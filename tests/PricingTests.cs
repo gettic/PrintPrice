@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 
 namespace PrintPrice.Tests
 {
@@ -22,6 +23,40 @@ namespace PrintPrice.Tests
         static QuoteInput Example()
         {
             return new QuoteInput { Hours = 5, Minutes = 30, FilamentGrams = 120, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00 };
+        }
+
+        // slice_info.config pieces (trimmed from the real 4-colour Benchy slices, scratchpad multi-colour_test\fixtures)
+        static string Fil(int id, string colour, string metres, string grams)
+        {
+            return "<filament id=\"" + id + "\" tray_info_idx=\"GFL99\" type=\"PLA\" color=\"" + colour + "\" used_m=\"" + metres +
+                "\" used_g=\"" + grams + "\" total_load_time=\"2225.00\" total_unload_time=\"2581.00\"/>";
+        }
+
+        static string PlateXml(string prediction, string weight, params string[] filaments)
+        {
+            return "<plate><metadata key=\"index\" value=\"1\"/><metadata key=\"prediction\" value=\"" + prediction + "\"/>" +
+                "<metadata key=\"weight\" value=\"" + weight + "\"/>" + string.Join("", filaments) + "</plate>";
+        }
+
+        static string SliceInfo(params string[] plates)
+        {
+            return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><config>" + string.Join("", plates) + "</config>";
+        }
+
+        // result.json (trimmed from result_a_one.json: one plate, 4 filaments)
+        const string ResultAOne = "{\"error_string\":\"Success.\",\"return_code\":0,\"sliced_plates\":[{" +
+            "\"feature_type_times\":{\"Flush\":31431.537109375},\"filament_change_times\":435,\"filaments\":[" +
+            "{\"filament_id\":\"GFA00\",\"id\":1,\"main_used_g\":5.042617321014404,\"total_used_g\":33.04133987426758}," +
+            "{\"filament_id\":\"GFL99\",\"id\":2,\"main_used_g\":0.38217446208000183,\"total_used_g\":55.98664855957031}," +
+            "{\"filament_id\":\"GFL99\",\"id\":3,\"main_used_g\":5.874551296234131,\"total_used_g\":17.282550811767578}," +
+            "{\"filament_id\":\"GFL99\",\"id\":4,\"main_used_g\":0.5582333207130432,\"total_used_g\":29.542543411254883}]," +
+            "\"id\":1,\"main_predication\":7115.779296875,\"total_predication\":38566.390625}]}";
+
+        static double Sum(System.Collections.Generic.IEnumerable<double> xs)
+        {
+            double t = 0;
+            foreach (var x in xs) t += x;
+            return t;
         }
 
         static int Main()
@@ -93,6 +128,60 @@ namespace PrintPrice.Tests
             Eq("benchy friends", 4.32, benchy.FriendsPrice);   // 2.5912 × 1.25 + 1.0830 = 4.3220
             Eq("benchy others", 5.62, benchy.OthersPrice);     // 2.5912 × 1.75 + 1.0830 = 5.6175
 
+            // ---- multi-colour (per-filament material) ----
+            // 1 line = today's formula exactly (the line is ignored, top-level grams/price used)
+            var one = Example();
+            one.Filaments = new List<FilamentLine> { new FilamentLine { Grams = 120, PricePerKg = 180 } };
+            var rOne = Pricing.Calculate(one, s);
+            var rOld = Pricing.Calculate(Example(), s);
+            True("1 line = old result exactly", rOne.MaterialCost == rOld.MaterialCost && rOne.BaseCost == rOld.BaseCost &&
+                rOne.FriendsPrice == rOld.FriendsPrice && rOne.OthersPrice == rOld.OthersPrice);
+            True("1 line: no FilamentCosts", rOne.FilamentCosts == null && rOld.FilamentCosts == null);
+            var empty = Example();
+            empty.Filaments = new List<FilamentLine>();
+            Eq("empty list = old material", 21.60, Pricing.Calculate(empty, s).MaterialCost);
+
+            // 4-colour Benchy, 10 h 43 m, 200 kr./kg, 3,65 kr./kWh, defaults:
+            // grams 33,04 + 55,99 + 17,28 + 29,54 = 135,85; × 0,2 = 27,17
+            // hours 10,716667; power 10,716667 × 0,1 × 3,65 = 3,9116; base 31,0816; wear 10,716667 × 1,71 = 18,3255
+            // friends 31,0816 × 1,25 + 18,3255 = 57,1775; customers 31,0816 × 1,75 + 18,3255 = 72,7183
+            Func<double, List<FilamentLine>> four = p2 => new List<FilamentLine> {
+                new FilamentLine { Grams = 33.04, PricePerKg = 200 }, new FilamentLine { Grams = 55.99, PricePerKg = p2 },
+                new FilamentLine { Grams = 17.28, PricePerKg = 200 }, new FilamentLine { Grams = 29.54, PricePerKg = 200 } };
+            var mc = Pricing.Calculate(new QuoteInput { Hours = 10, Minutes = 43, FilamentGrams = 135.85, FilamentDkkPerKg = 200,
+                ElectricityDkkPerKwh = 3.65, Filaments = four(200) }, new AppSettings());
+            True("4 colours: 4 line costs", mc.FilamentCosts != null && mc.FilamentCosts.Length == 4);
+            Eq("4 colours line 1 (33,04 g × 200)", 6.608, mc.FilamentCosts[0]);
+            Eq("4 colours line 2 (55,99 g × 200)", 11.198, mc.FilamentCosts[1]);
+            Eq("4 colours line 3 (17,28 g × 200)", 3.456, mc.FilamentCosts[2]);
+            Eq("4 colours line 4 (29,54 g × 200)", 5.908, mc.FilamentCosts[3]);
+            Eq("4 colours material", 27.17, mc.MaterialCost);
+            Eq("4 colours power", 3.91, mc.PowerCost);
+            Eq("4 colours base", 31.08, mc.BaseCost);
+            Eq("4 colours friends", 57.18, mc.FriendsPrice);
+            Eq("4 colours customers", 72.72, mc.OthersPrice);
+
+            // Mixed: line 2 at 300 kr./kg -> 79,86 g × 0,2 = 15,972 + 55,99 × 0,3 = 16,797 -> 32,769
+            // (top-level FilamentGrams/FilamentDkkPerKg are not used with 2+ lines)
+            var s0 = new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 0 };
+            var mx = Pricing.Calculate(new QuoteInput { Hours = 1, FilamentGrams = 999, FilamentDkkPerKg = 999,
+                ElectricityDkkPerKwh = 2.00, Filaments = four(300) }, s0);
+            Eq("mixed line 2 (55,99 g × 300)", 16.797, mx.FilamentCosts[1]);
+            Eq("mixed material", 32.769, mx.MaterialCost);
+            // power 1 h × 0,1 × 2 = 0,20; base 32,969; × 1,25 = 41,21125; × 1,75 = 57,69575
+            Eq("mixed base", 32.969, mx.BaseCost);
+            Eq("mixed friends", 41.21125, mx.FriendsPrice);
+            Eq("mixed customers", 57.69575, mx.OthersPrice);
+            // failed prints 10 % on the summed material: (32,769 + 0,20) × 0,1 = 3,2969; base 36,2659
+            var mf = Pricing.Calculate(new QuoteInput { Hours = 1, ElectricityDkkPerKwh = 2.00, Filaments = four(300) },
+                new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 10 });
+            Eq("mixed failed prints 10 %", 3.2969, mf.FailedPrintCost);
+            Eq("mixed base with failed prints", 36.2659, mf.BaseCost);
+            bool negThrew = false;
+            var neg = four(200); neg[2].Grams = -1;
+            try { Pricing.Calculate(new QuoteInput { Filaments = neg }, s0); } catch (ArgumentException) { negThrew = true; }
+            True("rejects negative line grams", negThrew);
+
             var s3 = new AppSettings { MinimumPrice = 50, MachineRatePerHour = 0, FailedPrintPct = 0 };
             Eq("minimum price", 50, Pricing.Calculate(Example(), s3).OthersPrice);
             Eq("minimum not for friends", 28.375, Pricing.Calculate(Example(), s3).FriendsPrice);
@@ -131,6 +220,78 @@ namespace PrintPrice.Tests
             Eq("slice plates", 2, si.Plates);
             True("unsliced → null", BambuSlicer.ParseSliceInfo("<config><plate><metadata key=\"index\" value=\"1\"/></plate></config>") == null);
             True("model ext", BambuSlicer.IsModelFile("a.STL") && BambuSlicer.IsModelFile("b.3mf") && !BambuSlicer.IsModelFile("c.f3d"));
+
+            // ---- multi-colour slice parsing (4-colour Benchy, fixtures trimmed) ----
+            string[] cols = { "#118002", "#FFFF0A", "#074080", "#ED1C24" };
+            var a1 = BambuSlicer.ParseSliceInfo(SliceInfo(PlateXml("38566", "135.85",
+                Fil(1, cols[0], "10.90", "33.04"), Fil(2, cols[1], "18.77", "55.99"),
+                Fil(3, cols[2], "5.79", "17.28"), Fil(4, cols[3], "9.91", "29.54"))));
+            Eq("a_one seconds", 38566, a1.Seconds);
+            Eq("a_one grams", 135.85, a1.Grams);
+            True("a_one 4 filaments", a1.Filaments != null && a1.Filaments.Count == 4);
+            double[] aG = { 33.04, 55.99, 17.28, 29.54 }, aM = { 10.90, 18.77, 5.79, 9.91 };
+            bool slotsOk = a1.Filaments.Count == 4;
+            for (int i = 0; slotsOk && i < 4; i++)
+            {
+                var f = a1.Filaments[i];
+                slotsOk = f.Slot == i + 1 && f.Colour == cols[i] && f.Type == "PLA" && Math.Abs(f.Grams - aG[i]) < 0.005 &&
+                          Math.Abs(f.Metres - aM[i]) < 0.005 && f.ModelGrams == -1;
+            }
+            True("a_one slots 1-4: colour, PLA, grams, metres, ModelGrams -1", slotsOk);
+            True("a_one purge/change unknown", a1.PurgeGrams == -1 && a1.ColourChangeHours == -1);
+
+            var b4 = BambuSlicer.ParseSliceInfo(SliceInfo(PlateXml("39807", "137.51",
+                Fil(1, cols[0], "10.90", "33.04"), Fil(2, cols[1], "18.77", "56.89"),
+                Fil(3, cols[2], "5.79", "17.56"), Fil(4, cols[3], "9.91", "30.02"))));
+            Eq("b_four seconds", 39807, b4.Seconds);
+            Eq("b_four grams", 137.51, b4.Grams);
+            True("b_four grams per slot", b4.Filaments.Count == 4 && Math.Abs(b4.Filaments[0].Grams - 33.04) < 0.005 &&
+                Math.Abs(b4.Filaments[1].Grams - 56.89) < 0.005 && Math.Abs(b4.Filaments[2].Grams - 17.56) < 0.005 &&
+                Math.Abs(b4.Filaments[3].Grams - 30.02) < 0.005);
+
+            // 2 plates, same slot summed (2,5 + 1,5 = 4,0 g; 0,8 + 0,5 = 1,3 m); used_g="0" left out; weight "" -> sum used_g
+            var two = BambuSlicer.ParseSliceInfo(SliceInfo(
+                PlateXml("600", "", Fil(1, "#00ae42", "0.8", "2.5"), Fil(2, "#FFFFFF", "0", "0")),
+                PlateXml("300", "", Fil(1, "#00ae42", "0.5", "1.5"))));
+            Eq("2 plates seconds", 900, two.Seconds);
+            Eq("2 plates grams", 4.0, two.Grams);
+            True("2 plates: one slot, zero left out", two.Filaments.Count == 1 && two.Filaments[0].Slot == 1);
+            Eq("2 plates slot 1 grams summed", 4.0, two.Filaments[0].Grams);
+            Eq("2 plates slot 1 metres summed", 1.3, two.Filaments[0].Metres);
+            True("colour normalised to upper case", two.Filaments[0].Colour == "#00AE42");
+            True("old single-colour XML has Filaments list", si.Filaments != null && si.Filaments.Count == 2);
+
+            // result.json: model grams 5,04 + 0,38 + 5,87 + 0,56 = 11,858; total 135,853
+            var st = BambuSlicer.ParseSliceResult(ResultAOne);
+            True("result parsed", st != null);
+            Eq("result main g slot 1", 5.04, st.MainGrams[1]);
+            Eq("result main g slot 2", 0.38, st.MainGrams[2]);
+            Eq("result main g slot 3", 5.87, st.MainGrams[3]);
+            Eq("result main g slot 4", 0.56, st.MainGrams[4]);
+            Eq("result main g sum", 11.858, Sum(st.MainGrams.Values));
+            Eq("result total g sum", 135.853, Sum(st.TotalGrams.Values));
+            Eq("result main seconds", 7115.78, st.MainSeconds);
+            Eq("result total seconds", 38566.39, st.TotalSeconds);
+            True("result colour changes 435", st.ColourChanges == 435);
+            True("result null/{}/x -> null", BambuSlicer.ParseSliceResult(null) == null &&
+                BambuSlicer.ParseSliceResult("{}") == null && BambuSlicer.ParseSliceResult("x") == null);
+
+            // Apply: purge = 135,853 - 11,858 = 123,996 g; change time (38566,39 - 7115,78) / 3600 = 8,7363 h
+            BambuSlicer.ApplySliceStats(a1, st);
+            Eq("apply purge grams", 123.996, a1.PurgeGrams);
+            Eq("apply colour change hours", 8.7363, a1.ColourChangeHours);
+            Eq("apply slot 1 model grams", 5.04, a1.Filaments[0].ModelGrams);
+            Eq("apply keeps grams", 135.85, a1.Grams);
+            Eq("apply keeps seconds", 38566, a1.Seconds);
+            BambuSlicer.ApplySliceStats(b4, null);
+            True("apply null stats leaves -1", b4.PurgeGrams == -1 && b4.ColourChangeHours == -1 && b4.Filaments[0].ModelGrams == -1);
+
+            // project_settings.config filament_settings_id
+            True("slots 4", BambuSlicer.ParseFilamentSlots("{\"filament_settings_id\":[\"Bambu PLA Basic @BBL A1\",\"PLA\",\"PLA\",\"PLA\"]}").Count == 4);
+            True("slots first name", BambuSlicer.ParseFilamentSlots("{\"filament_settings_id\":[\"Bambu PLA Basic @BBL A1\",\"PLA\"]}")[0] == "Bambu PLA Basic @BBL A1");
+            True("slots plain string -> 1", BambuSlicer.ParseFilamentSlots("{\"filament_settings_id\":\"Bambu PLA Basic @BBL A1\"}").Count == 1);
+            True("slots null/empty/bad -> empty", BambuSlicer.ParseFilamentSlots(null).Count == 0 &&
+                BambuSlicer.ParseFilamentSlots("").Count == 0 && BambuSlicer.ParseFilamentSlots("{bad").Count == 0);
 
             // Live electricity price
             Eq("power total incl. VAT", 2.7625, PowerPrice.TotalPrice(1.66, 0.55, true));

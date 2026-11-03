@@ -20,6 +20,8 @@ namespace PrintPrice
         Label lblFriends, lblOthers, lblFriendsInfo, lblOthersInfo, lblStatus;
         Button btnCopy, btnUpdate;
         UpdateInfo pendingUpdate;   // newer version found at startup (null = none)
+        System.Windows.Forms.Timer updateTimer;   // quiet check every 5 min while running (null in picture mode)
+        bool checkingUpdate, updateDialogOpen;
         QuoteResult last;
         int lastHours, lastMinutes;
         bool statusIsSuccess;
@@ -34,6 +36,21 @@ namespace PrintPrice
         PictureBox picModel;
         int picRequest;   // bumped for every new job / Clear, so a late picture of an old job is dropped
         int picBaseHeight;   // buttons' top to a 2-line info box's bottom (scaled, set on Load)
+
+        // multi-colour (2+ filaments): one row per colour in the Cost breakdown instead of the Material line,
+        // the "Filament price" row hides and "Filament used" shows the read-only total
+        const int MaxColourRows = 4;   // AMS lite has 4 slots; with more, row 4 holds all the rest ("+N more")
+        List<FilamentUse> filaments;   // null = single filament (today's layout)
+        int colourRows;                // rows in use (0 = single layout)
+        readonly List<int>[] rowItems = new List<int>[MaxColourRows];   // indices into filaments per row
+        readonly Control[][] rowControls = new Control[MaxColourRows][];
+        readonly Swatch[] rowSwatch = new Swatch[MaxColourRows];
+        readonly Label[] rowType = new Label[MaxColourRows], rowGrams = new Label[MaxColourRows], rowCost = new Label[MaxColourRows];
+        readonly TextBox[] rowPrice = new TextBox[MaxColourRows];
+        TableLayoutPanel colourGrid;
+        Label lblMaterialCap, lblPurge;
+        Control filPriceCap, filPriceRow;
+        bool fillingColours;   // no recalculation while the rows are being filled
 
         // live electricity price
         Button btnPower;
@@ -74,9 +91,11 @@ namespace PrintPrice
             inputs.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
             // link box, buttons and info boxes end at the Cost breakdown's right edge (widths set on Load, see below)
-            txtUrl = new TextBox { Width = 394, Margin = new Padding(3, 3, 0, 3) };
+            txtUrl = new HintBox { Width = 394, Margin = new Padding(3, 3, 0, 3) };
             // grey example text while empty; re-applied whenever the handle is recreated (e.g. theme change)
-            txtUrl.HandleCreated += delegate { SetCueBanner(txtUrl, L.S("e.g. ", "f.eks. ") + "https://www.printables.com/model/3161-3d-benchy"); };
+            txtUrl.HandleCreated += delegate { ApplyUrlCue(); };
+            // typing/pasting brings the grey example text back
+            txtUrl.TextChanged += delegate { SetUrlHint(false); };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
@@ -90,7 +109,7 @@ namespace PrintPrice
             {
                 if (e.KeyCode != Keys.Enter || e.Modifiers != Keys.None) return;
                 e.SuppressKeyPress = true;   // no beep
-                if (cts == null && txtUrl.Text.Trim().Length > 0) AnalyzeClicked();
+                if (cts == null) AnalyzeClicked();   // empty box: shows the red hint (AnalyzeClicked)
             };
             var autoRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             autoRow.Controls.Add(btnAnalyze);
@@ -133,7 +152,8 @@ namespace PrintPrice
             txtGrams = NumBox("");
             AddRow(inputs, L.S("Filament used", "Filamentforbrug"), WithUnit(txtGrams, "g"), null);
             txtFilamentPrice = NumBox(Num.Fmt(settings.LastFilamentPrice));
-            AddRow(inputs, L.S("Filament price", "Filamentpris"), WithUnit(txtFilamentPrice, "kr./kg"), null);
+            filPriceRow = WithUnit(txtFilamentPrice, "kr./kg");
+            filPriceCap = AddRow(inputs, L.S("Filament price", "Filamentpris"), filPriceRow, null);   // row hides for 2+ colours
             txtElecPrice = NumBox(Num.Fmt(settings.LastElectricityPrice));
             var elecRow = (FlowLayoutPanel)WithUnit(txtElecPrice, "kr./kWh");
             // same top margin as the text box; height is matched to the box once the form has loaded (DPI-safe)
@@ -164,14 +184,20 @@ namespace PrintPrice
             bt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             bt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             lblMaterial = BreakLabel(); lblPower = BreakLabel(); lblFailed = BreakLabel(); lblBase = BreakLabel();
-            bt.Controls.Add(BreakCaption(L.S("Material", "Materiale")), 0, 0); bt.Controls.Add(lblMaterial, 1, 0);
-            bt.Controls.Add(BreakCaption(L.S("Power", "Strøm")), 0, 1); bt.Controls.Add(lblPower, 1, 1);
+            lblMaterialCap = BreakCaption(L.S("Material", "Materiale"));
+            bt.Controls.Add(lblMaterialCap, 0, 0); bt.Controls.Add(lblMaterial, 1, 0);
+            // 2+ colours: the Material row hides, one row per colour + a muted purge line show instead (SetColours)
+            colourGrid = BuildColourGrid();
+            bt.Controls.Add(colourGrid, 0, 1); bt.SetColumnSpan(colourGrid, 2);
+            lblPurge = new Theme.PlainLabel { AutoSize = true, Tag = "muted", Font = new Font("Segoe UI", 9f), UseMnemonic = false, Margin = new Padding(3, 0, 3, 4), Visible = false };
+            bt.Controls.Add(lblPurge, 0, 2); bt.SetColumnSpan(lblPurge, 2);
+            bt.Controls.Add(BreakCaption(L.S("Power", "Strøm")), 0, 3); bt.Controls.Add(lblPower, 1, 3);
             // failed prints: hidden (row collapses, box shrinks) when the setting is 0 %, see UpdateFailedRow
             lblFailedCap = BreakCaption("");
-            bt.Controls.Add(lblFailedCap, 0, 2); bt.Controls.Add(lblFailed, 1, 2);
+            bt.Controls.Add(lblFailedCap, 0, 4); bt.Controls.Add(lblFailed, 1, 4);
             var baseCap = BreakCaption(L.S("Base cost", "Kostpris")); baseCap.Font = new Font(Font, FontStyle.Bold);
             lblBase.Font = new Font(Font, FontStyle.Bold);
-            bt.Controls.Add(baseCap, 0, 3); bt.Controls.Add(lblBase, 1, 3);
+            bt.Controls.Add(baseCap, 0, 5); bt.Controls.Add(lblBase, 1, 5);
             grpBreak.Controls.Add(bt);
             root.Controls.Add(grpBreak);
             Load += delegate
@@ -259,7 +285,17 @@ namespace PrintPrice
             }
 
             FormClosing += delegate { if (cts != null) cts.Cancel(); SaveLastPrices(); };
-            FormClosed += delegate { picRequest++; SetModelPicture(null); };
+            FormClosed += delegate
+            {
+                picRequest++; SetModelPicture(null);
+                if (updateTimer != null) { updateTimer.Stop(); updateTimer.Dispose(); updateTimer = null; }
+            };
+            if (!offline)
+            {
+                updateTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
+                updateTimer.Tick += delegate { PeriodicUpdateCheck(); };
+                Shown += delegate { SyncUpdateTimer(); };
+            }
             EnableDrop(this);
 
             ApplyTheme();
@@ -298,6 +334,7 @@ namespace PrintPrice
         internal void SetSampleJob()
         {
             if (!offline) return;
+            SetColours(null);
             txtUrl.Text = "https://www.printables.com/model/3161-3d-benchy";
             SetAuto(L.S("✓ \"3D BENCHY\": 0 h 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic).",
                         "✓ \"3D BENCHY\": 0 t 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic)."), false);
@@ -308,6 +345,29 @@ namespace PrintPrice
             txtElecPrice.Text = "3,65";
             SetPowerInfo(L.S("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.",
                              "Live-pris DK1 17:45: spot 2,37 + afgifter 0,55 + 25 % moms = 3,65 kr."), false);
+            Recalculate();
+        }
+
+        /// Picture mode: the 4-colour Benchy (Printables 1648230) as our CLI slices it (real numbers from the
+        /// multi-colour test: 135,85 g of which 124 g purge, 8,7 h of colour changes). Call after SetSampleJob
+        /// (keeps its live price line).
+        internal void SetSampleMultiJob()
+        {
+            if (!offline) return;
+            txtUrl.Text = "https://www.printables.com/model/1648230-four-color-multicolor-test-benchy";
+            SetAuto(L.S("✓ \"Four-Color Multicolor Test benchy\": 10 h 43 m, 135,85 g (0.20mm Standard · 4 colours).",
+                        "✓ \"Four-Color Multicolor Test benchy\": 10 t 43 m, 135,85 g (0.20mm Standard · 4 farver)."), false);
+            var r = new SliceResult { Seconds = 38566, Grams = 135.85, Plates = 1, PurgeGrams = 124.0, ColourChangeHours = 31450 / 3600.0 };
+            string[] colours = { "#118002", "#FFFF0A", "#074080", "#ED1C24" };
+            double[] grams = { 33.04, 55.99, 17.28, 29.54 }, model = { 5.04, 0.38, 5.87, 0.56 };
+            for (int i = 0; i < 4; i++)
+                r.Filaments.Add(new FilamentUse { Slot = i + 1, Colour = colours[i], Type = "PLA", Grams = grams[i], ModelGrams = model[i] });
+            txtHours.Text = "10";
+            txtMinutes.Text = "43";
+            txtFilamentPrice.Text = "200";
+            txtElecPrice.Text = "3,65";
+            SetColours(r);
+            txtGrams.Text = "135,85";
             Recalculate();
         }
 
@@ -443,7 +503,7 @@ namespace PrintPrice
         {
             if (cts != null) { cts.Cancel(); return; }
             string src = txtUrl.Text.Trim().Trim('"');
-            if (src.Length == 0) { BrowseForModel(); return; }
+            if (src.Length == 0) { txtUrl.Text = ""; SetUrlHint(true); txtUrl.Focus(); return; }
             if (File.Exists(src)) { Analyze(null, new List<string> { src }); return; }
 
             string id = Printables.ParseId(src);
@@ -533,15 +593,19 @@ namespace PrintPrice
                 if (totalMinutes == 0 && result.Seconds > 0) totalMinutes = 1;
                 txtHours.Text = (totalMinutes / 60).ToString();
                 txtMinutes.Text = (totalMinutes % 60).ToString();
-                txtGrams.Text = Num.Fmt(Math.Round(result.Grams, 1));
+                SetColours(result);   // 2+ colours: one row per colour in the Cost breakdown, else today's layout
+                bool multi = filaments != null;
+                // several colours: grams with 2 decimals, like the colour rows
+                string gramsText = multi ? Math.Round(result.Grams, 2).ToString("0.##", Num.Dk) : Math.Round(result.Grams, 1).ToString("0.#", Num.Dk);
+                txtGrams.Text = gramsText;
 
                 string what = modelName != null ? "\"" + modelName + "\"" :
                               localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : L.F("{0} files", "{0} filer", localFiles.Count);
-                string summary = (totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m, " +
-                                 Math.Round(result.Grams, 1).ToString("0.#", Num.Dk) + " g";
+                string summary = (totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m, " + gramsText + " g";
+                string colourCount = multi ? L.F("{0} colours", "{0} farver", filaments.Count) : null;
                 string how = result.FromSlicedFile
-                    ? L.S("read from the sliced file", "læst fra den slicede fil")
-                    : BambuSlicer.ShortName(process) + " · " + BambuSlicer.ShortName(filament);
+                    ? L.S("read from the sliced file", "læst fra den slicede fil") + (multi ? " · " + colourCount : "")
+                    : BambuSlicer.ShortName(process) + " · " + (multi ? colourCount : BambuSlicer.ShortName(filament));
                 int parts = chosen != null ? chosen.Count : localFiles.Count;
                 SetAuto("✓ " + what + ": " + summary + " (" + how +
                         (parts > 1 ? L.F(", {0} files", ", {0} filer", parts) : "") +
@@ -604,13 +668,39 @@ namespace PrintPrice
                     total.Grams += r.Grams;
                     total.Plates += r.Plates;
                     if (total.Picture == null) total.Picture = r.Picture;   // first model's plate picture
+                    MergeFilaments(total, r);
                 }
+                total.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
                 return total;
             }
             finally
             {
                 try { Directory.Delete(work, true); } catch { }
             }
+        }
+
+        /// Several model files: adds one slice's filaments to the total per slot, and sums the known purge / colour-change values.
+        static void MergeFilaments(SliceResult total, SliceResult r)
+        {
+            foreach (var f in r.Filaments)
+            {
+                if (f == null) continue;
+                var t = total.Filaments.FirstOrDefault(x => x.Slot == f.Slot);
+                if (t == null)
+                {
+                    total.Filaments.Add(new FilamentUse { Slot = f.Slot, Colour = f.Colour ?? "", Type = f.Type ?? "", Profile = f.Profile ?? "",
+                                                          Grams = f.Grams, ModelGrams = f.ModelGrams, Metres = f.Metres });
+                    continue;
+                }
+                t.Grams += f.Grams;
+                t.Metres += f.Metres;
+                t.ModelGrams = t.ModelGrams >= 0 && f.ModelGrams >= 0 ? t.ModelGrams + f.ModelGrams : -1;
+                if (t.Colour.Length == 0 && !string.IsNullOrEmpty(f.Colour)) t.Colour = f.Colour;
+                if (t.Type.Length == 0 && !string.IsNullOrEmpty(f.Type)) t.Type = f.Type;
+                if (t.Profile.Length == 0 && !string.IsNullOrEmpty(f.Profile)) t.Profile = f.Profile;
+            }
+            if (r.PurgeGrams >= 0) total.PurgeGrams = Math.Max(0, total.PurgeGrams) + r.PurgeGrams;
+            if (r.ColourChangeHours >= 0) total.ColourChangeHours = Math.Max(0, total.ColourChangeHours) + r.ColourChangeHours;
         }
 
         [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
@@ -621,6 +711,39 @@ namespace PrintPrice
         {
             const int EM_SETCUEBANNER = 0x1501;
             SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);   // 1 = keep showing while focused
+        }
+
+        /// Link box that can show a red hint (the native cue banner is always grey).
+        sealed class HintBox : TextBox
+        {
+            public string Hint;   // null = no hint
+            protected override void WndProc(ref Message m)
+            {
+                base.WndProc(ref m);
+                if (m.Msg != 0x000F || Hint == null || Text.Length > 0) return;   // WM_PAINT
+                using (var g = Graphics.FromHwnd(Handle))
+                    TextRenderer.DrawText(g, Hint, Font, new Rectangle(1, 0, ClientSize.Width - 2, ClientSize.Height), Theme.Error, Theme.Input,
+                        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter);   // centred; 1 px above the first version
+            }
+        }
+
+        void ApplyUrlCue()
+        {
+            var box = (HintBox)txtUrl;
+            if (!box.IsHandleCreated) return;
+            SetCueBanner(box, box.Hint != null ? "" : L.S("e.g. ", "f.eks. ") + "https://www.printables.com/model/3161-3d-benchy");
+            box.Invalidate();
+        }
+
+        /// true = red "Paste a link or load a file first" in the empty link box; false = grey example again.
+        void SetUrlHint(bool on)
+        {
+            var box = (HintBox)txtUrl;
+            string hint = on ? L.S("Paste a link or load a file first", "Indsæt et link eller åbn en fil først") : null;
+            if (box.Hint == hint) return;
+            box.Hint = hint;
+            box.AccessibleDescription = hint;
+            ApplyUrlCue();
         }
 
         // ---------- Model picture ----------
@@ -663,9 +786,10 @@ namespace PrintPrice
             SetModelPicture(bmp);
         }
 
-        /// Picture mode: shows a sample picture (a file, never a download).
+        /// Picture mode: shows a sample picture (a file, never a download); no file = back to the logo.
         internal void SetSamplePicture(string file)
         {
+            if (!File.Exists(file)) { ResetModelPicture(); return; }
             try { SetModelPicture(PrepareModelPicture(File.ReadAllBytes(file))); } catch { }
         }
 
@@ -794,16 +918,153 @@ namespace PrintPrice
         [System.Runtime.InteropServices.DllImport("kernel32.dll")]
         static extern uint SizeofResource(IntPtr module, IntPtr res);
 
+        // ---------- Multi-colour rows (Cost breakdown) ----------
+        /// Grid of MaxColourRows rows: swatch, type, grams, ×, kr./kg box, unit, cost (right, lined up with the other amounts).
+        /// Spans both breakdown columns; its height is set by SetColours (rows × box row height).
+        TableLayoutPanel BuildColourGrid()
+        {
+            var g = new TableLayoutPanel { ColumnCount = 7, AutoSize = false, Height = 10, Margin = Padding.Empty, Visible = false,
+                                           Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
+            for (int c = 0; c < 6; c++) g.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            g.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < MaxColourRows; i++)
+            {
+                g.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                rowSwatch[i] = new Swatch { Size = new Size(14, 14), Anchor = AnchorStyles.Left, Margin = new Padding(3, 0, 8, 0) };
+                rowType[i] = new Label { AutoSize = true, UseMnemonic = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 14, 0) };
+                rowGrams[i] = new Label { AutoSize = true, Anchor = AnchorStyles.Right, Margin = new Padding(0, 0, 6, 0) };
+                // grayscale text: ClearType made the small × look orange
+                var times = new Theme.PlainLabel { Text = "×", AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 8, 0) };
+                var box = new TextBox { Width = 50, TextAlign = HorizontalAlignment.Right, Margin = Padding.Empty };   // rows = box height (25 px at 100 %)
+                var unit = Unit("kr./kg");
+                unit.Margin = new Padding(2, 0, 10, 0);
+                rowPrice[i] = box;
+                rowCost[i] = BreakLabel();
+                box.TextChanged += delegate { Recalculate(); };
+                box.Enter += delegate { BeginInvoke((MethodInvoker)delegate { box.SelectAll(); }); };
+                rowControls[i] = new Control[] { rowSwatch[i], rowType[i], rowGrams[i], times, box, unit, rowCost[i] };
+                for (int c = 0; c < 7; c++) g.Controls.Add(rowControls[i][c], c, i);
+            }
+            return g;
+        }
+
+        /// Switches between today's single-filament layout (r null or 1 filament) and one row per colour (2+).
+        /// Each colour's kr./kg starts at the main filament price; with more than MaxColourRows colours the last
+        /// row holds all the rest ("+N more", one shared kr./kg box).
+        void SetColours(SliceResult r)
+        {
+            var list = r == null ? null : r.Filaments.Where(f => f != null && f.Grams > 0).OrderBy(f => f.Slot).ToList();
+            bool multi = list != null && list.Count >= 2;
+            filaments = multi ? list : null;
+            fillingColours = true;
+            SuspendLayout();
+            int rows = 0;
+            if (multi)
+            {
+                rows = Math.Min(list.Count, MaxColourRows);
+                int own = list.Count > MaxColourRows ? MaxColourRows - 1 : rows;   // rows with one colour each
+                for (int i = 0; i < rows; i++) rowItems[i] = new List<int>();
+                for (int k = 0; k < list.Count; k++) rowItems[k < own ? k : own].Add(k);
+                string price = txtFilamentPrice.Text.Trim();
+                for (int i = 0; i < rows; i++)
+                {
+                    var items = rowItems[i];
+                    rowSwatch[i].Colours = items.Select(k => ParseColour(list[k].Colour)).ToArray();
+                    rowType[i].Text = items.Count > 1 ? L.F("+{0} more", "+{0} flere", items.Count) : FilamentName(list[items[0]]);
+                    rowGrams[i].Text = items.Sum(k => list[k].Grams).ToString("0.00", Num.Dk) + " g";
+                    rowPrice[i].Text = price;
+                    rowCost[i].Text = "–";
+                }
+            }
+            colourRows = rows;
+            for (int i = 0; i < MaxColourRows; i++)
+                foreach (var c in rowControls[i]) c.Visible = i < rows;
+            colourGrid.Height = Math.Max(1, rows * (rowPrice[0].Height + rowPrice[0].Margin.Vertical));
+            colourGrid.Visible = multi;
+            lblMaterialCap.Visible = lblMaterial.Visible = !multi;
+            string note = multi ? PurgeNote(r) : "";
+            lblPurge.Text = note;
+            lblPurge.Visible = note.Length > 0;
+            // the hidden "Filament price" box keeps its value (saved as the last price, default for the next job)
+            filPriceCap.Visible = filPriceRow.Visible = !multi;
+            txtGrams.ReadOnly = multi;
+            txtGrams.TabStop = !multi;
+            txtGrams.ForeColor = multi ? Theme.Muted : Theme.Text;
+            ResumeLayout(true);
+            fillingColours = false;
+            UpdateBreakHeight();
+            Recalculate();
+        }
+
+        /// "incl. 124 g purge · 8,7 h colour changes"; only the parts that are known (purge only above 0,5 g). "" = no line.
+        static string PurgeNote(SliceResult r)
+        {
+            var parts = new List<string>();
+            if (r.PurgeGrams > 0.5)
+                parts.Add(L.F("incl. {0} g purge", "heraf {0} g udskylning", r.PurgeGrams.ToString(r.PurgeGrams >= 10 ? "0" : "0.#", Num.Dk)));
+            if (r.ColourChangeHours >= 0.05)
+                parts.Add(L.F("{0} h colour changes", "{0} t farveskift", r.ColourChangeHours.ToString("0.#", Num.Dk)));
+            return string.Join(" · ", parts);
+        }
+
+        /// Row text for a filament: its type ("PLA"), else the profile's short name, else "Colour 3".
+        static string FilamentName(FilamentUse f)
+        {
+            if (!string.IsNullOrEmpty(f.Type)) return f.Type;
+            if (!string.IsNullOrEmpty(f.Profile)) return BambuSlicer.ShortName(f.Profile);
+            return L.F("Colour {0}", "Farve {0}", f.Slot);
+        }
+
+        /// "#RRGGBB" (or "#RRGGBBAA") -> colour; Color.Empty if unknown.
+        static Color ParseColour(string hex)
+        {
+            if (string.IsNullOrEmpty(hex)) return Color.Empty;
+            string h = hex.Trim().TrimStart('#');
+            int v;
+            if (h.Length < 6 || !int.TryParse(h.Substring(0, 6), System.Globalization.NumberStyles.HexNumber, null, out v)) return Color.Empty;
+            return Color.FromArgb((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
+        }
+
+        /// Small colour square with a thin border; several colours = equal vertical stripes; unknown colour = empty box.
+        sealed class Swatch : Control
+        {
+            Color[] colours = new Color[0];
+            public Swatch()
+            {
+                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                TabStop = false;
+            }
+            public Color[] Colours { get { return colours; } set { colours = value ?? new Color[0]; Invalidate(); } }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                var r = ClientRectangle;
+                using (var b = new SolidBrush(Theme.Input)) e.Graphics.FillRectangle(b, r);
+                var known = colours.Where(c => !c.IsEmpty).ToArray();
+                for (int i = 0; i < known.Length; i++)
+                {
+                    int x0 = r.Width * i / known.Length, x1 = r.Width * (i + 1) / known.Length;
+                    using (var b = new SolidBrush(known[i])) e.Graphics.FillRectangle(b, x0, 0, x1 - x0, r.Height);
+                }
+                using (var p = new Pen(Theme.Border)) e.Graphics.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+            }
+        }
+
         // ---------- UI helpers ----------
-        void AddRow(TableLayoutPanel t, string caption, Control input, Control extra)
+        /// Adds a row; returns its caption label (null for an empty caption).
+        Label AddRow(TableLayoutPanel t, string caption, Control input, Control extra)
         {
             int row = t.RowCount++;
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            Label cap = null;
             if (caption.Length > 0)   // no empty caption label, so rows holding a hidden info box collapse fully
-                t.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, Theme.LabelGap, 6) }, 0, row);
+            {
+                cap = new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, Theme.LabelGap, 6) };
+                t.Controls.Add(cap, 0, row);
+            }
             input.Anchor = AnchorStyles.Left;
             t.Controls.Add(input, 1, row);
             if (extra != null) { extra.Anchor = AnchorStyles.Left; t.Controls.Add(extra, 2, row); }
+            return cap;
         }
 
         /// Keeps the buttons' total width (real px, after DPI scaling) and gives each one its measured text
@@ -898,9 +1159,28 @@ namespace PrintPrice
 
         void Recalculate()
         {
+            if (fillingColours) return;
             double grams, filPrice, elPrice;
             var s1 = Num.Read(txtGrams, out grams);
             var s2 = Num.Read(txtFilamentPrice, out filPrice);
+            // 2+ colours: one line per colour with its own kr./kg; these boxes replace the hidden filament price box
+            List<FilamentLine> lines = null;
+            if (filaments != null)
+            {
+                lines = new List<FilamentLine>(filaments.Count);
+                for (int k = 0; k < filaments.Count; k++) lines.Add(null);
+                bool invalid = false, empty = false;
+                for (int i = 0; i < colourRows; i++)
+                {
+                    double p;
+                    var st = Num.Read(rowPrice[i], out p);
+                    if (st == FieldState.Invalid) invalid = true;
+                    if (st == FieldState.Empty) empty = true;
+                    foreach (int k in rowItems[i]) lines[k] = new FilamentLine { Grams = filaments[k].Grams, PricePerKg = p };
+                }
+                s2 = invalid ? FieldState.Invalid : empty ? FieldState.Empty : FieldState.Ok;
+                if (filPrice < 0) filPrice = 0;
+            }
             var s3 = Num.Read(txtElecPrice, out elPrice);
             int hours, minutes;
             var sh = ReadInt(txtHours, 999, out hours);     // empty counts as 0
@@ -919,6 +1199,7 @@ namespace PrintPrice
                 last = null;
                 SetStatus(problem, false);
                 lblMaterial.Text = lblPower.Text = lblFailed.Text = lblBase.Text = "–";
+                foreach (var c in rowCost) c.Text = "–";
                 lblFriends.Text = lblOthers.Text = "–";
                 btnCopy.Enabled = false;
                 return;
@@ -927,13 +1208,16 @@ namespace PrintPrice
             var input = new QuoteInput
             {
                 Hours = hours, Minutes = minutes, FilamentGrams = grams,
-                FilamentDkkPerKg = filPrice, ElectricityDkkPerKwh = elPrice
+                FilamentDkkPerKg = filPrice, ElectricityDkkPerKwh = elPrice, Filaments = lines
             };
             last = Pricing.Calculate(input, settings);
             lastHours = hours; lastMinutes = minutes;
 
             SetStatus("", false);
             lblMaterial.Text = Num.Kr(last.MaterialCost);
+            if (lines != null && last.FilamentCosts != null)
+                for (int i = 0; i < colourRows; i++)
+                    rowCost[i].Text = Num.Kr(rowItems[i].Sum(k => last.FilamentCosts[k]));
             lblPower.Text = Num.Kr(last.PowerCost) + "  (" + last.PowerKwh.ToString("N2", Num.Dk) + " kWh)";
             lblFailed.Text = Num.Kr(last.FailedPrintCost);
             lblBase.Text = Num.Kr(last.BaseCost);
@@ -960,7 +1244,21 @@ namespace PrintPrice
             bool on = settings.FailedPrintPct > 0;
             lblFailedCap.Text = L.F("Failed prints (+{0} %)", "Fejlprint (+{0} %)", Num.Fmt(settings.FailedPrintPct));
             lblFailedCap.Visible = lblFailed.Visible = on;
-            if (breakBaseHeight > 0) grpBreak.Height = breakBaseHeight + (on ? breakRowHeight : 0);
+            UpdateBreakHeight();
+        }
+
+        /// Cost breakdown height: 3 rows, + the failed-prints row, + the colour rows and purge line instead of
+        /// the Material row (2+ colours). The window follows (GrowAndShrink).
+        void UpdateBreakHeight()
+        {
+            if (breakBaseHeight == 0) return;
+            int h = breakBaseHeight + (settings.FailedPrintPct > 0 ? breakRowHeight : 0);
+            if (filaments != null)
+            {
+                h += colourGrid.Height + colourGrid.Margin.Vertical - breakRowHeight;
+                if (lblPurge.Text.Length > 0) h += lblPurge.PreferredHeight + lblPurge.Margin.Vertical;
+            }
+            grpBreak.Height = h;
         }
 
         void OpenSettings()
@@ -974,6 +1272,7 @@ namespace PrintPrice
                     settings = dlg.Result;
                     if (old.AutoUpdateCheck == 0 && settings.AutoUpdateCheck != 0 && pendingUpdate == null)
                         BeginInvoke((MethodInvoker)StartupUpdateCheck);   // switched back on: check now
+                    SyncUpdateTimer();   // the 5-minute check follows the setting
                     bool powerChanged = old.PriceArea != settings.PriceArea || old.PowerAddOn != settings.PowerAddOn ||
                                         old.PowerIncludeVat != settings.PowerIncludeVat ||
                                         (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
@@ -1013,6 +1312,29 @@ namespace PrintPrice
             ShowUpdateButton(found);
         }
 
+        /// The 5-minute timer runs only while "Check for a new version at startup" is on.
+        void SyncUpdateTimer()
+        {
+            if (updateTimer == null) return;
+            updateTimer.Enabled = settings.AutoUpdateCheck != 0;
+        }
+
+        /// Every 5 minutes while running: a quiet check (ETag cache, never throws). Skipped while the setting is off,
+        /// the update dialog is open (download/install), a slice job runs, the last check is still busy, or GitHub
+        /// asked us to back off. Only ever shows (or raises) the red button, never hides it.
+        async void PeriodicUpdateCheck()
+        {
+            if (offline || IsDisposed || settings.AutoUpdateCheck == 0 || updateDialogOpen || cts != null || checkingUpdate) return;
+            if (DateTime.UtcNow < Updater.NextAllowedUtc) return;
+            checkingUpdate = true;
+            UpdateInfo found = null;
+            try { found = await Task.Run(() => Updater.CheckQuiet()); }
+            catch { }
+            finally { checkingUpdate = false; }
+            if (found == null || IsDisposed || found.Version == null) return;
+            if (pendingUpdate == null || pendingUpdate.Version == null || found.Version > pendingUpdate.Version) ShowUpdateButton(found);
+        }
+
         internal void ShowUpdateButton(UpdateInfo found)
         {
             pendingUpdate = found;
@@ -1024,8 +1346,13 @@ namespace PrintPrice
         void ShowUpdate(UpdateInfo found)
         {
             if (offline) return;
-            using (var dlg = new UpdateForm(found, SaveLastPrices))
-                if (dlg.ShowDialog(this) == DialogResult.OK) Close();   // the new version is already starting
+            updateDialogOpen = true;   // no background checks while it may be downloading / installing
+            try
+            {
+                using (var dlg = new UpdateForm(found, SaveLastPrices))
+                    if (dlg.ShowDialog(this) == DialogResult.OK) Close();   // the new version is already starting
+            }
+            finally { updateDialogOpen = false; }
         }
 
         void SaveLastPrices()
@@ -1044,7 +1371,8 @@ namespace PrintPrice
             string text = L.S("3D print quote", "Tilbud på 3D-print") + nl;
             if (txtUrl.Text.Trim().Length > 0) text += "Model: " + txtUrl.Text.Trim() + nl;
             text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g",
-                        lastHours, lastMinutes, txtGrams.Text.Trim()) + nl;
+                        lastHours, lastMinutes, txtGrams.Text.Trim()) +
+                    (filaments != null ? L.F(" ({0} colours)", " ({0} farver)", filaments.Count) : "") + nl;
             text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(last.FriendsPrice) + nl;
             text += L.S("Customer: ", "Kunde: ") + Num.Kr(last.OthersPrice);
             try
@@ -1062,6 +1390,8 @@ namespace PrintPrice
         void ClearJob()
         {
             txtUrl.Text = "";
+            SetUrlHint(false);
+            SetColours(null);   // back to the single-filament layout
             txtGrams.Text = "";
             txtHours.Text = "0";
             txtMinutes.Text = "0";

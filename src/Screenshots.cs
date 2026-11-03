@@ -9,7 +9,8 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, ...; a model.png in the folder is used as the sample model picture). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
+    /// into PNGs and exits (main_empty.png, main.png, main_multi.png, ...; a model.png / model2.png in the folder is used as
+    /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
     {
@@ -33,8 +34,14 @@ namespace PrintPrice
                     main.SetSampleJob();   // Benchy example with a sample live price
                     // sample model picture: <folder>\model.png if it is there (e.g. a slicer plate_1.png), else the logo stays
                     string sample = Path.Combine(folder, "model.png");
-                    if (File.Exists(sample)) main.SetSamplePicture(sample);
+                    main.SetSamplePicture(sample);
                     Snap(main, folder, "main.png");
+                    // 4-colour Benchy: one row per colour in the Cost breakdown; picture = <folder>\model2.png if there
+                    main.SetSampleMultiJob();
+                    main.SetSamplePicture(Path.Combine(folder, "model2.png"));
+                    Snap(main, folder, "main_multi.png");
+                    main.SetSampleJob();   // back to the single-colour example for the update picture
+                    main.SetSamplePicture(sample);
                     main.ShowUpdateButton(fake);
                     Snap(main, folder, "main_update.png");
 

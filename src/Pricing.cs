@@ -1,7 +1,15 @@
 using System;
+using System.Collections.Generic;
 
 namespace PrintPrice
 {
+    /// One filament (colour/slot) of a multi-colour print. Grams include purge.
+    public class FilamentLine
+    {
+        public double Grams;
+        public double PricePerKg;   // DKK/kg; the ui defaults it to the main filament price
+    }
+
     public class QuoteInput
     {
         public int Hours;
@@ -9,12 +17,16 @@ namespace PrintPrice
         public double FilamentGrams;
         public double FilamentDkkPerKg;
         public double ElectricityDkkPerKwh;
+        // Optional: 2+ lines = material is the sum of the lines (FilamentGrams/FilamentDkkPerKg are then not used
+        // for the cost). Null, empty or 1 line = today's single-filament formula.
+        public List<FilamentLine> Filaments;
     }
 
     public class QuoteResult
     {
         public double PrintHours;
         public double MaterialCost;
+        public double[] FilamentCosts;   // per line of QuoteInput.Filaments (unrounded); null for a single filament
         public double PowerKwh;
         public double PowerCost;
         public double FailedPrintCost;   // (material + power) × FailedPrintPct / 100
@@ -124,10 +136,26 @@ namespace PrintPrice
                 throw new ArgumentException("Print time must be >= 0 and minutes 0-59.");
             if (input.FilamentGrams < 0 || input.FilamentDkkPerKg < 0 || input.ElectricityDkkPerKwh < 0)
                 throw new ArgumentException("Values cannot be negative.");
+            bool multi = input.Filaments != null && input.Filaments.Count >= 2;
+            if (multi)
+                foreach (var f in input.Filaments)
+                    if (f == null || f.Grams < 0 || f.PricePerKg < 0)
+                        throw new ArgumentException("Values cannot be negative.");
 
             var r = new QuoteResult();
             r.PrintHours = input.Hours + input.Minutes / 60.0;
-            r.MaterialCost = (input.FilamentGrams / 1000.0) * input.FilamentDkkPerKg;
+            if (multi)
+            {
+                r.FilamentCosts = new double[input.Filaments.Count];
+                for (int i = 0; i < r.FilamentCosts.Length; i++)
+                {
+                    var f = input.Filaments[i];
+                    r.FilamentCosts[i] = (f.Grams / 1000.0) * f.PricePerKg;
+                    r.MaterialCost += r.FilamentCosts[i];
+                }
+            }
+            else
+                r.MaterialCost = (input.FilamentGrams / 1000.0) * input.FilamentDkkPerKg;
             r.PowerKwh = r.PrintHours * (s.PrinterWatts / 1000.0);
             r.PowerCost = r.PowerKwh * input.ElectricityDkkPerKwh;
             // Failed prints / reprints: a share of material + power on top (not of the wear).

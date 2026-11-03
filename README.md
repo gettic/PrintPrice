@@ -9,6 +9,8 @@ A small dark-mode Windows app that turns a 3D print job into two price quotes: o
 
 <p align="center"><img src="assets/screenshot.png" width="480" alt="Screenshot"></p>
 
+<p align="center"><img src="assets/screenshot-multicolour.png" width="480" alt="Screenshot of a multi-colour print"></p>
+
 ## Download
 Download **`PrintPrice.zip`** from the [latest release](../../releases/latest), unzip it and run **`PrintPrice.exe`**. Nothing needs to be installed: Windows 10/11 already includes what it needs (.NET Framework 4.8).
 
@@ -20,6 +22,8 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 - **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with A1 profiles.
   - **Other sites** (MakerWorld, Thingiverse…) block automatic downloads. Download the STL/3MF yourself and drop it on the window instead.
   - **Already-sliced `.gcode.3mf` files** are read instantly, without slicing again.
+  - **Multi-colour prints:** if the model uses 2 or more filaments, the Cost breakdown shows one row per colour with its own kr./kg box. A line below shows the purge waste and the time spent on colour changes (for example "incl. 124 g purge · 8,7 h colour changes"). With more than 4 colours the rest are grouped in one "+N more" row. If you pick several model files, they are added together. **Filament used** becomes the read-only total.
+  - **Empty link:** if you press **Get time & weight** with an empty link box, a red "Paste a link or load a file first" hint shows in the box.
   - **Model picture:** a small picture of the model shows under the Model link: the Printables photo, the picture inside a `.3mf`, or Bambu Studio's plate picture after slicing. Without a model it shows the logo.
 - **Live electricity price:** the current 15-minute spot price for DK1/DK2 comes from Energinet's free [Energi Data Service](https://www.energidataservice.dk/). The app adds your tariffs, taxes and fees, then 25 % VAT.
 - **Wear & tear:** a machine-time rate is worked out from the chosen **nozzle**, **filament** and **build plate**. It is added to both prices.
@@ -28,7 +32,7 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 - **Configurable:** set the markups, minimum price, rounding, failed prints, printer power, print profile, price area and language in Settings.
 - **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
 - **Copy quote:** puts a ready-to-send text on the clipboard.
-- **Auto-update:** at startup the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. You can switch the check off in Settings (**Check for a new version at startup**). Next to the version number in Settings, **check now** looks once when you click it.
+- **Auto-update:** at startup, and then every 5 minutes while the program is open, the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. You can switch the check off in Settings (**Check for a new version at startup**); that switches off the 5-minute check too. Next to the version number in Settings, **check now** looks once when you click it.
 
 ## How prices are calculated
 ```
@@ -70,7 +74,7 @@ The app sends no personal information anywhere. It has no account, cookies or tr
 
 | Service | When | What is sent |
 |---|---|---|
-| GitHub | At startup, to look for a new version (can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version |
+| GitHub | At startup and then every 5 minutes while the program is open, to look for a new version (all of it can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version. Unchanged answers are not downloaded again (ETag), and if GitHub says "too many requests" the app quietly waits longer |
 | Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
 | Printables | Only when you paste a Printables link | The model's ID, then the file and a small model picture (~10 KB, from media.printables.com) download |
 
@@ -83,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 This runs the tests and compiles `bin\PrintPrice.exe` with the C# compiler that ships with Windows, so no SDK or Visual Studio is needed. To regenerate the logo and icon, run `tools\make-icon.ps1`. The switch on its first line picks the AI logo (`'ai'`, made from `assets\logo-master.png`) or the old drawn one (`'drawn'`); line 2 sets the outline colour.
 
-To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This hidden option saves the windows as PNGs in that folder and exits. It uses default settings, never goes online and never saves anything. Add `--lang da` for Danish pictures. A `model.png` in the folder is used as the sample model picture.
+To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This hidden option saves the windows as PNGs in that folder and exits. It uses default settings, never goes online and never saves anything. Add `--lang da` for Danish pictures. A `model.png` in the folder is used as the sample model picture for `main.png`, and a `model2.png` for the multi-colour `main_multi.png`.
 
 ### Project layout
 | Path | What |

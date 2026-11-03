@@ -19,6 +19,31 @@ namespace PrintPrice
         public int Plates;
         public bool FromSlicedFile;   // values read from an already-sliced .gcode.3mf
         public byte[] Picture;        // plate picture (PNG) from the sliced 3MF, null if none
+        public List<FilamentUse> Filaments = new List<FilamentUse>();   // per slot, summed over plates, sorted by slot
+        public double PurgeGrams = -1;          // flush/purge waste (already inside Grams); -1 = unknown
+        public double ColourChangeHours = -1;   // extra print time from colour changes (inside Seconds); -1 = unknown
+    }
+
+    /// One filament slot used by a sliced print (summed over all plates).
+    public class FilamentUse
+    {
+        public int Slot;              // 1-based filament slot in the project
+        public string Colour = "";    // "#RRGGBB", "" if unknown
+        public string Type = "";      // e.g. "PLA"
+        public string Profile = "";   // e.g. "Bambu PLA Basic @BBL A1", "" if unknown
+        public double Grams;          // incl. purge/flush
+        public double ModelGrams = -1;   // model only (no purge); -1 = unknown
+        public double Metres;
+    }
+
+    /// Numbers from the Bambu CLI's result.json, summed over all sliced plates.
+    public class SliceStats
+    {
+        public SortedDictionary<int, double> MainGrams = new SortedDictionary<int, double>();    // per slot, model only
+        public SortedDictionary<int, double> TotalGrams = new SortedDictionary<int, double>();   // per slot, incl. purge
+        public double MainSeconds;     // print time without colour changes
+        public double TotalSeconds;    // full print time
+        public int ColourChanges;      // filament_change_times
     }
 
     public class SliceException : Exception
@@ -238,12 +263,14 @@ namespace PrintPrice
             }
 
             string error = null;
+            string resultText = null;
             string resultJson = Path.Combine(outDir, "result.json");
             if (File.Exists(resultJson))
             {
                 try
                 {
-                    var r = Json().Deserialize<Dictionary<string, object>>(File.ReadAllText(resultJson));
+                    resultText = File.ReadAllText(resultJson);
+                    var r = Json().Deserialize<Dictionary<string, object>>(resultText);
                     object e;
                     if (r.TryGetValue("error_string", out e)) error = e as string;
                 }
@@ -257,6 +284,7 @@ namespace PrintPrice
             var res = ReadSliceInfo(out3mf);
             if (res == null) throw new SliceException(L.F("Bambu Studio returned no print estimate for {0}.",
                 "Bambu Studio gav intet printestimat for {0}.", Path.GetFileName(model)));
+            ApplySliceStats(res, ParseSliceResult(resultText));
             return res;
         }
 
@@ -280,16 +308,129 @@ namespace PrintPrice
         /// Sums print time and filament weight over all sliced plates in a Bambu .3mf.
         public static SliceResult ReadSliceInfo(string path3mf)
         {
-            string xml;
+            string xml, settings = null;
             using (var zip = ZipFile.OpenRead(path3mf))
             {
                 var entry = zip.GetEntry("Metadata/slice_info.config");
                 if (entry == null) return null;
                 using (var sr = new StreamReader(entry.Open())) xml = sr.ReadToEnd();
+                var ps = zip.GetEntry("Metadata/project_settings.config");
+                if (ps != null && ps.Length > 0 && ps.Length < 64 * 1048576)
+                {
+                    try { using (var sr = new StreamReader(ps.Open())) settings = sr.ReadToEnd(); }
+                    catch { settings = null; }
+                }
             }
             var res = ParseSliceInfo(xml);
-            if (res != null) res.Picture = FromProject(path3mf);
+            if (res != null)
+            {
+                res.Picture = FromProject(path3mf);
+                var profiles = ParseFilamentSlots(settings);
+                foreach (var f in res.Filaments)
+                    if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
+            }
             return res;
+        }
+
+        /// Filament profile names per slot from Metadata/project_settings.config (JSON, "filament_settings_id").
+        /// Index 0 = slot 1. Empty list on missing or bad input, never null.
+        public static List<string> ParseFilamentSlots(string projectSettingsJson)
+        {
+            var list = new List<string>();
+            if (string.IsNullOrEmpty(projectSettingsJson)) return list;
+            try
+            {
+                var d = Json().Deserialize<Dictionary<string, object>>(projectSettingsJson);
+                object v;
+                if (d == null || !d.TryGetValue("filament_settings_id", out v) || v == null) return list;
+                if (v is string) { list.Add((string)v); return list; }
+                var items = v as System.Collections.IEnumerable;
+                if (items != null)
+                    foreach (var o in items) list.Add(Convert.ToString(o, CultureInfo.InvariantCulture) ?? "");
+            }
+            catch { list.Clear(); }
+            return list;
+        }
+
+        /// Per-filament model/total grams and model/total time from the CLI's result.json, summed over plates.
+        /// Null on missing or bad input.
+        public static SliceStats ParseSliceResult(string resultJson)
+        {
+            if (string.IsNullOrEmpty(resultJson)) return null;
+            try
+            {
+                var d = Json().Deserialize<Dictionary<string, object>>(resultJson);
+                object platesObj;
+                if (d == null || !d.TryGetValue("sliced_plates", out platesObj)) return null;
+                var plates = platesObj as System.Collections.IEnumerable;
+                if (plates == null) return null;
+                var st = new SliceStats();
+                int count = 0;
+                foreach (var po in plates)
+                {
+                    var p = po as Dictionary<string, object>;
+                    if (p == null) continue;
+                    count++;
+                    st.MainSeconds += JsonNum(p, "main_predication");
+                    st.TotalSeconds += JsonNum(p, "total_predication");
+                    st.ColourChanges += (int)JsonNum(p, "filament_change_times");
+                    object fo;
+                    var fils = p.TryGetValue("filaments", out fo) ? fo as System.Collections.IEnumerable : null;
+                    if (fils == null) continue;
+                    foreach (var o in fils)
+                    {
+                        var f = o as Dictionary<string, object>;
+                        if (f == null) continue;
+                        int slot = (int)JsonNum(f, "id");
+                        if (slot <= 0) continue;
+                        AddTo(st.MainGrams, slot, JsonNum(f, "main_used_g"));
+                        AddTo(st.TotalGrams, slot, JsonNum(f, "total_used_g"));
+                    }
+                }
+                return count > 0 ? st : null;
+            }
+            catch { return null; }
+        }
+
+        static double JsonNum(Dictionary<string, object> d, string key)
+        {
+            object v;
+            if (!d.TryGetValue(key, out v) || v == null || v is string) return 0;
+            try
+            {
+                double x = Convert.ToDouble(v, CultureInfo.InvariantCulture);
+                return double.IsNaN(x) || double.IsInfinity(x) ? 0 : x;
+            }
+            catch { return 0; }
+        }
+
+        static void AddTo(SortedDictionary<int, double> d, int key, double v)
+        {
+            double old;
+            d.TryGetValue(key, out old);
+            d[key] = old + v;
+        }
+
+        /// Fills ModelGrams per filament, PurgeGrams and ColourChangeHours from result.json numbers.
+        /// Does nothing when stats is null (e.g. a user's .gcode.3mf): those stay -1. Seconds/Grams are not changed.
+        public static void ApplySliceStats(SliceResult res, SliceStats stats)
+        {
+            if (res == null || stats == null || stats.TotalGrams.Count == 0) return;
+            foreach (var f in res.Filaments)
+            {
+                double main;
+                if (stats.MainGrams.TryGetValue(f.Slot, out main)) f.ModelGrams = main;
+            }
+            double purge = 0;
+            foreach (var kv in stats.TotalGrams)
+            {
+                double main;
+                stats.MainGrams.TryGetValue(kv.Key, out main);
+                purge += kv.Value - main;
+            }
+            res.PurgeGrams = Math.Max(0, purge);
+            if (stats.TotalSeconds > 0 && stats.MainSeconds > 0)
+                res.ColourChangeHours = Math.Max(0, stats.TotalSeconds - stats.MainSeconds) / 3600.0;
         }
 
         const long MaxPictureBytes = 4 * 1048576;
@@ -343,21 +484,50 @@ namespace PrintPrice
             var doc = new XmlDocument();
             doc.LoadXml(xml);
             var res = new SliceResult();
+            var slots = new SortedDictionary<int, FilamentUse>();
             foreach (XmlNode plate in doc.SelectNodes("/config/plate"))
             {
                 double seconds = Meta(plate, "prediction");
                 if (seconds <= 0) continue;
                 double grams = Meta(plate, "weight");
-                if (grams <= 0)
+                bool sumFilaments = grams <= 0;
+                foreach (XmlNode f in plate.SelectNodes("filament"))
                 {
-                    foreach (XmlNode f in plate.SelectNodes("filament"))
-                        grams += Attr(f, "used_g");
+                    double g = Attr(f, "used_g");
+                    if (sumFilaments) grams += g;
+                    int slot = (int)Attr(f, "id");
+                    if (g <= 0 || slot <= 0) continue;
+                    FilamentUse u;
+                    if (!slots.TryGetValue(slot, out u))
+                    {
+                        u = new FilamentUse { Slot = slot, Colour = NormColour(AttrText(f, "color")), Type = AttrText(f, "type") };
+                        slots[slot] = u;
+                    }
+                    u.Grams += g;
+                    u.Metres += Attr(f, "used_m");
                 }
                 res.Seconds += seconds;
                 res.Grams += grams;
                 res.Plates++;
             }
+            res.Filaments = slots.Values.ToList();
             return res.Plates > 0 ? res : null;
+        }
+
+        static string AttrText(XmlNode n, string name)
+        {
+            var a = n.Attributes == null ? null : n.Attributes[name];
+            return a == null ? "" : (a.Value ?? "").Trim();
+        }
+
+        /// "#rrggbb" or "#RRGGBBAA" -> "#RRGGBB"; anything else -> "".
+        static string NormColour(string c)
+        {
+            if (c == null) return "";
+            c = c.Trim();
+            if (!c.StartsWith("#")) c = "#" + c;
+            if (c.Length < 7 || !Regex.IsMatch(c.Substring(1, 6), "^[0-9A-Fa-f]{6}$")) return "";
+            return c.Substring(0, 7).ToUpperInvariant();
         }
 
         static double Meta(XmlNode plate, string key)

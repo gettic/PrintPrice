@@ -116,21 +116,114 @@ namespace PrintPrice
         }
 
         /// Returns the latest release if it is newer than this program, otherwise null.
+        // Conditional-request cache (per process, memory only). A 304 reply doesn't count toward GitHub's rate limit.
+        static readonly object CacheLock = new object();
+        static string _etag;
+        static UpdateInfo _cached;
+        static bool _hasCache;
+        static DateTime _nextAllowedUtc = DateTime.MinValue;
+
+        /// After a rate-limit reply from GitHub: the earliest time to ask again (UTC). Otherwise in the past.
+        public static DateTime NextAllowedUtc
+        {
+            get { lock (CacheLock) return _nextAllowedUtc; }
+        }
+
+        /// Returns the latest release if it is newer than this program, otherwise null.
+        /// Throws UpdateException if GitHub can't be reached or the rate limit is hit.
         public static UpdateInfo CheckForUpdate()
         {
-            string json;
-            using (var wc = Client())
+            bool limited;
+            var r = Fetch(out limited);
+            if (limited) throw new UpdateException(L.S("GitHub is limiting requests right now. Try again in a little while.",
+                "GitHub begrænser forespørgsler lige nu. Prøv igen om lidt."));
+            return r;
+        }
+
+        /// For the background timer: same as CheckForUpdate but never throws and never shows anything.
+        /// Returns the newest release (or the last known one if GitHub is rate limiting or unreachable), null if none.
+        /// Does nothing (returns the cached result) while NextAllowedUtc is in the future. Call off the UI thread.
+        public static UpdateInfo CheckQuiet()
+        {
+            try
             {
-                wc.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
-                try { json = wc.DownloadString(Api); }
+                lock (CacheLock)
+                    if (DateTime.UtcNow < _nextAllowedUtc) return _hasCache ? _cached : null;
+                bool limited;
+                return Fetch(out limited);
+            }
+            catch (Exception)
+            {
+                lock (CacheLock) return _hasCache ? _cached : null;
+            }
+        }
+
+        static UpdateInfo Fetch(out bool rateLimited)
+        {
+            rateLimited = false;
+            string etag; bool hadCache;
+            lock (CacheLock) { etag = _etag; hadCache = _hasCache; }
+            var req = (HttpWebRequest)WebRequest.Create(Api);
+            req.UserAgent = "PrintPrice-updater/" + CurrentText;
+            req.Accept = "application/vnd.github+json";
+            req.Timeout = 15000;
+            req.ReadWriteTimeout = 15000;
+            if (hadCache && !string.IsNullOrEmpty(etag)) req.Headers[HttpRequestHeader.IfNoneMatch] = etag;
+            HttpWebResponse resp = null;
+            try
+            {
+                try { resp = (HttpWebResponse)req.GetResponse(); }
                 catch (WebException ex)
                 {
-                    var resp = ex.Response as HttpWebResponse;
-                    if (resp != null && resp.StatusCode == HttpStatusCode.NotFound) return null;   // no releases yet
+                    resp = ex.Response as HttpWebResponse;
+                    if (resp == null) throw new UpdateException(L.F("Couldn't reach GitHub ({0})", "Kunne ikke nå GitHub ({0})", ex.Message));
+                    var code = resp.StatusCode;
+                    if (code == HttpStatusCode.NotModified)
+                    {
+                        lock (CacheLock) return _hasCache ? _cached : null;
+                    }
+                    if (code == HttpStatusCode.NotFound) return null;   // no releases yet
+                    if (code == HttpStatusCode.Forbidden || (int)code == 429)
+                    {
+                        SetBackoff(resp, true);
+                        rateLimited = true;
+                        lock (CacheLock) return _hasCache ? _cached : null;
+                    }
                     throw new UpdateException(L.F("Couldn't reach GitHub ({0})", "Kunne ikke nå GitHub ({0})", ex.Message));
                 }
+                string json;
+                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) json = sr.ReadToEnd();
+                var info = ParseReleases(json, Current);
+                lock (CacheLock)
+                {
+                    _etag = resp.Headers["ETag"];
+                    _cached = info;
+                    _hasCache = true;
+                }
+                SetBackoff(resp, false);
+                return info;
             }
-            return ParseReleases(json, Current);
+            finally { if (resp != null) resp.Close(); }
+        }
+
+        /// Reads Retry-After / X-RateLimit-* headers. On a rate-limit reply always sets a wait; on a normal
+        /// reply only when no requests remain.
+        static void SetBackoff(HttpWebResponse resp, bool limitedReply)
+        {
+            DateTime until = DateTime.MinValue;
+            int secs, remaining; long reset;
+            if (int.TryParse(resp.Headers["Retry-After"], out secs) && secs > 0) until = DateTime.UtcNow.AddSeconds(secs);
+            if (int.TryParse(resp.Headers["X-RateLimit-Remaining"], out remaining) && remaining <= 0 &&
+                long.TryParse(resp.Headers["X-RateLimit-Reset"], out reset))
+            {
+                var r = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(reset);
+                if (r > until) until = r;
+            }
+            else if (!limitedReply) return;
+            if (limitedReply && until <= DateTime.UtcNow) until = DateTime.UtcNow.AddMinutes(15);
+            var max = DateTime.UtcNow.AddHours(2);
+            if (until > max) until = max;
+            if (until > DateTime.UtcNow) lock (CacheLock) _nextAllowedUtc = until;
         }
 
         /// Reads GitHub's release list. The target is the newest version above `current` with a usable
