@@ -1,0 +1,4 @@
+# build output (the exe is attached to GitHub releases instead)
+bin/
+*.exe
+*.pdb
