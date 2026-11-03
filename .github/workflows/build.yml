@@ -1,0 +1,105 @@
+# Builds PrintPrice.exe from source on GitHub, runs the unit tests, and gets the exe
+# code-signed by SignPath (free OSS signing, certificate by SignPath Foundation).
+# Goes to .github/workflows/build.yml.
+#
+# Needs (set by the repo owner, never in this file):
+#   secret   SIGNPATH_API_TOKEN        - SignPath CI user token (submitter on the signing policy)
+#   variable SIGNPATH_ORGANIZATION_ID  - SignPath organization id (Settings > Secrets and variables > Actions > Variables)
+# The project/policy/artifact-configuration slugs below must match what is set up in SignPath.
+
+name: Build and sign
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read   # checkout
+  actions: read    # SignPath reads the unsigned artifact of this run
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90          # includes waiting for the manual signing approval
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check compiler and version
+        id: version
+        shell: powershell
+        run: |
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
+          & $csc /help | Select-Object -First 1
+          $info = Get-Content src\AssemblyInfo.cs -Raw
+          if ($info -notmatch 'AssemblyVersion\("(\d+\.\d+\.\d+)\.0"\)') { throw 'No AssemblyVersion in src\AssemblyInfo.cs' }
+          $v = $Matches[1]
+          if ($info -notmatch ('AssemblyFileVersion\("' + [regex]::Escape($v) + '\.0"\)')) { throw 'AssemblyFileVersion differs from AssemblyVersion' }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$v") {
+            throw "Tag $env:GITHUB_REF_NAME does not match AssemblyInfo version v$v"
+          }
+          "version=$v.0" >> $env:GITHUB_OUTPUT
+
+      - name: Build and test
+        shell: powershell
+        run: |
+          .\build.ps1          # throws (fails the job) on a test failure or build error
+          if (-not (Test-Path bin\PrintPrice.exe)) { throw 'bin\PrintPrice.exe was not built' }
+          (Get-FileHash bin\PrintPrice.exe -Algorithm SHA256).Hash
+
+      - name: Upload unsigned exe
+        id: upload-unsigned
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: PrintPrice-unsigned
+          path: bin/PrintPrice.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign with SignPath
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: PrintPrice                 # PLACEHOLDER: set to the real SignPath project slug
+          signing-policy-slug: release-signing     # PLACEHOLDER: set to the real signing policy slug
+          artifact-configuration-slug: initial     # PLACEHOLDER: set to the real artifact configuration slug
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          parameters: |
+            version: "${{ steps.version.outputs.version }}"
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600   # time for the owner to approve the request
+          output-artifact-directory: signed
+
+      - name: Verify signature and version
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        shell: powershell
+        run: |
+          $exe = (Resolve-Path signed\PrintPrice.exe).Path
+          $sig = Get-AuthenticodeSignature $exe
+          if ($sig.Status -ne 'Valid') { throw "Signature status: $($sig.Status)" }
+          if ($sig.SignerCertificate.Subject -notmatch 'SignPath Foundation') { throw "Unexpected signer: $($sig.SignerCertificate.Subject)" }
+          $name = [Reflection.AssemblyName]::GetAssemblyName($exe)
+          if ($name.Name -ne 'PrintPrice' -or $name.Version.ToString() -ne '${{ steps.version.outputs.version }}') {
+            throw "Signed exe is $($name.Name) $($name.Version)"
+          }
+          "Signed by: $($sig.SignerCertificate.Subject)"
+          (Get-FileHash $exe -Algorithm SHA256).Hash
+
+      - name: Upload signed exe
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: PrintPrice-signed
+          path: signed/PrintPrice.exe
+          if-no-files-found: error
+          retention-days: 30

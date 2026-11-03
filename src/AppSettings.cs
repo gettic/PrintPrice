@@ -20,7 +20,8 @@ namespace PrintPrice
 
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
-        public double PowerAddOn = 0.55;        // DKK/kWh excl. VAT: grid tariff + Energinet + elafgift + supplier fee
+        public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
+        public double PowerAddOn = 0.55;       // DKK/kWh excl. VAT: grid tariff + Energinet + elafgift + supplier fee
         public double PowerIncludeVat = 1;      // 1 = add 25 % VAT
         public string PriceArea = "DK1";        // DK1 = Jutland/Funen, DK2 = Zealand/Copenhagen
 
@@ -56,6 +57,7 @@ namespace PrintPrice
             d["LastElectricityPrice"] = LastElectricityPrice;
             d["AutoWearRate"] = AutoWearRate;
             d["AutoPowerPrice"] = AutoPowerPrice;
+            d["AutoUpdateCheck"] = AutoUpdateCheck;
             d["PowerAddOn"] = PowerAddOn;
             d["PowerIncludeVat"] = PowerIncludeVat;
             return d;
@@ -87,7 +89,8 @@ namespace PrintPrice
                 case "LastElectricityPrice": LastElectricityPrice = v; break;
                 case "AutoWearRate": AutoWearRate = v; break;
                 case "AutoPowerPrice": AutoPowerPrice = v; break;
-                case "PowerAddOn": PowerAddOn = v; break;
+                case "AutoUpdateCheck": AutoUpdateCheck = v; break;
+                case "PowerAddOn":PowerAddOn = v; break;
                 case "PowerIncludeVat": PowerIncludeVat = v; break;
             }
         }

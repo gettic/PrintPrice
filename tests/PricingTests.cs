@@ -36,6 +36,9 @@ namespace PrintPrice.Tests
             Eq("wear CF on stainless (100 h hotend)", 2.16, cfSS.Total);
             True("short preset name", BambuSlicer.ShortName("Bambu PLA Basic @BBL A1 0.2 nozzle") == "Bambu PLA Basic");
             True("suffix 0.6", BambuSlicer.Suffix("0.6") == " @BBL A1 0.6 nozzle" && BambuSlicer.Suffix("0.4") == " @BBL A1");
+            Eq("AutoUpdateCheck default is 1", 1, new AppSettings().AutoUpdateCheck);
+            var orig0 = new AppSettings { AutoUpdateCheck = 0 };
+            Eq("Clone keeps AutoUpdateCheck 0", 0, orig0.Clone().AutoUpdateCheck);
             var s = new AppSettings { MachineRatePerHour = 0 }; // 100 W, 25 %, 75 %, no wear (formula check)
             var r = Pricing.Calculate(Example(), s);
             Eq("material", 21.60, r.MaterialCost);

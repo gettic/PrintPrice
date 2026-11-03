@@ -12,7 +12,10 @@ namespace PrintPrice
         readonly AppSettings source;
         readonly string exe;
         TextBox txtWatts, txtFriends, txtOthers, txtRate, txtMin, txtRound, txtAddOn, txtSlicer;
-        CheckBox chkAutoPower, chkVat, chkAutoWear;
+        CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate;
+        Label lblCheck, lnkCheck;   // "v1.1.0 –" / check result, and the clickable "check now"
+        /// Called when "check now" finds a newer version (MainForm shows its red update button).
+        public Action<UpdateInfo> UpdateFound;
         ComboBox cmbNozzle, cmbProcess, cmbFilament, cmbBed, cmbArea;
         InfoBox lblWear;
         bool filling;   // suppress change events while filling the form
@@ -88,7 +91,14 @@ namespace PrintPrice
                 "elafgift (0,008 in 2026) and your supplier's fee. Check your electricity bill.");
             chkVat = Check(t2, "Add 25 % VAT");
 
-            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0) };
+            // bottom row: update-check switch on the left, version link + buttons on the right
+            var bottom = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0) };
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            chkAutoUpdate = new CheckBox { Text = "Check for a new version at startup", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 4) };
+            bottom.Controls.Add(chkAutoUpdate, 0, 0);
+            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Anchor = AnchorStyles.Right, Margin = Padding.Empty, WrapContents = false };
+            bottom.Controls.Add(buttons, 1, 0);
             var ok = new Button { Text = "OK", AutoSize = true };
             var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
             var reset = new Button { Text = "Defaults", AutoSize = true };
@@ -97,14 +107,17 @@ namespace PrintPrice
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(ok);
             buttons.Controls.Add(reset);
-            // installed version, left of Defaults (updates are offered by a button in the main window)
-            buttons.Controls.Add(new Theme.PlainLabel
-            {
-                Text = "v" + Updater.CurrentText, AutoSize = true, Tag = "muted",
-                Anchor = AnchorStyles.Left, Margin = new Padding(3, 0, 8, 0)
-            });
-            outer.Controls.Add(buttons, 0, 1);
-            outer.SetColumnSpan(buttons, 2);
+            // installed version + "check now" link, left of Defaults (a found update shows the red button in the main window)
+            // (flow is right-to-left: the link is added first so it sits right of the text)
+            lnkCheck = new Theme.PlainLabel { AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 8, 0), Cursor = Cursors.Hand };
+            lnkCheck.Font = new Font(Font, FontStyle.Underline);
+            lnkCheck.Click += delegate { CheckNow(); };
+            lblCheck = new Theme.PlainLabel { AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(3, 0, 0, 0) };
+            buttons.Controls.Add(lnkCheck);
+            buttons.Controls.Add(lblCheck);
+            SetCheckText("v" + Updater.CurrentText + " –", "check now", null);
+            outer.Controls.Add(bottom, 0, 1);
+            outer.SetColumnSpan(bottom, 2);
 
             // live updates
             cmbNozzle.SelectedIndexChanged += delegate { if (!filling) { RefillPresets(); UpdateWear(); } };
@@ -279,6 +292,7 @@ namespace PrintPrice
             cmbArea.SelectedIndex = s.PriceArea == "DK1" ? 0 : 1;
             txtAddOn.Text = Num.Fmt(s.PowerAddOn);
             chkVat.Checked = s.PowerIncludeVat != 0;
+            chkAutoUpdate.Checked = s.AutoUpdateCheck != 0;
             filling = false;
             UpdateWear();
         }
@@ -315,8 +329,41 @@ namespace PrintPrice
             Result.PriceArea = cmbArea.SelectedIndex == 0 ? "DK1" : "DK2";
             Result.PowerAddOn = addOn;
             Result.PowerIncludeVat = chkVat.Checked ? 1 : 0;
+            Result.AutoUpdateCheck = chkAutoUpdate.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
+        }
+
+        // ---------- "check now" (only when clicked; never in picture mode) ----------
+        /// Text left of Defaults, then an optional clickable part ("check now" / "try again"); colour null = muted.
+        internal void SetCheckText(string text, string link, Color? colour)
+        {
+            lblCheck.Text = text;
+            lblCheck.ForeColor = colour ?? Theme.Muted;
+            lnkCheck.Text = link ?? "";
+            lnkCheck.Visible = link != null;
+            lblCheck.Margin = new Padding(3, 0, link != null ? 0 : 8, 0);
+        }
+
+        async void CheckNow()
+        {
+            if (Screenshots.Active) return;
+            SetCheckText("Checking for a new version…", null, null);
+            UpdateInfo found;
+            try { found = await Task.Run(() => Updater.CheckForUpdate()); }
+            catch
+            {
+                if (!IsDisposed) SetCheckText("Check failed –", "try again", Theme.Error);
+                return;
+            }
+            if (IsDisposed) return;
+            if (found == null)
+            {
+                SetCheckText("✓ v" + Updater.CurrentText + " is the newest", null, null);   // muted
+                return;
+            }
+            SetCheckText("v" + Updater.Short(found.Version) + " is out – see main window", null, Theme.Text);
+            if (UpdateFound != null) UpdateFound(found);
         }
     }
 }

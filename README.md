@@ -10,7 +10,7 @@ A small dark-mode Windows app that turns a 3D print job into two price quotes: o
 <p align="center"><img src="assets/screenshot.png" width="480" alt="Screenshot"></p>
 
 ## Download
-Get **`PrintPrice.exe`** from the [latest release](../../releases/latest) and double-click it. Nothing needs to be installed: Windows 10/11 already includes what it needs (.NET Framework 4.8).
+Download **`PrintPrice.zip`** from the [latest release](../../releases/latest), unzip it and run **`PrintPrice.exe`**. Nothing needs to be installed: Windows 10/11 already includes what it needs (.NET Framework 4.8).
 
 The exe isn't code-signed, so the first time you run it Windows SmartScreen may warn you. Click **More info → Run anyway**.
 
@@ -25,7 +25,7 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Configurable:** set the markups, minimum price, rounding, printer power, print profile and price area in Settings.
 - **Copy quote:** puts a ready-to-send text on the clipboard.
-- **Auto-update:** at startup the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. Settings shows the installed version.
+- **Auto-update:** at startup the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. You can switch the check off in Settings (**Check for a new version at startup**). Next to the version number in Settings, **check now** looks once when you click it.
 
 ## How prices are calculated
 ```
@@ -58,6 +58,18 @@ The default setup (0.4 stainless nozzle, PLA, smooth PEI plate) comes to **0,91 
 
 Settings are saved in `%APPDATA%\PrintPrice\settings.ini`.
 
+## Privacy
+The app sends no personal information anywhere. It has no account, cookies or tracking. It only connects to these services:
+
+| Service | When | What is sent |
+|---|---|---|
+| GitHub | At startup, to look for a new version (can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version |
+| Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
+| Printables | Only when you paste a Printables link | The model's ID, then the file downloads |
+
+Like any web request, these show your IP address to the service. Bambu Studio runs on your own PC; the app only starts its command-line slicer.
+
+Nothing is installed. The app writes only its settings file and temporary slicing files. To uninstall, delete PrintPrice.exe and the folder %APPDATA%\PrintPrice.
 ## Build from source
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1
@@ -77,3 +89,8 @@ To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |
 | `src/Screenshots.cs` | Hidden `--screenshots` picture mode |
 | `tests/PricingTests.cs` | Unit tests |
+| `.github/workflows/build.yml` | GitHub Actions: builds and tests the release exe |
+| `LICENSE` | GPL-3.0 |
+
+## License
+[GPL-3.0](LICENSE). Copyright (C) 2026 Gettic.

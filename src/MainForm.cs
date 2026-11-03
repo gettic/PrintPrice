@@ -94,6 +94,13 @@ namespace PrintPrice
             timeRow.Controls.Add(txtMinutes);
             timeRow.Controls.Add(Unit("m"));
             AddRow(inputs, "Print time", timeRow, null);
+            Load += delegate
+            {
+                // number boxes below end exactly where the m box ends (DPI-safe, measured)
+                int right = txtMinutes.Parent.PointToScreen(new Point(txtMinutes.Right, 0)).X;
+                foreach (var tb in new[] { txtGrams, txtFilamentPrice, txtElecPrice })
+                    tb.Width = right - tb.Parent.PointToScreen(new Point(tb.Left, 0)).X;
+            };
 
             txtGrams = NumBox("");
             AddRow(inputs, "Filament used", WithUnit(txtGrams, "g"), null);
@@ -654,10 +661,13 @@ namespace PrintPrice
         {
             using (var dlg = new SettingsForm(settings))
             {
+                if (!offline) dlg.UpdateFound = ShowUpdateButton;   // "check now" in Settings
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
                     var old = settings;
                     settings = dlg.Result;
+                    if (old.AutoUpdateCheck == 0 && settings.AutoUpdateCheck != 0 && pendingUpdate == null)
+                        BeginInvoke((MethodInvoker)StartupUpdateCheck);   // switched back on: check now
                     bool powerChanged = old.PriceArea != settings.PriceArea || old.PowerAddOn != settings.PowerAddOn ||
                                         old.PowerIncludeVat != settings.PowerIncludeVat ||
                                         (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
@@ -671,18 +681,19 @@ namespace PrintPrice
         }
 
         // ---------- updates from GitHub ----------
-        /// Removes leftovers of a previous update, then quietly looks for a new release.
-        /// A newer version shows the red update button under the Friends & family box.
+        /// Removes leftovers of a previous update (local only), then, if the setting allows it,
+        /// quietly looks for a new release. A newer version shows the red update button under the Friends & family box.
         async void StartupUpdateCheck()
         {
             if (offline) return;
+            bool check = settings.AutoUpdateCheck != 0;
             UpdateInfo found = null;
             try
             {
                 found = await Task.Run(() =>
                 {
                     Updater.CleanUp();
-                    return Updater.CheckForUpdate();
+                    return check ? Updater.CheckForUpdate() : null;
                 });
             }
             catch { /* offline or GitHub unreachable: try again next start */ }

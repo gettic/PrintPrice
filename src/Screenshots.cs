@@ -39,6 +39,9 @@ namespace PrintPrice
                         Place(set);
                         set.Show();
                         Snap(set, folder, "settings.png");
+                        // longest "check now" result text, to check the bottom row still fits (no real check)
+                        set.SetCheckText("v" + Updater.Short(fake.Version) + " is out – see main window", null, Theme.Text);
+                        Snap(set, folder, "settings_found.png");
                         set.Hide();
                     }
 
@@ -97,9 +100,42 @@ namespace PrintPrice
         static void Snap(Form f, string folder, string name)
         {
             Pump();
-            f.Refresh();
+            RedrawWindow(f.Handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0080 | 0x0100 | 0x0400);   // INVALIDATE|ALLCHILDREN|UPDATENOW|FRAME
             Pump();
-            using (var bmp = Capture(f)) bmp.Save(Path.Combine(folder, name), ImageFormat.Png);
+            // PrintWindow's full-content copy comes from DWM and can lag behind a change made just before
+            // (stale picture): wait for DWM to compose the new frame first
+            for (int i = 0; i < 3; i++) { try { DwmFlush(); } catch { } Pump(); }
+            // ...and keep capturing until two captures in a row are the same (up to ~3 s)
+            Bitmap bmp = Capture(f);
+            for (int i = 0; i < 10; i++)
+            {
+                Pump();
+                try { DwmFlush(); } catch { }
+                var next = Capture(f);
+                bool same = SamePixels(bmp, next);
+                bmp.Dispose();
+                bmp = next;
+                if (same) break;
+            }
+            using (bmp) bmp.Save(Path.Combine(folder, name), ImageFormat.Png);
+        }
+
+        static bool SamePixels(Bitmap a, Bitmap b)
+        {
+            if (a.Size != b.Size) return false;
+            var r = new Rectangle(Point.Empty, a.Size);
+            var da = a.LockBits(r, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            var db = b.LockBits(r, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                int n = da.Stride * a.Height;
+                var pa = new byte[n]; var pb = new byte[n];
+                Marshal.Copy(da.Scan0, pa, 0, n);
+                Marshal.Copy(db.Scan0, pb, 0, n);
+                for (int i = 0; i < n; i++) if (pa[i] != pb[i]) return false;
+                return true;
+            }
+            finally { a.UnlockBits(da); b.UnlockBits(db); }
         }
 
         /// PrintWindow with PW_RENDERFULLCONTENT (also draws the RichTextBox and the dark title bar),
@@ -140,6 +176,10 @@ namespace PrintPrice
         static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
         [DllImport("user32.dll")]
         static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+        [DllImport("user32.dll")]
+        static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr region, uint flags);
+        [DllImport("dwmapi.dll")]
+        static extern int DwmFlush();
         [DllImport("dwmapi.dll")]
         static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT value, int size);
     }
