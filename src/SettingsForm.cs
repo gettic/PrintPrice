@@ -18,6 +18,7 @@ namespace PrintPrice
         public Action<UpdateInfo> UpdateFound;
         ComboBox cmbNozzle, cmbProcess, cmbFilament, cmbBed, cmbArea;
         InfoBox lblWear;
+        Panel divider;   // red line between the two columns
         bool filling;   // suppress change events while filling the form
 
         public SettingsForm(AppSettings current)
@@ -37,12 +38,16 @@ namespace PrintPrice
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
             // two columns: left = pricing, right = printer setup & live price; buttons underneath
-            var outer = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Padding = new Padding(14, 2, 14, 14), Margin = Padding.Empty };
+            // no top padding, so the red divider starts right under the title bar; the columns keep their 2 px top margin
+            var outer = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Padding = new Padding(14, 0, 14, 14), Margin = Padding.Empty };
             Controls.Add(outer);
-            var t = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = new Padding(0, 0, 28, 0) };
-            var t2 = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = Padding.Empty };
+            var t = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
+            var t2 = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
+            // red divider centred in the 28 px gap (13 + 2 + 13), from the top down to just above the bottom row
+            divider = new Panel { Width = 2, Anchor = AnchorStyles.Top | AnchorStyles.Bottom, Margin = new Padding(13, 0, 13, 0) };
             outer.Controls.Add(t, 0, 0);
-            outer.Controls.Add(t2, 1, 0);
+            outer.Controls.Add(divider, 1, 0);
+            outer.Controls.Add(t2, 2, 0);
 
             // ----- left: pricing -----
             Section(t, "Pricing");
@@ -117,7 +122,7 @@ namespace PrintPrice
             buttons.Controls.Add(lblCheck);
             SetCheckText("v" + Updater.CurrentText + " –", "check now", null);
             outer.Controls.Add(bottom, 0, 1);
-            outer.SetColumnSpan(bottom, 2);
+            outer.SetColumnSpan(bottom, 3);
 
             // live updates
             cmbNozzle.SelectedIndexChanged += delegate { if (!filling) { RefillPresets(); UpdateWear(); } };
@@ -128,6 +133,7 @@ namespace PrintPrice
             AcceptButton = ok;
             CancelButton = cancel;
             Theme.Apply(this);
+            divider.BackColor = Theme.InfoAccent;   // after Apply, which paints panels in the background colour
             ResumeLayout(true);
             Fill(current);
         }
@@ -143,7 +149,7 @@ namespace PrintPrice
         // ---------- layout helpers ----------
         static Label Caption(string text)
         {
-            return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 10, 6) };
+            return new Label { Text = text, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, Theme.LabelGap, 6) };
         }
 
         TextBox Row(TableLayoutPanel t, string caption, string unit, string hint)

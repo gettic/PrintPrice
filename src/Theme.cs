@@ -24,6 +24,10 @@ namespace PrintPrice
         public static readonly Color InfoAccent = Color.FromArgb(150, 30, 35);    // dark red
         public static readonly Color Warning = Color.FromArgb(240, 180, 70);
 
+        /// Right margin after a row caption (96 dpi units): ~30 px clear gap to the box after the longest label,
+        /// in the main window and Settings alike (label columns are AutoSize, so this follows the real text width).
+        public const int LabelGap = 21;
+
         /// Label drawn with grayscale anti-aliasing: ClearType colour fringes make thin grey text look tinted.
         public class PlainLabel : Label
         {
@@ -171,6 +175,16 @@ namespace PrintPrice
 
         /// Usable text width; read at runtime so it follows DPI scaling of the box.
         int InnerWidth { get { return Math.Max(50, MaximumSize.Width - Padding.Horizontal - 2); } }
+
+        /// New width in real pixels (e.g. measured on Load); the text rewraps to it.
+        public void SetWidth(int width)
+        {
+            MaximumSize = new Size(width, 0);
+            MinimumSize = new Size(width, 0);
+            label.MaximumSize = new Size(InnerWidth, 0);
+            if (grid != null) grid.MinimumSize = new Size(InnerWidth, 0);
+            if (note != null) note.MaximumSize = new Size(InnerWidth, 0);
+        }
 
         Label NewLabel()
         {

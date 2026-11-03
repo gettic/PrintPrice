@@ -61,18 +61,19 @@ namespace PrintPrice
 
             // ---------- Inputs ----------
             var inputs = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
-            inputs.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
+            // label column as wide as the longest label + Theme.LabelGap (~30 px gap to the boxes)
+            inputs.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             inputs.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             inputs.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
-            // link box spans to the right edge of the panels below (540 px wide content)
-            txtUrl = new TextBox { Width = 394 };
+            // link box, buttons and info boxes end at the Cost breakdown's right edge (widths set on Load, see below)
+            txtUrl = new TextBox { Width = 394, Margin = new Padding(3, 3, 0, 3) };
             // grey example text while empty; re-applied whenever the handle is recreated (e.g. theme change)
             txtUrl.HandleCreated += delegate { SetCueBanner(txtUrl, "e.g. https://www.printables.com/model/3161-3d-benchy"); };
             AddRow(inputs, "Model link", txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
-            // two equal buttons lined up exactly under the link box
+            // two equal buttons lined up exactly under the link box (widths set on Load)
             btnAnalyze = new Button { Text = "Get time && weight", Width = 194, Height = 32, Margin = new Padding(3, 6, 6, 4) };
             btnLoadFile = new Button { Text = "Load file…", Width = 194, Height = 32, Margin = new Padding(0, 6, 0, 4) };
             btnAnalyze.Click += delegate { AnalyzeClicked(); };
@@ -82,7 +83,7 @@ namespace PrintPrice
             autoRow.Controls.Add(btnLoadFile);
             AddRow(inputs, "", autoRow, null);
             inputs.SetColumnSpan(autoRow, 2);
-            lblAuto = new InfoBox(394, 9.5f) { Margin = new Padding(3, 4, 3, 10) };
+            lblAuto = new InfoBox(394, 9.5f) { Margin = new Padding(3, 4, 0, 10) };
             AddRow(inputs, "", lblAuto, null);
             inputs.SetColumnSpan(lblAuto, 2);
 
@@ -123,7 +124,7 @@ namespace PrintPrice
             btnPower.Click += delegate { FetchPowerPrice(); };
             elecRow.Controls.Add(btnPower);
             AddRow(inputs, "Electricity price", elecRow, null);
-            lblPowerInfo = new InfoBox(394, 9.5f) { Margin = new Padding(3, 2, 3, 8) };
+            lblPowerInfo = new InfoBox(394, 9.5f) { Margin = new Padding(3, 2, 0, 8) };
             AddRow(inputs, "", lblPowerInfo, null);
             inputs.SetColumnSpan(lblPowerInfo, 2);
             lblPrinter = new Label { AutoSize = true, Tag = "muted", Margin = new Padding(3, 4, 3, 4) };
@@ -143,6 +144,19 @@ namespace PrintPrice
             bt.Controls.Add(baseCap, 0, 2); bt.Controls.Add(lblBase, 1, 2);
             grpBreak.Controls.Add(bt);
             root.Controls.Add(grpBreak);
+            Load += delegate
+            {
+                // link box, the two buttons and both info boxes end exactly at the Cost breakdown's right edge
+                // (measured, so it stays lined up at any DPI and whatever the label column's width)
+                int edge = grpBreak.Parent.PointToScreen(new Point(grpBreak.Right, 0)).X;
+                int w = edge - txtUrl.Parent.PointToScreen(new Point(txtUrl.Left, 0)).X;
+                txtUrl.Width = w;
+                lblAuto.SetWidth(w);
+                lblPowerInfo.SetWidth(w);
+                int gap = btnAnalyze.Margin.Right;
+                btnAnalyze.Width = (w - gap) / 2;
+                btnLoadFile.Width = w - gap - btnAnalyze.Width;
+            };
 
             // ---------- Prices ----------
             var prices = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
@@ -526,7 +540,7 @@ namespace PrintPrice
             int row = t.RowCount++;
             t.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             if (caption.Length > 0)   // no empty caption label, so rows holding a hidden info box collapse fully
-                t.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 6) }, 0, row);
+                t.Controls.Add(new Label { Text = caption, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, Theme.LabelGap, 6) }, 0, row);
             input.Anchor = AnchorStyles.Left;
             t.Controls.Add(input, 1, row);
             if (extra != null) { extra.Anchor = AnchorStyles.Left; t.Controls.Add(extra, 2, row); }
