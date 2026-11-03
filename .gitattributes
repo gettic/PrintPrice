@@ -1,0 +1,7 @@
+# Windows project: text files use CRLF in the working copy, LF in the repository
+* text=auto eol=crlf
+
+# binary assets
+*.png binary
+*.ico binary
+*.exe binary
