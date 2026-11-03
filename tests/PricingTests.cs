@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace PrintPrice.Tests
 {
@@ -36,13 +36,13 @@ namespace PrintPrice.Tests
             Eq("wear CF on stainless (100 h hotend)", 2.16, cfSS.Total);
             True("short preset name", BambuSlicer.ShortName("Bambu PLA Basic @BBL A1 0.2 nozzle") == "Bambu PLA Basic");
             True("suffix 0.6", BambuSlicer.Suffix("0.6") == " @BBL A1 0.6 nozzle" && BambuSlicer.Suffix("0.4") == " @BBL A1");
-            var s = new AppSettings { MachineRatePerHour = 0 }; // 100 W, 15 %, 75 %, no wear (formula check)
+            var s = new AppSettings { MachineRatePerHour = 0 }; // 100 W, 25 %, 75 %, no wear (formula check)
             var r = Pricing.Calculate(Example(), s);
             Eq("material", 21.60, r.MaterialCost);
             Eq("power kWh", 0.55, r.PowerKwh);
             Eq("power cost", 1.10, r.PowerCost);
             Eq("base", 22.70, r.BaseCost);
-            Eq("friends", 26.105, r.FriendsPrice);
+            Eq("friends", 28.375, r.FriendsPrice);
             Eq("others", 39.725, r.OthersPrice);
 
             var zero = Pricing.Calculate(new QuoteInput(), s);
@@ -56,7 +56,7 @@ namespace PrintPrice.Tests
 
             var s4 = new AppSettings();   // defaults include A1 wear: 39.725 + 5.5 h × 0.91 = 44.73
             Eq("others with default wear", 44.73, Pricing.Calculate(Example(), s4).OthersPrice);
-            Eq("friends unaffected by wear", 26.105, Pricing.Calculate(Example(), s4).FriendsPrice);
+            Eq("friends unaffected by wear", 28.375, Pricing.Calculate(Example(), s4).FriendsPrice);
 
             var s3 = new AppSettings { MinimumPrice = 50, MachineRatePerHour = 0 };
             Eq("minimum price", 50, Pricing.Calculate(Example(), s3).OthersPrice);
@@ -111,6 +111,26 @@ namespace PrintPrice.Tests
             try { PowerPrice.PickCurrent(pj, "DK2", now.AddHours(5)); } catch (SliceException) { threw = true; }
             True("stale data rejected", threw);
 
+            // ---- updater ----
+            True("tag v1.0.1", Updater.ParseTag("v1.0.1") == new Version(1, 0, 1, 0));
+            True("tag 2.3", Updater.ParseTag("2.3") == new Version(2, 3, 0, 0));
+            True("tag junk", Updater.ParseTag("latest") == null && Updater.ParseTag("v1.0.1-beta") == null);
+            True("1.0.1 newer than 1.0.0", Updater.ParseTag("v1.0.1") > Updater.ParseTag("v1.0.0"));
+            True("1.0.0 = 1.0.0.0", Updater.ParseTag("v1.0.0") == new Version(1, 0, 0, 0));
+            True("short version", Updater.Short(new Version(1, 2, 3, 0)) == "1.2.3");
+            string rel = "{\"tag_name\":\"v1.2.0\",\"name\":\"v1.2.0\",\"draft\":false,\"prerelease\":false," +
+                "\"html_url\":\"https://github.com/gettic/PrintPrice/releases/tag/v1.2.0\",\"body\":\"## New\\n- **Faster** slicing\\n- See [README](https://x)\"," +
+                "\"assets\":[{\"name\":\"other.zip\",\"size\":5,\"browser_download_url\":\"https://github.com/gettic/PrintPrice/releases/download/v1.2.0/other.zip\"}," +
+                "{\"name\":\"PrintPrice.exe\",\"size\":201728,\"digest\":\"sha256:9E4D00BF7355CD8A364686FAEBD887511851169E5075428FDA7AB07787E4643B\"," +
+                "\"browser_download_url\":\"https://github.com/gettic/PrintPrice/releases/download/v1.2.0/PrintPrice.exe\"}]}";
+            var ui = Updater.ParseRelease(rel);
+            True("release parsed", ui != null && ui.Version == new Version(1, 2, 0, 0) && ui.Size == 201728);
+            True("release exe asset", ui != null && ui.DownloadUrl.EndsWith("/v1.2.0/PrintPrice.exe"));
+            True("release digest", ui != null && ui.Sha256 == "9e4d00bf7355cd8a364686faebd887511851169e5075428fda7ab07787e4643b");
+            True("release notes text", ui != null && Updater.NotesText(ui, 500) == "New\n• Faster slicing\n• See README");
+            True("prerelease ignored", Updater.ParseRelease(rel.Replace("\"prerelease\":false", "\"prerelease\":true")) == null);
+            True("no exe asset", Updater.ParseRelease(rel.Replace("PrintPrice.exe", "Other.exe")) == null);
+            True("bad tag ignored", Updater.ParseRelease(rel.Replace("\"v1.2.0\",\"name\"", "\"nightly\",\"name\"")) == null);
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
         }

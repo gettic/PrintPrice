@@ -2,3 +2,22 @@
 bin/
 *.exe
 *.pdb
+
+# Claude starter kit: workflow files stay on this PC
+CLAUDE.md
+.claude/
+ideas.md
+work status.md
+readme notes.md
+plans/
+starter kit source/
+
+# secrets
+.env*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+credentials*.json
+.dev.vars

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -9,7 +9,7 @@ namespace PrintPrice
     {
         // Bambu Lab A1 averages roughly 80-110 W while printing PLA.
         public double PrinterWatts = 100;
-        public double FriendsMarkupPct = 15;
+        public double FriendsMarkupPct = 25;
         public double OthersMarkupPct = 75;
         public double MachineRatePerHour = Wear.DefaultRate;   // DKK/h added to the customer price (A1 wear & tear)
         public double AutoWearRate = 1;                        // 1 = calculate from nozzle, filament & plate
@@ -23,6 +23,8 @@ namespace PrintPrice
         public double PowerAddOn = 0.55;        // DKK/kWh excl. VAT: grid tariff + Energinet + elafgift + supplier fee
         public double PowerIncludeVat = 1;      // 1 = add 25 % VAT
         public string PriceArea = "DK1";        // DK1 = Jutland/Funen, DK2 = Zealand/Copenhagen
+
+        public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
 
         // Auto-detect (Bambu Studio)
         public string SlicerPath = "";          // empty = auto-detect
@@ -58,6 +60,7 @@ namespace PrintPrice
             d["AutoPowerPrice"] = AutoPowerPrice;
             d["PowerAddOn"] = PowerAddOn;
             d["PowerIncludeVat"] = PowerIncludeVat;
+            d["AutoUpdateCheck"] = AutoUpdateCheck;
             return d;
         }
 
@@ -89,6 +92,7 @@ namespace PrintPrice
                 case "AutoPowerPrice": AutoPowerPrice = v; break;
                 case "PowerAddOn": PowerAddOn = v; break;
                 case "PowerIncludeVat": PowerIncludeVat = v; break;
+                case "AutoUpdateCheck": AutoUpdateCheck = v; break;
             }
         }
 

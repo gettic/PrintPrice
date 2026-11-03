@@ -1,4 +1,4 @@
-<p align="center"><img src="assets/logo.png" width="128" alt="Logo"></p>
+﻿<p align="center"><img src="assets/logo.png" width="128" alt="Logo"></p>
 
 # Gettic's 3D Print Price Calculator
 
@@ -25,6 +25,7 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Configurable:** set the markups, minimum price, rounding, printer power, print profile and price area in Settings.
 - **Copy quote:** puts a ready-to-send text on the clipboard.
+- **Auto-update:** at startup the app checks this repo's latest release. If there's a newer version, it shows what's new and can update itself in one click. The download is verified against GitHub's SHA-256 checksum before it's installed. You can turn the check off, or check manually, in Settings.
 
 ## How prices are calculated
 ```
@@ -51,7 +52,7 @@ The default setup (0.4 stainless nozzle, PLA, smooth PEI plate) comes to **0,91 
 | Setting | Default |
 |---|---|
 | Printer power | 100 W (A1 average when printing PLA) |
-| Markups | 15 % friends & family, 75 % customers |
+| Markups | 25 % friends & family, 75 % customers |
 | Slicing | 0.4 mm nozzle, 0.20mm Standard, Bambu PLA Basic, Smooth PEI plate |
 | Electricity | DK1, 0,55 kr./kWh fees on top of spot, 25 % VAT |
 

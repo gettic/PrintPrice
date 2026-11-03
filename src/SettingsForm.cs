@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace PrintPrice
@@ -8,10 +9,14 @@ namespace PrintPrice
     public class SettingsForm : Form
     {
         public AppSettings Result;
+        public Action BeforeUpdateRestart;   // called just before the updated version starts
+        public bool UpdateStarted;           // true = a new version is starting; the program should exit
         readonly AppSettings source;
         readonly string exe;
         TextBox txtWatts, txtFriends, txtOthers, txtRate, txtMin, txtRound, txtAddOn, txtSlicer;
-        CheckBox chkAutoPower, chkVat, chkAutoWear;
+        CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate;
+        InfoBox lblUpdate;
+        Button btnCheckUpdate;
         ComboBox cmbNozzle, cmbProcess, cmbFilament, cmbBed, cmbArea;
         InfoBox lblWear;
         bool filling;   // suppress change events while filling the form
@@ -54,6 +59,15 @@ namespace PrintPrice
 
             Section(t, "Optional – both prices");
             txtRound = Row(t, "Round up to nearest", "kr.  (0 = off)", null);
+
+            // ----- left: updates -----
+            Section(t, "Updates (from GitHub)");
+            chkAutoUpdate = Check(t, "Check for a new version when the program starts");
+            btnCheckUpdate = new Button { Text = "Check now", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 0, 4) };
+            btnCheckUpdate.Click += delegate { CheckNow(); };
+            int ur = t.RowCount++;
+            t.Controls.Add(btnCheckUpdate, 0, ur);
+            lblUpdate = Hint(t, "You have version " + Updater.CurrentText + ".");
 
             // ----- right: printer setup -----
             Section(t2, "Printer setup (used for slicing && wear)");
@@ -245,6 +259,43 @@ namespace PrintPrice
                          : InfoKind.Info;
         }
 
+        // ---------- updates ----------
+        async void CheckNow()
+        {
+            btnCheckUpdate.Enabled = false;
+            lblUpdate.Kind = InfoKind.Info;
+            lblUpdate.Text = "Checking GitHub for a new version…";
+            UpdateInfo found;
+            try { found = await Task.Run(() => Updater.CheckForUpdate()); }
+            catch (Exception ex)
+            {
+                if (IsDisposed) return;
+                lblUpdate.Kind = InfoKind.Error;
+                lblUpdate.Text = ex is UpdateException ? ex.Message + "." : "The check failed (" + ex.Message + ").";
+                btnCheckUpdate.Enabled = true;
+                return;
+            }
+            if (IsDisposed) return;
+            btnCheckUpdate.Enabled = true;
+            if (found == null)
+            {
+                lblUpdate.Kind = InfoKind.Success;
+                lblUpdate.Text = "✓ You have the newest version (" + Updater.CurrentText + ").";
+                return;
+            }
+            lblUpdate.Kind = InfoKind.Info;
+            lblUpdate.Text = "Version " + Updater.Short(found.Version) + " is available (you have " + Updater.CurrentText + ").";
+            using (var dlg = new UpdateForm(found, BeforeUpdateRestart))
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    UpdateStarted = true;
+                    DialogResult = DialogResult.Cancel;   // unsaved changes here are dropped; the new version starts
+                    Close();
+                }
+            }
+        }
+
         // ---------- fill / accept ----------
         void Fill(AppSettings s)
         {
@@ -264,6 +315,7 @@ namespace PrintPrice
             cmbArea.SelectedIndex = s.PriceArea == "DK1" ? 0 : 1;
             txtAddOn.Text = Num.Fmt(s.PowerAddOn);
             chkVat.Checked = s.PowerIncludeVat != 0;
+            chkAutoUpdate.Checked = s.AutoUpdateCheck != 0;
             filling = false;
             UpdateWear();
         }
@@ -300,6 +352,7 @@ namespace PrintPrice
             Result.PriceArea = cmbArea.SelectedIndex == 0 ? "DK1" : "DK2";
             Result.PowerAddOn = addOn;
             Result.PowerIncludeVat = chkVat.Checked ? 1 : 0;
+            Result.AutoUpdateCheck = chkAutoUpdate.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
         }

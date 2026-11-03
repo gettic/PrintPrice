@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -141,9 +141,10 @@ namespace PrintPrice
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             lblStatus = new Label { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(260, 0) };
             var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
-            var btnClear = new Button { Text = "Clear", AutoSize = true };
-            var btnSettings = new Button { Text = "Settings…", AutoSize = true };
-            btnCopy = new Button { Text = "Copy quote", AutoSize = true };
+            // three buttons spanning exactly the Customers box (264 px = 76 + 84 + 92 + 2 × 6 gap) above them
+            var btnClear = new Button { Text = "Clear", Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
+            var btnSettings = new Button { Text = "Settings…", Size = new Size(84, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
+            btnCopy = new Button { Text = "Copy quote", Size = new Size(92, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3) };
             btnClear.Click += delegate { ClearJob(); };
             btnSettings.Click += delegate { OpenSettings(); };
             btnCopy.Click += delegate { CopyQuote(); };
@@ -170,6 +171,7 @@ namespace PrintPrice
             ResumeLayout(true);
             RefreshSettingsLabels();
             ShowAutoIdle();
+            Shown += delegate { StartupUpdateCheck(); };
             if (settings.AutoPowerPrice != 0) Shown += delegate { FetchPowerPrice(); };
             else SetPowerInfo("Live price is off (Settings). Click Update to fetch it once.", false);
             Recalculate();
@@ -611,9 +613,11 @@ namespace PrintPrice
 
         void OpenSettings()
         {
-            using (var dlg = new SettingsForm(settings))
+            using (var dlg = new SettingsForm(settings) { BeforeUpdateRestart = SaveLastPrices })
             {
-                if (dlg.ShowDialog(this) == DialogResult.OK)
+                var answer = dlg.ShowDialog(this);
+                if (dlg.UpdateStarted) { Close(); return; }
+                if (answer == DialogResult.OK)
                 {
                     var old = settings;
                     settings = dlg.Result;
@@ -627,6 +631,38 @@ namespace PrintPrice
                     if (cts == null) ShowAutoIdle();
                 }
             }
+        }
+
+        // ---------- updates from GitHub ----------
+        bool updateDialogOpen;
+
+        /// Removes leftovers of a previous update, then quietly looks for a new release (if enabled).
+        async void StartupUpdateCheck()
+        {
+            UpdateInfo found = null;
+            bool check = settings.AutoUpdateCheck != 0;
+            try
+            {
+                found = await Task.Run(() =>
+                {
+                    Updater.CleanUp();
+                    return check ? Updater.CheckForUpdate() : null;
+                });
+            }
+            catch { /* offline or GitHub unreachable: try again next start */ }
+            if (found == null || IsDisposed || updateDialogOpen || OwnedForms.Length > 0) return;
+            ShowUpdate(found);
+        }
+
+        void ShowUpdate(UpdateInfo found)
+        {
+            updateDialogOpen = true;
+            try
+            {
+                using (var dlg = new UpdateForm(found, SaveLastPrices))
+                    if (dlg.ShowDialog(this) == DialogResult.OK) Close();   // the new version is already starting
+            }
+            finally { updateDialogOpen = false; }
         }
 
         void SaveLastPrices()

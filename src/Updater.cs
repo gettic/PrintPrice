@@ -1,0 +1,244 @@
+﻿using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Web.Script.Serialization;
+
+namespace PrintPrice
+{
+    public class UpdateInfo
+    {
+        public Version Version;
+        public string Tag;
+        public string Title;
+        public string Notes;
+        public string PageUrl;
+        public string DownloadUrl;
+        public string Sha256;      // lower-case hex from GitHub's asset digest
+        public long Size;
+    }
+
+    public class UpdateException : Exception
+    {
+        public UpdateException(string message) : base(message) { }
+    }
+
+    /// Updates the program from the latest GitHub release of gettic/PrintPrice.
+    /// The release must contain an asset named PrintPrice.exe; GitHub's SHA-256 digest of it is verified.
+    public static class Updater
+    {
+        public const string Repo = "gettic/PrintPrice";
+        const string Api = "https://api.github.com/repos/" + Repo + "/releases/latest";
+        public const string ReleasesPage = "https://github.com/" + Repo + "/releases/latest";
+        const string AssetName = "PrintPrice.exe";
+        const string AllowedHost = "github.com";
+
+        static Updater()
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        }
+
+        public static Version Current
+        {
+            get { return Normalize(Assembly.GetExecutingAssembly().GetName().Version); }
+        }
+
+        public static string CurrentText
+        {
+            get { return Short(Current); }
+        }
+
+        /// "1.2.3.0" -> "1.2.3"
+        public static string Short(Version v)
+        {
+            return v.Revision > 0 ? v.ToString(4) : v.ToString(3);
+        }
+
+        static Version Normalize(Version v)
+        {
+            return new Version(v.Major, v.Minor, Math.Max(0, v.Build), Math.Max(0, v.Revision));
+        }
+
+        /// "v1.0.1" / "1.0.1" -> 1.0.1.0; null if the tag isn't a version.
+        public static Version ParseTag(string tag)
+        {
+            var m = Regex.Match(tag ?? "", @"^[vV]?(\d+(?:\.\d+){1,3})$");
+            Version v;
+            if (!m.Success || !Version.TryParse(m.Groups[1].Value, out v)) return null;
+            return Normalize(v);
+        }
+
+        static WebClient Client()
+        {
+            var wc = new WebClient { Encoding = Encoding.UTF8 };
+            wc.Headers[HttpRequestHeader.UserAgent] = "PrintPrice-updater/" + CurrentText;
+            return wc;
+        }
+
+        static string Str(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return d != null && d.TryGetValue(key, out v) && v != null ? Convert.ToString(v) : null;
+        }
+
+        /// Reads GitHub's "latest release" JSON. Returns null if it has no usable PrintPrice.exe.
+        public static UpdateInfo ParseRelease(string json)
+        {
+            var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(json);
+            if (d == null) return null;
+            if (Str(d, "draft") == "True" || Str(d, "prerelease") == "True") return null;
+            var info = new UpdateInfo
+            {
+                Tag = Str(d, "tag_name"),
+                Title = Str(d, "name"),
+                Notes = Str(d, "body") ?? "",
+                PageUrl = Str(d, "html_url") ?? ReleasesPage
+            };
+            info.Version = ParseTag(info.Tag);
+            if (info.Version == null) return null;
+            var assets = d.ContainsKey("assets") ? d["assets"] as IEnumerable : null;
+            if (assets == null) return null;
+            foreach (var o in assets)
+            {
+                var a = o as Dictionary<string, object>;
+                if (a == null || !string.Equals(Str(a, "name"), AssetName, StringComparison.OrdinalIgnoreCase)) continue;
+                info.DownloadUrl = Str(a, "browser_download_url");
+                long size; long.TryParse(Str(a, "size"), out size);
+                info.Size = size;
+                var dg = Regex.Match(Str(a, "digest") ?? "", @"^sha256:([0-9a-fA-F]{64})$");
+                info.Sha256 = dg.Success ? dg.Groups[1].Value.ToLowerInvariant() : null;
+            }
+            return string.IsNullOrEmpty(info.DownloadUrl) ? null : info;
+        }
+
+        /// Returns the latest release if it is newer than this program, otherwise null.
+        public static UpdateInfo CheckForUpdate()
+        {
+            string json;
+            using (var wc = Client())
+            {
+                wc.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+                try { json = wc.DownloadString(Api); }
+                catch (WebException ex)
+                {
+                    var resp = ex.Response as HttpWebResponse;
+                    if (resp != null && resp.StatusCode == HttpStatusCode.NotFound) return null;   // no releases yet
+                    throw new UpdateException("Couldn't reach GitHub (" + ex.Message + ")");
+                }
+            }
+            var info = ParseRelease(json);
+            return info != null && info.Version > Current ? info : null;
+        }
+
+        /// Plain-text version of the release notes (markdown stripped a little), shortened.
+        public static string NotesText(UpdateInfo u, int max)
+        {
+            string s = (u.Notes ?? "").Replace("\r", "");
+            s = Regex.Replace(s, @"^#+\s*", "", RegexOptions.Multiline);
+            s = Regex.Replace(s, @"\*\*(.+?)\*\*", "$1");
+            s = Regex.Replace(s, @"\[([^\]]+)\]\([^)]+\)", "$1");
+            s = Regex.Replace(s, @"^\s*[-*]\s+", "• ", RegexOptions.Multiline);
+            s = Regex.Replace(s, @"\n{3,}", "\n\n").Trim();
+            if (s.Length > max) s = s.Substring(0, max).TrimEnd() + "…";
+            return s;
+        }
+
+        static string Sha256Of(string path)
+        {
+            using (var sha = SHA256.Create())
+            using (var fs = File.OpenRead(path))
+                return BitConverter.ToString(sha.ComputeHash(fs)).Replace("-", "").ToLowerInvariant();
+        }
+
+        static bool IsTrustedUrl(string url)
+        {
+            Uri uri;
+            return Uri.TryCreate(url, UriKind.Absolute, out uri) && uri.Scheme == Uri.UriSchemeHttps &&
+                   uri.Host.Equals(AllowedHost, StringComparison.OrdinalIgnoreCase) &&
+                   uri.AbsolutePath.StartsWith("/" + Repo + "/releases/download/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// Downloads the new exe next to the running one and verifies it. Returns the downloaded file's path.
+        public static string Download(UpdateInfo u, IProgress<int> progress, CancellationToken ct)
+        {
+            if (!IsTrustedUrl(u.DownloadUrl)) throw new UpdateException("The download link doesn't point to the " + Repo + " releases on GitHub.");
+            if (u.Sha256 == null) throw new UpdateException("GitHub didn't provide a checksum for this release, so it can't be verified.");
+
+            string target = System.Windows.Forms.Application.ExecutablePath + ".download";
+            try { File.Delete(target); } catch { }
+            try { File.WriteAllBytes(target, new byte[0]); }
+            catch (Exception) { throw new UpdateException("The program's folder isn't writable (" + Path.GetDirectoryName(target) + "). Download the new version manually."); }
+
+            using (var wc = Client())
+            using (ct.Register(wc.CancelAsync))
+            {
+                var done = new ManualResetEvent(false);
+                Exception error = null;
+                bool cancelled = false;
+                wc.DownloadProgressChanged += (s, e) => { if (progress != null) progress.Report(e.ProgressPercentage); };
+                wc.DownloadFileCompleted += (s, e) => { error = e.Error; cancelled = e.Cancelled; done.Set(); };
+                wc.DownloadFileAsync(new Uri(u.DownloadUrl), target);
+                done.WaitOne();
+                if (cancelled) { TryDelete(target); throw new OperationCanceledException(); }
+                if (error != null) { TryDelete(target); throw new UpdateException("Download failed (" + error.Message + ")"); }
+            }
+
+            try
+            {
+                if (u.Size > 0 && new FileInfo(target).Length != u.Size)
+                    throw new UpdateException("The download is incomplete.");
+                if (Sha256Of(target) != u.Sha256)
+                    throw new UpdateException("The download's checksum doesn't match GitHub's, so it wasn't installed.");
+                AssemblyName name;
+                try { name = AssemblyName.GetAssemblyName(target); }
+                catch (Exception) { throw new UpdateException("The download isn't a valid program file."); }
+                if (name.Name != Assembly.GetExecutingAssembly().GetName().Name || Normalize(name.Version) != u.Version)
+                    throw new UpdateException("The downloaded program isn't version " + Short(u.Version) + " of this app.");
+            }
+            catch { TryDelete(target); throw; }
+            return target;
+        }
+
+        /// Swaps the running exe for the downloaded one (a running exe can be renamed, not overwritten)
+        /// and starts the new version. The caller should exit right after.
+        public static void InstallAndRestart(string downloaded)
+        {
+            string exe = System.Windows.Forms.Application.ExecutablePath;
+            string old = exe + ".old";
+            TryDelete(old);
+            File.Move(exe, old);
+            try { File.Move(downloaded, exe); }
+            catch (Exception ex)
+            {
+                try { File.Move(old, exe); } catch { }   // roll back
+                throw new UpdateException("Couldn't replace the program file (" + ex.Message + ")");
+            }
+            Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
+        }
+
+        /// Removes leftovers from a previous update. Called at startup.
+        public static void CleanUp()
+        {
+            string exe = System.Windows.Forms.Application.ExecutablePath;
+            // the old process may still be closing for a moment after the restart
+            for (int i = 0; i < 10 && File.Exists(exe + ".old"); i++)
+            {
+                TryDelete(exe + ".old");
+                if (File.Exists(exe + ".old")) Thread.Sleep(300);
+            }
+            TryDelete(exe + ".download");
+        }
+
+        static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+    }
+}
