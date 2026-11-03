@@ -91,6 +91,14 @@ namespace PrintPrice
             base.OnLoad(e);
         }
 
+        protected override bool ShowWithoutActivation { get { return Screenshots.Active; } }
+
+        /// Picture mode: scrolls the release notes to the top or the end.
+        internal void ScrollNotes(bool end)
+        {
+            if (notesBox != null) notesBox.ScrollTo(end);
+        }
+
         void SetStatus(string text, InfoKind kind)
         {
             status.Kind = kind;
@@ -99,6 +107,7 @@ namespace PrintPrice
 
         async void UpdateNow()
         {
+            if (Screenshots.Active) return;   // picture mode never downloads
             btnUpdate.Enabled = false;
             btnPage.Visible = false;
             cts = new CancellationTokenSource();
@@ -108,7 +117,7 @@ namespace PrintPrice
             try
             {
                 string file = await Task.Run(() => Updater.Download(update, progress, ct));
-                SetStatus("✓ Download verified. Restarting…", InfoKind.Success);
+                SetStatus("✓ Download verified. Restarting…", InfoKind.Info);   // red stripe like every info box
                 if (beforeRestart != null) beforeRestart();
                 Updater.InstallAndRestart(file);
                 DialogResult = DialogResult.OK;   // caller exits the program
@@ -207,6 +216,16 @@ namespace PrintPrice
             g.Clear(BackColor);
             using (var pen = new Pen(Theme.Border)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
             using (var accent = new SolidBrush(Theme.InfoAccent)) g.FillRectangle(accent, 0, 0, 4, Height);
+        }
+
+        /// Scrolls the text to the top or the end (used by picture mode).
+        public void ScrollTo(bool end)
+        {
+            if (!rtb.IsHandleCreated) return;
+            rtb.ScrollPos = end ? rtb.MaxScroll : 0;
+            bar.Invalidate();
+            rtb.Update();
+            bar.Update();
         }
 
         static readonly Regex Heading = new Regex(@"^\s*#+\s*(.*)$");

@@ -33,9 +33,15 @@ namespace PrintPrice
         InfoBox lblPowerInfo;
         bool powerIsError, fetchingPower;
 
-        public MainForm()
+        // picture mode (--screenshots): never saves, never goes online
+        readonly bool offline;
+
+        public MainForm() : this(AppSettings.Load(), false) { }
+
+        public MainForm(AppSettings startSettings, bool offline)
         {
-            settings = AppSettings.Load();
+            this.offline = offline;
+            settings = startSettings;
             if (settings.AutoWearRate != 0) settings.MachineRatePerHour = AutoWearRate(settings);
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96F, 96F);
@@ -184,8 +190,8 @@ namespace PrintPrice
             ResumeLayout(true);
             RefreshSettingsLabels();
             ShowAutoIdle();
-            Shown += delegate { StartupUpdateCheck(); };
-            if (settings.AutoPowerPrice != 0) Shown += delegate { FetchPowerPrice(); };
+            if (!offline) Shown += delegate { StartupUpdateCheck(); };
+            if (settings.AutoPowerPrice != 0) { if (!offline) Shown += delegate { FetchPowerPrice(); }; }
             else SetPowerInfo("Live price is off (Settings). Click Update to fetch it once.", false);
             Recalculate();
             ActiveControl = txtUrl;
@@ -206,6 +212,24 @@ namespace PrintPrice
         {
             base.OnHandleCreated(e);
             Theme.TitleBar(this);
+        }
+
+        protected override bool ShowWithoutActivation { get { return offline || Screenshots.Active; } }
+
+        /// Picture mode: fills in a fixed example Benchy job, as if it had been sliced and the live
+        /// price fetched (made-up texts, nothing goes online). The price labels update by themselves.
+        internal void SetSampleJob()
+        {
+            if (!offline) return;
+            txtUrl.Text = "https://www.printables.com/model/3161-3d-benchy";
+            SetAuto("✓ \"3D BENCHY\": 0 h 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic).", false);
+            txtHours.Text = "0";
+            txtMinutes.Text = "38";
+            txtGrams.Text = "11,8";
+            txtFilamentPrice.Text = "200";
+            txtElecPrice.Text = "3,65";
+            SetPowerInfo("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.", false);
+            Recalculate();
         }
 
         void ApplyTheme()
@@ -233,7 +257,7 @@ namespace PrintPrice
 
         async void FetchPowerPrice()
         {
-            if (fetchingPower) return;
+            if (offline || fetchingPower) return;
             fetchingPower = true;
             btnPower.Enabled = false;
             string area = settings.PriceArea;
@@ -281,10 +305,8 @@ namespace PrintPrice
 
         void SetAutoColor()
         {
-            if (lblAuto != null)
-                lblAuto.Kind = autoIsError ? InfoKind.Error
-                             : lblAuto.Text.StartsWith("✓") ? InfoKind.Success
-                             : InfoKind.Info;
+            // results keep the red info stripe too (the ✓ in the text already shows it worked)
+            if (lblAuto != null) lblAuto.Kind = autoIsError ? InfoKind.Error : InfoKind.Info;
         }
 
         void ShowAutoIdle()
@@ -358,7 +380,7 @@ namespace PrintPrice
 
         async void Analyze(string printablesId, List<string> localFiles)
         {
-            if (cts != null) return;
+            if (offline || cts != null) return;
             string exe = BambuSlicer.FindExe(settings.SlicerPath);
             bool presliced = localFiles != null && localFiles.Count == 1 && BambuSlicer.IsSlicedProject(localFiles[0]);
             if (exe == null && !presliced)
@@ -619,9 +641,11 @@ namespace PrintPrice
         void RefreshSettingsLabels()
         {
             lblPrinter.Text = "Bambu Lab A1 · " + Num.Fmt(settings.PrinterWatts) + " W  (change in Settings)";
-            lblFriendsInfo.Text = "+" + Num.Fmt(settings.FriendsMarkupPct) + " % markup";
+            string f = "+" + Num.Fmt(settings.FriendsMarkupPct) + " % markup";
+            if (settings.MachineRatePerHour > 0) f += ", " + Num.Fmt(settings.MachineRatePerHour) + " kr./h wear";
+            lblFriendsInfo.Text = f;
             string o = "+" + Num.Fmt(settings.OthersMarkupPct) + " % markup";
-            if (settings.MachineRatePerHour > 0) o += ", " + Num.Fmt(settings.MachineRatePerHour) + " kr./h";
+            if (settings.MachineRatePerHour > 0) o += ", " + Num.Fmt(settings.MachineRatePerHour) + " kr./h wear";
             if (settings.MinimumPrice > 0) o += ", min " + Num.Fmt(settings.MinimumPrice) + " kr.";
             lblOthersInfo.Text = o;
         }
@@ -651,6 +675,7 @@ namespace PrintPrice
         /// A newer version shows the red update button under the Friends & family box.
         async void StartupUpdateCheck()
         {
+            if (offline) return;
             UpdateInfo found = null;
             try
             {
@@ -665,7 +690,7 @@ namespace PrintPrice
             ShowUpdateButton(found);
         }
 
-        void ShowUpdateButton(UpdateInfo found)
+        internal void ShowUpdateButton(UpdateInfo found)
         {
             pendingUpdate = found;
             btnUpdate.Text = "⬆  Update to v" + Updater.Short(found.Version);
@@ -675,12 +700,14 @@ namespace PrintPrice
         /// What's new + Update now / Later. Later keeps the button.
         void ShowUpdate(UpdateInfo found)
         {
+            if (offline) return;
             using (var dlg = new UpdateForm(found, SaveLastPrices))
                 if (dlg.ShowDialog(this) == DialogResult.OK) Close();   // the new version is already starting
         }
 
         void SaveLastPrices()
         {
+            if (offline) return;   // picture mode never writes settings.ini
             double v;
             if (Num.TryParse(txtFilamentPrice.Text, out v)) settings.LastFilamentPrice = v;
             if (Num.TryParse(txtElecPrice.Text, out v)) settings.LastElectricityPrice = v;

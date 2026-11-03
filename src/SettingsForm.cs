@@ -47,10 +47,12 @@ namespace PrintPrice
             txtFriends = Row(t, "Friends && family markup", "%", null);
             txtOthers = Row(t, "Customer markup", "%", null);
 
-            Section(t, "Optional – customer price only");
+            Section(t, "Wear && tear – both prices");
             txtRate = Row(t, "Machine-time rate", "kr./h", null);
             chkAutoWear = Check(t, "Calculate from nozzle, filament && plate");
             lblWear = Hint(t, "");
+
+            Section(t, "Optional – customer price only");
             txtMin = Row(t, "Minimum price", "kr.  (0 = off)", null);
 
             Section(t, "Optional – both prices");
@@ -122,6 +124,8 @@ namespace PrintPrice
             base.OnHandleCreated(e);
             Theme.TitleBar(this);
         }
+
+        protected override bool ShowWithoutActivation { get { return Screenshots.Active; } }
 
         // ---------- layout helpers ----------
         static Label Caption(string text)

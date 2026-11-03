@@ -10,12 +10,15 @@ namespace PrintPrice
         static extern bool SetProcessDPIAware();
 
         [STAThread]
-        static void Main()
+        static int Main(string[] args)
         {
             try { SetProcessDPIAware(); } catch { }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            // hidden picture mode: PrintPrice.exe --screenshots <folder> renders the windows to PNGs and exits
+            if (args.Length >= 2 && args[0] == "--screenshots") return Screenshots.Run(args[1]);
             Application.Run(new MainForm());
+            return 0;
         }
     }
 }

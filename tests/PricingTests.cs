@@ -52,14 +52,22 @@ namespace PrintPrice.Tests
             var r2 = Pricing.Calculate(Example(), s2);
             // 39.725 + 5.5h*5 = 67.225 -> round up to 70
             Eq("others w/ rate + rounding", 70, r2.OthersPrice);
-            Eq("friends rounded", 30, r2.FriendsPrice);
+            // 28.375 + 5.5h*5 = 55.875 -> round up to 60
+            Eq("friends w/ rate + rounding", 60, r2.FriendsPrice);
 
-            var s4 = new AppSettings();   // defaults include A1 wear: 39.725 + 5.5 h × 0.91 = 44.73
-            Eq("others with default wear", 44.73, Pricing.Calculate(Example(), s4).OthersPrice);
-            Eq("friends unaffected by wear", 28.375, Pricing.Calculate(Example(), s4).FriendsPrice);
+            var s4 = new AppSettings();   // defaults include A1 wear: 5.5 h × 0.91 = 5.005
+            Eq("others with default wear", 44.73, Pricing.Calculate(Example(), s4).OthersPrice);   // 39.725 + 5.005
+            Eq("friends with default wear", 33.38, Pricing.Calculate(Example(), s4).FriendsPrice); // 28.375 + 5.005
+
+            // Benchy: 0 h 38 m, 11.8 g, 200 DKK/kg, 3.65 DKK/kWh, defaults.
+            // base = 2.36 + 0.6333 × 0.1 × 3.65 = 2.5912; wear = 0.6333 × 0.91 = 0.5763
+            var benchy = Pricing.Calculate(new QuoteInput { Hours = 0, Minutes = 38, FilamentGrams = 11.8, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 3.65 }, new AppSettings());
+            Eq("benchy friends", 3.82, benchy.FriendsPrice);   // 2.5912 × 1.25 + 0.5763 = 3.8153
+            Eq("benchy others", 5.11, benchy.OthersPrice);     // 2.5912 × 1.75 + 0.5763 = 5.1109
 
             var s3 = new AppSettings { MinimumPrice = 50, MachineRatePerHour = 0 };
             Eq("minimum price", 50, Pricing.Calculate(Example(), s3).OthersPrice);
+            Eq("minimum not for friends", 28.375, Pricing.Calculate(Example(), s3).FriendsPrice);
 
             Eq("round exact stays", 25, Pricing.RoundUp(25, 5));
 

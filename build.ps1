@@ -1,4 +1,4 @@
-﻿# Builds PrintPrice.exe using the C# compiler that ships with Windows (.NET Framework 4.8).
+# Builds PrintPrice.exe using the C# compiler that ships with Windows (.NET Framework 4.8).
 # No SDK or Visual Studio needed. Usage:  powershell -ExecutionPolicy Bypass -File build.ps1
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -15,6 +15,6 @@ if ($LASTEXITCODE) { throw 'Test build failed' }
 if ($LASTEXITCODE) { throw 'Tests failed' }
 
 if (-not (Test-Path assets\app.ico)) { & "$PSScriptRoot\tools\make-icon.ps1" }
-& $csc /nologo /codepage:65001 /optimize+ /target:winexe /win32icon:assets\app.ico /out:bin\PrintPrice.exe $refs src\*.cs
+& $csc /nologo /codepage:65001 /optimize+ /target:winexe /win32icon:assets\app.ico /win32manifest:app.manifest /out:bin\PrintPrice.exe $refs src\*.cs
 if ($LASTEXITCODE) { throw 'App build failed' }
 Write-Host "Built bin\PrintPrice.exe"

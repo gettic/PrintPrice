@@ -21,7 +21,7 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
   - **Other sites** (MakerWorld, Thingiverse…) block automatic downloads. Download the STL/3MF yourself and drop it on the window instead.
   - **Already-sliced `.gcode.3mf` files** are read instantly, without slicing again.
 - **Live electricity price:** the current 15-minute spot price for DK1/DK2 comes from Energinet's free [Energi Data Service](https://www.energidataservice.dk/). The app adds your tariffs, taxes and fees, then 25 % VAT.
-- **Wear & tear:** a machine-time rate is worked out from the chosen **nozzle**, **filament** and **build plate**.
+- **Wear & tear:** a machine-time rate is worked out from the chosen **nozzle**, **filament** and **build plate**. It is added to both prices.
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Configurable:** set the markups, minimum price, rounding, printer power, print profile and price area in Settings.
 - **Copy quote:** puts a ready-to-send text on the clipboard.
@@ -32,10 +32,10 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 Material   = grams / 1000 × filament DKK/kg
 Power      = hours × printer kW × electricity DKK/kWh
 Base       = Material + Power
-Friends    = Base × (1 + friends markup)
+Friends    = Base × (1 + friends markup) + hours × machine-time rate
 Customers  = Base × (1 + customer markup) + hours × machine-time rate   (at least the minimum price)
 ```
-Both prices can optionally be rounded up to the nearest N kr.
+The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr.
 
 **Machine-time rate** (kr. per print hour):
 
@@ -64,6 +64,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 This runs the tests and compiles `bin\PrintPrice.exe` with the C# compiler that ships with Windows, so no SDK or Visual Studio is needed. To regenerate the logo and icon, run `tools\make-icon.ps1`.
 
+To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This hidden option saves the windows as PNGs in that folder and exits. It uses default settings, never goes online and never saves anything.
+
 ### Project layout
 | Path | What |
 |---|---|
@@ -73,4 +75,5 @@ This runs the tests and compiles `bin\PrintPrice.exe` with the C# compiler that 
 | `src/PowerPrice.cs` | Energi Data Service spot prices |
 | `src/Updater.cs` | Update check and install from GitHub releases |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |
+| `src/Screenshots.cs` | Hidden `--screenshots` picture mode |
 | `tests/PricingTests.cs` | Unit tests |

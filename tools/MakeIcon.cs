@@ -52,6 +52,8 @@ static class MakeIcon
                     g.DrawPath(pen, path);
             }
 
+            // centre the group (head + cube + coin) in the tile, offsets from its measured bounding box
+            g.TranslateTransform((small ? 0f : -11.75f) * S, (small ? -15.25f : -16.25f) * S);
             // --- isometric cube (the print) ---
             float cx = (small ? 128 : 116) * S, top = (small ? 92 : 96) * S, w = (small ? 88 : 74) * S, h = w * 0.58f, depth = (small ? 60 : 54) * S;
             var T = new PointF(cx, top);                       // back corner of top face

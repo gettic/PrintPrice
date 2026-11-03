@@ -4,8 +4,10 @@ using System.Reflection;
 [assembly: AssemblyTitle("Gettic's 3D Print Price Calculator")]
 [assembly: AssemblyProduct("Gettic's 3D Print Price Calculator")]
 [assembly: AssemblyDescription("Price quotes for 3D prints on a Bambu Lab A1")]
-[assembly: AssemblyVersion("1.0.2.0")]
-[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyCompany("Gettic")]
+[assembly: AssemblyCopyright("Copyright © 2026 Gettic")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace PrintPrice
 {

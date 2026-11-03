@@ -11,7 +11,7 @@ namespace PrintPrice
         public double PrinterWatts = 100;
         public double FriendsMarkupPct = 25;
         public double OthersMarkupPct = 75;
-        public double MachineRatePerHour = Wear.DefaultRate;   // DKK/h added to the customer price (A1 wear & tear)
+        public double MachineRatePerHour = Wear.DefaultRate;   // DKK/h added to both prices (A1 wear & tear)
         public double AutoWearRate = 1;                        // 1 = calculate from nozzle, filament & plate
         public double MinimumPrice = 0;         // DKK, customer price floor
         public double RoundTo = 0;              // round prices up to nearest N kr. (0 = off)

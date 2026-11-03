@@ -129,9 +129,11 @@ namespace PrintPrice
             r.PowerCost = r.PowerKwh * input.ElectricityDkkPerKwh;
             r.BaseCost = r.MaterialCost + r.PowerCost;
 
-            r.FriendsPrice = r.BaseCost * (1 + s.FriendsMarkupPct / 100.0);
+            // Both prices: markup + machine-time rate (wear, not marked up). Minimum price is customers only.
+            r.FriendsPrice = r.BaseCost * (1 + s.FriendsMarkupPct / 100.0)
+                             + r.PrintHours * s.MachineRatePerHour;
 
-            // Customer price: markup + optional machine-time rate + optional minimum price.
+            // Customer price: markup + machine-time rate + optional minimum price.
             double others = r.BaseCost * (1 + s.OthersMarkupPct / 100.0)
                             + r.PrintHours * s.MachineRatePerHour;
             if (r.BaseCost > 0 && others < s.MinimumPrice) others = s.MinimumPrice;
