@@ -3,7 +3,7 @@
 # Gettic's 3D Print Price Calculator
 
 > [!NOTE]
-> **AI disclaimer:** This app, including its code, logo and documentation, was made with the help of AI (Claude by Anthropic). It has been tested, but it may still contain mistakes. The prices it calculates are estimates, so check them before you send a quote.
+> **AI disclaimer:** This app, including its code, logo and documentation, was made with the help of AI. It has been tested, but it may still contain mistakes. The prices it calculates are estimates, so check them before you send a quote.
 
 A small dark-mode Windows app that turns a 3D print job into two price quotes: one for **friends & family** and one for **customers**. It's made for the **Bambu Lab A1** and Danish prices (DKK).
 
