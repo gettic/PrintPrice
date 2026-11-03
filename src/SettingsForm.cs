@@ -9,14 +9,10 @@ namespace PrintPrice
     public class SettingsForm : Form
     {
         public AppSettings Result;
-        public Action BeforeUpdateRestart;   // called just before the updated version starts
-        public bool UpdateStarted;           // true = a new version is starting; the program should exit
         readonly AppSettings source;
         readonly string exe;
         TextBox txtWatts, txtFriends, txtOthers, txtRate, txtMin, txtRound, txtAddOn, txtSlicer;
-        CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate;
-        InfoBox lblUpdate;
-        Button btnCheckUpdate;
+        CheckBox chkAutoPower, chkVat, chkAutoWear;
         ComboBox cmbNozzle, cmbProcess, cmbFilament, cmbBed, cmbArea;
         InfoBox lblWear;
         bool filling;   // suppress change events while filling the form
@@ -38,7 +34,7 @@ namespace PrintPrice
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
             // two columns: left = pricing, right = printer setup & live price; buttons underneath
-            var outer = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Padding = new Padding(14, 2, 14, 14) };
+            var outer = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Padding = new Padding(14, 2, 14, 14), Margin = Padding.Empty };
             Controls.Add(outer);
             var t = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = new Padding(0, 0, 28, 0) };
             var t2 = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = Padding.Empty };
@@ -60,15 +56,6 @@ namespace PrintPrice
             Section(t, "Optional – both prices");
             txtRound = Row(t, "Round up to nearest", "kr.  (0 = off)", null);
 
-            // ----- left: updates -----
-            Section(t, "Updates (from GitHub)");
-            chkAutoUpdate = Check(t, "Check for a new version when the program starts");
-            btnCheckUpdate = new Button { Text = "Check now", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 0, 4) };
-            btnCheckUpdate.Click += delegate { CheckNow(); };
-            int ur = t.RowCount++;
-            t.Controls.Add(btnCheckUpdate, 0, ur);
-            lblUpdate = Hint(t, "You have version " + Updater.CurrentText + ".");
-
             // ----- right: printer setup -----
             Section(t2, "Printer setup (used for slicing && wear)");
             cmbNozzle = Combo(t2, "Nozzle");
@@ -80,7 +67,10 @@ namespace PrintPrice
             txtSlicer = Row(t2, "Bambu Studio path", "", exe == null
                 ? "Bambu Studio not found. Install it, or enter the path to bambu-studio.exe."
                 : "Found: " + exe + ". Leave empty to auto-detect.");
-            txtSlicer.Width = 230;
+            // stretch to the right edge of the info boxes below (the column is as wide as they are)
+            txtSlicer.Width = 200;
+            txtSlicer.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            txtSlicer.Margin = new Padding(3, 3, 0, 3);
             txtSlicer.TextAlign = HorizontalAlignment.Left;
             t2.SetColumnSpan(txtSlicer, 2);
 
@@ -105,6 +95,12 @@ namespace PrintPrice
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(ok);
             buttons.Controls.Add(reset);
+            // installed version, left of Defaults (updates are offered by a button in the main window)
+            buttons.Controls.Add(new Theme.PlainLabel
+            {
+                Text = "v" + Updater.CurrentText, AutoSize = true, Tag = "muted",
+                Anchor = AnchorStyles.Left, Margin = new Padding(3, 0, 8, 0)
+            });
             outer.Controls.Add(buttons, 0, 1);
             outer.SetColumnSpan(buttons, 2);
 
@@ -149,7 +145,8 @@ namespace PrintPrice
         {
             int r = t.RowCount++;
             t.Controls.Add(Caption(caption), 0, r);
-            var cb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 230, Anchor = AnchorStyles.Left, MaxDropDownItems = 20 };
+            // stretches to the right edge of the info boxes (Width is only the minimum)
+            var cb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 200, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(3, 3, 0, 3), MaxDropDownItems = 20 };
             t.Controls.Add(cb, 1, r);
             t.SetColumnSpan(cb, 2);
             return cb;
@@ -259,43 +256,6 @@ namespace PrintPrice
                          : InfoKind.Info;
         }
 
-        // ---------- updates ----------
-        async void CheckNow()
-        {
-            btnCheckUpdate.Enabled = false;
-            lblUpdate.Kind = InfoKind.Info;
-            lblUpdate.Text = "Checking GitHub for a new version…";
-            UpdateInfo found;
-            try { found = await Task.Run(() => Updater.CheckForUpdate()); }
-            catch (Exception ex)
-            {
-                if (IsDisposed) return;
-                lblUpdate.Kind = InfoKind.Error;
-                lblUpdate.Text = ex is UpdateException ? ex.Message + "." : "The check failed (" + ex.Message + ").";
-                btnCheckUpdate.Enabled = true;
-                return;
-            }
-            if (IsDisposed) return;
-            btnCheckUpdate.Enabled = true;
-            if (found == null)
-            {
-                lblUpdate.Kind = InfoKind.Success;
-                lblUpdate.Text = "✓ You have the newest version (" + Updater.CurrentText + ").";
-                return;
-            }
-            lblUpdate.Kind = InfoKind.Info;
-            lblUpdate.Text = "Version " + Updater.Short(found.Version) + " is available (you have " + Updater.CurrentText + ").";
-            using (var dlg = new UpdateForm(found, BeforeUpdateRestart))
-            {
-                if (dlg.ShowDialog(this) == DialogResult.OK)
-                {
-                    UpdateStarted = true;
-                    DialogResult = DialogResult.Cancel;   // unsaved changes here are dropped; the new version starts
-                    Close();
-                }
-            }
-        }
-
         // ---------- fill / accept ----------
         void Fill(AppSettings s)
         {
@@ -315,7 +275,6 @@ namespace PrintPrice
             cmbArea.SelectedIndex = s.PriceArea == "DK1" ? 0 : 1;
             txtAddOn.Text = Num.Fmt(s.PowerAddOn);
             chkVat.Checked = s.PowerIncludeVat != 0;
-            chkAutoUpdate.Checked = s.AutoUpdateCheck != 0;
             filling = false;
             UpdateWear();
         }
@@ -352,7 +311,6 @@ namespace PrintPrice
             Result.PriceArea = cmbArea.SelectedIndex == 0 ? "DK1" : "DK2";
             Result.PowerAddOn = addOn;
             Result.PowerIncludeVat = chkVat.Checked ? 1 : 0;
-            Result.AutoUpdateCheck = chkAutoUpdate.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
         }

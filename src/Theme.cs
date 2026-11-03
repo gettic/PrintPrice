@@ -16,13 +16,24 @@ namespace PrintPrice
         public static readonly Color ButtonBack = Color.FromArgb(55, 55, 58);
         public static readonly Color ButtonHover = Color.FromArgb(70, 70, 74);
         public static readonly Color Friends = Color.FromArgb(90, 210, 150);
-        public static readonly Color Others = Color.FromArgb(100, 170, 255);
+        public static readonly Color Others = Color.FromArgb(205, 70, 75);       // customer price: lighter InfoAccent red, readable as big text
         public static readonly Color Error = Color.FromArgb(255, 120, 120);
         public static readonly Color Success = Color.FromArgb(110, 215, 150);
         public static readonly Color InvalidBack = Color.FromArgb(95, 40, 40);
         public static readonly Color InfoBack = Color.FromArgb(42, 45, 50);
         public static readonly Color InfoAccent = Color.FromArgb(150, 30, 35);    // dark red
         public static readonly Color Warning = Color.FromArgb(240, 180, 70);
+
+        /// Label drawn with grayscale anti-aliasing: ClearType colour fringes make thin grey text look tinted.
+        public class PlainLabel : Label
+        {
+            public PlainLabel() { UseCompatibleTextRendering = true; }
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                base.OnPaint(e);
+            }
+        }
 
         /// Recursively colours a control tree. Labels can carry Tag = "muted" | "friends" | "others".
         public static void Apply(Control c)
@@ -87,11 +98,22 @@ namespace PrintPrice
             c.Invalidate();
         }
 
+        /// Dark red call-to-action button (e.g. "Update to vX"). Call after Apply, which resets button colours.
+        public static void AccentButton(Button b)
+        {
+            b.FlatStyle = FlatStyle.Flat;
+            b.BackColor = InfoAccent;
+            b.ForeColor = Color.White;
+            b.FlatAppearance.BorderColor = Color.FromArgb(190, 55, 60);
+            b.FlatAppearance.MouseOverBackColor = Color.FromArgb(175, 40, 45);
+            b.FlatAppearance.MouseDownBackColor = Color.FromArgb(120, 22, 27);
+        }
+
         static void DrawComboItem(object sender, DrawItemEventArgs e)
         {
             var cb = (ComboBox)sender;
             bool selected = (e.State & DrawItemState.Selected) != 0 && (e.State & DrawItemState.ComboBoxEdit) == 0;
-            Color back = selected ? Color.FromArgb(0, 95, 184) : Input;
+            Color back = selected ? InfoAccent : Input;
             Color fore = selected ? Color.White : Text;
             using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
             if (e.Index >= 0)

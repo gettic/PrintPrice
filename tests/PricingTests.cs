@@ -131,6 +131,34 @@ namespace PrintPrice.Tests
             True("prerelease ignored", Updater.ParseRelease(rel.Replace("\"prerelease\":false", "\"prerelease\":true")) == null);
             True("no exe asset", Updater.ParseRelease(rel.Replace("PrintPrice.exe", "Other.exe")) == null);
             True("bad tag ignored", Updater.ParseRelease(rel.Replace("\"v1.2.0\",\"name\"", "\"nightly\",\"name\"")) == null);
+            // releases list -> target + combined notes
+            Func<string, string, bool, bool, bool, string> mk = (tag, body, draft, pre, exe) =>
+                "{\"tag_name\":\"" + tag + "\",\"draft\":" + (draft ? "true" : "false") + ",\"prerelease\":" + (pre ? "true" : "false") +
+                ",\"body\":\"" + body + "\",\"assets\":[{\"name\":\"" + (exe ? "PrintPrice.exe" : "other.zip") + "\",\"size\":100," +
+                "\"digest\":\"sha256:9E4D00BF7355CD8A364686FAEBD887511851169E5075428FDA7AB07787E4643B\"," +
+                "\"browser_download_url\":\"https://github.com/gettic/PrintPrice/releases/download/" + tag + "/" + (exe ? "PrintPrice.exe" : "other.zip") + "\"}]}";
+            string rBeta = mk("v1.1.0-beta", "BETA-NOTE", false, true, true);
+            string rDraft = mk("v1.0.4", "DRAFT-NOTE", true, false, true);
+            string rNightly = mk("nightly", "NIGHTLY-NOTE", false, false, true);
+            string rv103 = mk("v1.0.3", "## Fixed\\n- **Faster** start", false, false, true);
+            string rv102 = mk("v1.0.2", "", false, false, true);
+            string rv101 = mk("v1.0.1", "V101-NOTE", false, false, true);
+            string rv100 = mk("v1.0.0", "V100-NOTE", false, false, true);
+            string list = "[" + string.Join(",", new string[] { rBeta, rDraft, rv103, rNightly, rv102, rv101, rv100 }) + "]";
+            var cur = new Version(1, 0, 1, 0);
+            var tu = Updater.ParseReleases(list, cur);
+            True("list target 1.0.3", tu != null && tu.Version == new Version(1, 0, 3, 0) && tu.DownloadUrl.EndsWith("/v1.0.3/PrintPrice.exe"));
+            True("list notes", tu != null && Updater.NotesText(tu, 0) == "## v1.0.3\nFixed\n• Faster start\n\n## v1.0.2\nNo notes");
+            True("list notes exclude others", tu != null && !tu.Notes.Contains("BETA") && !tu.Notes.Contains("DRAFT") &&
+                !tu.Notes.Contains("NIGHTLY") && !tu.Notes.Contains("V101") && !tu.Notes.Contains("V100"));
+            True("list up to date", Updater.ParseReleases(list, new Version(1, 0, 3, 0)) == null);
+            True("list empty", Updater.ParseReleases("[]", cur) == null);
+            var tu2 = Updater.ParseReleases("[" + string.Join(",", new string[] { rBeta, rDraft, mk("v1.0.3", "X", false, false, false), rNightly, rv102, rv101, rv100 }) + "]", cur);
+            True("list no-asset skipped", tu2 != null && tu2.Version == new Version(1, 0, 2, 0) && Updater.NotesText(tu2, 0) == "## v1.0.2\nNo notes");
+            var tu3 = Updater.ParseReleases("[" + string.Join(",", new string[] { rv100, rv102, rNightly, rv101, rv103, rDraft, rBeta }) + "]", cur);
+            True("list scrambled order", tu3 != null && Updater.NotesText(tu3, 0) == "## v1.0.3\nFixed\n• Faster start\n\n## v1.0.2\nNo notes");
+            True("notes max 0 no cut", tu != null && Updater.NotesText(tu, 0).Length > 20);
+            True("notes max cuts", tu != null && Updater.NotesText(tu, 10).EndsWith("…") && Updater.NotesText(tu, 10) == "## v1.0.3…");
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
         }

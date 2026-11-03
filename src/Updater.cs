@@ -35,7 +35,7 @@ namespace PrintPrice
     public static class Updater
     {
         public const string Repo = "gettic/PrintPrice";
-        const string Api = "https://api.github.com/repos/" + Repo + "/releases/latest";
+        const string Api = "https://api.github.com/repos/" + Repo + "/releases?per_page=100";
         public const string ReleasesPage = "https://github.com/" + Repo + "/releases/latest";
         const string AssetName = "PrintPrice.exe";
         const string AllowedHost = "github.com";
@@ -91,7 +91,12 @@ namespace PrintPrice
         /// Reads GitHub's "latest release" JSON. Returns null if it has no usable PrintPrice.exe.
         public static UpdateInfo ParseRelease(string json)
         {
-            var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(json);
+            return FromRelease(new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(json));
+        }
+
+        /// One release object from GitHub's JSON. Null if draft/prerelease, not a version tag, or no usable PrintPrice.exe.
+        static UpdateInfo FromRelease(Dictionary<string, object> d)
+        {
             if (d == null) return null;
             if (Str(d, "draft") == "True" || Str(d, "prerelease") == "True") return null;
             var info = new UpdateInfo
@@ -133,20 +138,61 @@ namespace PrintPrice
                     throw new UpdateException("Couldn't reach GitHub (" + ex.Message + ")");
                 }
             }
-            var info = ParseRelease(json);
-            return info != null && info.Version > Current ? info : null;
+            return ParseReleases(json, Current);
+        }
+
+        /// Reads GitHub's release list. The target is the newest version above `current` with a usable
+        /// PrintPrice.exe; its Notes become every release in (current, target], newest first, each under "## vX.Y.Z".
+        /// Returns null if there is nothing newer.
+        public static UpdateInfo ParseReleases(string json, Version current)
+        {
+            var list = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as object[];
+            if (list == null) return null;
+            var all = new List<Dictionary<string, object>>();
+            UpdateInfo target = null;
+            foreach (var o in list)
+            {
+                var d = o as Dictionary<string, object>;
+                if (d == null || Str(d, "draft") == "True" || Str(d, "prerelease") == "True") continue;
+                var v = ParseTag(Str(d, "tag_name"));
+                if (v == null || v <= current) continue;
+                all.Add(d);
+                if (target != null && v <= target.Version) continue;
+                var info = FromRelease(d);
+                if (info != null) target = info;
+            }
+            if (target == null) return null;
+            var notes = new List<KeyValuePair<Version, string>>();
+            var seen = new HashSet<Version>();
+            foreach (var d in all)
+            {
+                var v = ParseTag(Str(d, "tag_name"));
+                if (v > target.Version || !seen.Add(v)) continue;
+                notes.Add(new KeyValuePair<Version, string>(v, Str(d, "body")));
+            }
+            notes.Sort((a, b) => b.Key.CompareTo(a.Key));
+            var sb = new StringBuilder();
+            foreach (var n in notes)
+            {
+                string body = Regex.Replace((n.Value ?? "").Replace("\r", ""), @"^#+\s*", "", RegexOptions.Multiline).Trim();
+                if (sb.Length > 0) sb.Append("\n\n");
+                sb.Append("## v").Append(Short(n.Key)).Append("\n").Append(body.Length > 0 ? body : "No notes");
+            }
+            target.Notes = sb.ToString();
+            return target;
         }
 
         /// Plain-text version of the release notes (markdown stripped a little), shortened.
         public static string NotesText(UpdateInfo u, int max)
         {
             string s = (u.Notes ?? "").Replace("\r", "");
-            s = Regex.Replace(s, @"^#+\s*", "", RegexOptions.Multiline);
+            // keep our "## v1.2.3" version headings (the UI shows them bold), strip other headings
+            s = Regex.Replace(s, @"^(?>#+)(?![ \t]*v\d+(?:\.\d+){1,3}[ \t]*$)\s*", "", RegexOptions.Multiline);
             s = Regex.Replace(s, @"\*\*(.+?)\*\*", "$1");
             s = Regex.Replace(s, @"\[([^\]]+)\]\([^)]+\)", "$1");
             s = Regex.Replace(s, @"^\s*[-*]\s+", "• ", RegexOptions.Multiline);
             s = Regex.Replace(s, @"\n{3,}", "\n\n").Trim();
-            if (s.Length > max) s = s.Substring(0, max).TrimEnd() + "…";
+            if (max > 0 && s.Length > max) s = s.Substring(0, max).TrimEnd() + "…";
             return s;
         }
 

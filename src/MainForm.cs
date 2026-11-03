@@ -16,7 +16,8 @@ namespace PrintPrice
         TextBox txtUrl, txtHours, txtMinutes, txtGrams, txtFilamentPrice, txtElecPrice;
         Label lblPrinter, lblMaterial, lblPower, lblBase;
         Label lblFriends, lblOthers, lblFriendsInfo, lblOthersInfo, lblStatus;
-        Button btnCopy;
+        Button btnCopy, btnUpdate;
+        UpdateInfo pendingUpdate;   // newer version found at startup (null = none)
         QuoteResult last;
         int lastHours, lastMinutes;
         bool statusIsSuccess;
@@ -48,7 +49,8 @@ namespace PrintPrice
             StartPosition = FormStartPosition.CenterScreen;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
-            var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Padding = new Padding(14) };
+            // GrowAndShrink: the window shrinks back when the status row hides again
+            var root = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(14), Margin = Padding.Empty };
             Controls.Add(root);
 
             // ---------- Inputs ----------
@@ -132,14 +134,24 @@ namespace PrintPrice
             // ---------- Prices ----------
             var prices = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
             prices.Controls.Add(PriceBox("Friends && family", "friends", out lblFriends, out lblFriendsInfo), 0, 0);
-            prices.Controls.Add(PriceBox("Customers", "others", out lblOthers, out lblOthersInfo), 1, 0);
+            var custBox = PriceBox("Customers", "others", out lblOthers, out lblOthersInfo);
+            custBox.Margin = Padding.Empty;   // gap only between the boxes, not after the last one
+            prices.Controls.Add(custBox, 1, 0);
             root.Controls.Add(prices);
 
             // ---------- Buttons + status ----------
             var bottom = new TableLayoutPanel { ColumnCount = 2, Width = 540, Height = 38, Margin = Padding.Empty };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            lblStatus = new Label { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(260, 0) };
+            // status line: its own row under the buttons, hidden (row collapses) while empty
+            lblStatus = new Label { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(540, 0), Margin = new Padding(0, 2, 0, 0), Visible = false };
+            // update button: same width as the Friends & family box above it, only shown when GitHub has a newer version
+            btnUpdate = new Button
+            {
+                Size = new Size(264, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3),
+                Anchor = AnchorStyles.Left, Visible = false, Font = new Font(Font, FontStyle.Bold)
+            };
+            btnUpdate.Click += delegate { if (pendingUpdate != null) ShowUpdate(pendingUpdate); };
             var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
             // three buttons spanning exactly the Customers box (264 px = 76 + 84 + 92 + 2 × 6 gap) above them
             var btnClear = new Button { Text = "Clear", Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
@@ -151,9 +163,10 @@ namespace PrintPrice
             buttons.Controls.Add(btnClear);
             buttons.Controls.Add(btnSettings);
             buttons.Controls.Add(btnCopy);
-            bottom.Controls.Add(lblStatus, 0, 0);
+            bottom.Controls.Add(btnUpdate, 0, 0);
             bottom.Controls.Add(buttons, 1, 0);
             root.Controls.Add(bottom);
+            root.Controls.Add(lblStatus);
 
             // live recalculation
             EventHandler recalc = delegate { Recalculate(); };
@@ -198,6 +211,7 @@ namespace PrintPrice
         void ApplyTheme()
         {
             Theme.Apply(this);
+            Theme.AccentButton(btnUpdate);
             Theme.TitleBar(this);
             SetStatusColor();
             SetAutoColor();
@@ -491,7 +505,7 @@ namespace PrintPrice
 
         static Label Unit(string text)
         {
-            return new Label { Text = text, AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(2, 6, 10, 0) };
+            return new Theme.PlainLabel { Text = text, AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(2, 6, 10, 0) };
         }
 
         static Control WithUnit(Control box, string unit)
@@ -535,6 +549,7 @@ namespace PrintPrice
         {
             statusIsSuccess = success;
             lblStatus.Text = text;
+            lblStatus.Visible = text.Length > 0;
             SetStatusColor();
         }
 
@@ -613,11 +628,9 @@ namespace PrintPrice
 
         void OpenSettings()
         {
-            using (var dlg = new SettingsForm(settings) { BeforeUpdateRestart = SaveLastPrices })
+            using (var dlg = new SettingsForm(settings))
             {
-                var answer = dlg.ShowDialog(this);
-                if (dlg.UpdateStarted) { Close(); return; }
-                if (answer == DialogResult.OK)
+                if (dlg.ShowDialog(this) == DialogResult.OK)
                 {
                     var old = settings;
                     settings = dlg.Result;
@@ -634,35 +647,36 @@ namespace PrintPrice
         }
 
         // ---------- updates from GitHub ----------
-        bool updateDialogOpen;
-
-        /// Removes leftovers of a previous update, then quietly looks for a new release (if enabled).
+        /// Removes leftovers of a previous update, then quietly looks for a new release.
+        /// A newer version shows the red update button under the Friends & family box.
         async void StartupUpdateCheck()
         {
             UpdateInfo found = null;
-            bool check = settings.AutoUpdateCheck != 0;
             try
             {
                 found = await Task.Run(() =>
                 {
                     Updater.CleanUp();
-                    return check ? Updater.CheckForUpdate() : null;
+                    return Updater.CheckForUpdate();
                 });
             }
             catch { /* offline or GitHub unreachable: try again next start */ }
-            if (found == null || IsDisposed || updateDialogOpen || OwnedForms.Length > 0) return;
-            ShowUpdate(found);
+            if (found == null || IsDisposed) return;
+            ShowUpdateButton(found);
         }
 
+        void ShowUpdateButton(UpdateInfo found)
+        {
+            pendingUpdate = found;
+            btnUpdate.Text = "⬆  Update to v" + Updater.Short(found.Version);
+            btnUpdate.Visible = true;
+        }
+
+        /// What's new + Update now / Later. Later keeps the button.
         void ShowUpdate(UpdateInfo found)
         {
-            updateDialogOpen = true;
-            try
-            {
-                using (var dlg = new UpdateForm(found, SaveLastPrices))
-                    if (dlg.ShowDialog(this) == DialogResult.OK) Close();   // the new version is already starting
-            }
-            finally { updateDialogOpen = false; }
+            using (var dlg = new UpdateForm(found, SaveLastPrices))
+                if (dlg.ShowDialog(this) == DialogResult.OK) Close();   // the new version is already starting
         }
 
         void SaveLastPrices()
