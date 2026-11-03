@@ -25,6 +25,202 @@ namespace PrintPrice.Tests
             return new QuoteInput { Hours = 5, Minutes = 30, FilamentGrams = 120, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00 };
         }
 
+        // ---------- price history (History.cs) ----------
+        static AppSettings HistSettings()
+        {
+            var s = new AppSettings();
+            s.PrinterWatts = 100; s.FriendsMarkupPct = 25; s.OthersMarkupPct = 75; s.MachineRatePerHour = 2;
+            s.FailedPrintPct = 10; s.MinimumPrice = 0; s.RoundTo = 0;
+            return s;
+        }
+
+        static QuoteRecord HistRecord(DateTime t)
+        {
+            var s = HistSettings();
+            return History.FromQuote(Example(), Pricing.Calculate(Example(), s), s, "Benchy", "https://www.printables.com/model/1", t);
+        }
+
+        static void HistoryTests()
+        {
+            var t0 = new DateTime(2026, 11, 3, 14, 5, 0);
+            var s = HistSettings();
+            var rec = HistRecord(t0);
+            // Example: 0,120 x 180 = 21,60 material; 5,5 h x 0,1 kW = 0,55 kWh x 2,00 = 1,10 power; 22,70 x 10 % = 2,27 failed
+            // base 24,97; friends 24,97 x 1,25 = 31,2125 + 5,5 x 2 = 42,2125; customer 24,97 x 1,75 = 43,6975 + 11 = 54,6975
+            True("History SavedAt", rec.SavedAt == "2026-11-03 14:05:00");
+            True("History Id starts with time", rec.Id.StartsWith("20261103140500000") && rec.Id.Length == 21);
+            True("History Model/Source", rec.Model == "Benchy" && rec.Source == "https://www.printables.com/model/1");
+            True("History time", rec.Hours == 5 && rec.Minutes == 30);
+            Eq("History Grams", 120, rec.Grams);
+            Eq("History FilamentDkkPerKg", 180, rec.FilamentDkkPerKg);
+            Eq("History Electricity", 2.00, rec.ElectricityDkkPerKwh);
+            True("History single filament -> Filaments null", rec.Filaments == null);
+            Eq("History MaterialCost 21,60", 21.60, rec.MaterialCost);
+            Eq("History PowerCost 1,10", 1.10, rec.PowerCost);
+            Eq("History FailedPrintCost 2,27", 2.27, rec.FailedPrintCost);
+            Eq("History BaseCost 24,97", 24.97, rec.BaseCost);
+            Eq("History FriendsPrice 42,2125", 42.2125, rec.FriendsPrice);
+            Eq("History OthersPrice 54,6975", 54.6975, rec.OthersPrice);
+            Eq("History snapshot FailedPrintPct", 10, rec.FailedPrintPct);
+            Eq("History snapshot MachineRate", 2, rec.MachineRatePerHour);
+            True("History new: For customer, Note empty, not failed", rec.For == History.ForCustomer && rec.Note == "" && !rec.Failed && rec.FailedAt == "");
+            Eq("History PriceFor customer = 54,6975", 54.6975, History.PriceFor(rec));
+            rec.For = History.ForFriends;
+            Eq("History PriceFor friends = 42,2125", 42.2125, History.PriceFor(rec));
+            rec.For = History.ForCustomer;
+
+            // price as it was, even after today's markup changes; today's price with today's settings
+            var today = HistSettings();
+            today.FriendsMarkupPct = 50;
+            var asWas = Pricing.Calculate(History.ToInput(rec), History.SavedSettings(rec, today));
+            Eq("History as it was: friends 42,2125", 42.2125, asWas.FriendsPrice);
+            Eq("History as it was: customer 54,6975", 54.6975, asWas.OthersPrice);
+            True("History SavedSettings doesn't change current", today.FriendsMarkupPct == 50);
+            // 24,97 x 1,50 = 37,455 + 11 = 48,455
+            Eq("History today: friends 48,455", 48.455, Pricing.Calculate(History.ToInput(rec), today).FriendsPrice);
+
+            // multi-colour: 50 g x 200 = 10,00 + 30 g x 300 = 9,00 -> 19,00 material
+            var mi = new QuoteInput { Hours = 1, Minutes = 0, FilamentGrams = 80, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00,
+                Filaments = new List<FilamentLine> { new FilamentLine { Grams = 50, PricePerKg = 200 }, new FilamentLine { Grams = 30, PricePerKg = 300 } } };
+            var mrec = History.FromQuote(mi, Pricing.Calculate(mi, s), s, "Multi", "", t0.AddHours(-1));
+            True("History multi: 2 lines", mrec.Filaments != null && mrec.Filaments.Count == 2);
+            mrec.Filaments[0].Colour = "#FF0000"; mrec.Filaments[0].Type = "PLA"; mrec.Filaments[0].Name = "Bambu PLA Basic";
+            mrec.PurgeGrams = 4.5;
+            Eq("History multi MaterialCost 19,00", 19.00, mrec.MaterialCost);
+
+            // JSON round trip under da-DK (decimal comma must not leak into the file)
+            var oldCulture = System.Threading.Thread.CurrentThread.CurrentCulture;
+            List<QuoteRecord> back;
+            string json;
+            try
+            {
+                System.Threading.Thread.CurrentThread.CurrentCulture = new System.Globalization.CultureInfo("da-DK");
+                var two = new List<QuoteRecord> { rec, mrec };
+                rec.Note = "Til Anne, rød"; rec.For = 2; rec.ElectricityDkkPerKwh = 2.27;
+                json = History.ToJson(two);
+                back = History.ParseJson(json);
+            }
+            finally { System.Threading.Thread.CurrentThread.CurrentCulture = oldCulture; }
+            True("History JSON has Version 1", json.Contains("\"Version\":1"));
+            True("History JSON uses decimal point", json.Contains("2.27") && !json.Contains("2,27"));
+            True("History JSON round trip: 2 quotes", back != null && back.Count == 2);
+            if (back != null && back.Count == 2)
+            {
+                Eq("History round trip 2,27 kr./kWh", 2.27, back[0].ElectricityDkkPerKwh);
+                True("History round trip Note/For/Id", back[0].Note == "Til Anne, rød" && back[0].For == 2 && back[0].Id == rec.Id);
+                Eq("History round trip FriendsPrice", 42.2125, back[0].FriendsPrice);
+                True("History round trip single -> null lines", back[0].Filaments == null);
+                True("History round trip multi lines", back[1].Filaments != null && back[1].Filaments.Count == 2
+                     && back[1].Filaments[0].Colour == "#FF0000" && back[1].Filaments[0].Type == "PLA"
+                     && back[1].Filaments[0].Name == "Bambu PLA Basic");
+                Eq("History round trip line 2 price", 300, back[1].Filaments[1].PricePerKg);
+                Eq("History round trip PurgeGrams", 4.5, back[1].PurgeGrams);
+                Eq("History round trip multi material 19,00",
+                   19.00, Pricing.Calculate(History.ToInput(back[1]), History.SavedSettings(back[1], null)).MaterialCost);
+            }
+            rec.Note = ""; rec.For = History.ForCustomer; rec.ElectricityDkkPerKwh = 2.00;
+
+            // ParseJson: not a history file -> null; missing fields -> defaults
+            True("History ParseJson empty -> null", History.ParseJson("") == null);
+            True("History ParseJson null -> null", History.ParseJson(null) == null);
+            True("History ParseJson garbage -> null", History.ParseJson("garbage{") == null);
+            True("History ParseJson array -> null", History.ParseJson("[1,2]") == null);
+            True("History ParseJson Version 2 -> null", History.ParseJson("{\"Version\":2,\"Quotes\":[]}") == null);
+            True("History ParseJson no Version -> null", History.ParseJson("{\"Quotes\":[]}") == null);
+            var empty = History.ParseJson("{\"Version\":1,\"Quotes\":[]}");
+            True("History ParseJson empty list", empty != null && empty.Count == 0);
+            var partial = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Hours\":3,\"Note\":null},null]}");
+            True("History ParseJson partial: 1 quote, defaults", partial != null && partial.Count == 1 && partial[0].Hours == 3
+                 && partial[0].Note == "" && partial[0].Model == "" && partial[0].Filaments == null && partial[0].PurgeGrams == -1
+                 && partial[0].For == History.ForCustomer);
+            var forOld = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"For\":0},{\"For\":1},{\"For\":7}]}");
+            True("History ParseJson For: old 0 -> customer, 1 kept, unknown -> customer", forOld != null && forOld.Count == 3
+                 && forOld[0].For == 2 && forOld[1].For == 1 && forOld[2].For == 2);
+
+            // SameQuote / Add: within 10 min replaces (keeps Id, For, Note), later or different adds
+            var list = new List<QuoteRecord>();
+            History.Add(list, HistRecord(t0));
+            list[0].Note = "keep me"; list[0].For = 1;
+            string firstId = list[0].Id;
+            History.Add(list, HistRecord(t0.AddMinutes(9)));
+            True("History Add same within 9 min -> replaced", list.Count == 1);
+            True("History replace keeps Id/Note/For", list[0].Id == firstId && list[0].Note == "keep me" && list[0].For == 1);
+            True("History replace has new time", list[0].SavedAt == "2026-11-03 14:14:00");
+            True("History SameQuote exactly 10 min", History.SameQuote(HistRecord(t0), HistRecord(t0.AddMinutes(10))));
+            True("History SameQuote 11 min -> no", !History.SameQuote(HistRecord(t0), HistRecord(t0.AddMinutes(11))));
+            History.Add(list, HistRecord(t0.AddMinutes(9 + 11)));
+            True("History Add 11 min later -> new entry", list.Count == 2 && list[0].SavedAt == "2026-11-03 14:25:00");
+            var other = HistRecord(t0.AddMinutes(21));
+            other.Grams = 121;
+            True("History SameQuote other grams -> no", !History.SameQuote(list[0], other));
+            History.Add(list, other);
+            True("History Add different -> new entry, newest first", list.Count == 3 && list[0].Grams == 121);
+            True("History SameQuote multi vs single -> no", !History.SameQuote(mrec, rec));
+
+            // Trim: 502 -> 500; an old failed one is kept
+            var big = new List<QuoteRecord>();
+            for (int i = 0; i < 502; i++) { var q = new QuoteRecord(); q.Id = "q" + i; big.Add(q); }
+            History.Trim(big, 500);
+            True("History Trim 502 -> 500", big.Count == 500 && big[499].Id == "q499");
+            big.Clear();
+            for (int i = 0; i < 502; i++) { var q = new QuoteRecord(); q.Id = "q" + i; big.Add(q); }
+            History.MarkFailed(big[501], true, t0);
+            History.Trim(big, 500);
+            True("History Trim keeps old failed", big.Count == 501 && big[500].Id == "q501" && !big.Exists(x => x.Id == "q500"));
+            True("History MarkFailed sets date", big[500].Failed && big[500].FailedAt == "2026-11-03 14:05:00");
+            History.MarkFailed(big[500], false, t0);
+            True("History MarkFailed off clears date", !big[500].Failed && big[500].FailedAt == "");
+            True("History Remove by Id", History.Remove(big, "q7") && big.Count == 500 && !big.Exists(x => x.Id == "q7"));   // 501 - 1
+            True("History Remove unknown Id", !History.Remove(big, "nope") && big.Count == 500);
+
+            // files: only in bin\test-history (test mode), never %APPDATA%
+            string histDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-history");
+            string histFile = System.IO.Path.Combine(histDir, "history.json");
+            try
+            {
+                True("History UseFolder test-history", AppSettings.UseFolder(histDir));
+                True("History FilePath in test folder", string.Equals(History.FilePath, histFile, StringComparison.OrdinalIgnoreCase));
+                True("AppSettings.Folder = test folder", string.Equals(AppSettings.Folder, histDir, StringComparison.OrdinalIgnoreCase));
+                System.IO.Directory.CreateDirectory(histDir);
+                // clean leftovers of earlier runs (this test's own folder only)
+                foreach (var f in System.IO.Directory.GetFiles(histDir, "history*.json*")) System.IO.File.Delete(f);
+                History.ResetBlock();
+                string problem;
+                var none = History.Load(out problem);
+                True("History Load missing file -> empty, no problem", none.Count == 0 && problem == null);
+
+                var saved = new List<QuoteRecord> { rec, mrec };
+                True("History Save OK", History.Save(saved) == null);
+                True("History Save left no .tmp", System.IO.File.Exists(histFile) && !System.IO.File.Exists(histFile + ".tmp"));
+                True("History Save again (replace) OK", History.Save(saved) == null);
+                var loaded = History.Load(out problem);
+                True("History Load round trip", problem == null && loaded.Count == 2 && loaded[0].Id == rec.Id && loaded[1].Filaments.Count == 2);
+
+                // corrupt file: backed up, empty list, settings.ini untouched
+                var st = new AppSettings(); st.FriendsMarkupPct = 37; st.Save();
+                string iniBefore = System.IO.File.ReadAllText(AppSettings.FilePath);
+                System.IO.File.WriteAllText(histFile, "garbage{");
+                var afterBad = History.Load(out problem);
+                var bads = System.IO.Directory.GetFiles(histDir, "history.bad-*.json");
+                True("History corrupt -> empty list + problem", afterBad.Count == 0 && problem != null);
+                True("History corrupt -> backed up", bads.Length == 1 && System.IO.File.ReadAllText(bads[0]) == "garbage{" && !System.IO.File.Exists(histFile));
+                True("History corrupt -> settings.ini unchanged", System.IO.File.ReadAllText(AppSettings.FilePath) == iniBefore);
+                True("History Save after backup OK", History.Save(new List<QuoteRecord> { rec }) == null && History.Load(out problem).Count == 1);
+                // newer version: backed up too, never overwritten unread
+                System.IO.File.WriteAllText(histFile, "{\"Version\":2,\"Quotes\":[]}");
+                History.Load(out problem);
+                True("History Version 2 -> backed up", problem != null && System.IO.Directory.GetFiles(histDir, "history.bad-*.json").Length == 2);
+                True("History BackupName unique", !System.IO.File.Exists(History.BackupName(histFile, DateTime.Now)));
+            }
+            finally
+            {
+                History.ResetBlock();
+                AppSettings.ClearTestFolder();
+            }
+            True("History FilePath back to %APPDATA%", string.Equals(History.FilePath,
+                 System.IO.Path.Combine(AppSettings.RealFolder, "history.json"), StringComparison.OrdinalIgnoreCase));
+        }
+
         // slice_info.config pieces (trimmed from the real 4-colour Benchy slices, scratchpad multi-colour_test\fixtures)
         static string Fil(int id, string colour, string metres, string grams)
         {
@@ -382,6 +578,80 @@ namespace PrintPrice.Tests
             True("IsImage null", !Net.IsImage(null));
             True("IsImage short", !Net.IsImage(new byte[] { 0x89, 0x50, 0x4E }));
             True("IsImage GIF", !Net.IsImage(System.Text.Encoding.ASCII.GetBytes("GIF89a..")));
+
+            // ---------- test mode (--settings "<folder>"): never reads or writes the real %APPDATA% file ----------
+            string realFile = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PrintPrice", "settings.ini");
+            string testDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-settings");
+            string testFile = System.IO.Path.Combine(testDir, "settings.ini");
+            try
+            {
+                // 1. no override
+                AppSettings.ClearTestFolder();
+                True("TestMode off by default", !AppSettings.TestMode);
+                True("FilePath = %APPDATA%\\PrintPrice\\settings.ini", string.Equals(AppSettings.FilePath, realFile, StringComparison.OrdinalIgnoreCase));
+                // 2. test folder
+                True("UseFolder test dir", AppSettings.UseFolder(testDir));
+                True("TestMode on", AppSettings.TestMode);
+                True("FilePath in test dir", string.Equals(AppSettings.FilePath, testFile, StringComparison.OrdinalIgnoreCase));
+                // 3. refused folders leave FilePath unchanged
+                string realDir = AppSettings.RealFolder;
+                True("UseFolder refuses empty", !AppSettings.UseFolder(""));
+                True("UseFolder refuses null", !AppSettings.UseFolder(null));
+                True("UseFolder refuses relative", !AppSettings.UseFolder(@"relative\x"));
+                True("UseFolder refuses \\x (no drive)", !AppSettings.UseFolder(@"\x"));
+                True("UseFolder refuses real folder", !AppSettings.UseFolder(realDir));
+                True("UseFolder refuses real folder + \\", !AppSettings.UseFolder(realDir + "\\"));
+                True("UseFolder refuses real folder upper-case", !AppSettings.UseFolder(realDir.ToUpperInvariant()));
+                True("UseFolder refuses real folder via ..", !AppSettings.UseFolder(System.IO.Path.Combine(realDir, "sub", "..")));
+                True("FilePath unchanged after refusals", string.Equals(AppSettings.FilePath, testFile, StringComparison.OrdinalIgnoreCase));
+                // 4. missing folder -> defaults, folder not created by Load
+                string neverDir = System.IO.Path.Combine(testDir, "never-made");
+                True("UseFolder never-made", AppSettings.UseFolder(neverDir));
+                var fresh = AppSettings.Load();
+                var defaults = new AppSettings();
+                Eq("missing folder: FriendsMarkupPct default", defaults.FriendsMarkupPct, fresh.FriendsMarkupPct);
+                Eq("missing folder: LastFilamentPrice default", defaults.LastFilamentPrice, fresh.LastFilamentPrice);
+                True("missing folder: Language default", fresh.Language == defaults.Language);
+                True("Load doesn't create the folder", !System.IO.Directory.Exists(neverDir));
+                // 5. save/load round trip in the test folder
+                True("UseFolder test dir again", AppSettings.UseFolder(testDir));
+                var s5 = new AppSettings();
+                s5.FriendsMarkupPct = 37;
+                s5.Language = "da";
+                s5.LastFilamentPrice = 189.5;
+                s5.Save();
+                True("Save wrote the test file", System.IO.File.Exists(testFile));
+                var r5 = AppSettings.Load();
+                Eq("round trip FriendsMarkupPct", 37, r5.FriendsMarkupPct);
+                Eq("round trip LastFilamentPrice", 189.5, r5.LastFilamentPrice);
+                True("round trip Language", r5.Language == "da");
+                // 6. command line
+                var o = StartOptions.Parse(new[] { "--settings", @"C:\t", "--hidden" });
+                True("Parse --settings --hidden", o.Error == null && o.SettingsFolder == @"C:\t" && o.Hidden && !o.Minimized);
+                o = StartOptions.Parse(new[] { "--settings", @"C:\t", "--minimized" });
+                True("Parse --settings --minimized", o.Error == null && o.SettingsFolder == @"C:\t" && o.Minimized && !o.Hidden);
+                True("Parse --settings without value", StartOptions.Parse(new[] { "--settings" }).Error != null);
+                True("Parse --settings followed by option", StartOptions.Parse(new[] { "--settings", "--hidden" }).Error != null);
+                True("Parse --hidden alone", StartOptions.Parse(new[] { "--hidden" }).Error != null);
+                True("Parse --minimized alone", StartOptions.Parse(new[] { "--minimized" }).Error != null);
+                True("Parse --hidden and --minimized", StartOptions.Parse(new[] { "--settings", @"C:\t", "--hidden", "--minimized" }).Error != null);
+                True("Parse --settings twice", StartOptions.Parse(new[] { "--settings", @"C:\a", "--settings", @"C:\b" }).Error != null);
+                True("Parse unknown --option (typo)", StartOptions.Parse(new[] { "--setting", @"C:\t" }).Error != null);
+                o = StartOptions.Parse(new string[0]);
+                True("Parse no args", o.Error == null && o.SettingsFolder == null && !o.Hidden && !o.Minimized);
+                o = StartOptions.Parse(new[] { @"C:\model.3mf" });
+                True("Parse plain arg ignored", o.Error == null && o.SettingsFolder == null);
+                True("Parse null", StartOptions.Parse(null).Error == null);
+            }
+            finally
+            {
+                // 7. back to normal
+                AppSettings.ClearTestFolder();
+            }
+            True("ClearTestFolder -> real path", !AppSettings.TestMode && string.Equals(AppSettings.FilePath, realFile, StringComparison.OrdinalIgnoreCase));
+
+            HistoryTests();
+
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
         }

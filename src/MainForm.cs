@@ -10,7 +10,7 @@ using System.Windows.Forms;
 
 namespace PrintPrice
 {
-    public class MainForm : Form
+    public class MainForm : CaptionForm
     {
         AppSettings settings;
         TextBox txtUrl, txtHours, txtMinutes, txtGrams, txtFilamentPrice, txtElecPrice;
@@ -20,11 +20,21 @@ namespace PrintPrice
         Label lblFriends, lblOthers, lblFriendsInfo, lblOthersInfo, lblStatus;
         Button btnCopy, btnUpdate;
         UpdateInfo pendingUpdate;   // newer version found at startup (null = none)
-        System.Windows.Forms.Timer updateTimer;   // quiet check every 5 min while running (null in picture mode)
+        System.Windows.Forms.Timer updateTimer;   // quiet check every 10 min while running (null in picture mode)
         bool checkingUpdate, updateDialogOpen;
         QuoteResult last;
+        QuoteInput lastInput;   // the input behind last (saved to the history)
         int lastHours, lastMinutes;
         bool statusIsSuccess;
+        System.Windows.Forms.Timer statusTimer;   // clears a green ✓ status line after a few seconds
+
+        // price history (history.json next to settings.ini; loaded on first use, never in picture mode)
+        Button btnHistory, btnSave;
+        List<QuoteRecord> history;
+        string historyProblem;          // load problem, shown once in the history window
+        string jobModel;                // model name of the current job (Printables name / file name), null = none
+        double jobPurge = -1;           // purge grams of the current multi-colour job (-1 = unknown)
+        QuoteRecord reopened;           // quote opened from the history (its line stays in the model info box)
 
         // auto-detect
         Button btnAnalyze, btnLoadFile;
@@ -36,6 +46,7 @@ namespace PrintPrice
         PictureBox picModel;
         int picRequest;   // bumped for every new job / Clear, so a late picture of an old job is dropped
         int picBaseHeight;   // buttons' top to a 2-line info box's bottom (scaled, set on Load)
+        bool jobLoaded;      // a model is loaded (analyzed or reopened): no picture = logo only, without "No model yet"
 
         // multi-colour (2+ filaments): one row per colour in the Cost breakdown instead of the Material line,
         // the "Filament price" row hides and "Filament used" shows the read-only total
@@ -71,12 +82,15 @@ namespace PrintPrice
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 10f);
-            Text = AppInfo.Name;
+            Text = AppInfo.Name + (AppSettings.TestMode && !offline ? " [TEST]" : "");
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
             StartPosition = FormStartPosition.CenterScreen;
+            // test mode: --hidden = off-screen from the first frame, no taskbar button; --minimized = starts minimized
+            if (Program.Hidden && !offline) Screenshots.Place(this);
+            else if (Program.Minimized && !offline) WindowState = FormWindowState.Minimized;
             try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
             // GrowAndShrink: the window shrinks back when the status row hides again
@@ -95,25 +109,35 @@ namespace PrintPrice
             // grey example text while empty; re-applied whenever the handle is recreated (e.g. theme change)
             txtUrl.HandleCreated += delegate { ApplyUrlCue(); };
             // typing/pasting brings the grey example text back
-            txtUrl.TextChanged += delegate { SetUrlHint(false); };
+            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; };   // a new link = no model name yet
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
-            // two equal buttons lined up exactly under the link box (widths set on Load)
-            btnAnalyze = new Button { Text = AnalyzeText, Width = 194, Height = 32, Margin = new Padding(3, 6, 6, 4) };
-            btnLoadFile = new Button { Text = L.S("Load file…", "Åbn fil…"), Width = 194, Height = 32, Margin = new Padding(0, 6, 0, 4) };
+            // three equal buttons lined up exactly under the link box (widths set on Load)
+            btnAnalyze = new Button { Text = AnalyzeText, Width = 128, Height = 32, Margin = new Padding(3, 6, 6, 4) };
+            btnLoadFile = new Button { Text = L.S("Load file…", "Åbn fil…"), Width = 128, Height = 32, Margin = new Padding(0, 6, 6, 4) };
+            btnHistory = new Button { Text = L.S("History…", "Historik…"), Width = 128, Height = 32, Margin = new Padding(0, 6, 0, 4) };
             btnAnalyze.Click += delegate { AnalyzeClicked(); };
             btnLoadFile.Click += delegate { BrowseForModel(); };
+            btnHistory.Click += delegate { OpenHistory(); };
             // Enter in the link box = "Get time & weight" (not while a job runs, so it never cancels by accident)
             txtUrl.KeyDown += (s, e) =>
             {
                 if (e.KeyCode != Keys.Enter || e.Modifiers != Keys.None) return;
                 e.SuppressKeyPress = true;   // no beep
-                if (cts == null) AnalyzeClicked();   // empty box: shows the red hint (AnalyzeClicked)
+                if (cts != null) return;
+                if (txtUrl.Text.Trim().Trim('"').Length == 0)
+                {
+                    // empty box + Enter = try the example (the button still shows the red hint)
+                    txtUrl.Text = ExampleLink;
+                    txtUrl.SelectionStart = txtUrl.Text.Length;
+                }
+                AnalyzeClicked();
             };
             var autoRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             autoRow.Controls.Add(btnAnalyze);
             autoRow.Controls.Add(btnLoadFile);
+            autoRow.Controls.Add(btnHistory);
             int picRow = inputs.RowCount;
             AddRow(inputs, "", autoRow, null);
             inputs.SetColumnSpan(autoRow, 2);
@@ -152,10 +176,10 @@ namespace PrintPrice
             txtGrams = NumBox("");
             AddRow(inputs, L.S("Filament used", "Filamentforbrug"), WithUnit(txtGrams, "g"), null);
             txtFilamentPrice = NumBox(Num.Fmt(settings.LastFilamentPrice));
-            filPriceRow = WithUnit(txtFilamentPrice, "kr./kg");
+            filPriceRow = WithUnit(txtFilamentPrice, "kr/kg");
             filPriceCap = AddRow(inputs, L.S("Filament price", "Filamentpris"), filPriceRow, null);   // row hides for 2+ colours
             txtElecPrice = NumBox(Num.Fmt(settings.LastElectricityPrice));
-            var elecRow = (FlowLayoutPanel)WithUnit(txtElecPrice, "kr./kWh");
+            var elecRow = (FlowLayoutPanel)WithUnit(txtElecPrice, "kr/kWh");
             // same top margin as the text box; height is matched to the box once the form has loaded (DPI-safe)
             // slightly smaller font + no padding so the text fits inside a button only as tall as the text box
             btnPower = new Button
@@ -214,8 +238,9 @@ namespace PrintPrice
                 lblAuto.SetWidth(w);
                 lblPowerInfo.SetWidth(w);
                 int gap = btnAnalyze.Margin.Right;
-                btnAnalyze.Width = (w - gap) / 2;
-                btnLoadFile.Width = w - gap - btnAnalyze.Width;
+                btnAnalyze.Width = (w - 2 * gap) / 3;
+                btnLoadFile.Width = btnAnalyze.Width;
+                btnHistory.Width = w - 2 * gap - 2 * btnAnalyze.Width;
 
                 // model picture: from the label column's left edge to the longest label's right edge (keeps the label gap),
                 // from the buttons' top to the bottom of a 2-line info box (the info box never gets shorter than that)
@@ -250,7 +275,7 @@ namespace PrintPrice
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             // status line: its own row under the buttons, hidden (row collapses) while empty
             lblStatus = new Label { AutoSize = true, Anchor = AnchorStyles.Left, MaximumSize = new Size(540, 0), Margin = new Padding(0, 2, 0, 0), Visible = false };
-            // update button: same width as the Friends & family box above it, only shown when GitHub has a newer version
+            // update button: from the left edge to 6 px before the buttons (width set on Load), only shown when GitHub has a newer version
             btnUpdate = new Button
             {
                 Size = new Size(264, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3),
@@ -258,17 +283,28 @@ namespace PrintPrice
             };
             btnUpdate.Click += delegate { if (pendingUpdate != null) ShowUpdate(pendingUpdate); };
             var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
-            // three buttons spanning exactly the Customers box (264 px = 76 + 84 + 92 + 2 × 6 gap) above them
+            // four buttons, 340 px = 76 + 84 + 70 + 92 + 3 × 6 gap, ending at the Customers box's right edge;
+            // the update button left of them takes the rest of the row
             var btnClear = new Button { Text = L.S("Clear", "Ryd"), Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
             var btnSettings = new Button { Text = L.S("Settings…", "Indstillinger…"), Size = new Size(84, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
+            btnSave = new Button { Text = L.S("Save", "Gem"), Size = new Size(70, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
             btnCopy = new Button { Text = L.S("Copy quote", "Kopiér tilbud"), Size = new Size(92, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3) };
             // same total width (scaled), split by the measured text widths so longer (Danish) texts fit
-            Load += delegate { SplitByText(new[] { btnClear, btnSettings, btnCopy }); };
+            Load += delegate
+            {
+                var row = new[] { btnClear, btnSettings, btnSave, btnCopy };
+                SplitByText(row);
+                int used = 0;
+                foreach (var b in row) used += b.Width + b.Margin.Horizontal;
+                btnUpdate.Width = Math.Max(btnUpdate.Height, bottom.Width - used - btnClear.Margin.Right);   // same 6 px gap
+            };
             btnClear.Click += delegate { ClearJob(); };
             btnSettings.Click += delegate { OpenSettings(); };
+            btnSave.Click += delegate { SaveClicked(); };
             btnCopy.Click += delegate { CopyQuote(); };
             buttons.Controls.Add(btnClear);
             buttons.Controls.Add(btnSettings);
+            buttons.Controls.Add(btnSave);
             buttons.Controls.Add(btnCopy);
             bottom.Controls.Add(btnUpdate, 0, 0);
             bottom.Controls.Add(buttons, 1, 0);
@@ -288,11 +324,13 @@ namespace PrintPrice
             FormClosed += delegate
             {
                 picRequest++; SetModelPicture(null);
+                if (statusTimer != null) { statusTimer.Stop(); statusTimer.Dispose(); statusTimer = null; }
                 if (updateTimer != null) { updateTimer.Stop(); updateTimer.Dispose(); updateTimer = null; }
+                if (hintTimer != null) { hintTimer.Stop(); hintTimer.Dispose(); hintTimer = null; }
             };
-            if (!offline)
+            if (!offline && !AppSettings.TestMode)   // test mode: no update checks at all
             {
-                updateTimer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
+                updateTimer = new System.Windows.Forms.Timer { Interval = 10 * 60 * 1000 };
                 updateTimer.Tick += delegate { PeriodicUpdateCheck(); };
                 Shown += delegate { SyncUpdateTimer(); };
             }
@@ -302,7 +340,7 @@ namespace PrintPrice
             ResumeLayout(true);
             RefreshSettingsLabels();
             ShowAutoIdle();
-            if (!offline) Shown += delegate { StartupUpdateCheck(); };
+            if (!offline && !AppSettings.TestMode) Shown += delegate { StartupUpdateCheck(); };
             if (settings.AutoPowerPrice != 0) { if (!offline) Shown += delegate { FetchPowerPrice(); }; }
             else SetPowerInfo(L.S("Live price is off (Settings). Click Update to fetch it once.",
                                   "Live-pris er slået fra (Indstillinger). Klik Opdatér for at hente den én gang."), false);
@@ -327,7 +365,7 @@ namespace PrintPrice
             Theme.TitleBar(this);
         }
 
-        protected override bool ShowWithoutActivation { get { return offline || Screenshots.Active; } }
+        protected override bool ShowWithoutActivation { get { return offline || Screenshots.Active || Program.Hidden; } }
 
         /// Picture mode: fills in a fixed example Benchy job, as if it had been sliced and the live
         /// price fetched (made-up texts, nothing goes online). The price labels update by themselves.
@@ -335,16 +373,17 @@ namespace PrintPrice
         {
             if (!offline) return;
             SetColours(null);
-            txtUrl.Text = "https://www.printables.com/model/3161-3d-benchy";
-            SetAuto(L.S("✓ \"3D BENCHY\": 0 h 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic).",
-                        "✓ \"3D BENCHY\": 0 t 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic)."), false);
+            txtUrl.Text = ExampleLink;
+            SetAuto(L.S("✓ \"3D BENCHY\": 0 h 38 m, 11,8 g (0.16mm Optimal · Bambu PLA Matte).",
+                        "✓ \"3D BENCHY\": 0 t 38 m, 11,8 g (0.16mm Optimal · Bambu PLA Matte)."), false);
             txtHours.Text = "0";
             txtMinutes.Text = "38";
             txtGrams.Text = "11,8";
             txtFilamentPrice.Text = "200";
             txtElecPrice.Text = "3,65";
+            SetJobLoaded(true);
             SetPowerInfo(L.S("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.",
-                             "Live-pris DK1 17:45: spot 2,37 + afgifter 0,55 + 25 % moms = 3,65 kr."), false);
+                             "Live-pris DK1 17:45: spot 2,37 + afg. 0,55 + moms = 3,65 kr."), false);
             Recalculate();
         }
 
@@ -355,8 +394,8 @@ namespace PrintPrice
         {
             if (!offline) return;
             txtUrl.Text = "https://www.printables.com/model/1648230-four-color-multicolor-test-benchy";
-            SetAuto(L.S("✓ \"Four-Color Multicolor Test benchy\": 10 h 43 m, 135,85 g (0.20mm Standard · 4 colours).",
-                        "✓ \"Four-Color Multicolor Test benchy\": 10 t 43 m, 135,85 g (0.20mm Standard · 4 farver)."), false);
+            SetAuto(L.S("✓ \"Four-Color Multicolor Test benchy\": 10 h 43 m, 135,85 g (0.16mm Optimal · 4 colours).",
+                        "✓ \"Four-Color Multicolor Test benchy\": 10 t 43 m, 135,85 g (0.16mm Optimal · 4 farver)."), false);
             var r = new SliceResult { Seconds = 38566, Grams = 135.85, Plates = 1, PurgeGrams = 124.0, ColourChangeHours = 31450 / 3600.0 };
             string[] colours = { "#118002", "#FFFF0A", "#074080", "#ED1C24" };
             double[] grams = { 33.04, 55.99, 17.28, 29.54 }, model = { 5.04, 0.38, 5.87, 0.56 };
@@ -368,6 +407,7 @@ namespace PrintPrice
             txtElecPrice.Text = "3,65";
             SetColours(r);
             txtGrams.Text = "135,85";
+            SetJobLoaded(true);
             Recalculate();
         }
 
@@ -408,9 +448,10 @@ namespace PrintPrice
             {
                 var q = await Task.Run(() => PowerPrice.GetCurrent(area));
                 double total = Math.Round(PowerPrice.TotalPrice(q.SpotDkkPerKwh, addOn, vat), 2);
-                string breakdown = L.F("spot {0} + fees {1}", "spot {0} + afgifter {1}",
+                // Danish kept short ("afg.", "moms" = always 25 %) so the line fits on one line in the box
+                string breakdown = L.F("spot {0} + fees {1}", "spot {0} + afg. {1}",
                                        q.SpotDkkPerKwh.ToString("0.00", Num.Dk), addOn.ToString("0.00", Num.Dk)) +
-                                   (vat ? L.S(" + 25 % VAT", " + 25 % moms") : "");
+                                   (vat ? L.S(" + 25 % VAT", " + moms") : "");
                 string when = q.Area + " " + q.SlotStartUtc.ToLocalTime().ToString("HH:mm", Num.Dk);
                 if (txtElecPrice.Text == before)
                 {
@@ -420,8 +461,8 @@ namespace PrintPrice
                 }
                 else
                 {
-                    SetPowerInfo(L.F("Live price {0} is {1} kr./kWh (not applied because you edited the field).",
-                                     "Live-pris {0} er {1} kr./kWh (ikke brugt, fordi du har rettet feltet).",
+                    SetPowerInfo(L.F("Live price {0} is {1} kr/kWh (not applied because you edited the field).",
+                                     "Live-pris {0} er {1} kr/kWh (ikke brugt, fordi du har rettet feltet).",
                                      when, total.ToString("0.00", Num.Dk)), false);
                 }
             }
@@ -441,6 +482,7 @@ namespace PrintPrice
         // ---------- Auto-detect: link / file → Bambu Studio → time & grams ----------
         void SetAuto(string text, bool error)
         {
+            reopened = null;   // any other message replaces the "Opened from history" lines
             autoIsError = error;
             lblAuto.Text = text;
             SetAutoColor();
@@ -524,6 +566,7 @@ namespace PrintPrice
         {
             btnAnalyze.Text = busy ? L.S("Cancel", "Annullér") : AnalyzeText;
             btnLoadFile.Enabled = !busy;
+            btnHistory.Enabled = !busy;   // "Open again" would clash with a running job
             txtUrl.ReadOnly = busy;
             UseWaitCursor = false;
         }
@@ -548,6 +591,7 @@ namespace PrintPrice
             IProgress<string> progress = new Progress<string>(s => SetAuto(s, false));
             string modelName = null;
             // model picture: a picked .3mf shows its own picture at once; Printables photo / slice render follow below
+            SetJobLoaded(false);
             ResetModelPicture();
             if (localFiles != null && localFiles.Count == 1 && localFiles[0].EndsWith(".3mf", StringComparison.OrdinalIgnoreCase))
             {
@@ -586,7 +630,10 @@ namespace PrintPrice
                 if (result.Picture != null)
                 {
                     byte[] render = result.Picture;
-                    LoadModelPicture(() => render, false);   // only if no Printables photo / 3MF picture is showing
+                    // the plate render always wins: replaces the Printables photo / 3MF thumbnail; picRequest++ drops a photo
+                    // still downloading (it would land after the render). The shown picture stays if the render can't be read.
+                    picRequest++;
+                    LoadModelPicture(() => render, true);
                 }
 
                 int totalMinutes = (int)Math.Round(result.Seconds / 60.0);
@@ -607,6 +654,9 @@ namespace PrintPrice
                     ? L.S("read from the sliced file", "læst fra den slicede fil") + (multi ? " · " + colourCount : "")
                     : BambuSlicer.ShortName(process) + " · " + (multi ? colourCount : BambuSlicer.ShortName(filament));
                 int parts = chosen != null ? chosen.Count : localFiles.Count;
+                // name for the history (after the link box was filled, whose TextChanged clears it)
+                jobModel = modelName ?? (localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : string.Join(", ", localFiles.Select(Path.GetFileName)));
+                SetJobLoaded(true);
                 SetAuto("✓ " + what + ": " + summary + " (" + how +
                         (parts > 1 ? L.F(", {0} files", ", {0} filer", parts) : "") +
                         (result.Plates > parts ? L.F(", {0} plates", ", {0} plader", result.Plates) : "") + ").", false);
@@ -703,46 +753,55 @@ namespace PrintPrice
             if (r.ColourChangeHours >= 0) total.ColourChangeHours = Math.Max(0, total.ColourChangeHours) + r.ColourChangeHours;
         }
 
-        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
-        static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+        const string ExampleLink = "https://www.printables.com/model/3161-3d-benchy";
 
-        /// Placeholder text for a TextBox (.NET Framework has no PlaceholderText property).
-        static void SetCueBanner(TextBox box, string text)
-        {
-            const int EM_SETCUEBANNER = 0x1501;
-            SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);   // 1 = keep showing while focused
-        }
-
-        /// Link box that can show a red hint (the native cue banner is always grey).
+        /// Link box that paints its own placeholder while empty, centred: the grey example (Cue) or the red Hint.
+        /// (The native cue banner can't be centred or coloured.) Typed text stays left-aligned.
         sealed class HintBox : TextBox
         {
-            public string Hint;   // null = no hint
+            public string Hint;   // null = no hint (red, wins over Cue)
+            public string Cue;    // grey example text, null = none
             protected override void WndProc(ref Message m)
             {
                 base.WndProc(ref m);
-                if (m.Msg != 0x000F || Hint == null || Text.Length > 0) return;   // WM_PAINT
+                if (m.Msg == 0x0007 || m.Msg == 0x0008) { Invalidate(); return; }   // WM_SETFOCUS / WM_KILLFOCUS: redraw the placeholder
+                string text = Hint ?? Cue;
+                if (m.Msg != 0x000F || text == null || Text.Length > 0) return;   // WM_PAINT
                 using (var g = Graphics.FromHwnd(Handle))
-                    TextRenderer.DrawText(g, Hint, Font, new Rectangle(1, 0, ClientSize.Width - 2, ClientSize.Height), Theme.Error, Theme.Input,
-                        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter);   // centred; 1 px above the first version
+                    TextRenderer.DrawText(g, text, Font, new Rectangle(1, 1, ClientSize.Width - 2, ClientSize.Height - 1), Hint != null ? Theme.Error : SystemColors.GrayText,
+                        TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter);   // centred; y 1 = same baseline as typed text; no background fill, so the box's top border stays whole
+            }
+            protected override void OnTextChanged(EventArgs e)
+            {
+                base.OnTextChanged(e);
+                Invalidate();   // placeholder appears/disappears with the first/last character
             }
         }
+
+        System.Windows.Forms.Timer hintTimer;
 
         void ApplyUrlCue()
         {
             var box = (HintBox)txtUrl;
-            if (!box.IsHandleCreated) return;
-            SetCueBanner(box, box.Hint != null ? "" : L.S("e.g. ", "f.eks. ") + "https://www.printables.com/model/3161-3d-benchy");
-            box.Invalidate();
+            box.Cue = L.S("e.g. ", "f.eks. ") + ExampleLink;   // painted by HintBox, centred (grey like the native cue banner)
+            box.AccessibleDescription = box.Hint ?? box.Cue;
+            if (box.IsHandleCreated) box.Invalidate();
         }
 
         /// true = red "Paste a link or load a file first" in the empty link box; false = grey example again.
         void SetUrlHint(bool on)
         {
             var box = (HintBox)txtUrl;
+            if (hintTimer == null)
+            {
+                hintTimer = new System.Windows.Forms.Timer { Interval = 10000 };   // red hint goes away after 10 s
+                hintTimer.Tick += delegate { SetUrlHint(false); };
+            }
+            hintTimer.Stop();
+            if (on) hintTimer.Start();   // pressing the button again restarts the 10 s
             string hint = on ? L.S("Paste a link or load a file first", "Indsæt et link eller åbn en fil først") : null;
             if (box.Hint == hint) return;
             box.Hint = hint;
-            box.AccessibleDescription = hint;
             ApplyUrlCue();
         }
 
@@ -769,6 +828,14 @@ namespace PrintPrice
         {
             picRequest++;
             SetModelPicture(null);
+        }
+
+        /// A model is loaded (true) or not: decides whether the empty picture box says "No model yet" under the logo.
+        void SetJobLoaded(bool on)
+        {
+            if (jobLoaded == on) return;
+            jobLoaded = on;
+            if (picModel.Image == null) picModel.Invalidate();
         }
 
         /// Gets the picture bytes and prepares the bitmap off the UI thread; failures are ignored quietly.
@@ -837,18 +904,19 @@ namespace PrintPrice
             return maxX < 0 ? Rectangle.Empty : Rectangle.FromLTRB(minX, minY, maxX + 1, maxY + 1);
         }
 
-        /// Border, and while there is no picture: the dimmed logo with "No model yet" under it.
+        /// Border, and while there is no picture: the dimmed logo, with "No model yet" under it unless a job is loaded
+        /// (e.g. a quote reopened from a Printables link has no picture, but it isn't "no model").
         void PaintModelPicture(Graphics g)
         {
             var r = picModel.ClientRectangle;
             if (picModel.Image == null)
             {
-                string text = L.S("No model yet", "Ingen model");
+                string text = jobLoaded ? "" : L.S("No model yet", "Ingen model");
                 var font = pictureFont;
                 var flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix;
                 int pad = picModel.Padding.Left;
-                Size ts = TextRenderer.MeasureText(g, text, font, new Size(r.Width - 2 * pad, 0), flags);
-                int gap = pad, topMin = pad * 3 / 2;   // at least 6 px (at 96 dpi) above the logo, 4 px under the text
+                Size ts = text.Length == 0 ? Size.Empty : TextRenderer.MeasureText(g, text, font, new Size(r.Width - 2 * pad, 0), flags);
+                int gap = text.Length == 0 ? 0 : pad, topMin = pad * 3 / 2;   // at least 6 px (at 96 dpi) above the logo, 4 px under the text
                 int logoSize = Math.Min(r.Width - 4 * pad, r.Height - topMin - pad - gap - ts.Height);
                 var logo = Logo;
                 if (logo == null) logoSize = 0;
@@ -919,7 +987,7 @@ namespace PrintPrice
         static extern uint SizeofResource(IntPtr module, IntPtr res);
 
         // ---------- Multi-colour rows (Cost breakdown) ----------
-        /// Grid of MaxColourRows rows: swatch, type, grams, ×, kr./kg box, unit, cost (right, lined up with the other amounts).
+        /// Grid of MaxColourRows rows: swatch, type, grams, ×, kr/kg box, unit, cost (right, lined up with the other amounts).
         /// Spans both breakdown columns; its height is set by SetColours (rows × box row height).
         TableLayoutPanel BuildColourGrid()
         {
@@ -936,8 +1004,16 @@ namespace PrintPrice
                 // grayscale text: ClearType made the small × look orange
                 var times = new Theme.PlainLabel { Text = "×", AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 8, 0) };
                 var box = new TextBox { Width = 50, TextAlign = HorizontalAlignment.Right, Margin = Padding.Empty };   // rows = box height (25 px at 100 %)
-                var unit = Unit("kr./kg");
+                // kr/kg on the row's text line without making the row taller: the label (23 px of GDI+ text) is stretched
+                // to the row (= box height, it adds only 10 px itself) and its text starts 4 px down (3 px lower than centred)
+                var unit = Unit("kr/kg");
+                unit.AutoSize = false;
+                using (var probe = new Theme.PlainLabel { AutoSize = true, Font = Font, Text = unit.Text })   // the font it gets from the form
+                    unit.Size = new Size(probe.PreferredWidth, 10);
+                unit.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Bottom;
                 unit.Margin = new Padding(2, 0, 10, 0);
+                unit.Padding = new Padding(0, 4, 0, 0);
+                unit.TextAlign = ContentAlignment.TopLeft;
                 rowPrice[i] = box;
                 rowCost[i] = BreakLabel();
                 box.TextChanged += delegate { Recalculate(); };
@@ -949,13 +1025,14 @@ namespace PrintPrice
         }
 
         /// Switches between today's single-filament layout (r null or 1 filament) and one row per colour (2+).
-        /// Each colour's kr./kg starts at the main filament price; with more than MaxColourRows colours the last
-        /// row holds all the rest ("+N more", one shared kr./kg box).
+        /// Each colour's kr/kg starts at the main filament price; with more than MaxColourRows colours the last
+        /// row holds all the rest ("+N more", one shared kr/kg box).
         void SetColours(SliceResult r)
         {
             var list = r == null ? null : r.Filaments.Where(f => f != null && f.Grams > 0).OrderBy(f => f.Slot).ToList();
             bool multi = list != null && list.Count >= 2;
             filaments = multi ? list : null;
+            jobPurge = multi ? r.PurgeGrams : -1;
             fillingColours = true;
             SuspendLayout();
             int rows = 0;
@@ -1163,7 +1240,7 @@ namespace PrintPrice
             double grams, filPrice, elPrice;
             var s1 = Num.Read(txtGrams, out grams);
             var s2 = Num.Read(txtFilamentPrice, out filPrice);
-            // 2+ colours: one line per colour with its own kr./kg; these boxes replace the hidden filament price box
+            // 2+ colours: one line per colour with its own kr/kg; these boxes replace the hidden filament price box
             List<FilamentLine> lines = null;
             if (filaments != null)
             {
@@ -1201,7 +1278,9 @@ namespace PrintPrice
                 lblMaterial.Text = lblPower.Text = lblFailed.Text = lblBase.Text = "–";
                 foreach (var c in rowCost) c.Text = "–";
                 lblFriends.Text = lblOthers.Text = "–";
-                btnCopy.Enabled = false;
+                btnCopy.Enabled = btnSave.Enabled = false;
+                lastInput = null;
+                UpdateReopenedLine();
                 return;
             }
 
@@ -1211,9 +1290,10 @@ namespace PrintPrice
                 FilamentDkkPerKg = filPrice, ElectricityDkkPerKwh = elPrice, Filaments = lines
             };
             last = Pricing.Calculate(input, settings);
+            lastInput = input;
             lastHours = hours; lastMinutes = minutes;
 
-            SetStatus("", false);
+            if (!statusIsSuccess) SetStatus("", false);   // a green "✓ Saved…" stays until its timer clears it
             lblMaterial.Text = Num.Kr(last.MaterialCost);
             if (lines != null && last.FilamentCosts != null)
                 for (int i = 0; i < colourRows; i++)
@@ -1223,13 +1303,14 @@ namespace PrintPrice
             lblBase.Text = Num.Kr(last.BaseCost);
             lblFriends.Text = Num.Kr(last.FriendsPrice);
             lblOthers.Text = Num.Kr(last.OthersPrice);
-            btnCopy.Enabled = true;
+            btnCopy.Enabled = btnSave.Enabled = true;
+            UpdateReopenedLine();
         }
 
         void RefreshSettingsLabels()
         {
             lblPrinter.Text = "Bambu Lab A1 · " + Num.Fmt(settings.PrinterWatts) + L.S(" W  (change in Settings)", " W  (ret i Indstillinger)");
-            string wear = settings.MachineRatePerHour > 0 ? L.F(", {0} kr./h wear", ", {0} kr./t slid", Num.Fmt(settings.MachineRatePerHour)) : "";
+            string wear = settings.MachineRatePerHour > 0 ? L.F(", {0} kr/h wear", ", {0} kr/t slid", Num.Fmt(settings.MachineRatePerHour)) : "";
             lblFriendsInfo.Text = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.FriendsMarkupPct)) + wear;
             string o = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.OthersMarkupPct)) + wear;
             if (settings.MinimumPrice > 0) o += L.F(", min {0} kr.", ", min. {0} kr.", Num.Fmt(settings.MinimumPrice));
@@ -1272,7 +1353,7 @@ namespace PrintPrice
                     settings = dlg.Result;
                     if (old.AutoUpdateCheck == 0 && settings.AutoUpdateCheck != 0 && pendingUpdate == null)
                         BeginInvoke((MethodInvoker)StartupUpdateCheck);   // switched back on: check now
-                    SyncUpdateTimer();   // the 5-minute check follows the setting
+                    SyncUpdateTimer();   // the 10-minute check follows the setting
                     bool powerChanged = old.PriceArea != settings.PriceArea || old.PowerAddOn != settings.PowerAddOn ||
                                         old.PowerIncludeVat != settings.PowerIncludeVat ||
                                         (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
@@ -1285,7 +1366,7 @@ namespace PrintPrice
                     {
                         // new language: settings are already saved above; Restart closes this window (saves again) and starts anew
                         if (cts != null) cts.Cancel();
-                        BeginInvoke((MethodInvoker)Application.Restart);
+                        BeginInvoke((MethodInvoker)Program.Restart);   // same arguments (test mode stays in its folder)
                     }
                 }
             }
@@ -1296,7 +1377,7 @@ namespace PrintPrice
         /// quietly looks for a new release. A newer version shows the red update button under the Friends & family box.
         async void StartupUpdateCheck()
         {
-            if (offline) return;
+            if (offline || AppSettings.TestMode) return;
             bool check = settings.AutoUpdateCheck != 0;
             UpdateInfo found = null;
             try
@@ -1312,19 +1393,19 @@ namespace PrintPrice
             ShowUpdateButton(found);
         }
 
-        /// The 5-minute timer runs only while "Check for a new version at startup" is on.
+        /// The 10-minute timer runs only while "Check for a new version at startup" is on.
         void SyncUpdateTimer()
         {
             if (updateTimer == null) return;
             updateTimer.Enabled = settings.AutoUpdateCheck != 0;
         }
 
-        /// Every 5 minutes while running: a quiet check (ETag cache, never throws). Skipped while the setting is off,
+        /// Every 10 minutes while running: a quiet check (ETag cache, never throws). Skipped while the setting is off,
         /// the update dialog is open (download/install), a slice job runs, the last check is still busy, or GitHub
         /// asked us to back off. Only ever shows (or raises) the red button, never hides it.
         async void PeriodicUpdateCheck()
         {
-            if (offline || IsDisposed || settings.AutoUpdateCheck == 0 || updateDialogOpen || cts != null || checkingUpdate) return;
+            if (offline || AppSettings.TestMode || IsDisposed || settings.AutoUpdateCheck == 0 || updateDialogOpen || cts != null || checkingUpdate) return;
             if (DateTime.UtcNow < Updater.NextAllowedUtc) return;
             checkingUpdate = true;
             UpdateInfo found = null;
@@ -1378,17 +1459,165 @@ namespace PrintPrice
             try
             {
                 Clipboard.SetText(text);
-                string msg = L.S("Quote copied to clipboard.", "Tilbuddet er kopieret til udklipsholderen.");
-                SetStatus(msg, true);
-                var t = new System.Windows.Forms.Timer { Interval = 2500 };
-                t.Tick += delegate { t.Stop(); t.Dispose(); if (lblStatus.Text == msg) SetStatus("", false); };
-                t.Start();
             }
-            catch (Exception ex) { MessageBox.Show(this, ex.Message, L.S("Clipboard", "Udklipsholder")); }
+            catch (Exception ex)
+            {
+                // hidden test start: no message box (it would pop up on screen), red status line instead
+                if (Program.Hidden) SetStatus(L.S("Clipboard: ", "Udklipsholder: ") + ex.Message, false);
+                else MessageBox.Show(this, ex.Message, L.S("Clipboard", "Udklipsholder"));
+                return;
+            }
+            // a copied quote is one that was sent: it goes into the price history too
+            string err = SaveToHistory();
+            if (err == null) FlashStatus(L.S("✓ Quote copied to clipboard and saved to history.", "✓ Tilbuddet er kopieret og gemt i historikken."));
+            else SetStatus(L.S("Quote copied to clipboard. ", "Tilbuddet er kopieret. ") + err, false);
+        }
+
+        // ---------- price history ----------
+        /// Green ✓ text in the status line that clears itself after 4 seconds.
+        void FlashStatus(string msg)
+        {
+            SetStatus(msg, true);
+            if (statusTimer == null)
+            {
+                statusTimer = new System.Windows.Forms.Timer { Interval = 4000 };
+                statusTimer.Tick += delegate
+                {
+                    statusTimer.Stop();
+                    if (statusIsSuccess) SetStatus("", false);
+                };
+            }
+            statusTimer.Stop();
+            statusTimer.Start();
+        }
+
+        void SaveClicked()
+        {
+            string err = SaveToHistory();
+            if (err == null) FlashStatus(L.S("✓ Saved to history.", "✓ Gemt i historikken."));
+            else SetStatus(err, false);
+        }
+
+        /// Loads history.json the first time it is needed (picture mode: an empty list in memory, never the file).
+        void EnsureHistory()
+        {
+            if (history != null) return;
+            if (offline) { history = new List<QuoteRecord>(); return; }
+            history = History.Load(out historyProblem);
+        }
+
+        /// Adds the quote on screen to the history and writes the file. null = OK, else the error text.
+        /// The same quote again within 10 minutes replaces the last entry (History.Add).
+        string SaveToHistory()
+        {
+            if (last == null || lastInput == null) return L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu.");
+            EnsureHistory();
+            var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", txtUrl.Text, DateTime.Now);
+            if (r.Filaments != null && filaments != null && r.Filaments.Count == filaments.Count)
+            {
+                // colour, type and profile, so "Open again" can rebuild the colour rows without slicing
+                for (int k = 0; k < filaments.Count; k++)
+                {
+                    r.Filaments[k].Colour = filaments[k].Colour ?? "";
+                    r.Filaments[k].Type = filaments[k].Type ?? "";
+                    r.Filaments[k].Name = filaments[k].Profile ?? "";
+                }
+                r.PurgeGrams = jobPurge;
+            }
+            if (reopened != null) r.For = reopened.For;   // opened again and re-saved: same person as before
+            History.Add(history, r);
+            if (offline) return null;   // picture mode never writes
+            return History.Save(history);
+        }
+
+        void OpenHistory()
+        {
+            if (cts != null) return;
+            EnsureHistory();
+            string problem = historyProblem;
+            historyProblem = null;   // shown once
+            using (var dlg = new HistoryForm(history, problem, offline))
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Selected != null) Reopen(dlg.Selected);
+            }
+        }
+
+        /// "Open again": puts a saved quote's inputs back (time, grams, colour rows with their kr/kg, filament and
+        /// electricity price, link/file, model name; no slicing) and recalculates with today's settings.
+        /// The model info box shows where it came from and the saved price next to today's.
+        internal void Reopen(QuoteRecord r)
+        {
+            if (r == null || cts != null) return;
+            reopened = null;   // no half-updated lines of an earlier one while the boxes fill
+            SetUrlHint(false);
+            txtUrl.Text = r.Source ?? "";
+            jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)
+            ResetModelPicture();
+            SetJobLoaded(true);   // no picture (Printables link, missing file) = logo without "No model yet"
+            string src = (r.Source ?? "").Trim().Trim('"');
+            if (!offline && src.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase) && File.Exists(src))
+                LoadModelPicture(() => BambuSlicer.FromProject(src), true);   // a local project still has its own picture
+
+            txtFilamentPrice.Text = Num.Fmt(r.FilamentDkkPerKg);
+            SliceResult slice = null;
+            if (r.Filaments != null && r.Filaments.Count >= 2)
+            {
+                slice = new SliceResult { PurgeGrams = r.PurgeGrams, ColourChangeHours = -1 };
+                for (int k = 0; k < r.Filaments.Count; k++)
+                {
+                    var f = r.Filaments[k];
+                    slice.Filaments.Add(new FilamentUse { Slot = k + 1, Colour = f.Colour ?? "", Type = f.Type ?? "", Profile = f.Name ?? "",
+                                                          Grams = f.Grams, ModelGrams = -1 });
+                }
+            }
+            SetColours(slice);
+            if (filaments != null)
+            {
+                fillingColours = true;
+                for (int i = 0; i < colourRows; i++)   // "+N more" row: one shared box, the first of its colours' price
+                    rowPrice[i].Text = Num.Fmt(r.Filaments[filaments[rowItems[i][0]].Slot - 1].PricePerKg);
+                fillingColours = false;
+            }
+            txtGrams.Text = Num.Fmt(r.Grams);
+            txtHours.Text = r.Hours.ToString();
+            txtMinutes.Text = r.Minutes.ToString();
+            txtElecPrice.Text = r.ElectricityDkkPerKwh.ToString("0.00##", Num.Dk);
+            SetPowerInfo(L.F("Electricity price {0} kr/kWh from the saved quote. Click Update for today's.",
+                             "Elpris {0} kr/kWh fra det gemte tilbud. Klik Opdatér for dagens.",
+                             r.ElectricityDkkPerKwh.ToString("0.00", Num.Dk)), false);
+            autoIsError = false;
+            SetAutoColor();
+            Recalculate();
+            reopened = r;   // after Recalculate/SetAuto, which clear it
+            UpdateReopenedLine();
+        }
+
+        /// "↻ Opened from history: …, saved …" + muted "Saved price a / b kr. — now c / d kr. (today's settings)".
+        /// Follows every recalculation (typing, new settings) while the quote is open.
+        void UpdateReopenedLine()
+        {
+            if (reopened == null) return;
+            var r = reopened;
+            DateTime t;
+            string when = History.TryTime(r.SavedAt, out t) ? t.ToString("dd-MM-yyyy HH:mm", Num.Dk) : r.SavedAt;
+            string name = !string.IsNullOrEmpty(r.Model) ? "\"" + r.Model + "\""
+                        : (r.Source ?? "").Length > 0 ? Path.GetFileName((r.Source ?? "").Trim().Trim('"')) : L.S("a quote", "et tilbud");
+            string main = L.F("↻ Opened from history: {0}, saved {1}.", "↻ Åbnet fra historikken: {0}, gemt {1}.", name, when);
+            Func<double, string> n = v => v.ToString("0.00", Num.Dk);
+            string now = last != null ? n(last.FriendsPrice) + " / " + n(last.OthersPrice) + " kr." : "–";
+            string muted = L.F("Saved price {0} / {1} kr. — now {2} (today's settings)", "Gemt pris {0} / {1} kr. — nu {2} (dagens indstillinger)",
+                               n(r.FriendsPrice), n(r.OthersPrice), now);
+            if (lblAuto.Text != main || lblAuto.MutedLine != muted)
+            {
+                lblAuto.SetText(main, muted);
+                SetAutoColor();
+            }
         }
 
         void ClearJob()
         {
+            reopened = null;
+            if (lblAuto.MutedLine.Length > 0) ShowAutoIdle();   // the "Opened from history" lines go with the job
             txtUrl.Text = "";
             SetUrlHint(false);
             SetColours(null);   // back to the single-filament layout
@@ -1396,6 +1625,7 @@ namespace PrintPrice
             txtHours.Text = "0";
             txtMinutes.Text = "0";
             ResetModelPicture();   // back to the logo
+            SetJobLoaded(false);   // with "No model yet" again
             txtUrl.Focus();
         }
     }

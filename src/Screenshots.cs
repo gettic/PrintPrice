@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_multi.png, ...; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_multi.png, main_reopened.png, history.png, ...; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -40,6 +40,19 @@ namespace PrintPrice
                     main.SetSampleMultiJob();
                     main.SetSamplePicture(Path.Combine(folder, "model2.png"));
                     Snap(main, folder, "main_multi.png");
+                    // price history: made-up quotes in memory (history.json is never read or written here)
+                    var quotes = HistoryForm.SampleQuotes();
+                    main.SetSampleJob();
+                    main.Reopen(quotes[0]);   // "↻ Opened from history" + saved price next to today's
+                    main.SetSamplePicture(sample);
+                    Snap(main, folder, "main_reopened.png");
+                    using (var hist = new HistoryForm(quotes, null, true))
+                    {
+                        Place(hist);
+                        hist.Show();
+                        Snap(hist, folder, "history.png");
+                        hist.Hide();
+                    }
                     main.SetSampleJob();   // back to the single-colour example for the update picture
                     main.SetSamplePicture(sample);
                     main.ShowUpdateButton(fake);
@@ -95,7 +108,7 @@ namespace PrintPrice
         }
 
         /// Left of every monitor, so nothing ever appears on screen, and not in the taskbar.
-        static void Place(Form f)
+        internal static void Place(Form f)
         {
             f.StartPosition = FormStartPosition.Manual;
             f.ShowInTaskbar = false;

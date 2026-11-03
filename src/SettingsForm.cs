@@ -6,7 +6,7 @@ using System.Windows.Forms;
 
 namespace PrintPrice
 {
-    public class SettingsForm : Form
+    public class SettingsForm : CaptionForm
     {
         public AppSettings Result;
         readonly AppSettings source;
@@ -40,6 +40,7 @@ namespace PrintPrice
             MaximizeBox = MinimizeBox = false;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
+            if (Program.Hidden) Screenshots.Place(this);   // CenterParent would clamp an off-screen dialog back onto the screen
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
@@ -63,7 +64,7 @@ namespace PrintPrice
             txtOthers = Row(t, L.S("Customer markup", "Avance, kunder"), "%", null);
 
             Section(t, L.S("Wear && tear – both prices", "Slid – begge priser"));
-            txtRate = Row(t, L.S("Machine-time rate", "Maskintimepris"), L.S("kr./h", "kr./t"), null);
+            txtRate = Row(t, L.S("Machine-time rate", "Maskintimepris"), L.S("kr/h", "kr/t"), null);
             chkAutoWear = Check(t, L.S("Calculate from nozzle, filament && plate", "Beregn ud fra dyse, filament og plade"));
             lblWear = Hint(t, "");
 
@@ -102,7 +103,7 @@ namespace PrintPrice
             cmbArea.Items.Add(L.S("DK2 – East Denmark", "DK2 – Østdanmark"));
             Hint(t2, L.S("DK1 = Jutland & Funen. DK2 = Zealand, Copenhagen, Lolland-Falster & Bornholm.",
                          "DK1 = Jylland og Fyn. DK2 = Sjælland, København, Lolland-Falster og Bornholm."));
-            txtAddOn = Row(t2, L.S("Tariffs, taxes && fees", "Tariffer, afgifter og gebyrer"), "kr./kWh", L.S(
+            txtAddOn = Row(t2, L.S("Tariffs, taxes && fees", "Tariffer, afgifter og gebyrer"), "kr/kWh", L.S(
                 "Added to the spot price (excl. VAT): your grid company's tariff, Energinet (~0,12), " +
                 "elafgift (0,008 in 2026) and your supplier's fee. Check your electricity bill.",
                 "Lægges oven i spotprisen (ekskl. moms): dit netselskabs tarif, Energinet (~0,12), " +
@@ -148,7 +149,10 @@ namespace PrintPrice
             lblCheck = new Theme.PlainLabel { AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(3, 0, 0, 0) };
             buttons.Controls.Add(lnkCheck);
             buttons.Controls.Add(lblCheck);
-            SetCheckText("v" + Updater.CurrentText + " –", L.S("check now", "tjek nu"), null);
+            if (AppSettings.TestMode)   // test mode never looks for updates: muted text, no link
+                SetCheckText("v" + Updater.CurrentText + L.S(" – check off in test mode", " – tjek slået fra i testtilstand"), null, null);
+            else
+                SetCheckText("v" + Updater.CurrentText + " –", L.S("check now", "tjek nu"), null);
             outer.Controls.Add(bottom, 0, 1);
             outer.SetColumnSpan(bottom, 3);
 
@@ -164,6 +168,8 @@ namespace PrintPrice
             divider.BackColor = Theme.InfoAccent;   // after Apply, which paints panels in the background colour
             ResumeLayout(true);
             Fill(current);
+            if (current.AutoUpdateCheck != 0 && !AppSettings.TestMode && !Screenshots.Active)
+                Shown += delegate { QuietCheckOnOpen(); };   // auto update on: look when Settings opens
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -172,7 +178,7 @@ namespace PrintPrice
             Theme.TitleBar(this);
         }
 
-        protected override bool ShowWithoutActivation { get { return Screenshots.Active; } }
+        protected override bool ShowWithoutActivation { get { return Screenshots.Active || Program.Hidden; } }
 
         // ---------- layout helpers ----------
         static Label Caption(string text)
@@ -263,8 +269,8 @@ namespace PrintPrice
             string size = SelectedNozzle.Size;
             bool was = filling;
             filling = true;
-            SetItems(cmbProcess, BambuSlicer.ListProcesses(exe, size), process, "Standard");
-            SetItems(cmbFilament, BambuSlicer.ListFilaments(exe, size), filament, "Bambu PLA Basic");
+            SetItems(cmbProcess, BambuSlicer.ListProcesses(exe, size), process, "Optimal");
+            SetItems(cmbFilament, BambuSlicer.ListFilaments(exe, size), filament, "Bambu PLA Matte");
             filling = was;
         }
 
@@ -361,8 +367,11 @@ namespace PrintPrice
             if (!ok)
             {
                 RestartRequested = false;
-                MessageBox.Show(this, L.S("Please enter valid, non-negative numbers in the highlighted fields.",
-                                          "Indtast gyldige tal, ikke negative, i de markerede felter."), Text);
+                string msg = L.S("Please enter valid, non-negative numbers in the highlighted fields.",
+                                 "Indtast gyldige tal, ikke negative, i de markerede felter.");
+                // hidden test start: no message box (it would pop up on screen), red text in the bottom row instead
+                if (Program.Hidden) SetCheckText(msg, null, Theme.Error);
+                else MessageBox.Show(this, msg, Text);
                 return;
             }
             Result = source.Clone();
@@ -406,9 +415,31 @@ namespace PrintPrice
             return L.F("v{0} is out – see main window", "v{0} er ude – se hovedvinduet", Updater.Short(found.Version));
         }
 
+        /// Runs once when Settings opens (auto update on): quiet check, ETag-cached. Failure = line stays as it is.
+        async void QuietCheckOnOpen()
+        {
+            if (UpdateFound == null) return;   // offline: no checks
+            string before = lblCheck.Text;
+            UpdateInfo found = null;
+            bool ok = false;
+            // LastQuietOk is read in the same task, right after CheckQuiet (the main window's timer may check too)
+            try { await Task.Run(() => { found = Updater.CheckQuiet(); ok = Updater.LastQuietOk; }); }
+            catch { return; }
+            if (IsDisposed || lblCheck.Text != before) return;   // closed, or "check now" was clicked meanwhile
+            if (found == null)
+            {
+                if (!ok) return;   // check failed: the line stays as it is
+
+                SetCheckText(L.F("✓ v{0} is the newest", "✓ v{0} er den nyeste", Updater.CurrentText), null, null);
+                return;
+            }
+            SetCheckText(FoundText(found), null, Theme.Text);
+            UpdateFound(found);
+        }
+
         async void CheckNow()
         {
-            if (Screenshots.Active) return;
+            if (Screenshots.Active || AppSettings.TestMode) return;
             SetCheckText(L.S("Checking for a new version…", "Søger efter ny version…"), null, null);
             UpdateInfo found;
             try { found = await Task.Run(() => Updater.CheckForUpdate()); }

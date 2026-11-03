@@ -8,7 +8,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Lets the user tick which of a model's files to slice.
-    public class FilePickerForm : Form
+    public class FilePickerForm : CaptionForm
     {
         readonly CheckedListBox list;
         readonly List<RemoteFile> files;
@@ -27,6 +27,7 @@ namespace PrintPrice
             MaximizeBox = MinimizeBox = false;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.CenterParent;
+            if (Program.Hidden) Screenshots.Place(this);   // CenterParent would clamp an off-screen dialog back onto the screen
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
 
@@ -82,6 +83,8 @@ namespace PrintPrice
             base.OnHandleCreated(e);
             Theme.TitleBar(this);
         }
+
+        protected override bool ShowWithoutActivation { get { return Program.Hidden; } }
 
         /// Prefer all STL files; if none, all 3MF files; otherwise everything.
         static HashSet<RemoteFile> DefaultSelection(List<RemoteFile> files)

@@ -129,10 +129,16 @@ namespace PrintPrice
             get { lock (CacheLock) return _nextAllowedUtc; }
         }
 
+        static string TestModeMessage()
+        {
+            return L.S("Updates are off in test mode.", "Opdateringer er slået fra i testtilstand.");
+        }
+
         /// Returns the latest release if it is newer than this program, otherwise null.
         /// Throws UpdateException if GitHub can't be reached or the rate limit is hit.
         public static UpdateInfo CheckForUpdate()
         {
+            if (AppSettings.TestMode) return null;
             bool limited;
             var r = Fetch(out limited);
             if (limited) throw new UpdateException(L.S("GitHub is limiting requests right now. Try again in a little while.",
@@ -145,18 +151,27 @@ namespace PrintPrice
         /// Does nothing (returns the cached result) while NextAllowedUtc is in the future. Call off the UI thread.
         public static UpdateInfo CheckQuiet()
         {
+            _lastQuietOk = false;
+            if (AppSettings.TestMode) return null;
             try
             {
                 lock (CacheLock)
                     if (DateTime.UtcNow < _nextAllowedUtc) return _hasCache ? _cached : null;
                 bool limited;
-                return Fetch(out limited);
+                var r = Fetch(out limited);
+                _lastQuietOk = !limited;
+                return r;
             }
             catch (Exception)
             {
                 lock (CacheLock) return _hasCache ? _cached : null;
             }
         }
+
+        static volatile bool _lastQuietOk;
+        /// True when the last CheckQuiet got a real answer from GitHub (200, 304, or 404 = no releases), so a null
+        /// result truly means "nothing newer". False on failure, rate limit, backoff wait or test mode.
+        public static bool LastQuietOk { get { return _lastQuietOk; } }
 
         static UpdateInfo Fetch(out bool rateLimited)
         {
@@ -299,6 +314,7 @@ namespace PrintPrice
         /// Downloads the new exe next to the running one and verifies it. Returns the downloaded file's path.
         public static string Download(UpdateInfo u, IProgress<int> progress, CancellationToken ct)
         {
+            if (AppSettings.TestMode) throw new UpdateException(TestModeMessage());
             if (!IsTrustedUrl(u.DownloadUrl)) throw new UpdateException(L.F("The download link doesn't point to the {0} releases on GitHub.",
                 "Download-linket peger ikke på udgivelserne af {0} på GitHub.", Repo));
             if (u.Sha256 == null) throw new UpdateException(L.S("GitHub didn't provide a checksum for this release, so it can't be verified.",
@@ -346,6 +362,7 @@ namespace PrintPrice
         /// and starts the new version. The caller should exit right after.
         public static void InstallAndRestart(string downloaded)
         {
+            if (AppSettings.TestMode) throw new UpdateException(TestModeMessage());
             string exe = System.Windows.Forms.Application.ExecutablePath;
             string old = exe + ".old";
             TryDelete(old);

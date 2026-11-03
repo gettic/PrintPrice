@@ -29,8 +29,8 @@ namespace PrintPrice
         // Auto-detect (Bambu Studio)
         public string SlicerPath = "";          // empty = auto-detect
         public string Nozzle = "0.4 stainless";         // key in Wear.Nozzles
-        public string ProcessPreset = "0.20mm Standard"; // short names; "@BBL A1 …" is added per nozzle
-        public string FilamentPreset = "Bambu PLA Basic";
+        public string ProcessPreset = "0.16mm Optimal"; // short names; "@BBL A1 …" is added per nozzle
+        public string FilamentPreset = "Bambu PLA Matte";
         public string BedType = "High Temp Plate";      // = Smooth PEI plate (Bambu's internal name)
 
         public string Language = "";            // "" = auto (Danish if Windows is Danish), "en", "da"
@@ -45,14 +45,59 @@ namespace PrintPrice
             return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "da";
         }
 
+        // ---------- test mode: PrintPrice.exe --settings "<folder>" ----------
+        // Once a test folder is set, FilePath only ever points into it (never falls back to %APPDATA%).
+        static string testFolder;
+
+        public static bool TestMode { get { return testFolder != null; } }
+
+        /// The user's own settings folder: %APPDATA%\PrintPrice
+        public static string RealFolder
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PrintPrice"); }
+        }
+
+        /// The folder settings.ini (and history.json) live in: the test folder in test mode, else RealFolder.
+        public static string Folder
+        {
+            get { return TestMode ? testFolder : RealFolder; }
+        }
+
         public static string FilePath
         {
-            get
+            get { return Path.Combine(Folder, "settings.ini"); }
+        }
+
+        /// Switches to a separate settings folder (test mode). Refuses (returns false, nothing changes) an empty or
+        /// relative path, or the real %APPDATA%\PrintPrice folder. Doesn't create the folder.
+        public static bool UseFolder(string folder)
+        {
+            string full = FullFolder(folder);
+            if (full == null) return false;
+            string real = FullFolder(RealFolder);
+            if (real != null && string.Equals(full, real, StringComparison.OrdinalIgnoreCase)) return false;
+            testFolder = full;
+            return true;
+        }
+
+        /// Tests only: back to the real settings file.
+        internal static void ClearTestFolder() { testFolder = null; }
+
+        // full path without trailing separators, or null if empty / relative / invalid
+        static string FullFolder(string folder)
+        {
+            if (string.IsNullOrEmpty(folder)) return null;
+            folder = folder.Trim();
+            bool drive = folder.Length >= 3 && char.IsLetter(folder[0]) && folder[1] == ':' && (folder[2] == '\\' || folder[2] == '/');
+            bool unc = folder.StartsWith(@"\\");
+            if (!drive && !unc) return null;
+            try
             {
-                return Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    "PrintPrice", "settings.ini");
+                string full = Path.GetFullPath(folder).TrimEnd('\\', '/');
+                if (full.Length == 2 && full[1] == ':') full += "\\";   // keep "C:\" a root
+                return full;
             }
+            catch { return null; }
         }
 
         Dictionary<string, double> Numbers()
@@ -163,6 +208,49 @@ namespace PrintPrice
         public AppSettings Clone()
         {
             return (AppSettings)MemberwiseClone();
+        }
+    }
+
+    /// Command-line options for a normal start (picture mode "--screenshots" is handled before this in Program).
+    /// --settings "<folder>"  separate settings folder (test mode)
+    /// --hidden               off-screen, no taskbar button (needs --settings)
+    /// --minimized            starts minimized (needs --settings; not together with --hidden)
+    /// Any other argument starting with "--" is an error, so a typo never silently runs on the real settings.
+    public class StartOptions
+    {
+        public string SettingsFolder;   // null = normal start on the real settings
+        public bool Hidden;
+        public bool Minimized;
+        public string Error;            // null = OK
+
+        public static StartOptions Parse(string[] args)
+        {
+            var o = new StartOptions();
+            if (args == null) return o;
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i] ?? "";
+                if (a == "--settings")
+                {
+                    if (o.SettingsFolder != null) return Fail(o, "--settings given twice");
+                    if (i + 1 >= args.Length || string.IsNullOrEmpty(args[i + 1]) || args[i + 1].StartsWith("--"))
+                        return Fail(o, "--settings needs a folder");
+                    o.SettingsFolder = args[++i];
+                }
+                else if (a == "--hidden") o.Hidden = true;
+                else if (a == "--minimized") o.Minimized = true;
+                else if (a.StartsWith("--")) return Fail(o, "unknown option " + a);
+                // plain arguments (e.g. a file dropped on the exe) are ignored, as before
+            }
+            if ((o.Hidden || o.Minimized) && o.SettingsFolder == null) return Fail(o, "--hidden / --minimized need --settings");
+            if (o.Hidden && o.Minimized) return Fail(o, "use --hidden or --minimized, not both");
+            return o;
+        }
+
+        static StartOptions Fail(StartOptions o, string error)
+        {
+            o.Error = error;
+            return o;
         }
     }
 }

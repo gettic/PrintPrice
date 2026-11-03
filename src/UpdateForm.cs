@@ -13,7 +13,7 @@ namespace PrintPrice
 {
     /// "A new version is available" dialog: shows the release notes, downloads, verifies and installs the update.
     /// DialogResult.OK means the new version has been started and the program should exit now.
-    public class UpdateForm : Form
+    public class UpdateForm : CaptionForm
     {
         readonly UpdateInfo update;
         readonly Action beforeRestart;
