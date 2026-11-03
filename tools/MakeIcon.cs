@@ -30,18 +30,49 @@ static class MakeIcon
         return p;
     }
 
+    static void Prep(Graphics g)
+    {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        g.Clear(Color.Transparent);
+    }
+
     static Bitmap Draw(int size)
     {
+        float S = size / 256f;                     // design on a 256 grid
+        // centre the group (head + cube + coins) in the tile from its measured pixel bounds:
+        // draw it alone on a bigger canvas, find the visible pixels, shift by the difference
+        float dx, dy;
+        using (var probe = new Bitmap(size * 2, size * 2, PixelFormat.Format32bppArgb))
+        {
+            using (var pg = Graphics.FromImage(probe))
+            {
+                Prep(pg);
+                pg.TranslateTransform(size / 2f, size / 2f);
+                DrawGroup(pg, size);
+            }
+            int x0 = int.MaxValue, y0 = int.MaxValue, x1 = -1, y1 = -1;
+            var data = probe.LockBits(new Rectangle(0, 0, probe.Width, probe.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            var px = new int[probe.Width * probe.Height];
+            System.Runtime.InteropServices.Marshal.Copy(data.Scan0, px, 0, px.Length);
+            probe.UnlockBits(data);
+            for (int y = 0; y < probe.Height; y++)
+                for (int x = 0; x < probe.Width; x++)
+                    if (((px[y * probe.Width + x] >> 24) & 0xFF) > 24)
+                    {
+                        if (x < x0) x0 = x; if (x > x1) x1 = x;
+                        if (y < y0) y0 = y; if (y > y1) y1 = y;
+                    }
+            dx = size - (x0 + x1 + 1) / 2f;       // canvas centre (size) minus group centre
+            dy = size - (y0 + y1 + 1) / 2f;
+            if (size <= 32) { dx = (float)Math.Round(dx); dy = (float)Math.Round(dy); }   // whole pixels stay crisp
+        }
+
         var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(bmp))
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            g.Clear(Color.Transparent);
-            float S = size / 256f;                 // design on a 256 grid
-            bool small = size <= 32;
-
+            Prep(g);
             // --- background tile ---
             var tile = new RectangleF(8 * S, 8 * S, 240 * S, 240 * S);
             using (var path = RoundRect(tile, 44 * S))
@@ -51,9 +82,18 @@ static class MakeIcon
                 using (var pen = new Pen(Color.FromArgb(90, 90, 96), Math.Max(1f, 3 * S)))
                     g.DrawPath(pen, path);
             }
+            g.TranslateTransform(dx, dy);
+            DrawGroup(g, size);
+        }
+        return bmp;
+    }
 
-            // centre the group (head + cube + coin) in the tile, offsets from its measured bounding box
-            g.TranslateTransform((small ? 0f : -11.75f) * S, (small ? -15.25f : -16.25f) * S);
+    /// Cube, print head and coin stack, in 256-grid design coordinates scaled to size.
+    static void DrawGroup(Graphics g, int size)
+    {
+        {
+            float S = size / 256f;
+            bool small = size <= 32;
             // --- isometric cube (the print) ---
             float cx = (small ? 128 : 116) * S, top = (small ? 92 : 96) * S, w = (small ? 88 : 74) * S, h = w * 0.58f, depth = (small ? 60 : 54) * S;
             var T = new PointF(cx, top);                       // back corner of top face
@@ -91,17 +131,18 @@ static class MakeIcon
             }
 
             // --- print head sitting on the cube: fan housing, heater block, short brass nozzle ---
-            // built upwards from the nozzle tip, which touches the centre of the top face
+            // built upwards from the nozzle tip, which sits on the middle of the back-right edge of the top face
             float k = small ? 1.25f : 1f;                      // chunkier at tiny sizes
-            float tipY = top + h - 1 * S;
+            float tipY = top + h * 0.5f - 1 * S;
             float coneH = 11 * S * k, hexH = 9 * S * k, blockH = 17 * S * k, bodyH = 50 * S * k;
             float hexY = tipY - coneH, blockY = hexY - hexH, bodyY = blockY - blockH, bodyTop = bodyY - bodyH;
             float bodyW = 76 * S * k, blockW = 44 * S * k, hexW = 24 * S * k, tipW = 7 * S * k;
 
-            // freshly laid filament on the top face, drawn first so the nozzle sits on top of it
+            // freshly laid filament along the edge (right corner -> nozzle), drawn first so the nozzle sits on top of it
             if (!small)
                 using (var trail = new Pen(Color.FromArgb(255, 200, 110), 7 * S) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-                    g.DrawLine(trail, cx - w * 0.5f, top + h + h * 0.5f - 2 * S, cx, tipY);
+                    g.DrawLine(trail, R.X - 4 * S, R.Y - 2 * S, cx + w * 0.5f, tipY);
+            cx += w * 0.5f;                                     // the head is drawn around the nozzle
 
             // fan housing / print head body
             var body = new RectangleF(cx - bodyW / 2, bodyTop, bodyW, bodyH);
@@ -145,24 +186,51 @@ static class MakeIcon
             using (var shade = new SolidBrush(Color.FromArgb(150, 105, 30)))
                 g.FillRectangle(shade, cx + hexW * 0.18f, hexY - hexH, hexW * 0.32f, hexH);   // hex facet
 
-            // --- price coin "kr" (skipped at tiny sizes) ---
-            if (size >= 48)
-            {
-                float r = 42 * S, ccx = 194 * S, ccy = 194 * S;
-                var coin = new RectangleF(ccx - r, ccy - r, 2 * r, 2 * r);
-                using (var sh = new SolidBrush(Color.FromArgb(110, 0, 0, 0))) g.FillEllipse(sh, coin.X + 3 * S, coin.Y + 4 * S, coin.Width, coin.Height);
-                using (var cbg = new LinearGradientBrush(coin, Color.FromArgb(255, 222, 120), Color.FromArgb(205, 150, 40), 60f))
-                    g.FillEllipse(cbg, coin);
-                using (var rim = new Pen(Color.FromArgb(150, 100, 20), Math.Max(1f, 4 * S))) g.DrawEllipse(rim, coin);
-                using (var inner = new Pen(Color.FromArgb(120, 255, 245, 200), Math.Max(1f, 2 * S)))
-                    g.DrawEllipse(inner, coin.X + 9 * S, coin.Y + 9 * S, coin.Width - 18 * S, coin.Height - 18 * S);
-                using (var font = new Font("Segoe UI", 36 * S, FontStyle.Bold, GraphicsUnit.Pixel))
-                using (var tb = new SolidBrush(Color.FromArgb(110, 60, 0)))
-                using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                    g.DrawString("kr", font, tb, new RectangleF(coin.X, coin.Y - 2 * S, coin.Width, coin.Height), sf);
-            }
+            // --- price: a stack of plain gold coins (no currency sign), at every size ---
+            if (small) CoinStack(g, S, size, 50 * S, 192 * S, 204 * S, size <= 16 ? 2 : 3);
+            else CoinStack(g, S, size, 42 * S, 194 * S, 194 * S, 3);
         }
-        return bmp;
+    }
+
+    /// Gold coins lying in a slightly uneven stack; r = coin radius, (ccx, ccy) = centre of the stack.
+    static void CoinStack(Graphics g, float S, int size, float r, float ccx, float ccy, int n)
+    {
+        float rw = r * 1.1f, eh = rw * 0.55f, thick = Math.Max(size <= 32 ? 2f : 1f, r * 0.32f);
+        float baseY = ccy + r * 0.55f;                          // centre of the bottom coin's lower face
+        var dark = Color.FromArgb(150, 100, 20);
+        using (var sh = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
+            g.FillEllipse(sh, ccx - rw + 3 * S, baseY - eh / 2 + 4 * S, 2 * rw, eh);
+        for (int i = 0; i < n; i++)
+        {
+            float off = (i == 1 ? -0.12f : i == 2 ? 0.06f : 0f) * rw;
+            float yb = baseY - i * thick, yt = yb - thick, x = ccx + off;
+            using (var side = new SolidBrush(Color.FromArgb(190, 135, 35)))
+            {
+                g.FillEllipse(side, x - rw, yb - eh / 2, 2 * rw, eh);
+                g.FillRectangle(side, x - rw, yt, 2 * rw, thick);
+            }
+            using (var rim = new Pen(dark, Math.Max(1f, 2.5f * S)))
+            {
+                g.DrawArc(rim, x - rw, yb - eh / 2, 2 * rw, eh, 0, 180);
+                g.DrawLine(rim, x - rw, yt, x - rw, yb);
+                g.DrawLine(rim, x + rw, yt, x + rw, yb);
+            }
+            if (size >= 48)                                     // reeded edge
+                using (var reed = new Pen(Color.FromArgb(120, 110, 70, 10), 1.5f * S))
+                    for (int j = 1; j < 12; j++)
+                    {
+                        double a = Math.PI * j / 12;
+                        float px = x - rw * (float)Math.Cos(a), py = (float)Math.Sin(a) * eh / 2;
+                        g.DrawLine(reed, px, yt + py, px, yb + py);
+                    }
+            var face = new RectangleF(x - rw, yt - eh / 2, 2 * rw, eh);
+            using (var fb = new LinearGradientBrush(face, Color.FromArgb(255, 226, 130), Color.FromArgb(215, 160, 50), 20f))
+                g.FillEllipse(fb, face);
+            using (var rim = new Pen(dark, Math.Max(1f, 2.5f * S))) g.DrawEllipse(rim, face);
+            if (i == n - 1 && size >= 48)
+                using (var inner = new Pen(Color.FromArgb(140, 255, 245, 200), 2 * S))
+                    g.DrawEllipse(inner, face.X + 9 * S, face.Y + 5 * S, face.Width - 18 * S, face.Height - 10 * S);
+        }
     }
 
     static byte[] Png(Bitmap b)
@@ -198,9 +266,9 @@ static class MakeIcon
         Directory.CreateDirectory(outDir);
         int[] sizes = { 16, 20, 24, 32, 40, 48, 64, 128, 256 };
         var images = new List<byte[]>();
-        foreach (int s in sizes) using (var b = Draw(s)) images.Add(s >= 256 ? Png(b) : Dib(b));
+        foreach (int s in sizes) using (var b = Draw(s)) images.Add(s >= 64 ? Png(b) : Dib(b));
 
-        // ICO container: bitmap entries for small sizes, PNG for 256 px (standard since Windows Vista)
+        // ICO container: bitmap entries for small sizes, PNG from 64 px up (standard since Windows Vista; much smaller)
         using (var fs = new FileStream(Path.Combine(outDir, "app.ico"), FileMode.Create))
         using (var w = new BinaryWriter(fs))
         {

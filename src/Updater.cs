@@ -40,11 +40,6 @@ namespace PrintPrice
         const string AssetName = "PrintPrice.exe";
         const string AllowedHost = "github.com";
 
-        static Updater()
-        {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-        }
-
         public static Version Current
         {
             get { return Normalize(Assembly.GetExecutingAssembly().GetName().Version); }
@@ -77,15 +72,12 @@ namespace PrintPrice
 
         static WebClient Client()
         {
-            var wc = new WebClient { Encoding = Encoding.UTF8 };
-            wc.Headers[HttpRequestHeader.UserAgent] = "PrintPrice-updater/" + CurrentText;
-            return wc;
+            return Net.Client("PrintPrice-updater/" + CurrentText);
         }
 
         static string Str(Dictionary<string, object> d, string key)
         {
-            object v;
-            return d != null && d.TryGetValue(key, out v) && v != null ? Convert.ToString(v) : null;
+            return Net.Str(d, key);
         }
 
         /// Reads GitHub's "latest release" JSON. Returns null if it has no usable PrintPrice.exe.
@@ -285,6 +277,30 @@ namespace PrintPrice
         static void TryDelete(string path)
         {
             try { if (File.Exists(path)) File.Delete(path); } catch { }
+        }
+    }
+
+    /// Shared by Updater, Printables and PowerPrice: TLS 1.2, one WebClient setup, one JSON string reader.
+    internal static class Net
+    {
+        static Net()
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        }
+
+        public const string DefaultUserAgent = "PrintPrice/1.0 (3D print price calculator)";
+
+        public static WebClient Client(string userAgent)
+        {
+            var wc = new WebClient { Encoding = Encoding.UTF8 };
+            wc.Headers[HttpRequestHeader.UserAgent] = userAgent;
+            return wc;
+        }
+
+        public static string Str(Dictionary<string, object> d, string key)
+        {
+            object v;
+            return d != null && d.TryGetValue(key, out v) && v != null ? Convert.ToString(v) : null;
         }
     }
 }

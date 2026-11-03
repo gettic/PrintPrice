@@ -285,8 +285,6 @@ namespace PrintPrice
             return sb.ToString();
         }
 
-        [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
-        static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
         [DllImport("user32.dll")]
         static extern bool HideCaret(IntPtr hwnd);
         [DllImport("user32.dll")]

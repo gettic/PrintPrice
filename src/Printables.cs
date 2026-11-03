@@ -35,11 +35,6 @@ namespace PrintPrice
         const string Endpoint = "https://api.printables.com/graphql/";
         static readonly Regex IdRx = new Regex(@"printables\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?model/(\d+)", RegexOptions.IgnoreCase);
 
-        static Printables()
-        {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-        }
-
         public static string ParseId(string url)
         {
             var m = IdRx.Match(url ?? "");
@@ -48,9 +43,7 @@ namespace PrintPrice
 
         static WebClient Client()
         {
-            var wc = new WebClient { Encoding = Encoding.UTF8 };
-            wc.Headers[HttpRequestHeader.UserAgent] = "PrintPrice/1.0 (3D print price calculator)";
-            return wc;
+            return Net.Client(Net.DefaultUserAgent);
         }
 
         static Dictionary<string, object> Query(string query)
@@ -73,8 +66,7 @@ namespace PrintPrice
 
         static string Str(Dictionary<string, object> d, string key)
         {
-            object v;
-            return d != null && d.TryGetValue(key, out v) && v != null ? Convert.ToString(v) : null;
+            return Net.Str(d, key);
         }
 
         public static RemoteModel GetModel(string id)

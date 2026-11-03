@@ -648,11 +648,9 @@ namespace PrintPrice
         void RefreshSettingsLabels()
         {
             lblPrinter.Text = "Bambu Lab A1 · " + Num.Fmt(settings.PrinterWatts) + " W  (change in Settings)";
-            string f = "+" + Num.Fmt(settings.FriendsMarkupPct) + " % markup";
-            if (settings.MachineRatePerHour > 0) f += ", " + Num.Fmt(settings.MachineRatePerHour) + " kr./h wear";
-            lblFriendsInfo.Text = f;
-            string o = "+" + Num.Fmt(settings.OthersMarkupPct) + " % markup";
-            if (settings.MachineRatePerHour > 0) o += ", " + Num.Fmt(settings.MachineRatePerHour) + " kr./h wear";
+            string wear = settings.MachineRatePerHour > 0 ? ", " + Num.Fmt(settings.MachineRatePerHour) + " kr./h wear" : "";
+            lblFriendsInfo.Text = "+" + Num.Fmt(settings.FriendsMarkupPct) + " % markup" + wear;
+            string o = "+" + Num.Fmt(settings.OthersMarkupPct) + " % markup" + wear;
             if (settings.MinimumPrice > 0) o += ", min " + Num.Fmt(settings.MinimumPrice) + " kr.";
             lblOthersInfo.Text = o;
         }

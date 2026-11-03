@@ -177,8 +177,20 @@ namespace PrintPrice
             return new Label
             {
                 AutoSize = true, Margin = Padding.Empty, UseMnemonic = false,
-                MaximumSize = new Size(InnerWidth, 0), Font = new Font("Segoe UI", fontSize)
+                MaximumSize = new Size(InnerWidth, 0), Font = SharedFont(fontSize, FontStyle.Regular)
             };
+        }
+
+        // One Font per size/style, shared by all labels and never disposed (lives for the whole run).
+        static readonly System.Collections.Generic.Dictionary<string, Font> fontCache =
+            new System.Collections.Generic.Dictionary<string, Font>();
+
+        static Font SharedFont(float size, FontStyle style)
+        {
+            string key = size.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/" + (int)style;
+            Font f;
+            if (!fontCache.TryGetValue(key, out f)) { f = new Font("Segoe UI", size, style); fontCache[key] = f; }
+            return f;
         }
 
         void ClearTable()
@@ -221,7 +233,7 @@ namespace PrintPrice
                 right.Text = r[1];
                 right.Anchor = AnchorStyles.Right;
                 left.Margin = right.Margin = new Padding(0, total ? 4 : 1, 0, 1);
-                if (total) left.Font = right.Font = new Font(left.Font, FontStyle.Bold);
+                if (total) left.Font = right.Font = SharedFont(fontSize, FontStyle.Bold);
                 int row = grid.RowCount++;
                 grid.Controls.Add(left, 0, row);
                 grid.Controls.Add(right, 1, row);

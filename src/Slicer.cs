@@ -106,7 +106,7 @@ namespace PrintPrice
         public static List<string> ListFilaments(string exe, string nozzleSize)
         {
             var set = ListShort(exe, "filament", Suffix(nozzleSize));
-            if (nozzleSize != "0.2") set.UnionWith(ListShort(exe, "filament", Suffix("0.4")));
+            if (nozzleSize != "0.2" && nozzleSize != "0.4") set.UnionWith(ListShort(exe, "filament", Suffix("0.4")));
             return set.ToList();
         }
 

@@ -21,11 +21,6 @@ namespace PrintPrice
     {
         public const double VatRate = 0.25;
 
-        static PowerPrice()
-        {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-        }
-
         /// What you actually pay per kWh: (spot + tariffs/taxes/supplier fee) + VAT.
         public static double TotalPrice(double spotDkkPerKwh, double addOnDkkPerKwh, bool includeVat)
         {
@@ -37,17 +32,14 @@ namespace PrintPrice
         {
             if (area != "DK1" && area != "DK2") area = "DK1";
             DateTime nowUtc = DateTime.UtcNow;
-            string start = nowUtc.AddDays(-1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-            string end = nowUtc.AddDays(2).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
             string url = "https://api.energidataservice.dk/dataset/DayAheadPrices" +
-                         "?start=" + start + "&end=" + end +
+                         "?start=now-PT3H&end=now%2BPT1H" +
                          "&filter=" + Uri.EscapeDataString("{\"PriceArea\":[\"" + area + "\"]}") +
                          "&columns=TimeUTC,DayAheadPriceDKK&sort=TimeUTC%20asc&limit=1000";
 
             string body;
-            using (var wc = new WebClient { Encoding = Encoding.UTF8 })
+            using (var wc = Net.Client(Net.DefaultUserAgent))
             {
-                wc.Headers[HttpRequestHeader.UserAgent] = "PrintPrice/1.0 (3D print price calculator)";
                 try { body = wc.DownloadString(url); }
                 catch (WebException ex)
                 {
