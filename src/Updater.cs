@@ -127,7 +127,7 @@ namespace PrintPrice
                 {
                     var resp = ex.Response as HttpWebResponse;
                     if (resp != null && resp.StatusCode == HttpStatusCode.NotFound) return null;   // no releases yet
-                    throw new UpdateException("Couldn't reach GitHub (" + ex.Message + ")");
+                    throw new UpdateException(L.F("Couldn't reach GitHub ({0})", "Kunne ikke nå GitHub ({0})", ex.Message));
                 }
             }
             return ParseReleases(json, Current);
@@ -168,7 +168,7 @@ namespace PrintPrice
             {
                 string body = Regex.Replace((n.Value ?? "").Replace("\r", ""), @"^#+\s*", "", RegexOptions.Multiline).Trim();
                 if (sb.Length > 0) sb.Append("\n\n");
-                sb.Append("## v").Append(Short(n.Key)).Append("\n").Append(body.Length > 0 ? body : "No notes");
+                sb.Append("## v").Append(Short(n.Key)).Append("\n").Append(body.Length > 0 ? body : L.S("No notes", "Ingen noter"));
             }
             target.Notes = sb.ToString();
             return target;
@@ -206,13 +206,16 @@ namespace PrintPrice
         /// Downloads the new exe next to the running one and verifies it. Returns the downloaded file's path.
         public static string Download(UpdateInfo u, IProgress<int> progress, CancellationToken ct)
         {
-            if (!IsTrustedUrl(u.DownloadUrl)) throw new UpdateException("The download link doesn't point to the " + Repo + " releases on GitHub.");
-            if (u.Sha256 == null) throw new UpdateException("GitHub didn't provide a checksum for this release, so it can't be verified.");
+            if (!IsTrustedUrl(u.DownloadUrl)) throw new UpdateException(L.F("The download link doesn't point to the {0} releases on GitHub.",
+                "Download-linket peger ikke på udgivelserne af {0} på GitHub.", Repo));
+            if (u.Sha256 == null) throw new UpdateException(L.S("GitHub didn't provide a checksum for this release, so it can't be verified.",
+                "GitHub gav ingen kontrolsum for denne version, så den kan ikke kontrolleres."));
 
             string target = System.Windows.Forms.Application.ExecutablePath + ".download";
             try { File.Delete(target); } catch { }
             try { File.WriteAllBytes(target, new byte[0]); }
-            catch (Exception) { throw new UpdateException("The program's folder isn't writable (" + Path.GetDirectoryName(target) + "). Download the new version manually."); }
+            catch (Exception) { throw new UpdateException(L.F("The program's folder isn't writable ({0}). Download the new version manually.",
+                "Der kan ikke skrives i programmets mappe ({0}). Hent den nye version manuelt.", Path.GetDirectoryName(target))); }
 
             using (var wc = Client())
             using (ct.Register(wc.CancelAsync))
@@ -225,20 +228,22 @@ namespace PrintPrice
                 wc.DownloadFileAsync(new Uri(u.DownloadUrl), target);
                 done.WaitOne();
                 if (cancelled) { TryDelete(target); throw new OperationCanceledException(); }
-                if (error != null) { TryDelete(target); throw new UpdateException("Download failed (" + error.Message + ")"); }
+                if (error != null) { TryDelete(target); throw new UpdateException(L.F("Download failed ({0})", "Download mislykkedes ({0})", error.Message)); }
             }
 
             try
             {
                 if (u.Size > 0 && new FileInfo(target).Length != u.Size)
-                    throw new UpdateException("The download is incomplete.");
+                    throw new UpdateException(L.S("The download is incomplete.", "Downloaden er ufuldstændig."));
                 if (Sha256Of(target) != u.Sha256)
-                    throw new UpdateException("The download's checksum doesn't match GitHub's, so it wasn't installed.");
+                    throw new UpdateException(L.S("The download's checksum doesn't match GitHub's, so it wasn't installed.",
+                        "Downloadens kontrolsum passer ikke med GitHubs, så den blev ikke installeret."));
                 AssemblyName name;
                 try { name = AssemblyName.GetAssemblyName(target); }
-                catch (Exception) { throw new UpdateException("The download isn't a valid program file."); }
+                catch (Exception) { throw new UpdateException(L.S("The download isn't a valid program file.", "Downloaden er ikke en gyldig programfil.")); }
                 if (name.Name != Assembly.GetExecutingAssembly().GetName().Name || Normalize(name.Version) != u.Version)
-                    throw new UpdateException("The downloaded program isn't version " + Short(u.Version) + " of this app.");
+                    throw new UpdateException(L.F("The downloaded program isn't version {0} of this app.",
+                        "Det hentede program er ikke version {0} af dette program.", Short(u.Version)));
             }
             catch { TryDelete(target); throw; }
             return target;
@@ -256,7 +261,7 @@ namespace PrintPrice
             catch (Exception ex)
             {
                 try { File.Move(old, exe); } catch { }   // roll back
-                throw new UpdateException("Couldn't replace the program file (" + ex.Message + ")");
+                throw new UpdateException(L.F("Couldn't replace the program file ({0})", "Kunne ikke udskifte programfilen ({0})", ex.Message));
             }
             Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
         }
@@ -301,6 +306,15 @@ namespace PrintPrice
         {
             object v;
             return d != null && d.TryGetValue(key, out v) && v != null ? Convert.ToString(v) : null;
+        }
+
+        /// True if the bytes start like a PNG or JPEG file.
+        public static bool IsImage(byte[] b)
+        {
+            if (b == null || b.Length < 8) return false;
+            bool png = b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47;
+            bool jpg = b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF;
+            return png || jpg;
         }
     }
 }

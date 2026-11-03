@@ -22,7 +22,7 @@ namespace PrintPrice
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 10f);
-            Text = "Choose files to print";
+            Text = L.S("Choose files to print", "Vælg filer, der skal printes");
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
             ShowInTaskbar = false;
@@ -39,8 +39,10 @@ namespace PrintPrice
             });
             t.Controls.Add(new InfoBox(460, 9.5f)
             {
-                Text = "Tick the parts you will print. Each file is sliced on its own and the times and weights are added up.\n\n" +
-                       "Models often include the same part as both STL and 3MF, so pick just one of those.",
+                Text = L.S("Tick the parts you will print. Each file is sliced on its own and the times and weights are added up.\n\n" +
+                           "Models often include the same part as both STL and 3MF, so pick just one of those.",
+                           "Sæt flueben ved de dele, du vil printe. Hver fil slices for sig, og tider og vægt lægges sammen.\n\n" +
+                           "Modeller har tit den samme del som både STL og 3MF, så vælg kun én af dem."),
                 Margin = new Padding(0, 2, 0, 10)
             });
 
@@ -55,10 +57,10 @@ namespace PrintPrice
             t.Controls.Add(list);
 
             var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, 10, 0, 0) };
-            ok = new Button { Text = "Slice selected", AutoSize = true };
-            var cancel = new Button { Text = "Cancel", AutoSize = true, DialogResult = DialogResult.Cancel };
-            var all = new Button { Text = "All", AutoSize = true };
-            var none = new Button { Text = "None", AutoSize = true };
+            ok = new Button { Text = L.S("Slice selected", "Slice valgte"), AutoSize = true };
+            var cancel = new Button { Text = L.S("Cancel", "Annullér"), AutoSize = true, DialogResult = DialogResult.Cancel };
+            var all = new Button { Text = L.S("All", "Alle"), AutoSize = true };
+            var none = new Button { Text = L.S("None", "Ingen"), AutoSize = true };
             ok.Click += delegate { Accept(); };
             all.Click += delegate { SetAll(true); };
             none.Click += delegate { SetAll(false); };

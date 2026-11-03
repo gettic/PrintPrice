@@ -30,7 +30,7 @@ namespace PrintPrice
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
             Font = new Font("Segoe UI", 10f);
-            Text = "Update available";
+            Text = L.S("Update available", "Opdatering klar");
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = MinimizeBox = false;
             ShowInTaskbar = false;
@@ -42,14 +42,14 @@ namespace PrintPrice
             Controls.Add(t);
             t.Controls.Add(new Label
             {
-                Text = "Version " + Updater.Short(update.Version) + " is available",
+                Text = L.F("Version {0} is available", "Version {0} er klar", Updater.Short(update.Version)),
                 AutoSize = true, Font = new Font("Segoe UI", 12f, FontStyle.Bold), Margin = new Padding(0, 0, 0, 2)
             });
-            t.Controls.Add(new Label { Text = "You have version " + Updater.CurrentText + ".", AutoSize = true, Tag = "muted", Margin = new Padding(0, 0, 0, 10) });
+            t.Controls.Add(new Label { Text = L.F("You have version {0}.", "Du har version {0}.", Updater.CurrentText), AutoSize = true, Tag = "muted", Margin = new Padding(0, 0, 0, 10) });
 
             if ((update.Notes ?? "").Trim().Length > 0)
             {
-                t.Controls.Add(new Label { Text = "What's new", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, 0, 0, 2) });
+                t.Controls.Add(new Label { Text = L.S("What's new", "Nyheder"), AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, 0, 0, 2) });
                 notesBox = new NotesBox(440, update.Notes) { Margin = new Padding(0, 2, 0, 8) };
                 t.Controls.Add(notesBox);
             }
@@ -58,9 +58,9 @@ namespace PrintPrice
             t.Controls.Add(status);
 
             var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
-            btnLater = new Button { Text = "Later", AutoSize = true, DialogResult = DialogResult.Cancel };
-            btnUpdate = new Button { Text = "Update now", AutoSize = true };
-            btnPage = new Button { Text = "Open download page", AutoSize = true, Visible = false };
+            btnLater = new Button { Text = L.S("Later", "Senere"), AutoSize = true, DialogResult = DialogResult.Cancel };
+            btnUpdate = new Button { Text = L.S("Update now", "Opdatér nu"), AutoSize = true };
+            btnPage = new Button { Text = L.S("Open download page", "Åbn download-siden"), AutoSize = true, Visible = false };
             btnUpdate.Click += delegate { UpdateNow(); };
             btnPage.Click += delegate { OpenPage(); };
             buttons.Controls.Add(btnLater);
@@ -112,12 +112,12 @@ namespace PrintPrice
             btnPage.Visible = false;
             cts = new CancellationTokenSource();
             var ct = cts.Token;
-            var progress = new Progress<int>(p => SetStatus("Downloading… " + p + " %", InfoKind.Info));
-            SetStatus("Downloading…", InfoKind.Info);
+            var progress = new Progress<int>(p => SetStatus(L.S("Downloading… ", "Henter… ") + p + " %", InfoKind.Info));
+            SetStatus(L.S("Downloading…", "Henter…"), InfoKind.Info);
             try
             {
                 string file = await Task.Run(() => Updater.Download(update, progress, ct));
-                SetStatus("✓ Download verified. Restarting…", InfoKind.Info);   // red stripe like every info box
+                SetStatus(L.S("✓ Download verified. Restarting…", "✓ Download kontrolleret. Genstarter…"), InfoKind.Info);   // red stripe like every info box
                 if (beforeRestart != null) beforeRestart();
                 Updater.InstallAndRestart(file);
                 DialogResult = DialogResult.OK;   // caller exits the program
@@ -126,9 +126,9 @@ namespace PrintPrice
             catch (Exception ex)
             {
                 if (IsDisposed) return;
-                string msg = ex is UpdateException ? ex.Message : "The update failed (" + ex.Message + ").";
-                SetStatus(msg + "\nYour current version is unchanged.", InfoKind.Error);
-                btnUpdate.Text = "Try again";
+                string msg = ex is UpdateException ? ex.Message : L.F("The update failed ({0}).", "Opdateringen mislykkedes ({0}).", ex.Message);
+                SetStatus(msg + L.S("\nYour current version is unchanged.", "\nDin nuværende version er uændret."), InfoKind.Error);
+                btnUpdate.Text = L.S("Try again", "Prøv igen");
                 btnUpdate.Enabled = true;
                 btnPage.Visible = true;
             }

@@ -14,7 +14,9 @@ namespace PrintPrice
     {
         AppSettings settings;
         TextBox txtUrl, txtHours, txtMinutes, txtGrams, txtFilamentPrice, txtElecPrice;
-        Label lblPrinter, lblMaterial, lblPower, lblBase;
+        Label lblPrinter, lblMaterial, lblPower, lblFailed, lblFailedCap, lblBase;
+        ThemedGroupBox grpBreak;
+        int breakBaseHeight, breakRowHeight;   // Cost breakdown height without the failed-prints row, and one row (scaled, set on Load)
         Label lblFriends, lblOthers, lblFriendsInfo, lblOthersInfo, lblStatus;
         Button btnCopy, btnUpdate;
         UpdateInfo pendingUpdate;   // newer version found at startup (null = none)
@@ -27,6 +29,11 @@ namespace PrintPrice
         InfoBox lblAuto;
         bool autoIsError;
         CancellationTokenSource cts;
+
+        // model picture under the "Model link" label (logo + "No model yet" while empty)
+        PictureBox picModel;
+        int picRequest;   // bumped for every new job / Clear, so a late picture of an old job is dropped
+        int picBaseHeight;   // buttons' top to a 2-line info box's bottom (scaled, set on Load)
 
         // live electricity price
         Button btnPower;
@@ -69,32 +76,52 @@ namespace PrintPrice
             // link box, buttons and info boxes end at the Cost breakdown's right edge (widths set on Load, see below)
             txtUrl = new TextBox { Width = 394, Margin = new Padding(3, 3, 0, 3) };
             // grey example text while empty; re-applied whenever the handle is recreated (e.g. theme change)
-            txtUrl.HandleCreated += delegate { SetCueBanner(txtUrl, "e.g. https://www.printables.com/model/3161-3d-benchy"); };
-            AddRow(inputs, "Model link", txtUrl, null);
+            txtUrl.HandleCreated += delegate { SetCueBanner(txtUrl, L.S("e.g. ", "f.eks. ") + "https://www.printables.com/model/3161-3d-benchy"); };
+            AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
             // two equal buttons lined up exactly under the link box (widths set on Load)
-            btnAnalyze = new Button { Text = "Get time && weight", Width = 194, Height = 32, Margin = new Padding(3, 6, 6, 4) };
-            btnLoadFile = new Button { Text = "Load file…", Width = 194, Height = 32, Margin = new Padding(0, 6, 0, 4) };
+            btnAnalyze = new Button { Text = AnalyzeText, Width = 194, Height = 32, Margin = new Padding(3, 6, 6, 4) };
+            btnLoadFile = new Button { Text = L.S("Load file…", "Åbn fil…"), Width = 194, Height = 32, Margin = new Padding(0, 6, 0, 4) };
             btnAnalyze.Click += delegate { AnalyzeClicked(); };
             btnLoadFile.Click += delegate { BrowseForModel(); };
+            // Enter in the link box = "Get time & weight" (not while a job runs, so it never cancels by accident)
+            txtUrl.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode != Keys.Enter || e.Modifiers != Keys.None) return;
+                e.SuppressKeyPress = true;   // no beep
+                if (cts == null && txtUrl.Text.Trim().Length > 0) AnalyzeClicked();
+            };
             var autoRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             autoRow.Controls.Add(btnAnalyze);
             autoRow.Controls.Add(btnLoadFile);
+            int picRow = inputs.RowCount;
             AddRow(inputs, "", autoRow, null);
             inputs.SetColumnSpan(autoRow, 2);
             lblAuto = new InfoBox(394, 9.5f) { Margin = new Padding(3, 4, 0, 10) };
             AddRow(inputs, "", lblAuto, null);
+            // model picture in the label column, beside the buttons and the info box (size measured on Load)
+            picModel = new PictureBox
+            {
+                SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Input, Size = new Size(10, 10),
+                Padding = new Padding(4), Margin = Padding.Empty, Anchor = AnchorStyles.Top | AnchorStyles.Left
+            };
+            picModel.Paint += (s, e) => PaintModelPicture(e.Graphics);
+            inputs.Controls.Add(picModel, 0, picRow);
+            inputs.SetRowSpan(picModel, 2);
+            // the box stays put: buttons and info box keep to the top of their rows, the info box is at least 2 lines tall
+            autoRow.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+            lblAuto.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             inputs.SetColumnSpan(lblAuto, 2);
 
             txtHours = new TextBox { Width = 50, Text = "0", TextAlign = HorizontalAlignment.Right };
             txtMinutes = new TextBox { Width = 50, Text = "0", TextAlign = HorizontalAlignment.Right };
             var timeRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             timeRow.Controls.Add(txtHours);
-            timeRow.Controls.Add(Unit("h"));
+            timeRow.Controls.Add(Unit(L.S("h", "t")));
             timeRow.Controls.Add(txtMinutes);
             timeRow.Controls.Add(Unit("m"));
-            AddRow(inputs, "Print time", timeRow, null);
+            AddRow(inputs, L.S("Print time", "Printtid"), timeRow, null);
             Load += delegate
             {
                 // number boxes below end exactly where the m box ends (DPI-safe, measured)
@@ -104,16 +131,16 @@ namespace PrintPrice
             };
 
             txtGrams = NumBox("");
-            AddRow(inputs, "Filament used", WithUnit(txtGrams, "g"), null);
+            AddRow(inputs, L.S("Filament used", "Filamentforbrug"), WithUnit(txtGrams, "g"), null);
             txtFilamentPrice = NumBox(Num.Fmt(settings.LastFilamentPrice));
-            AddRow(inputs, "Filament price", WithUnit(txtFilamentPrice, "DKK/kg"), null);
+            AddRow(inputs, L.S("Filament price", "Filamentpris"), WithUnit(txtFilamentPrice, "kr./kg"), null);
             txtElecPrice = NumBox(Num.Fmt(settings.LastElectricityPrice));
-            var elecRow = (FlowLayoutPanel)WithUnit(txtElecPrice, "DKK/kWh");
+            var elecRow = (FlowLayoutPanel)WithUnit(txtElecPrice, "kr./kWh");
             // same top margin as the text box; height is matched to the box once the form has loaded (DPI-safe)
             // slightly smaller font + no padding so the text fits inside a button only as tall as the text box
             btnPower = new Button
             {
-                Text = "Update", AutoSize = false, Width = 76, Margin = new Padding(4, 3, 0, 3),
+                Text = L.S("Update", "Opdatér"), AutoSize = false, Width = 76, Margin = new Padding(4, 3, 0, 3),
                 Padding = Padding.Empty, Font = new Font("Segoe UI", 9f), TextAlign = ContentAlignment.MiddleCenter
             };
             Load += delegate
@@ -123,29 +150,36 @@ namespace PrintPrice
             };
             btnPower.Click += delegate { FetchPowerPrice(); };
             elecRow.Controls.Add(btnPower);
-            AddRow(inputs, "Electricity price", elecRow, null);
+            AddRow(inputs, L.S("Electricity price", "Elpris"), elecRow, null);
             lblPowerInfo = new InfoBox(394, 9.5f) { Margin = new Padding(3, 2, 0, 8) };
             AddRow(inputs, "", lblPowerInfo, null);
             inputs.SetColumnSpan(lblPowerInfo, 2);
             lblPrinter = new Label { AutoSize = true, Tag = "muted", Margin = new Padding(3, 4, 3, 4) };
-            AddRow(inputs, "Printer", lblPrinter, null);
+            AddRow(inputs, L.S("Printer", "Printer"), lblPrinter, null);
             root.Controls.Add(inputs);
 
             // ---------- Breakdown ----------
-            var grpBreak = new ThemedGroupBox { Text = "Cost breakdown", Width = 540, Height = 110, Margin = new Padding(0, 0, 0, 8) };
+            grpBreak = new ThemedGroupBox { Text = L.S("Cost breakdown", "Omkostninger"), Width = 540, Height = 110, Margin = new Padding(0, 0, 0, 8) };
             var bt = new TableLayoutPanel { ColumnCount = 2, Dock = DockStyle.Fill, Padding = new Padding(6, 2, 6, 2) };
             bt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             bt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            lblMaterial = BreakLabel(); lblPower = BreakLabel(); lblBase = BreakLabel();
-            bt.Controls.Add(BreakCaption("Material"), 0, 0); bt.Controls.Add(lblMaterial, 1, 0);
-            bt.Controls.Add(BreakCaption("Power"), 0, 1); bt.Controls.Add(lblPower, 1, 1);
-            var baseCap = BreakCaption("Base cost"); baseCap.Font = new Font(Font, FontStyle.Bold);
+            lblMaterial = BreakLabel(); lblPower = BreakLabel(); lblFailed = BreakLabel(); lblBase = BreakLabel();
+            bt.Controls.Add(BreakCaption(L.S("Material", "Materiale")), 0, 0); bt.Controls.Add(lblMaterial, 1, 0);
+            bt.Controls.Add(BreakCaption(L.S("Power", "Strøm")), 0, 1); bt.Controls.Add(lblPower, 1, 1);
+            // failed prints: hidden (row collapses, box shrinks) when the setting is 0 %, see UpdateFailedRow
+            lblFailedCap = BreakCaption("");
+            bt.Controls.Add(lblFailedCap, 0, 2); bt.Controls.Add(lblFailed, 1, 2);
+            var baseCap = BreakCaption(L.S("Base cost", "Kostpris")); baseCap.Font = new Font(Font, FontStyle.Bold);
             lblBase.Font = new Font(Font, FontStyle.Bold);
-            bt.Controls.Add(baseCap, 0, 2); bt.Controls.Add(lblBase, 1, 2);
+            bt.Controls.Add(baseCap, 0, 3); bt.Controls.Add(lblBase, 1, 3);
             grpBreak.Controls.Add(bt);
             root.Controls.Add(grpBreak);
             Load += delegate
             {
+                // scaled sizes: the box's 3-row height, plus one row (label + margins) for the failed-prints line
+                breakBaseHeight = grpBreak.Height;
+                breakRowHeight = lblPower.Height + lblPower.Margin.Vertical;
+                UpdateFailedRow();
                 // link box, the two buttons and both info boxes end exactly at the Cost breakdown's right edge
                 // (measured, so it stays lined up at any DPI and whatever the label column's width)
                 int edge = grpBreak.Parent.PointToScreen(new Point(grpBreak.Right, 0)).X;
@@ -156,12 +190,30 @@ namespace PrintPrice
                 int gap = btnAnalyze.Margin.Right;
                 btnAnalyze.Width = (w - gap) / 2;
                 btnLoadFile.Width = w - gap - btnAnalyze.Width;
+
+                // model picture: from the label column's left edge to the longest label's right edge (keeps the label gap),
+                // from the buttons' top to the bottom of a 2-line info box (the info box never gets shorter than that)
+                int labelsRight = 0;
+                foreach (Control c in inputs.Controls)
+                    if (c is Label && inputs.GetColumn(c) == 0) labelsRight = Math.Max(labelsRight, c.Right);
+                int twoLines;
+                using (var probe = new Label { AutoSize = true, Font = new Font("Segoe UI", 9.5f), Text = "Ag\nAg" })
+                    twoLines = probe.GetPreferredSize(Size.Empty).Height + lblAuto.Padding.Vertical;
+                lblAuto.MinimumSize = new Size(lblAuto.MinimumSize.Width, twoLines);
+                picModel.Margin = new Padding(0, btnAnalyze.Margin.Top, 0, 0);
+                picBaseHeight = btnAnalyze.Height + btnAnalyze.Margin.Bottom + lblAuto.Margin.Top + twoLines;
+                picModel.Size = new Size(labelsRight - picModel.Left, picBaseHeight);
+                FitModelPicture();
             };
+            // a 3+ line info box: the picture box grows with it, so both still end at the same line
+            lblAuto.SizeChanged += delegate { FitModelPicture(); };
+            lblAuto.LocationChanged += delegate { FitModelPicture(); };
+            picModel.Resize += delegate { picModel.Invalidate(); };
 
             // ---------- Prices ----------
             var prices = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
-            prices.Controls.Add(PriceBox("Friends && family", "friends", out lblFriends, out lblFriendsInfo), 0, 0);
-            var custBox = PriceBox("Customers", "others", out lblOthers, out lblOthersInfo);
+            prices.Controls.Add(PriceBox(L.S("Friends && family", "Venner og familie"), "friends", out lblFriends, out lblFriendsInfo), 0, 0);
+            var custBox = PriceBox(L.S("Customers", "Kunder"), "others", out lblOthers, out lblOthersInfo);
             custBox.Margin = Padding.Empty;   // gap only between the boxes, not after the last one
             prices.Controls.Add(custBox, 1, 0);
             root.Controls.Add(prices);
@@ -181,9 +233,11 @@ namespace PrintPrice
             btnUpdate.Click += delegate { if (pendingUpdate != null) ShowUpdate(pendingUpdate); };
             var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
             // three buttons spanning exactly the Customers box (264 px = 76 + 84 + 92 + 2 × 6 gap) above them
-            var btnClear = new Button { Text = "Clear", Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
-            var btnSettings = new Button { Text = "Settings…", Size = new Size(84, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
-            btnCopy = new Button { Text = "Copy quote", Size = new Size(92, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3) };
+            var btnClear = new Button { Text = L.S("Clear", "Ryd"), Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
+            var btnSettings = new Button { Text = L.S("Settings…", "Indstillinger…"), Size = new Size(84, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
+            btnCopy = new Button { Text = L.S("Copy quote", "Kopiér tilbud"), Size = new Size(92, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3) };
+            // same total width (scaled), split by the measured text widths so longer (Danish) texts fit
+            Load += delegate { SplitByText(new[] { btnClear, btnSettings, btnCopy }); };
             btnClear.Click += delegate { ClearJob(); };
             btnSettings.Click += delegate { OpenSettings(); };
             btnCopy.Click += delegate { CopyQuote(); };
@@ -205,6 +259,7 @@ namespace PrintPrice
             }
 
             FormClosing += delegate { if (cts != null) cts.Cancel(); SaveLastPrices(); };
+            FormClosed += delegate { picRequest++; SetModelPicture(null); };
             EnableDrop(this);
 
             ApplyTheme();
@@ -213,7 +268,8 @@ namespace PrintPrice
             ShowAutoIdle();
             if (!offline) Shown += delegate { StartupUpdateCheck(); };
             if (settings.AutoPowerPrice != 0) { if (!offline) Shown += delegate { FetchPowerPrice(); }; }
-            else SetPowerInfo("Live price is off (Settings). Click Update to fetch it once.", false);
+            else SetPowerInfo(L.S("Live price is off (Settings). Click Update to fetch it once.",
+                                  "Live-pris er slået fra (Indstillinger). Klik Opdatér for at hente den én gang."), false);
             Recalculate();
             ActiveControl = txtUrl;
         }
@@ -243,13 +299,15 @@ namespace PrintPrice
         {
             if (!offline) return;
             txtUrl.Text = "https://www.printables.com/model/3161-3d-benchy";
-            SetAuto("✓ \"3D BENCHY\": 0 h 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic).", false);
+            SetAuto(L.S("✓ \"3D BENCHY\": 0 h 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic).",
+                        "✓ \"3D BENCHY\": 0 t 38 m, 11,8 g (0.20mm Standard · Bambu PLA Basic)."), false);
             txtHours.Text = "0";
             txtMinutes.Text = "38";
             txtGrams.Text = "11,8";
             txtFilamentPrice.Text = "200";
             txtElecPrice.Text = "3,65";
-            SetPowerInfo("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.", false);
+            SetPowerInfo(L.S("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.",
+                             "Live-pris DK1 17:45: spot 2,37 + afgifter 0,55 + 25 % moms = 3,65 kr."), false);
             Recalculate();
         }
 
@@ -285,29 +343,33 @@ namespace PrintPrice
             double addOn = settings.PowerAddOn;
             bool vat = settings.PowerIncludeVat != 0;
             string before = txtElecPrice.Text;
-            SetPowerInfo("Fetching the current electricity price for " + area + "…", false);
+            SetPowerInfo(L.F("Fetching the current electricity price for {0}…", "Henter den aktuelle elpris for {0}…", area), false);
             try
             {
                 var q = await Task.Run(() => PowerPrice.GetCurrent(area));
                 double total = Math.Round(PowerPrice.TotalPrice(q.SpotDkkPerKwh, addOn, vat), 2);
-                string breakdown = "spot " + q.SpotDkkPerKwh.ToString("0.00", Num.Dk) +
-                                   " + fees " + addOn.ToString("0.00", Num.Dk) + (vat ? " + 25 % VAT" : "");
+                string breakdown = L.F("spot {0} + fees {1}", "spot {0} + afgifter {1}",
+                                       q.SpotDkkPerKwh.ToString("0.00", Num.Dk), addOn.ToString("0.00", Num.Dk)) +
+                                   (vat ? L.S(" + 25 % VAT", " + 25 % moms") : "");
                 string when = q.Area + " " + q.SlotStartUtc.ToLocalTime().ToString("HH:mm", Num.Dk);
                 if (txtElecPrice.Text == before)
                 {
                     txtElecPrice.Text = total.ToString("0.00", Num.Dk);
-                    SetPowerInfo("Live " + when + ": " + breakdown + " = " + total.ToString("0.00", Num.Dk) + " kr.", false);
+                    // non-breaking spaces: "= 3,65 kr." wraps as one piece, never a lone "kr." on line 2
+                    SetPowerInfo(L.S("Live ", "Live-pris ") + when + ": " + breakdown + " = " + total.ToString("0.00", Num.Dk) + " kr.", false);
                 }
                 else
                 {
-                    SetPowerInfo("Live price " + when + " is " + total.ToString("0.00", Num.Dk) +
-                                 " kr./kWh (not applied because you edited the field).", false);
+                    SetPowerInfo(L.F("Live price {0} is {1} kr./kWh (not applied because you edited the field).",
+                                     "Live-pris {0} er {1} kr./kWh (ikke brugt, fordi du har rettet feltet).",
+                                     when, total.ToString("0.00", Num.Dk)), false);
                 }
             }
             catch (Exception ex)
             {
-                string why = ex is SliceException ? ex.Message : "unexpected error";
-                SetPowerInfo("Couldn't get the live price (" + why + "). Using your last price.", true);
+                string why = ex is SliceException ? ex.Message : L.S("unexpected error", "uventet fejl");
+                SetPowerInfo(L.F("Couldn't get the live price ({0}). Using your last price.",
+                                 "Kunne ikke hente live-prisen ({0}). Bruger din sidste pris.", why), true);
             }
             finally
             {
@@ -333,11 +395,13 @@ namespace PrintPrice
         void ShowAutoIdle()
         {
             if (BambuSlicer.FindExe(settings.SlicerPath) == null)
-                SetAuto("Bambu Studio was not found. Install it to detect time and weight automatically.", false);
+                SetAuto(L.S("Bambu Studio was not found. Install it to detect time and weight automatically.",
+                            "Bambu Studio blev ikke fundet. Installér det for at finde tid og vægt automatisk."), false);
             else
-                SetAuto("Paste a Printables link, or drop a model file (STL/3MF) on this window. Slices with " +
-                        Wear.FindNozzle(settings.Nozzle).Size + " mm nozzle · " +
-                        BambuSlicer.ShortName(settings.ProcessPreset) + " · " + BambuSlicer.ShortName(settings.FilamentPreset) + ".", false);
+                SetAuto(L.F("Paste a Printables link, or drop a model file (STL/3MF) on this window. Slices with {0} mm nozzle · {1} · {2}.",
+                            "Indsæt et Printables-link, eller træk en modelfil (STL/3MF) ind i vinduet. Slicer med {0} mm dyse · {1} · {2}.",
+                            L.Danish ? Wear.FindNozzle(settings.Nozzle).Size.Replace('.', ',') : Wear.FindNozzle(settings.Nozzle).Size,
+                            BambuSlicer.ShortName(settings.ProcessPreset), BambuSlicer.ShortName(settings.FilamentPreset)), false);
         }
 
         void EnableDrop(Control c)
@@ -352,8 +416,8 @@ namespace PrintPrice
                 var paths = e.Data.GetData(DataFormats.FileDrop) as string[];
                 if (paths == null || paths.Length == 0) return;
                 var models = paths.Where(BambuSlicer.IsModelFile).ToList();
-                if (models.Count == 0) { SetAuto("That isn't a model file. Use STL, 3MF, OBJ or STEP.", true); return; }
-                txtUrl.Text = models.Count == 1 ? models[0] : models.Count + " files: " + string.Join(", ", models.Select(Path.GetFileName));
+                if (models.Count == 0) { SetAuto(L.S("That isn't a model file. Use STL, 3MF, OBJ or STEP.", "Det er ikke en modelfil. Brug STL, 3MF, OBJ eller STEP."), true); return; }
+                txtUrl.Text = models.Count == 1 ? models[0] : L.F("{0} files: ", "{0} filer: ", models.Count) + string.Join(", ", models.Select(Path.GetFileName));
                 Analyze(null, models);
             };
             foreach (Control child in c.Controls) EnableDrop(child);
@@ -363,13 +427,14 @@ namespace PrintPrice
         {
             using (var dlg = new OpenFileDialog
             {
-                Title = "Choose model file(s)", Multiselect = true,
-                Filter = "3D models (*.stl;*.3mf;*.obj;*.step;*.stp)|*.stl;*.3mf;*.obj;*.step;*.stp;*.amf|All files (*.*)|*.*"
+                Title = L.S("Choose model file(s)", "Vælg modelfil(er)"), Multiselect = true,
+                Filter = L.S("3D models", "3D-modeller") + " (*.stl;*.3mf;*.obj;*.step;*.stp)|*.stl;*.3mf;*.obj;*.step;*.stp;*.amf|" +
+                         L.S("All files", "Alle filer") + " (*.*)|*.*"
             })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 var files = dlg.FileNames.ToList();
-                txtUrl.Text = files.Count == 1 ? files[0] : files.Count + " files: " + string.Join(", ", files.Select(Path.GetFileName));
+                txtUrl.Text = files.Count == 1 ? files[0] : L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
                 Analyze(null, files);
             }
         }
@@ -386,14 +451,18 @@ namespace PrintPrice
 
             string lower = src.ToLowerInvariant();
             if (lower.Contains("makerworld.com") || lower.Contains("thingiverse.com") || lower.Contains("cults3d.com") || lower.Contains("myminifactory.com"))
-                SetAuto("This site blocks automatic downloads. Download the model (STL/3MF) from the page and drop the file on this window.", true);
+                SetAuto(L.S("This site blocks automatic downloads. Download the model (STL/3MF) from the page and drop the file on this window.",
+                            "Siden blokerer automatisk download. Hent modellen (STL/3MF) fra siden, og træk filen ind i vinduet."), true);
             else
-                SetAuto("Paste a Printables link (printables.com/model/…) or load a model file.", true);
+                SetAuto(L.S("Paste a Printables link (printables.com/model/…) or load a model file.",
+                            "Indsæt et Printables-link (printables.com/model/…) eller åbn en modelfil."), true);
         }
+
+        static string AnalyzeText { get { return L.S("Get time && weight", "Hent tid og vægt"); } }
 
         void SetBusy(bool busy)
         {
-            btnAnalyze.Text = busy ? "Cancel" : "Get time && weight";
+            btnAnalyze.Text = busy ? L.S("Cancel", "Annullér") : AnalyzeText;
             btnLoadFile.Enabled = !busy;
             txtUrl.ReadOnly = busy;
             UseWaitCursor = false;
@@ -406,7 +475,8 @@ namespace PrintPrice
             bool presliced = localFiles != null && localFiles.Count == 1 && BambuSlicer.IsSlicedProject(localFiles[0]);
             if (exe == null && !presliced)
             {
-                SetAuto("Bambu Studio was not found. Install it from bambulab.com, or set its location in Settings.", true);
+                SetAuto(L.S("Bambu Studio was not found. Install it from bambulab.com, or set its location in Settings.",
+                            "Bambu Studio blev ikke fundet. Installér det fra bambulab.com, eller angiv stien i Indstillinger."), true);
                 return;
             }
 
@@ -417,17 +487,30 @@ namespace PrintPrice
             SetBusy(true);
             IProgress<string> progress = new Progress<string>(s => SetAuto(s, false));
             string modelName = null;
+            // model picture: a picked .3mf shows its own picture at once; Printables photo / slice render follow below
+            ResetModelPicture();
+            if (localFiles != null && localFiles.Count == 1 && localFiles[0].EndsWith(".3mf", StringComparison.OrdinalIgnoreCase))
+            {
+                string project = localFiles[0];
+                LoadModelPicture(() => BambuSlicer.FromProject(project), true);
+            }
             try
             {
                 List<RemoteFile> chosen = null;
                 if (printablesId != null)
                 {
-                    progress.Report("Looking up the model on Printables…");
+                    progress.Report(L.S("Looking up the model on Printables…", "Finder modellen på Printables…"));
                     var model = await Task.Run(() => Printables.GetModel(printablesId));
                     token.ThrowIfCancellationRequested();
                     modelName = model.Name;
+                    if (model.ImageUrl != null)
+                    {
+                        string imageUrl = model.ImageUrl;
+                        LoadModelPicture(() => Printables.DownloadImage(imageUrl), true);
+                    }
                     var sliceable = model.Files.Where(f => BambuSlicer.IsModelFile(f.Name)).ToList();
-                    if (sliceable.Count == 0) throw new SliceException("\"" + model.Name + "\" has no STL, 3MF or STEP files to slice.");
+                    if (sliceable.Count == 0) throw new SliceException(L.F("\"{0}\" has no STL, 3MF or STEP files to slice.",
+                                                                           "\"{0}\" har ingen STL-, 3MF- eller STEP-filer at slice.", model.Name));
                     if (sliceable.Count == 1) chosen = sliceable;
                     else
                     {
@@ -440,6 +523,11 @@ namespace PrintPrice
                 }
 
                 var result = await Task.Run(() => RunJob(exe, printablesId, chosen, localFiles, nozzle, process, filament, bed, progress, token));
+                if (result.Picture != null)
+                {
+                    byte[] render = result.Picture;
+                    LoadModelPicture(() => render, false);   // only if no Printables photo / 3MF picture is showing
+                }
 
                 int totalMinutes = (int)Math.Round(result.Seconds / 60.0);
                 if (totalMinutes == 0 && result.Seconds > 0) totalMinutes = 1;
@@ -448,20 +536,20 @@ namespace PrintPrice
                 txtGrams.Text = Num.Fmt(Math.Round(result.Grams, 1));
 
                 string what = modelName != null ? "\"" + modelName + "\"" :
-                              localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : localFiles.Count + " files";
-                string summary = (totalMinutes / 60) + " h " + (totalMinutes % 60) + " m, " +
+                              localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : L.F("{0} files", "{0} filer", localFiles.Count);
+                string summary = (totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m, " +
                                  Math.Round(result.Grams, 1).ToString("0.#", Num.Dk) + " g";
                 string how = result.FromSlicedFile
-                    ? "read from the sliced file"
+                    ? L.S("read from the sliced file", "læst fra den slicede fil")
                     : BambuSlicer.ShortName(process) + " · " + BambuSlicer.ShortName(filament);
                 int parts = chosen != null ? chosen.Count : localFiles.Count;
                 SetAuto("✓ " + what + ": " + summary + " (" + how +
-                        (parts > 1 ? ", " + parts + " files" : "") +
-                        (result.Plates > parts ? ", " + result.Plates + " plates" : "") + ").", false);
+                        (parts > 1 ? L.F(", {0} files", ", {0} filer", parts) : "") +
+                        (result.Plates > parts ? L.F(", {0} plates", ", {0} plader", result.Plates) : "") + ").", false);
             }
-            catch (OperationCanceledException) { SetAuto("Cancelled.", false); }
+            catch (OperationCanceledException) { SetAuto(L.S("Cancelled.", "Annulleret."), false); }
             catch (SliceException ex) { SetAuto(ex.Message, true); }
-            catch (Exception ex) { SetAuto("Something went wrong: " + ex.Message, true); }
+            catch (Exception ex) { SetAuto(L.S("Something went wrong: ", "Noget gik galt: ") + ex.Message, true); }
             finally
             {
                 cts.Dispose();
@@ -483,7 +571,7 @@ namespace PrintPrice
                     for (int i = 0; i < remote.Count; i++)
                     {
                         ct.ThrowIfCancellationRequested();
-                        progress.Report("Downloading " + remote[i].Name + (remote.Count > 1 ? " (" + (i + 1) + "/" + remote.Count + ")" : "") + "…");
+                        progress.Report(L.S("Downloading ", "Henter ") + remote[i].Name + (remote.Count > 1 ? " (" + (i + 1) + "/" + remote.Count + ")" : "") + "…");
                         string target = Path.Combine(work, (i + 1) + "_" + Printables.SafeFileName(remote[i].Name));
                         Printables.Download(printId, remote[i], target);
                         models.Add(new KeyValuePair<string, string>(remote[i].Name, target));
@@ -502,19 +590,20 @@ namespace PrintPrice
                 }
 
                 ct.ThrowIfCancellationRequested();
-                progress.Report("Preparing Bambu Lab A1 profiles…");
+                progress.Report(L.S("Preparing Bambu Lab A1 profiles…", "Klargør Bambu Lab A1-profiler…"));
                 BambuSlicer.PrepareProfiles(exe, nozzle, process, filament, bed, work);
 
                 var total = new SliceResult();
                 for (int i = 0; i < models.Count; i++)
                 {
                     ct.ThrowIfCancellationRequested();
-                    progress.Report("Slicing " + models[i].Key + (models.Count > 1 ? " (" + (i + 1) + "/" + models.Count + ")" : "") +
-                                    " in Bambu Studio…");
+                    progress.Report(L.S("Slicing ", "Slicer ") + models[i].Key + (models.Count > 1 ? " (" + (i + 1) + "/" + models.Count + ")" : "") +
+                                    L.S(" in Bambu Studio…", " i Bambu Studio…"));
                     var r = BambuSlicer.SliceFile(exe, models[i].Value, work, ct);
                     total.Seconds += r.Seconds;
                     total.Grams += r.Grams;
                     total.Plates += r.Plates;
+                    if (total.Picture == null) total.Picture = r.Picture;   // first model's plate picture
                 }
                 return total;
             }
@@ -534,6 +623,177 @@ namespace PrintPrice
             SendMessage(box.Handle, EM_SETCUEBANNER, (IntPtr)1, text);   // 1 = keep showing while focused
         }
 
+        // ---------- Model picture ----------
+        /// Shows a new picture (null = back to the logo) and disposes the old one.
+        void SetModelPicture(Bitmap bmp)
+        {
+            var old = picModel.Image;
+            picModel.Image = bmp;
+            if (old != null) old.Dispose();
+            picModel.Invalidate();
+        }
+
+        /// Picture box height: at least the 2-line size, else down to the info box's bottom.
+        void FitModelPicture()
+        {
+            if (picBaseHeight == 0) return;
+            int h = Math.Max(picBaseHeight, lblAuto.Bottom - picModel.Top);
+            if (picModel.Height != h) picModel.Height = h;
+        }
+
+        /// Starts a new picture "job": anything still loading for an older one is dropped. Back to the logo.
+        void ResetModelPicture()
+        {
+            picRequest++;
+            SetModelPicture(null);
+        }
+
+        /// Gets the picture bytes and prepares the bitmap off the UI thread; failures are ignored quietly.
+        /// replace = false: only used if nothing is showing yet for this job (the Printables photo beats the slice render).
+        async void LoadModelPicture(Func<byte[]> source, bool replace)
+        {
+            if (offline) return;   // picture mode never downloads
+            int request = picRequest;
+            Bitmap bmp = null;
+            try { bmp = await Task.Run(() => { var bytes = source(); return bytes == null ? null : PrepareModelPicture(bytes); }); }
+            catch { }
+            if (bmp == null) return;
+            // back on the UI thread (await); drop it if the window closed, a newer job started or a better picture is there
+            if (IsDisposed || request != picRequest || (!replace && picModel.Image != null)) { bmp.Dispose(); return; }
+            SetModelPicture(bmp);
+        }
+
+        /// Picture mode: shows a sample picture (a file, never a download).
+        internal void SetSamplePicture(string file)
+        {
+            try { SetModelPicture(PrepareModelPicture(File.ReadAllBytes(file))); } catch { }
+        }
+
+        /// Decodes the picture, cuts off transparent margins (slicer renders have lots) and scales it down to at most 384 px.
+        static Bitmap PrepareModelPicture(byte[] bytes)
+        {
+            using (var ms = new MemoryStream(bytes))
+            using (var src = new Bitmap(ms))
+            using (var full = new Bitmap(src.Width, src.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(full)) g.DrawImage(src, 0, 0, src.Width, src.Height);
+                Rectangle r = OpaqueBounds(full);
+                if (r.Width <= 0 || r.Height <= 0) return null;
+                double sc = Math.Min(1.0, 384.0 / Math.Max(r.Width, r.Height));
+                int w = Math.Max(1, (int)Math.Round(r.Width * sc)), h = Math.Max(1, (int)Math.Round(r.Height * sc));
+                var result = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(result))
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                    g.DrawImage(full, new Rectangle(0, 0, w, h), r, GraphicsUnit.Pixel);
+                }
+                return result;
+            }
+        }
+
+        /// Smallest rectangle holding all pixels that aren't (almost) transparent.
+        static Rectangle OpaqueBounds(Bitmap b)
+        {
+            var all = new Rectangle(0, 0, b.Width, b.Height);
+            var data = b.LockBits(all, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            var px = new int[b.Width * b.Height];
+            try { System.Runtime.InteropServices.Marshal.Copy(data.Scan0, px, 0, px.Length); }   // 32bpp: stride = width * 4
+            finally { b.UnlockBits(data); }
+            int minX = b.Width, minY = b.Height, maxX = -1, maxY = -1;
+            for (int y = 0; y < b.Height; y++)
+                for (int x = 0; x < b.Width; x++)
+                    if (((px[y * b.Width + x] >> 24) & 0xFF) > 16)
+                    {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+            return maxX < 0 ? Rectangle.Empty : Rectangle.FromLTRB(minX, minY, maxX + 1, maxY + 1);
+        }
+
+        /// Border, and while there is no picture: the dimmed logo with "No model yet" under it.
+        void PaintModelPicture(Graphics g)
+        {
+            var r = picModel.ClientRectangle;
+            if (picModel.Image == null)
+            {
+                string text = L.S("No model yet", "Ingen model");
+                var font = pictureFont;
+                var flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix;
+                int pad = picModel.Padding.Left;
+                Size ts = TextRenderer.MeasureText(g, text, font, new Size(r.Width - 2 * pad, 0), flags);
+                int gap = pad, topMin = pad * 3 / 2;   // at least 6 px (at 96 dpi) above the logo, 4 px under the text
+                int logoSize = Math.Min(r.Width - 4 * pad, r.Height - topMin - pad - gap - ts.Height);
+                var logo = Logo;
+                if (logo == null) logoSize = 0;
+                int top = Math.Max(topMin, (r.Height - (logoSize + (logoSize > 0 ? gap : 0) + ts.Height)) / 2);
+                if (logoSize > 0)
+                {
+                    using (var ia = new System.Drawing.Imaging.ImageAttributes())
+                    {
+                        var cm = new System.Drawing.Imaging.ColorMatrix { Matrix33 = 0.6f };   // dimmed: 60 % opacity
+                        ia.SetColorMatrix(cm);
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(logo, new Rectangle((r.Width - logoSize) / 2, top, logoSize, logoSize),
+                                    0, 0, logo.Width, logo.Height, GraphicsUnit.Pixel, ia);
+                    }
+                    top += logoSize + gap;
+                }
+                TextRenderer.DrawText(g, text, font, new Rectangle(pad, top, r.Width - 2 * pad, ts.Height), Theme.Muted, flags);
+            }
+            using (var p = new Pen(Theme.Border)) g.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+        }
+
+        static readonly Font pictureFont = new Font("Segoe UI", 9f);
+        static Bitmap logo;
+        static bool logoLoaded;
+
+        /// The app logo: the biggest PNG frame of the program's own icon (app.ico has a 128 px one). Null if not found.
+        static Bitmap Logo
+        {
+            get
+            {
+                if (logoLoaded) return logo;
+                logoLoaded = true;
+                try
+                {
+                    IntPtr module = GetModuleHandle(null);
+                    int bestWidth = 0;
+                    for (int id = 1; id <= 32; id++)
+                    {
+                        IntPtr res = FindResource(module, (IntPtr)id, (IntPtr)3);   // RT_ICON
+                        if (res == IntPtr.Zero) continue;
+                        int size = (int)SizeofResource(module, res);
+                        IntPtr data = LockResource(LoadResource(module, res));
+                        if (data == IntPtr.Zero || size < 8) continue;
+                        var bytes = new byte[size];
+                        System.Runtime.InteropServices.Marshal.Copy(data, bytes, 0, size);
+                        if (bytes[0] != 0x89 || bytes[1] != 0x50 || bytes[2] != 0x4E || bytes[3] != 0x47) continue;   // PNG frames only (keep alpha)
+                        Bitmap bmp;
+                        using (var ms = new MemoryStream(bytes))
+                        using (var png = new Bitmap(ms)) bmp = new Bitmap(png);   // own copy, the stream can go
+                        if (bmp.Width > bestWidth) { if (logo != null) logo.Dispose(); logo = bmp; bestWidth = bmp.Width; }
+                        else bmp.Dispose();
+                    }
+                }
+                catch { }
+                return logo;
+            }
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern IntPtr GetModuleHandle(string name);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern IntPtr FindResource(IntPtr module, IntPtr name, IntPtr type);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern IntPtr LoadResource(IntPtr module, IntPtr res);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern IntPtr LockResource(IntPtr data);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern uint SizeofResource(IntPtr module, IntPtr res);
+
         // ---------- UI helpers ----------
         void AddRow(TableLayoutPanel t, string caption, Control input, Control extra)
         {
@@ -544,6 +804,28 @@ namespace PrintPrice
             input.Anchor = AnchorStyles.Left;
             t.Controls.Add(input, 1, row);
             if (extra != null) { extra.Anchor = AnchorStyles.Left; t.Controls.Add(extra, 2, row); }
+        }
+
+        /// Keeps the buttons' total width (real px, after DPI scaling) and gives each one its measured text
+        /// width plus an equal share of the spare room.
+        static void SplitByText(Button[] buttons)
+        {
+            int total = 0, need = 0;
+            var natural = new int[buttons.Length];
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                total += buttons[i].Width;
+                natural[i] = TextRenderer.MeasureText(buttons[i].Text, buttons[i].Font).Width + buttons[i].Height / 2;
+                need += natural[i];
+            }
+            int spare = total - need, used = 0;
+            for (int i = 0; i < buttons.Length; i++)
+            {
+                int w = i == buttons.Length - 1 ? total - used
+                      : natural[i] + (spare >= 0 ? spare / buttons.Length : spare * natural[i] / need);
+                buttons[i].Width = w;
+                used += w;
+            }
         }
 
         static Label Unit(string text)
@@ -626,9 +908,9 @@ namespace PrintPrice
 
             string problem = null;
             if (s1 == FieldState.Invalid || s2 == FieldState.Invalid || s3 == FieldState.Invalid)
-                problem = "Please enter valid, non-negative numbers.";
+                problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
             else if (sh == FieldState.Invalid || sm == FieldState.Invalid)
-                problem = "Print time: hours 0–999, minutes 0–59.";
+                problem = L.S("Print time: hours 0–999, minutes 0–59.", "Printtid: timer 0–999, minutter 0–59.");
             else if (s1 == FieldState.Empty || s2 == FieldState.Empty || s3 == FieldState.Empty)
                 problem = "";   // incomplete, no error
 
@@ -636,7 +918,7 @@ namespace PrintPrice
             {
                 last = null;
                 SetStatus(problem, false);
-                lblMaterial.Text = lblPower.Text = lblBase.Text = "–";
+                lblMaterial.Text = lblPower.Text = lblFailed.Text = lblBase.Text = "–";
                 lblFriends.Text = lblOthers.Text = "–";
                 btnCopy.Enabled = false;
                 return;
@@ -653,6 +935,7 @@ namespace PrintPrice
             SetStatus("", false);
             lblMaterial.Text = Num.Kr(last.MaterialCost);
             lblPower.Text = Num.Kr(last.PowerCost) + "  (" + last.PowerKwh.ToString("N2", Num.Dk) + " kWh)";
+            lblFailed.Text = Num.Kr(last.FailedPrintCost);
             lblBase.Text = Num.Kr(last.BaseCost);
             lblFriends.Text = Num.Kr(last.FriendsPrice);
             lblOthers.Text = Num.Kr(last.OthersPrice);
@@ -661,12 +944,23 @@ namespace PrintPrice
 
         void RefreshSettingsLabels()
         {
-            lblPrinter.Text = "Bambu Lab A1 · " + Num.Fmt(settings.PrinterWatts) + " W  (change in Settings)";
-            string wear = settings.MachineRatePerHour > 0 ? ", " + Num.Fmt(settings.MachineRatePerHour) + " kr./h wear" : "";
-            lblFriendsInfo.Text = "+" + Num.Fmt(settings.FriendsMarkupPct) + " % markup" + wear;
-            string o = "+" + Num.Fmt(settings.OthersMarkupPct) + " % markup" + wear;
-            if (settings.MinimumPrice > 0) o += ", min " + Num.Fmt(settings.MinimumPrice) + " kr.";
+            lblPrinter.Text = "Bambu Lab A1 · " + Num.Fmt(settings.PrinterWatts) + L.S(" W  (change in Settings)", " W  (ret i Indstillinger)");
+            string wear = settings.MachineRatePerHour > 0 ? L.F(", {0} kr./h wear", ", {0} kr./t slid", Num.Fmt(settings.MachineRatePerHour)) : "";
+            lblFriendsInfo.Text = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.FriendsMarkupPct)) + wear;
+            string o = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.OthersMarkupPct)) + wear;
+            if (settings.MinimumPrice > 0) o += L.F(", min {0} kr.", ", min. {0} kr.", Num.Fmt(settings.MinimumPrice));
             lblOthersInfo.Text = o;
+            UpdateFailedRow();
+        }
+
+        /// "Failed prints (+5 %)" line in the Cost breakdown: shown only when the setting is above 0 %;
+        /// the box grows/shrinks by one row (the window follows, it is GrowAndShrink).
+        void UpdateFailedRow()
+        {
+            bool on = settings.FailedPrintPct > 0;
+            lblFailedCap.Text = L.F("Failed prints (+{0} %)", "Fejlprint (+{0} %)", Num.Fmt(settings.FailedPrintPct));
+            lblFailedCap.Visible = lblFailed.Visible = on;
+            if (breakBaseHeight > 0) grpBreak.Height = breakBaseHeight + (on ? breakRowHeight : 0);
         }
 
         void OpenSettings()
@@ -688,6 +982,12 @@ namespace PrintPrice
                     RefreshSettingsLabels();
                     Recalculate();
                     if (cts == null) ShowAutoIdle();
+                    if (dlg.RestartRequested && !offline)
+                    {
+                        // new language: settings are already saved above; Restart closes this window (saves again) and starts anew
+                        if (cts != null) cts.Cancel();
+                        BeginInvoke((MethodInvoker)Application.Restart);
+                    }
                 }
             }
         }
@@ -716,7 +1016,7 @@ namespace PrintPrice
         internal void ShowUpdateButton(UpdateInfo found)
         {
             pendingUpdate = found;
-            btnUpdate.Text = "⬆  Update to v" + Updater.Short(found.Version);
+            btnUpdate.Text = L.S("⬆  Update to v", "⬆  Opdatér til v") + Updater.Short(found.Version);
             btnUpdate.Visible = true;
         }
 
@@ -741,21 +1041,22 @@ namespace PrintPrice
         {
             if (last == null) return;
             string nl = Environment.NewLine;
-            string text = "3D print quote" + nl;
+            string text = L.S("3D print quote", "Tilbud på 3D-print") + nl;
             if (txtUrl.Text.Trim().Length > 0) text += "Model: " + txtUrl.Text.Trim() + nl;
-            text += "Print time: " + lastHours + " h " + lastMinutes + " m, filament: " + txtGrams.Text.Trim() + " g" + nl;
-            text += "Friends & family: " + Num.Kr(last.FriendsPrice) + nl;
-            text += "Customer: " + Num.Kr(last.OthersPrice);
+            text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g",
+                        lastHours, lastMinutes, txtGrams.Text.Trim()) + nl;
+            text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(last.FriendsPrice) + nl;
+            text += L.S("Customer: ", "Kunde: ") + Num.Kr(last.OthersPrice);
             try
             {
                 Clipboard.SetText(text);
-                const string msg = "Quote copied to clipboard.";
+                string msg = L.S("Quote copied to clipboard.", "Tilbuddet er kopieret til udklipsholderen.");
                 SetStatus(msg, true);
                 var t = new System.Windows.Forms.Timer { Interval = 2500 };
                 t.Tick += delegate { t.Stop(); t.Dispose(); if (lblStatus.Text == msg) SetStatus("", false); };
                 t.Start();
             }
-            catch (Exception ex) { MessageBox.Show(this, ex.Message, "Clipboard"); }
+            catch (Exception ex) { MessageBox.Show(this, ex.Message, L.S("Clipboard", "Udklipsholder")); }
         }
 
         void ClearJob()
@@ -764,6 +1065,7 @@ namespace PrintPrice
             txtGrams.Text = "";
             txtHours.Text = "0";
             txtMinutes.Text = "0";
+            ResetModelPicture();   // back to the logo
             txtUrl.Focus();
         }
     }

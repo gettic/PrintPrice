@@ -1,4 +1,5 @@
-// Draws the program logo and writes assets\app.ico (16–256 px) plus assets\logo.png (512 px).
+// Writes assets\app.ico and assets\logo.png. Picture source "ai" (default) scales the AI master PNGs;
+// "drawn" draws the original coin-stack logo (16–256 px icon, 512 px logo.png), kept so we can switch back.
 // Build & run:  powershell -ExecutionPolicy Bypass -File tools\make-icon.ps1
 using System;
 using System.Collections.Generic;
@@ -260,10 +261,136 @@ static class MakeIcon
         }
     }
 
+    // ---- Picture source "ai": icon sizes scaled from assets\logo-master.png (64 px and up)
+    // and assets\logo-master-small.png (zoomed crop, 48 px and down) ----
+
+    static Bitmap Scale1(Image img, int n)
+    {
+        var b = new Bitmap(n, n, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(b))
+        using (var ia = new ImageAttributes())
+        {
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.CompositingQuality = CompositingQuality.HighQuality;
+            ia.SetWrapMode(WrapMode.TileFlipXY);
+            g.DrawImage(img, new Rectangle(0, 0, n, n), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel, ia);
+        }
+        return b;
+    }
+
+    /// Halves in steps while more than 4x too big (smoother small sizes), then scales to n.
+    static Bitmap ScaleDown(Bitmap master, int n)
+    {
+        Bitmap cur = master;
+        while (cur.Width >= 4 * n)
+        {
+            var half = Scale1(cur, (int)Math.Round(cur.Width / 2.0));
+            if (cur != master) cur.Dispose();
+            cur = half;
+        }
+        var result = Scale1(cur, n);
+        if (cur != master) cur.Dispose();
+        return result;
+    }
+
+    /// Light sharpening of opaque pixels (used for 32 px and below).
+    static Bitmap Sharpen(Bitmap b, double a)
+    {
+        int n = b.Width;
+        var o = new Bitmap(n, n, PixelFormat.Format32bppArgb);
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++)
+            {
+                Color c = b.GetPixel(x, y);
+                if (c.A < 250 || x == 0 || y == 0 || x == n - 1 || y == n - 1) { o.SetPixel(x, y, c); continue; }
+                Color l = b.GetPixel(x - 1, y), r = b.GetPixel(x + 1, y), u = b.GetPixel(x, y - 1), d = b.GetPixel(x, y + 1);
+                Func<int, int, int, int, int, int> f = (v, v1, v2, v3, v4) =>
+                    Math.Max(0, Math.Min(255, (int)Math.Round((1 + 4 * a) * v - a * (v1 + v2 + v3 + v4))));
+                o.SetPixel(x, y, Color.FromArgb(c.A, f(c.R, l.R, r.R, u.R, d.R), f(c.G, l.G, r.G, u.G, d.G), f(c.B, l.B, r.B, u.B, d.B)));
+            }
+        return o;
+    }
+
+    /// 1 px light rim just inside the rounded square (2 px at 256), so the dark tile shows on dark backgrounds.
+    static void DrawOutline(Bitmap b, Color colour)
+    {
+        int n = b.Width;
+        float w = Math.Max(1f, n / 128f);
+        float h = w / 2 + 0.02f * n / 32;
+        using (var g = Graphics.FromImage(b))
+        using (var pen = new Pen(Color.FromArgb(230, colour), w))   // 90 % opacity
+        using (var path = RoundRect(new RectangleF(h, h, n - 2 * h, n - 2 * h), 0.222f * n - h))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.DrawPath(pen, path);
+        }
+    }
+
+    static Bitmap FromMaster(Bitmap full, Bitmap small, int size, Color? outline)
+    {
+        var b = ScaleDown(size <= 48 ? small : full, size);
+        if (size <= 32) { var s = Sharpen(b, 0.12); b.Dispose(); b = s; }
+        if (outline.HasValue) DrawOutline(b, outline.Value);
+        return b;
+    }
+
+    /// "none" (or empty) = no outline, otherwise "R,G,B".
+    static Color? ParseOutline(string s)
+    {
+        if (string.IsNullOrEmpty(s) || s.ToLowerInvariant() == "none") return null;
+        string[] p = s.Split(',');
+        if (p.Length != 3) throw new ArgumentException("Outline must be 'none' or 'R,G,B', not '" + s + "'");
+        return Color.FromArgb(int.Parse(p[0].Trim()), int.Parse(p[1].Trim()), int.Parse(p[2].Trim()));
+    }
+
+    /// Writes an ICO: classic bitmap entries below 64 px, PNG from 64 px up (standard since Windows Vista; much smaller).
+    static void WriteIco(string path, int[] sizes, Func<int, Bitmap> make)
+    {
+        var images = new List<byte[]>();
+        foreach (int s in sizes) using (var b = make(s)) images.Add(s >= 64 ? Png(b) : Dib(b));
+        using (var fs = new FileStream(path, FileMode.Create))
+        using (var w = new BinaryWriter(fs))
+        {
+            w.Write((short)0); w.Write((short)1); w.Write((short)sizes.Length);
+            int offset = 6 + 16 * sizes.Length;
+            for (int i = 0; i < sizes.Length; i++)
+            {
+                w.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i]));
+                w.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i]));
+                w.Write((byte)0); w.Write((byte)0);
+                w.Write((short)1); w.Write((short)32);
+                w.Write(images[i].Length); w.Write(offset);
+                offset += images[i].Length;
+            }
+            foreach (var img in images) w.Write(img);
+        }
+    }
+
+    /// Usage: MakeIcon <outDir> [ai|drawn] [none|R,G,B]
+    /// ai (default): icon 16-128 px + logo.png 256 px from the master PNGs in outDir, with an optional outline colour.
+    /// drawn: the original drawn logo, exactly as in v1.2.2 (icon 16-256 px, logo.png 512 px; outline ignored).
     static void Main(string[] args)
     {
         string outDir = args.Length > 0 ? args[0] : "assets";
+        string source = args.Length > 1 ? args[1].ToLowerInvariant() : "ai";
+        Color? outline = ParseOutline(args.Length > 2 ? args[2] : "none");
         Directory.CreateDirectory(outDir);
+        if (source == "ai")
+        {
+            using (var full = new Bitmap(Path.Combine(outDir, "logo-master.png")))
+            using (var small = new Bitmap(Path.Combine(outDir, "logo-master-small.png")))
+            {
+                WriteIco(Path.Combine(outDir, "app.ico"), new[] { 16, 20, 24, 32, 40, 48, 64, 128 },
+                         s => FromMaster(full, small, s, outline));
+                using (var logo = FromMaster(full, small, 256, outline))
+                    logo.Save(Path.Combine(outDir, "logo.png"), ImageFormat.Png);
+            }
+            Console.WriteLine("Wrote " + Path.Combine(outDir, "app.ico") + " and logo.png from the AI master" + (outline.HasValue ? " (outline " + args[2] + ")" : ""));
+            return;
+        }
+        if (source != "drawn") throw new ArgumentException("Picture source must be 'ai' or 'drawn', not '" + source + "'");
         int[] sizes = { 16, 20, 24, 32, 40, 48, 64, 128, 256 };
         var images = new List<byte[]>();
         foreach (int s in sizes) using (var b = Draw(s)) images.Add(s >= 64 ? Png(b) : Dib(b));

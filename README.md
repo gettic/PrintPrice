@@ -20,10 +20,13 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 - **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with A1 profiles.
   - **Other sites** (MakerWorld, Thingiverse…) block automatic downloads. Download the STL/3MF yourself and drop it on the window instead.
   - **Already-sliced `.gcode.3mf` files** are read instantly, without slicing again.
+  - **Model picture:** a small picture of the model shows under the Model link: the Printables photo, the picture inside a `.3mf`, or Bambu Studio's plate picture after slicing. Without a model it shows the logo.
 - **Live electricity price:** the current 15-minute spot price for DK1/DK2 comes from Energinet's free [Energi Data Service](https://www.energidataservice.dk/). The app adds your tariffs, taxes and fees, then 25 % VAT.
 - **Wear & tear:** a machine-time rate is worked out from the chosen **nozzle**, **filament** and **build plate**. It is added to both prices.
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
-- **Configurable:** set the markups, minimum price, rounding, printer power, print profile and price area in Settings.
+- **Failed prints:** optional. Set a % in Settings and material and power are raised by it for failed prints and reprints, before the markup. The default is 0 % (off). When it is above 0, the Cost breakdown shows a "Failed prints" line.
+- **Configurable:** set the markups, minimum price, rounding, failed prints, printer power, print profile, price area and language in Settings.
+- **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
 - **Copy quote:** puts a ready-to-send text on the clipboard.
 - **Auto-update:** at startup the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. You can switch the check off in Settings (**Check for a new version at startup**). Next to the version number in Settings, **check now** looks once when you click it.
 
@@ -31,28 +34,32 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 ```
 Material   = grams / 1000 × filament DKK/kg
 Power      = hours × printer kW × electricity DKK/kWh
-Base       = Material + Power
+Base       = (Material + Power) × (1 + failed prints %)
 Friends    = Base × (1 + friends markup) + hours × machine-time rate
 Customers  = Base × (1 + customer markup) + hours × machine-time rate   (at least the minimum price)
 ```
-The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr.
+The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr. Failed prints are 0 % by default and do not affect the machine-time rate.
 
 **Machine-time rate** (kr. per print hour):
 
 | Part | How it's calculated |
 |---|---|
-| Printer | 2.100 kr. ÷ 5.000 h |
-| Belts, PTFE tube, wiper, grease | 300 kr. ÷ 2.000 h |
-| Hotend | 139 kr. stainless (1.000 h; ~100 h with abrasive filament) or 185 kr. hardened steel (1.500 h; 500 h abrasive) |
+| Printer | 2.099 kr. ÷ 3.000 h |
+| Parts and upkeep (PTFE tube, wiper, cutter, belts, extruder gears, rods/bearings, grease, IPA, glue stick, shipping) | 600 kr. ÷ 1.500 h |
+| Hotend | 139 kr. stainless (500 h; ~100 h with abrasive filament) or 185 kr. hardened steel (750 h; 300 h abrasive) |
 | Build plate | price ÷ life; PETG/TPU halve the smooth PEI plate's life |
 
-The default setup (0.4 stainless nozzle, PLA, smooth PEI plate) comes to **0,91 kr./h**. All of these numbers are estimates and live in `src/Pricing.cs`.
+Plate prices and lives: Smooth PEI 200 kr./600 h, Textured PEI 150 kr./1.000 h, SuperTack 260 kr./500 h, Cool 150 kr./500 h, Engineering 180 kr./800 h.
+
+The default setup (0.4 stainless nozzle, PLA, smooth PEI plate) comes to **1,71 kr./h**. All of these numbers are estimates and live in `src/Pricing.cs`.
 
 ## Defaults
 | Setting | Default |
 |---|---|
 | Printer power | 100 W (A1 average when printing PLA) |
 | Markups | 25 % friends & family, 75 % customers |
+| Failed prints | 0 % (off; % of material + power) |
+| Language | Automatic (Danish if Windows is Danish, otherwise English) |
 | Slicing | 0.4 mm nozzle, 0.20mm Standard, Bambu PLA Basic, Smooth PEI plate |
 | Electricity | DK1, 0,55 kr./kWh fees on top of spot, 25 % VAT |
 
@@ -65,18 +72,18 @@ The app sends no personal information anywhere. It has no account, cookies or tr
 |---|---|---|
 | GitHub | At startup, to look for a new version (can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version |
 | Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
-| Printables | Only when you paste a Printables link | The model's ID, then the file downloads |
+| Printables | Only when you paste a Printables link | The model's ID, then the file and a small model picture (~10 KB, from media.printables.com) download |
 
-Like any web request, these show your IP address to the service. Bambu Studio runs on your own PC; the app only starts its command-line slicer.
+Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer.
 
 Nothing is installed. The app writes only its settings file and temporary slicing files. To uninstall, delete PrintPrice.exe and the folder %APPDATA%\PrintPrice.
 ## Build from source
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
-This runs the tests and compiles `bin\PrintPrice.exe` with the C# compiler that ships with Windows, so no SDK or Visual Studio is needed. To regenerate the logo and icon, run `tools\make-icon.ps1`.
+This runs the tests and compiles `bin\PrintPrice.exe` with the C# compiler that ships with Windows, so no SDK or Visual Studio is needed. To regenerate the logo and icon, run `tools\make-icon.ps1`. The switch on its first line picks the AI logo (`'ai'`, made from `assets\logo-master.png`) or the old drawn one (`'drawn'`); line 2 sets the outline colour.
 
-To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This hidden option saves the windows as PNGs in that folder and exits. It uses default settings, never goes online and never saves anything.
+To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This hidden option saves the windows as PNGs in that folder and exits. It uses default settings, never goes online and never saves anything. Add `--lang da` for Danish pictures. A `model.png` in the folder is used as the sample model picture.
 
 ### Project layout
 | Path | What |
@@ -87,6 +94,7 @@ To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This
 | `src/PowerPrice.cs` | Energi Data Service spot prices |
 | `src/Updater.cs` | Update check and install from GitHub releases |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |
+| `src/Lang.cs` | English and Danish texts |
 | `src/Screenshots.cs` | Hidden `--screenshots` picture mode |
 | `tests/PricingTests.cs` | Unit tests |
 | `.github/workflows/build.yml` | GitHub Actions: builds and tests the release exe |

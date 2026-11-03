@@ -45,8 +45,8 @@ namespace PrintPrice
                 {
                     var resp = ex.Response as HttpWebResponse;
                     if (resp != null && (int)resp.StatusCode == 429)
-                        throw new SliceException("the price service is busy right now");
-                    throw new SliceException("could not reach Energi Data Service");
+                        throw new SliceException(L.S("the price service is busy right now", "pristjenesten har travlt lige nu"));
+                    throw new SliceException(L.S("could not reach Energi Data Service", "kunne ikke nå Energi Data Service"));
                 }
             }
             return PickCurrent(body, area, nowUtc);
@@ -58,7 +58,7 @@ namespace PrintPrice
             var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(json);
             object recs;
             if (!d.TryGetValue("records", out recs) || !(recs is IEnumerable))
-                throw new SliceException("unexpected answer from Energi Data Service");
+                throw new SliceException(L.S("unexpected answer from Energi Data Service", "uventet svar fra Energi Data Service"));
 
             PowerQuote best = null;
             foreach (var o in (IEnumerable)recs)
@@ -79,7 +79,7 @@ namespace PrintPrice
                 }
             }
             if (best == null || nowUtc - best.SlotStartUtc > TimeSpan.FromHours(2))
-                throw new SliceException("no current price published for " + area);
+                throw new SliceException(L.F("no current price published for {0}", "ingen aktuel pris offentliggjort for {0}", area));
             return best;
         }
     }

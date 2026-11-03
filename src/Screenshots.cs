@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits. Uses default settings in memory (settings.ini is never read or written)
+    /// into PNGs and exits (main_empty.png, main.png, ...; a model.png in the folder is used as the sample model picture). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
     {
@@ -29,7 +29,11 @@ namespace PrintPrice
                 {
                     Place(main);
                     main.Show();
+                    Snap(main, folder, "main_empty.png");   // fresh window: logo + "No model yet"
                     main.SetSampleJob();   // Benchy example with a sample live price
+                    // sample model picture: <folder>\model.png if it is there (e.g. a slicer plate_1.png), else the logo stays
+                    string sample = Path.Combine(folder, "model.png");
+                    if (File.Exists(sample)) main.SetSamplePicture(sample);
                     Snap(main, folder, "main.png");
                     main.ShowUpdateButton(fake);
                     Snap(main, folder, "main_update.png");
@@ -40,7 +44,7 @@ namespace PrintPrice
                         set.Show();
                         Snap(set, folder, "settings.png");
                         // longest "check now" result text, to check the bottom row still fits (no real check)
-                        set.SetCheckText("v" + Updater.Short(fake.Version) + " is out – see main window", null, Theme.Text);
+                        set.SetCheckText(SettingsForm.FoundText(fake), null, Theme.Text);
                         Snap(set, folder, "settings_found.png");
                         set.Hide();
                     }

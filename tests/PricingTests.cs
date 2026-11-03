@@ -26,49 +26,74 @@ namespace PrintPrice.Tests
 
         static int Main()
         {
-            // Wear: printer 0.42 + parts 0.15 + hotend + plate
-            Eq("wear default (0.4 SS, PLA, smooth)", 0.91, Wear.DefaultRate);
-            Eq("wear textured plate", 0.86, Wear.Calculate(Wear.FindNozzle("0.4 stainless"), false, "PLA", Wear.FindPlate("Textured PEI Plate")).Total);
-            Eq("wear PETG on smooth (plate life halved)", 1.11, Wear.Calculate(Wear.FindNozzle("0.4 stainless"), false, "PETG", Wear.FindPlate("High Temp Plate")).Total);
-            Eq("wear CF on hardened", 1.14, Wear.Calculate(Wear.FindNozzle("0.4 hardened"), true, "PLA-CF", Wear.FindPlate("High Temp Plate")).Total);
+            // Wear: printer 2099/3000 = 0.6997 + parts 600/1500 = 0.40 + hotend + plate
+            // default: + 139/500 = 0.278 + 200/600 = 0.3333 = 1.711
+            Eq("wear default (0.4 SS, PLA, smooth)", 1.71, Wear.DefaultRate);
+            // 0.2 stainless: same hotend price and life = 1.711
+            Eq("wear 0.2 stainless", 1.71, Wear.Calculate(Wear.FindNozzle("0.2 stainless"), false, "PLA", Wear.FindPlate("High Temp Plate")).Total);
+            // + 0.278 + 150/1000 = 0.15 -> 1.5277
+            Eq("wear textured plate", 1.53, Wear.Calculate(Wear.FindNozzle("0.4 stainless"), false, "PLA", Wear.FindPlate("Textured PEI Plate")).Total);
+            // + 0.278 + 200/300 = 0.6667 -> 2.0443
+            Eq("wear PETG on smooth (plate life halved)", 2.04, Wear.Calculate(Wear.FindNozzle("0.4 stainless"), false, "PETG", Wear.FindPlate("High Temp Plate")).Total);
+            // + 185/750 = 0.2467 + 0.3333 -> 1.6797
+            Eq("wear PLA on hardened", 1.68, Wear.Calculate(Wear.FindNozzle("0.4 hardened"), false, "PLA", Wear.FindPlate("High Temp Plate")).Total);
+            // + 185/300 = 0.6167 + 0.3333 -> 2.0497
+            Eq("wear CF on hardened", 2.05, Wear.Calculate(Wear.FindNozzle("0.4 hardened"), true, "PLA-CF", Wear.FindPlate("High Temp Plate")).Total);
             var cfSS = Wear.Calculate(Wear.FindNozzle("0.4 stainless"), true, "PLA-CF", Wear.FindPlate("High Temp Plate"));
             True("CF on stainless flagged", cfSS.AbrasiveOnStainless);
-            Eq("wear CF on stainless (100 h hotend)", 2.16, cfSS.Total);
+            // + 139/100 = 1.39 + 0.3333 -> 2.823
+            Eq("wear CF on stainless (100 h hotend)", 2.82, cfSS.Total);
             True("short preset name", BambuSlicer.ShortName("Bambu PLA Basic @BBL A1 0.2 nozzle") == "Bambu PLA Basic");
             True("suffix 0.6", BambuSlicer.Suffix("0.6") == " @BBL A1 0.6 nozzle" && BambuSlicer.Suffix("0.4") == " @BBL A1");
             Eq("AutoUpdateCheck default is 1", 1, new AppSettings().AutoUpdateCheck);
             var orig0 = new AppSettings { AutoUpdateCheck = 0 };
             Eq("Clone keeps AutoUpdateCheck 0", 0, orig0.Clone().AutoUpdateCheck);
-            var s = new AppSettings { MachineRatePerHour = 0 }; // 100 W, 25 %, 75 %, no wear (formula check)
+            True("Language default is empty", new AppSettings().Language == "");
+            True("IsDanish(da) true", AppSettings.IsDanish("da"));
+            True("IsDanish(en) false", !AppSettings.IsDanish("en"));
+            True("IsDanish(unknown) = IsDanish(auto)", AppSettings.IsDanish("xx") == AppSettings.IsDanish(""));
+            True("Clone keeps Language da", new AppSettings { Language = "da" }.Clone().Language == "da");
+            Eq("FailedPrintPct default is 0 (off)", 0, new AppSettings().FailedPrintPct);
+            Eq("Clone keeps FailedPrintPct", 12, new AppSettings { FailedPrintPct = 12 }.Clone().FailedPrintPct);
+            var s = new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 0 }; // 100 W, 25 %, 75 %, no wear, no fails (formula check)
             var r = Pricing.Calculate(Example(), s);
             Eq("material", 21.60, r.MaterialCost);
             Eq("power kWh", 0.55, r.PowerKwh);
             Eq("power cost", 1.10, r.PowerCost);
+            Eq("failed prints off", 0, r.FailedPrintCost);
             Eq("base", 22.70, r.BaseCost);
             Eq("friends", 28.375, r.FriendsPrice);
             Eq("others", 39.725, r.OthersPrice);
 
+            // Failed prints 5 %: 22.70 × 0.05 = 1.135; base 23.835; × 1.25 = 29.79375; × 1.75 = 41.71125
+            var rf = Pricing.Calculate(Example(), new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 5 });
+            Eq("failed prints 5 %", 1.135, rf.FailedPrintCost);
+            Eq("base with failed prints", 23.835, rf.BaseCost);
+            Eq("friends with failed prints", 29.79375, rf.FriendsPrice);
+            Eq("others with failed prints", 41.71125, rf.OthersPrice);
+            Eq("negative failed % counts as 0", 22.70, Pricing.Calculate(Example(), new AppSettings { MachineRatePerHour = 0, FailedPrintPct = -5 }).BaseCost);
+
             var zero = Pricing.Calculate(new QuoteInput(), s);
             Eq("zero job", 0, zero.OthersPrice);
 
-            var s2 = new AppSettings { MachineRatePerHour = 5, MinimumPrice = 50, RoundTo = 5 };
+            var s2 = new AppSettings { MachineRatePerHour = 5, MinimumPrice = 50, RoundTo = 5, FailedPrintPct = 0 };
             var r2 = Pricing.Calculate(Example(), s2);
             // 39.725 + 5.5h*5 = 67.225 -> round up to 70
             Eq("others w/ rate + rounding", 70, r2.OthersPrice);
             // 28.375 + 5.5h*5 = 55.875 -> round up to 60
             Eq("friends w/ rate + rounding", 60, r2.FriendsPrice);
 
-            var s4 = new AppSettings();   // defaults include A1 wear: 5.5 h × 0.91 = 5.005
-            Eq("others with default wear", 44.73, Pricing.Calculate(Example(), s4).OthersPrice);   // 39.725 + 5.005
-            Eq("friends with default wear", 33.38, Pricing.Calculate(Example(), s4).FriendsPrice); // 28.375 + 5.005
+            var s4 = new AppSettings();   // defaults: failed prints off, A1 wear 5.5 h × 1.71 = 9.405
+            Eq("others with defaults", 49.13, Pricing.Calculate(Example(), s4).OthersPrice);   // 39.725 + 9.405
+            Eq("friends with defaults", 37.78, Pricing.Calculate(Example(), s4).FriendsPrice); // 28.375 + 9.405
 
             // Benchy: 0 h 38 m, 11.8 g, 200 DKK/kg, 3.65 DKK/kWh, defaults.
-            // base = 2.36 + 0.6333 × 0.1 × 3.65 = 2.5912; wear = 0.6333 × 0.91 = 0.5763
+            // base = 2.36 + 0.6333 × 0.1 × 3.65 = 2.5912; wear = 0.6333 × 1.71 = 1.0830
             var benchy = Pricing.Calculate(new QuoteInput { Hours = 0, Minutes = 38, FilamentGrams = 11.8, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 3.65 }, new AppSettings());
-            Eq("benchy friends", 3.82, benchy.FriendsPrice);   // 2.5912 × 1.25 + 0.5763 = 3.8153
-            Eq("benchy others", 5.11, benchy.OthersPrice);     // 2.5912 × 1.75 + 0.5763 = 5.1109
+            Eq("benchy friends", 4.32, benchy.FriendsPrice);   // 2.5912 × 1.25 + 1.0830 = 4.3220
+            Eq("benchy others", 5.62, benchy.OthersPrice);     // 2.5912 × 1.75 + 1.0830 = 5.6175
 
-            var s3 = new AppSettings { MinimumPrice = 50, MachineRatePerHour = 0 };
+            var s3 = new AppSettings { MinimumPrice = 50, MachineRatePerHour = 0, FailedPrintPct = 0 };
             Eq("minimum price", 50, Pricing.Calculate(Example(), s3).OthersPrice);
             Eq("minimum not for friends", 28.375, Pricing.Calculate(Example(), s3).FriendsPrice);
 
@@ -170,6 +195,32 @@ namespace PrintPrice.Tests
             True("list scrambled order", tu3 != null && Updater.NotesText(tu3, 0) == "## v1.0.3\nFixed\n• Faster start\n\n## v1.0.2\nNo notes");
             True("notes max 0 no cut", tu != null && Updater.NotesText(tu, 0).Length > 20);
             True("notes max cuts", tu != null && Updater.NotesText(tu, 10).EndsWith("…") && Updater.NotesText(tu, 10) == "## v1.0.3…");
+            // Model picture helpers
+            string benchyDir = "media/prints/3161/images/20206_70fde6a0-6da1-4522-ba46-25f1bece7199/";
+            string benchyThumb = "https://media.printables.com/" + benchyDir + "thumbs/inside/320x240/jpg/benchy.jpg";
+            True("ThumbUrl benchy jpg", Printables.ThumbUrl(benchyDir + "benchy.jpg") == benchyThumb);
+            True("ThumbUrl png -> jpg", Printables.ThumbUrl(benchyDir + "benchy.png") == benchyThumb);
+            True("ThumbUrl webp -> jpg", Printables.ThumbUrl(benchyDir + "benchy.webp") == benchyThumb);
+            True("ThumbUrl leading slash", Printables.ThumbUrl("/" + benchyDir + "benchy.jpg") == benchyThumb);
+            True("ThumbUrl null", Printables.ThumbUrl(null) == null);
+            True("ThumbUrl empty", Printables.ThumbUrl("") == null);
+            True("ThumbUrl ../x", Printables.ThumbUrl("../x") == null);
+            True("ThumbUrl full http url", Printables.ThumbUrl("http://evil/x.jpg") == null);
+            True("ThumbUrl not under media/", Printables.ThumbUrl("other/prints/1/x.jpg") == null);
+            True("ImagePath from image.filePath", Printables.ImagePathFromReply("{\"data\":{\"print\":{\"image\":{\"filePath\":\"media/a/x.jpg\"},\"images\":[{\"filePath\":\"media/b/y.jpg\"}]}}}") == "media/a/x.jpg");
+            True("ImagePath image null -> first of images", Printables.ImagePathFromReply("{\"data\":{\"print\":{\"image\":null,\"images\":[{\"filePath\":\"media/b/y.jpg\"},{\"filePath\":\"media/c/z.jpg\"}]}}}") == "media/b/y.jpg");
+            True("ImagePath print null", Printables.ImagePathFromReply("{\"data\":{\"print\":null}}") == null);
+            True("ImagePath bad JSON", Printables.ImagePathFromReply("not json {") == null);
+            True("PickPicture prefers plate_1", BambuSlicer.PickPictureEntry(new[] { "Metadata/pick_1.png", "Metadata/top_1.png", "Metadata/plate_no_light_1.png", "Metadata/plate_1_small.png", "Metadata/plate_1.png" }) == "Metadata/plate_1.png");
+            True("PickPicture thumbnail", BambuSlicer.PickPictureEntry(new[] { "Metadata/thumbnail.png", "Metadata/top_1.png" }) == "Metadata/thumbnail.png");
+            True("PickPicture plate_2 over small", BambuSlicer.PickPictureEntry(new[] { "Metadata/plate_2_small.png", "Metadata/plate_2.png" }) == "Metadata/plate_2.png");
+            True("PickPicture only pick -> null", BambuSlicer.PickPictureEntry(new[] { "Metadata/pick_1.png" }) == null);
+            True("PickPicture ignores subfolders and 3D", BambuSlicer.PickPictureEntry(new[] { "Metadata/sub/x.png", "3D/x.png" }) == null);
+            True("IsImage PNG", Net.IsImage(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }));
+            True("IsImage JPEG", Net.IsImage(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, 0x4A, 0x46 }));
+            True("IsImage null", !Net.IsImage(null));
+            True("IsImage short", !Net.IsImage(new byte[] { 0x89, 0x50, 0x4E }));
+            True("IsImage GIF", !Net.IsImage(System.Text.Encoding.ASCII.GetBytes("GIF89a..")));
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
         }

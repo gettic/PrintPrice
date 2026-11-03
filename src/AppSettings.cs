@@ -13,6 +13,7 @@ namespace PrintPrice
         public double OthersMarkupPct = 75;
         public double MachineRatePerHour = Wear.DefaultRate;   // DKK/h added to both prices (A1 wear & tear)
         public double AutoWearRate = 1;                        // 1 = calculate from nozzle, filament & plate
+        public double FailedPrintPct = 0;       // % added to material + power for failed prints / reprints (0 = off)
         public double MinimumPrice = 0;         // DKK, customer price floor
         public double RoundTo = 0;              // round prices up to nearest N kr. (0 = off)
         public double LastFilamentPrice = 180;  // DKK/kg
@@ -32,7 +33,17 @@ namespace PrintPrice
         public string FilamentPreset = "Bambu PLA Basic";
         public string BedType = "High Temp Plate";      // = Smooth PEI plate (Bambu's internal name)
 
+        public string Language = "";            // "" = auto (Danish if Windows is Danish), "en", "da"
+
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+        // "da" -> true, "en" -> false, anything else (incl. "") -> follow Windows' UI language
+        public static bool IsDanish(string language)
+        {
+            if (language == "da") return true;
+            if (language == "en") return false;
+            return CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "da";
+        }
 
         public static string FilePath
         {
@@ -51,6 +62,7 @@ namespace PrintPrice
             d["FriendsMarkupPct"] = FriendsMarkupPct;
             d["OthersMarkupPct"] = OthersMarkupPct;
             d["MachineRatePerHour"] = MachineRatePerHour;
+            d["FailedPrintPct"] = FailedPrintPct;
             d["MinimumPrice"] = MinimumPrice;
             d["RoundTo"] = RoundTo;
             d["LastFilamentPrice"] = LastFilamentPrice;
@@ -72,6 +84,7 @@ namespace PrintPrice
             d["Nozzle"] = Nozzle;
             d["BedType"] = BedType;
             d["PriceArea"] = PriceArea;
+            d["Language"] = Language;
             return d;
         }
 
@@ -83,6 +96,7 @@ namespace PrintPrice
                 case "FriendsMarkupPct": FriendsMarkupPct = v; break;
                 case "OthersMarkupPct": OthersMarkupPct = v; break;
                 case "MachineRatePerHour": MachineRatePerHour = v; break;
+                case "FailedPrintPct": FailedPrintPct = v; break;
                 case "MinimumPrice": MinimumPrice = v; break;
                 case "RoundTo": RoundTo = v; break;
                 case "LastFilamentPrice": LastFilamentPrice = v; break;
@@ -106,6 +120,7 @@ namespace PrintPrice
                 case "Nozzle": if (Wear.FindNozzle(v).Key == v) Nozzle = v; break;
                 case "BedType": if (v.Length > 0) BedType = v; break;
                 case "PriceArea": if (v == "DK1" || v == "DK2") PriceArea = v; break;
+                case "Language": if (v == "" || v == "en" || v == "da") Language = v; break;
             }
         }
 

@@ -17,7 +17,8 @@ namespace PrintPrice
         public double MaterialCost;
         public double PowerKwh;
         public double PowerCost;
-        public double BaseCost;
+        public double FailedPrintCost;   // (material + power) × FailedPrintPct / 100
+        public double BaseCost;          // material + power + failed prints
         public double FriendsPrice;
         public double OthersPrice;
     }
@@ -25,8 +26,9 @@ namespace PrintPrice
     /// Estimated wear & tear for a Bambu Lab A1 per print hour, depending on nozzle, filament and build plate.
     public static class Wear
     {
-        public const double PrinterPriceDkk = 2100, PrinterLifeHours = 5000;   // depreciation of the printer itself
-        public const double PartsPriceDkk = 300, PartsLifeHours = 2000;       // belts, PTFE tube, cutter, wiper, grease
+        public const double PrinterPriceDkk = 2099, PrinterLifeHours = 3000;   // printer paid off before it is worn out or outdated
+        // parts and upkeep: PTFE tube, wiper, cutter, belts, extruder gears, rods/bearings, grease, IPA, glue stick, shipping
+        public const double PartsPriceDkk = 600, PartsLifeHours = 1500;
 
         public class Nozzle
         {
@@ -52,11 +54,11 @@ namespace PrintPrice
 
         public static readonly Plate[] Plates =
         {
-            new Plate { Key = "High Temp Plate", Label = "Smooth PEI / High Temp Plate", PriceDkk = 200, LifeHours = 1000 },
-            new Plate { Key = "Textured PEI Plate", Label = "Textured PEI Plate", PriceDkk = 220, LifeHours = 1500 },
-            new Plate { Key = "Supertack Plate", Label = "Cool Plate (SuperTack)", PriceDkk = 260, LifeHours = 800 },
-            new Plate { Key = "Cool Plate", Label = "Cool Plate", PriceDkk = 150, LifeHours = 800 },
-            new Plate { Key = "Engineering Plate", Label = "Engineering Plate", PriceDkk = 180, LifeHours = 1200 },
+            new Plate { Key = "High Temp Plate", Label = "Smooth PEI / High Temp Plate", PriceDkk = 200, LifeHours = 600 },
+            new Plate { Key = "Textured PEI Plate", Label = "Textured PEI Plate", PriceDkk = 150, LifeHours = 1000 },
+            new Plate { Key = "Supertack Plate", Label = "Cool Plate (SuperTack)", PriceDkk = 260, LifeHours = 500 },
+            new Plate { Key = "Cool Plate", Label = "Cool Plate", PriceDkk = 150, LifeHours = 500 },
+            new Plate { Key = "Engineering Plate", Label = "Engineering Plate", PriceDkk = 180, LifeHours = 800 },
         };
 
         public static Nozzle FindNozzle(string key)
@@ -74,7 +76,8 @@ namespace PrintPrice
         /// Abrasive filaments (CF/GF, glow…) eat nozzles; stainless steel ones very quickly.
         public static double HotendLifeHours(bool hardened, bool abrasive)
         {
-            return hardened ? (abrasive ? 500 : 1500) : (abrasive ? 100 : 1000);
+            // real use: clogs, heat creep, crashes, heater/thermistor faults
+            return hardened ? (abrasive ? 300 : 750) : (abrasive ? 100 : 500);
         }
 
         /// PETG and TPU bond so hard to smooth PEI that they can tear the surface.
@@ -127,7 +130,9 @@ namespace PrintPrice
             r.MaterialCost = (input.FilamentGrams / 1000.0) * input.FilamentDkkPerKg;
             r.PowerKwh = r.PrintHours * (s.PrinterWatts / 1000.0);
             r.PowerCost = r.PowerKwh * input.ElectricityDkkPerKwh;
-            r.BaseCost = r.MaterialCost + r.PowerCost;
+            // Failed prints / reprints: a share of material + power on top (not of the wear).
+            r.FailedPrintCost = (r.MaterialCost + r.PowerCost) * (Math.Max(0, s.FailedPrintPct) / 100.0);
+            r.BaseCost = r.MaterialCost + r.PowerCost + r.FailedPrintCost;
 
             // Both prices: markup + machine-time rate (wear, not marked up). Minimum price is customers only.
             r.FriendsPrice = r.BaseCost * (1 + s.FriendsMarkupPct / 100.0)

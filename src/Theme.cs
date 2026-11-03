@@ -39,6 +39,39 @@ namespace PrintPrice
             }
         }
 
+        /// Underlined text link that also works from the keyboard: reachable with Tab, Enter or Space clicks it,
+        /// a dotted focus rectangle shows when it has keyboard focus. Looks like a PlainLabel otherwise.
+        public class LinkText : PlainLabel
+        {
+            public LinkText()
+            {
+                SetStyle(ControlStyles.Selectable, true);
+                TabStop = true;
+                Cursor = Cursors.Hand;
+            }
+
+            protected override bool IsInputKey(Keys keyData)
+            {
+                // Enter/Space go to this control instead of the form's OK button
+                return keyData == Keys.Enter || keyData == Keys.Space || base.IsInputKey(keyData);
+            }
+
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) { e.Handled = true; e.SuppressKeyPress = true; OnClick(EventArgs.Empty); return; }
+                base.OnKeyDown(e);
+            }
+
+            protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+            protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(e.Graphics, ClientRectangle, ForeColor, BackColor);
+            }
+        }
+
         /// Recursively colours a control tree. Labels can carry Tag = "muted" | "friends" | "others".
         public static void Apply(Control c)
         {

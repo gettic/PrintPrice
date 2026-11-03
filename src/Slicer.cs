@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Xml;
@@ -17,6 +18,7 @@ namespace PrintPrice
         public double Grams;
         public int Plates;
         public bool FromSlicedFile;   // values read from an already-sliced .gcode.3mf
+        public byte[] Picture;        // plate picture (PNG) from the sliced 3MF, null if none
     }
 
     public class SliceException : Exception
@@ -166,13 +168,14 @@ namespace PrintPrice
                 var hits = Directory.GetFiles(dir, name + ".json", SearchOption.AllDirectories);
                 if (hits.Length > 0) return hits[0];
             }
-            throw new SliceException("Bambu Studio profile not found: \"" + name + "\". Pick another profile in Settings.");
+            throw new SliceException(L.F("Bambu Studio profile not found: \"{0}\". Pick another profile in Settings.",
+                "Bambu Studio-profilen blev ikke fundet: \"{0}\". Vælg en anden profil i Indstillinger.", name));
         }
 
         /// The CLI does not resolve "inherits" chains, so merge parent → child ourselves.
         static Dictionary<string, object> Flatten(List<string> roots, string kind, string name, int depth)
         {
-            if (depth > 25) throw new SliceException("Profile inheritance too deep: " + name);
+            if (depth > 25) throw new SliceException(L.F("Profile inheritance too deep: {0}", "Profilen arver i for mange led: {0}", name));
             var own = Json().Deserialize<Dictionary<string, object>>(File.ReadAllText(FindProfile(roots, kind, name)));
             var merged = new Dictionary<string, object>();
             object parent;
@@ -186,7 +189,7 @@ namespace PrintPrice
         public static void PrepareProfiles(string exe, string nozzleSize, string process, string filament, string bedType, string workDir)
         {
             var roots = Roots(exe);
-            if (roots.Count == 0) throw new SliceException("Could not find Bambu Studio's printer profiles.");
+            if (roots.Count == 0) throw new SliceException(L.S("Could not find Bambu Studio's printer profiles.", "Kunne ikke finde Bambu Studios printerprofiler."));
             Directory.CreateDirectory(workDir);
             var json = Json();
             File.WriteAllText(Path.Combine(workDir, "machine.json"), json.Serialize(Flatten(roots, "machine", MachinePreset(nozzleSize), 0)));
@@ -227,7 +230,8 @@ namespace PrintPrice
                     {
                         try { proc.Kill(); } catch { }
                         ct.ThrowIfCancellationRequested();
-                        throw new SliceException("Slicing took longer than " + TimeoutMinutes + " minutes and was stopped.");
+                        throw new SliceException(L.F("Slicing took longer than {0} minutes and was stopped.",
+                            "Slicing tog mere end {0} minutter og blev stoppet.", TimeoutMinutes));
                     }
                 }
                 exit = proc.ExitCode;
@@ -247,11 +251,12 @@ namespace PrintPrice
             }
             string out3mf = Path.Combine(outDir, "out.3mf");
             if (exit != 0 || !File.Exists(out3mf))
-                throw new SliceException("Bambu Studio could not slice " + Path.GetFileName(model) + ": " +
-                    (string.IsNullOrEmpty(error) ? "exit code " + exit : error));
+                throw new SliceException(L.F("Bambu Studio could not slice {0}: {1}", "Bambu Studio kunne ikke slice {0}: {1}",
+                    Path.GetFileName(model), string.IsNullOrEmpty(error) ? L.F("exit code {0}", "fejlkode {0}", exit) : error));
 
             var res = ReadSliceInfo(out3mf);
-            if (res == null) throw new SliceException("Bambu Studio returned no print estimate for " + Path.GetFileName(model) + ".");
+            if (res == null) throw new SliceException(L.F("Bambu Studio returned no print estimate for {0}.",
+                "Bambu Studio gav intet printestimat for {0}.", Path.GetFileName(model)));
             return res;
         }
 
@@ -282,7 +287,55 @@ namespace PrintPrice
                 if (entry == null) return null;
                 using (var sr = new StreamReader(entry.Open())) xml = sr.ReadToEnd();
             }
-            return ParseSliceInfo(xml);
+            var res = ParseSliceInfo(xml);
+            if (res != null) res.Picture = FromProject(path3mf);
+            return res;
+        }
+
+        const long MaxPictureBytes = 4 * 1048576;
+
+        /// Picture of the model from a .3mf (sliced or not): PNG bytes, or null if none / on any error.
+        public static byte[] FromProject(string path3mf)
+        {
+            try
+            {
+                using (var zip = ZipFile.OpenRead(path3mf))
+                {
+                    string name = PickPictureEntry(zip.Entries.Select(e => e.FullName));
+                    if (name == null) return null;
+                    var entry = zip.GetEntry(name);
+                    if (entry == null || entry.Length <= 0 || entry.Length > MaxPictureBytes) return null;
+                    using (var s = entry.Open())
+                    using (var ms = new MemoryStream())
+                    {
+                        s.CopyTo(ms);
+                        var bytes = ms.ToArray();
+                        return Net.IsImage(bytes) ? bytes : null;
+                    }
+                }
+            }
+            catch { return null; }
+        }
+
+        /// Which zip entry holds the best model picture: Metadata/plate_1.png, then Metadata/thumbnail.png,
+        /// then any other Metadata/*.png (sorted; pick_/top_/no_light helper renders and _small last or skipped). Null if none.
+        public static string PickPictureEntry(IEnumerable<string> names)
+        {
+            var pngs = (names ?? Enumerable.Empty<string>())
+                .Where(n => n != null && n.StartsWith("Metadata/", StringComparison.OrdinalIgnoreCase)
+                         && n.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                         && n.IndexOf('/', 9) < 0)
+                .ToList();
+            foreach (var want in new[] { "Metadata/plate_1.png", "Metadata/thumbnail.png" })
+            {
+                var hit = pngs.FirstOrDefault(n => string.Equals(n, want, StringComparison.OrdinalIgnoreCase));
+                if (hit != null) return hit;
+            }
+            return pngs
+                .Where(n => !Regex.IsMatch(n, @"^Metadata/(pick_|top_|plate_no_light_)", RegexOptions.IgnoreCase))
+                .OrderBy(n => n.EndsWith("_small.png", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                .ThenBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
         }
 
         public static SliceResult ParseSliceInfo(string xml)
