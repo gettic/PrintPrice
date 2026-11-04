@@ -7,9 +7,7 @@
 
 A small dark-mode Windows app that turns a 3D print job into two price quotes: one for **friends & family** and one for **customers**. It's made for the **Bambu Lab A1** and Danish prices (DKK).
 
-<p align="center"><img src="assets/screenshot.png" width="480" alt="Screenshot"></p>
-
-<p align="center"><img src="assets/screenshot-multicolour.png" width="480" alt="Screenshot of a multi-colour print"></p>
+<p align="center"><img src="assets/screenshot-multicolour.png" width="480" alt="Screenshot"></p>
 
 ## Download
 Download **`PrintPrice.zip`** from the [latest release](../../releases/latest), unzip it and run **`PrintPrice.exe`**. Nothing needs to be installed: Windows 10/11 already includes what it needs (.NET Framework 4.8).

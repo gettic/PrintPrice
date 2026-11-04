@@ -21,6 +21,7 @@ namespace PrintPrice
         [STAThread]
         static int Main(string[] args)
         {
+            Net.EnsureTls();
             try { SetProcessDPIAware(); } catch { }
             // hidden picture mode: PrintPrice.exe --screenshots <folder> renders the windows to PNGs and exits
             // optional "--lang da" / "--lang en" (picture mode only, which never reads the settings file)

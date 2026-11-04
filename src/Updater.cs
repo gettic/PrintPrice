@@ -72,6 +72,7 @@ namespace PrintPrice
 
         static WebClient Client()
         {
+            Net.EnsureTls();   // the exe download
             return Net.Client("PrintPrice-updater/" + CurrentText);
         }
 
@@ -116,7 +117,8 @@ namespace PrintPrice
         }
 
         /// Returns the latest release if it is newer than this program, otherwise null.
-        // Conditional-request cache (per process, memory only). A 304 reply doesn't count toward GitHub's rate limit.
+        // Conditional-request cache (per process, memory only). It saves downloading the list again; our requests are
+        // anonymous, so a 304 reply still counts toward GitHub's rate limit (60 an hour per IP address).
         static readonly object CacheLock = new object();
         static string _etag;
         static UpdateInfo _cached;
@@ -176,6 +178,7 @@ namespace PrintPrice
         static UpdateInfo Fetch(out bool rateLimited)
         {
             rateLimited = false;
+            Net.EnsureTls();   // this request doesn't go through Net.Client; without it the first check after a start fails
             string etag; bool hadCache;
             lock (CacheLock) { etag = _etag; hadCache = _hasCache; }
             var req = (HttpWebRequest)WebRequest.Create(Api);
@@ -400,7 +403,16 @@ namespace PrintPrice
     {
         static Net()
         {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            EnsureTls();
+        }
+
+        /// Turns TLS 1.2 on (GitHub and the other services refuse older TLS). The exe has no target-framework
+        /// attribute, so .NET would otherwise offer only SSL3/TLS 1.0. Safe to call any number of times, from any thread;
+        /// call it before every request that doesn't go through Net.Client (and once at startup).
+        public static void EnsureTls()
+        {
+            if ((ServicePointManager.SecurityProtocol & SecurityProtocolType.Tls12) == 0)
+                ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
         }
 
         public const string DefaultUserAgent = "PrintPrice/1.0 (3D print price calculator)";

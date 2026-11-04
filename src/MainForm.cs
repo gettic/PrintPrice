@@ -166,7 +166,7 @@ namespace PrintPrice
             // model picture in the label column, beside the buttons and the info box (size measured on Load)
             picModel = new PictureBox
             {
-                SizeMode = PictureBoxSizeMode.Zoom, BackColor = Theme.Input, Size = new Size(10, 10),
+                BackColor = Theme.Input, Size = new Size(10, 10),   // the model picture is drawn in PaintModelPicture (Zoom ignores Padding)
                 Padding = new Padding(4), Margin = Padding.Empty, Anchor = AnchorStyles.Top | AnchorStyles.Left
             };
             picModel.Paint += (s, e) => PaintModelPicture(e.Graphics);
@@ -307,7 +307,7 @@ namespace PrintPrice
             // a 3+ line info box: the picture box grows with it, so both still end at the same line
             lblAuto.SizeChanged += delegate { FitModelPicture(); };
             lblAuto.LocationChanged += delegate { FitModelPicture(); };
-            picModel.Resize += delegate { UpdatePicturePadding(); picModel.Invalidate(); };
+            picModel.Resize += delegate { picModel.Invalidate(); };
             Load += delegate { printerCardReady = true; LayoutPrinterCard(); };   // after the widths above are set
 
             // ---------- Prices ----------
@@ -890,29 +890,15 @@ namespace PrintPrice
         /// Shows a new picture (null = back to the logo) and disposes the old one.
         void SetModelPicture(Bitmap bmp)
         {
-            var old = picModel.Image;
-            picModel.Image = bmp;
-            UpdatePicturePadding();
+            var old = modelImage;
+            modelImage = bmp;
             if (old != null) old.Dispose();
             picModel.Invalidate();
         }
 
-        int picBasePad;
-        bool picPadOverridden;
-
-        /// A model picture keeps a margin (5 % of the box, at least 4 px at 96 dpi) so it doesn't touch the walls;
-        /// the empty box keeps its normal padding (the logo layout uses it).
-        void UpdatePicturePadding()
-        {
-            if (picModel.Image == null)
-            {
-                if (picPadOverridden) { picModel.Padding = new Padding(picBasePad); picPadOverridden = false; }
-                return;
-            }
-            if (!picPadOverridden) { picBasePad = picModel.Padding.Left; picPadOverridden = true; }
-            int min = Math.Max(4 * DeviceDpi / 96, (int)Math.Round(0.05 * Math.Min(picModel.ClientSize.Width, picModel.ClientSize.Height)));
-            if (picModel.Padding.Left != min) picModel.Padding = new Padding(min);
-        }
+        /// The model picture, drawn by PaintModelPicture (not PictureBox.Image: its Zoom mode ignores Padding,
+        /// so the picture touched the walls and the border was drawn over its edges).
+        Bitmap modelImage;
 
         /// Picture box height: at least the 2-line size, else down to the info box's bottom.
         void FitModelPicture()
@@ -934,7 +920,7 @@ namespace PrintPrice
         {
             if (jobLoaded == on) return;
             jobLoaded = on;
-            if (picModel.Image == null) picModel.Invalidate();
+            if (modelImage == null) picModel.Invalidate();
         }
 
         /// Gets the picture bytes and prepares the bitmap off the UI thread; failures are ignored quietly.
@@ -948,7 +934,7 @@ namespace PrintPrice
             catch { }
             if (bmp == null) return;
             // back on the UI thread (await); drop it if the window closed, a newer job started or a better picture is there
-            if (IsDisposed || request != picRequest || (!replace && picModel.Image != null)) { bmp.Dispose(); return; }
+            if (IsDisposed || request != picRequest || (!replace && modelImage != null)) { bmp.Dispose(); return; }
             SetModelPicture(bmp);
         }
 
@@ -1008,7 +994,22 @@ namespace PrintPrice
         void PaintModelPicture(Graphics g)
         {
             var r = picModel.ClientRectangle;
-            if (picModel.Image == null)
+            var pic = modelImage;
+            if (pic != null)
+            {
+                // the whole picture, scaled to fit inside a margin of 5 % of the box (at least 4 px at 96 dpi), centred
+                int m = Math.Max(4 * DeviceDpi / 96, (int)Math.Round(0.05 * Math.Min(r.Width, r.Height)));
+                int aw = r.Width - 2 * m, ah = r.Height - 2 * m;
+                if (aw > 0 && ah > 0)
+                {
+                    double sc = Math.Min((double)aw / pic.Width, (double)ah / pic.Height);
+                    int w = Math.Max(1, (int)Math.Round(pic.Width * sc)), h = Math.Max(1, (int)Math.Round(pic.Height * sc));
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                    g.DrawImage(pic, new Rectangle(m + (aw - w) / 2, m + (ah - h) / 2, w, h));
+                }
+            }
+            else
             {
                 string text = jobLoaded ? "" : L.S("No model yet", "Ingen model");
                 var font = pictureFont;
