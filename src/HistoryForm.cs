@@ -23,8 +23,10 @@ namespace PrintPrice
         readonly InfoBox info;
         readonly Button btnDelete, btnOpen;
         readonly TableLayoutPanel top, bottom;
-        readonly DataGridViewTextBoxColumn colDate, colModel, colTime, colGrams, colPrice, colNote, colFailed;
+        readonly DataGridViewTextBoxColumn colDate, colModel, colTime, colGrams, colPrice, colNote;
         readonly DataGridViewComboBoxColumn colFor;
+        readonly ToolTip modelTip;   // dark tooltip with the full model name when it is cut off
+        readonly DataGridViewCheckBoxColumn colFailed;   // read-only cell, toggled by click / Space (ToggleFailed), drawn in the theme (PaintFailed)
         System.Windows.Forms.Timer deleteTimer;
         bool deleteArmed, filling;
         string saveError;
@@ -66,7 +68,8 @@ namespace PrintPrice
             for (int i = 0; i < 4; i++) top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             // search box and Show combo: same top (Top anchor, same margin) and same height (FitLayout), captions centred beside them
-            txtSearch = new TextBox { Width = 260, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 24, 3) };
+            // Tag "single": stays a single-line edit (its cue banner needs that), see Theme.TextMargins
+            txtSearch = new TextBox { Width = 260, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 24, 3), Tag = "single" };
             txtSearch.HandleCreated += delegate
             {
                 SendMessage(txtSearch.Handle, 0x1501, (IntPtr)1, L.S("Model, link or note", "Model, link eller note"));   // EM_SETCUEBANNER
@@ -131,9 +134,9 @@ namespace PrintPrice
             colNote.ReadOnly = false;
             colNote.MaxInputLength = 200;
             colNote.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;   // takes what is left (no scroll bar = a bit wider)
-            colFailed = TextColumn(L.S("Failed", "Fejlet"), false);
-            colFailed.Visible = false;   // idea 9 (failed prints) adds it
-            colFailed.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            // Failed: ticking it marks the print as failed (its cost is earned back by new quotes when that is on in Settings)
+            colFailed = new DataGridViewCheckBoxColumn { HeaderText = L.S("Failed", "Fejlet"), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable };
+            colFailed.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
             grid.Columns.AddRange(new DataGridViewColumn[] { colDate, colModel, colTime, colGrams, colPrice, colFor, colNote, colFailed });
 
             grid.CellFormatting += GridCellFormatting;
@@ -145,6 +148,28 @@ namespace PrintPrice
             };
             grid.CellValueChanged += GridCellValueChanged;
             grid.DataError += (s, e) => { e.ThrowException = false; };
+            // the grid's own cell tooltip is Windows' light one: off; a cut-off model name shows in a dark one instead
+            grid.ShowCellToolTips = false;
+            modelTip = new ToolTip { OwnerDraw = true, InitialDelay = 400 };
+            modelTip.Draw += (s, e) =>
+            {
+                using (var b = new SolidBrush(Theme.InfoBack)) e.Graphics.FillRectangle(b, e.Bounds);
+                using (var p = new Pen(Theme.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
+                TextRenderer.DrawText(e.Graphics, e.ToolTipText, e.Font, e.Bounds, Theme.Text,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            };
+            grid.CellMouseEnter += (s, e) =>
+            {
+                if (e.RowIndex < 0 || e.ColumnIndex != colModel.Index) return;
+                var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+                string text = Convert.ToString(cell.FormattedValue);
+                var r = grid.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
+                var pad = cell.InheritedStyle.Padding;
+                if (string.IsNullOrEmpty(text) || TextRenderer.MeasureText(text, grid.Font).Width <= r.Width - pad.Horizontal - 4) return;
+                modelTip.Show(text, grid, r.Left, r.Bottom + 2, 8000);
+            };
+            grid.CellMouseLeave += delegate { modelTip.Hide(grid); };
+            FormClosed += delegate { modelTip.Dispose(); };
             grid.EditingControlShowing += (s, e) =>
             {
                 e.CellStyle.BackColor = Theme.Input;
@@ -158,6 +183,7 @@ namespace PrintPrice
                 // one click on For or Note edits it (For opens its list)
                 if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
                 var col = grid.Columns[e.ColumnIndex];
+                if (col == colFailed) { ToggleFailed(e.RowIndex); return; }
                 if (col != colFor && col != colNote) return;
                 grid.CurrentCell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
                 if (!grid.BeginEdit(col == colNote)) return;
@@ -168,14 +194,18 @@ namespace PrintPrice
             {
                 if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
                 var col = grid.Columns[e.ColumnIndex];
-                if (col == colFor || col == colNote) return;   // those edit
+                if (col == colFor || col == colNote || col == colFailed) return;   // those edit / toggle
                 OpenAgain();
             };
             grid.OpenRequested = OpenAgain;
             grid.KeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Delete && !grid.IsCurrentCellInEditMode) { e.Handled = true; DeleteClicked(); }
+                // Space on the Failed cell ticks / unticks it
+                if (e.KeyCode == Keys.Space && !grid.IsCurrentCellInEditMode && grid.CurrentCell != null && grid.CurrentCell.OwningColumn == colFailed)
+                { e.Handled = true; ToggleFailed(grid.CurrentCell.RowIndex); }
             };
+            grid.CellPainting += PaintFailed;
             grid.SelectionChanged += delegate { DisarmDelete(); UpdateButtons(); };
             grid.HandleCreated += delegate { DarkScrollBars(grid); };
 
@@ -259,13 +289,13 @@ namespace PrintPrice
                 return Math.Max(px(w), need);
             };
             colDate.Width = width(colDate, "00-00-0000 00:00", 130);
-            colModel.Width = px(210);
+            colModel.Width = px(240);   // most names fit; longer ones get the dark tooltip (ModelTip)
             colTime.Width = width(colTime, L.S("000 h 00 m", "000 t 00 m"), 92);
             colGrams.Width = width(colGrams, "0000,00", 70);
             colPrice.Width = width(colPrice, "0000,00", 74);
             colFor.Width = width(colFor, L.S("Customer", "Venner"), 96);
             colNote.MinimumWidth = px(200);
-            colFailed.Width = px(60);
+            colFailed.Width = width(colFailed, null, 64);
 
             // Show combo exactly as tall as the search box (owner-drawn: height = ItemHeight + its frame, measured)
             int frame = cmbShow.Height - cmbShow.ItemHeight;
@@ -274,7 +304,7 @@ namespace PrintPrice
             int rowH = TextRenderer.MeasureText("Ag", grid.Font).Height + px(8);
             grid.RowTemplate.Height = rowH;
             grid.ColumnHeadersHeight = rowH + px(4);
-            int cols = colDate.Width + colModel.Width + colTime.Width + colGrams.Width + colPrice.Width + colFor.Width + px(230);
+            int cols = colDate.Width + colModel.Width + colTime.Width + colGrams.Width + colPrice.Width + colFor.Width + colFailed.Width + px(230);
             gridFrame.Size = new Size(cols + SystemInformation.VerticalScrollBarWidth + 2,
                                       grid.ColumnHeadersHeight + VisibleRows * rowH + 2);
             info.SetWidth(gridFrame.Width);
@@ -334,7 +364,7 @@ namespace PrintPrice
                                       r.Hours + L.S(" h ", " t ") + r.Minutes + " m",
                                       Num.Fmt(r.Grams), History.PriceFor(r).ToString("0.00", Num.Dk),
                                       r.For == History.ForFriends ? History.ForFriends : History.ForCustomer,
-                                      r.Note ?? "", r.Failed ? "✗" : "");
+                                      r.Note ?? "", r.Failed);
                 grid.Rows[i].Tag = r;
                 grid.Rows[i].Height = grid.RowTemplate.Height;
                 if (r == keep) { grid.CurrentCell = grid.Rows[i].Cells[0]; }
@@ -368,7 +398,48 @@ namespace PrintPrice
             bool friends = r.For == History.ForFriends;
             if (col == colPrice) e.CellStyle.ForeColor = friends ? Theme.Friends : Theme.Others;
             else if (col == colFor) e.CellStyle.ForeColor = friends ? Theme.Friends : Theme.Others;   // same colours as the prices
-            else if (col == colFailed) e.CellStyle.ForeColor = Theme.Error;
+        }
+
+        /// Failed cell: a themed box (border colour, input background) with a red ✗ when ticked (white on the selected row).
+        void PaintFailed(object sender, DataGridViewCellPaintingEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex != colFailed.Index) return;
+            e.PaintBackground(e.CellBounds, (e.State & DataGridViewElementStates.Selected) != 0);
+            bool selected = (e.State & DataGridViewElementStates.Selected) != 0;
+            bool on = e.Value is bool && (bool)e.Value;
+            float sc = CurrentAutoScaleDimensions.Height / 96f;
+            int size = (int)Math.Round(14 * sc);
+            var box = new Rectangle(e.CellBounds.X + (e.CellBounds.Width - size) / 2, e.CellBounds.Y + (e.CellBounds.Height - size) / 2, size - 1, size - 1);
+            using (var back = new SolidBrush(Theme.Input)) e.Graphics.FillRectangle(back, box);
+            using (var pen = new Pen(selected ? Theme.Text : Theme.Muted)) e.Graphics.DrawRectangle(pen, box);   // no pure white (style)
+            if (on)
+            {
+                var old = e.Graphics.SmoothingMode;
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                int m = Math.Max(3, (int)Math.Round(3f * sc));   // ✗ 7 px of the 13 px box at 96 dpi (was 5)
+                using (var pen = new Pen(Theme.Error, Math.Max(2f, 2f * sc)))
+                {
+                    e.Graphics.DrawLine(pen, box.Left + m, box.Top + m, box.Right - m, box.Bottom - m);
+                    e.Graphics.DrawLine(pen, box.Right - m, box.Top + m, box.Left + m, box.Bottom - m);
+                }
+                e.Graphics.SmoothingMode = old;
+            }
+            e.Handled = true;
+        }
+
+        /// Ticks / unticks Failed for the row's quote (History.MarkFailed) and saves at once.
+        void ToggleFailed(int rowIndex)
+        {
+            if (rowIndex < 0 || rowIndex >= grid.Rows.Count) return;
+            var row = grid.Rows[rowIndex];
+            var r = row.Tag as QuoteRecord;
+            if (r == null) return;
+            History.MarkFailed(r, !r.Failed, DateTime.Now);
+            filling = true;
+            row.Cells[colFailed.Index].Value = r.Failed;
+            filling = false;
+            grid.InvalidateCell(colFailed.Index, rowIndex);
+            SaveList();
         }
 
         void GridCellValueChanged(object sender, DataGridViewCellEventArgs e)
@@ -413,9 +484,9 @@ namespace PrintPrice
         void ShowInfo()
         {
             string help = L.S("Double-click a quote (or Open again) to load it with today's settings; the saved price is shown next to the new one.\n" +
-                              "Click For or Note to change them, changes are saved at once. The history is kept only on this PC and never sent anywhere.",
+                              "Click For, Note or Failed to change them, changes are saved at once. The history is kept only on this PC and never sent anywhere.",
                               "Dobbeltklik på et tilbud (eller Åbn igen) for at hente det med dagens indstillinger; den gemte pris vises ved siden af den nye.\n" +
-                              "Klik på Til eller Note for at ændre dem, ændringer gemmes med det samme. Historikken ligger kun på denne pc og sendes aldrig nogen steder.");
+                              "Klik på Til, Note eller Fejlet for at ændre dem, ændringer gemmes med det samme. Historikken ligger kun på denne pc og sendes aldrig nogen steder.");
             if (saveError != null) { info.Text = saveError; info.Kind = InfoKind.Error; }
             else if (!string.IsNullOrEmpty(problem)) { info.Text = problem + "\n" + help; info.Kind = InfoKind.Warning; }
             else { info.Text = help; info.Kind = InfoKind.Info; }
@@ -534,6 +605,9 @@ namespace PrintPrice
             add("2026-10-19 12:33:00", L.S("Headphone hook", "Hovedtelefonkrog"), @"C:\Models\headphone_hook.stl", 1, 48, 38.6, 13.55, 17.74, C, "");
             add("2026-10-12 20:02:00", L.S("Articulated dragon", "Bevægelig drage"), "https://www.printables.com/model/1234-articulated-dragon", 4, 55, 92.3, 33.73, 43.85, F, L.S("Emma's birthday", "Emmas fødselsdag"));
             add("2026-10-05 09:47:00", L.S("Lithophane lamp", "Litofanlampe"), @"C:\Models\lithophane.3mf", 9, 20, 120.5, 50.34, 64.10, C, L.S("Not paid yet", "Ikke betalt endnu"));
+            // one failed print, so the picture shows a ticked Failed box
+            l[5].Note = L.S("Layer shift at 80 %", "Lagforskydning ved 80 %");
+            History.MarkFailed(l[5], true, new DateTime(2026, 10, 19, 15, 10, 0));
             return l;
         }
     }

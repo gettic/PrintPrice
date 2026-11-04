@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_multi.png, main_reopened.png, history.png, ...; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, main_reopened.png, history.png, ...; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -36,6 +36,10 @@ namespace PrintPrice
                     string sample = Path.Combine(folder, "model.png");
                     main.SetSamplePicture(sample);
                     Snap(main, folder, "main.png");
+                    // failed prints payback on, with a made-up debt (nothing is saved): the extra Cost breakdown row
+                    main.SetSamplePayback(33.70);
+                    Snap(main, folder, "main_payback.png");
+                    main.SetSamplePayback(0);   // back to the defaults (off) for the other pictures
                     // 4-colour Benchy: one row per colour in the Cost breakdown; picture = <folder>\model2.png if there
                     main.SetSampleMultiJob();
                     main.SetSamplePicture(Path.Combine(folder, "model2.png"));
@@ -66,6 +70,16 @@ namespace PrintPrice
                         // longest "check now" result text, to check the bottom row still fits (no real check)
                         set.SetCheckText(SettingsForm.FoundText(fake), null, Theme.Text);
                         Snap(set, folder, "settings_found.png");
+                        set.Hide();
+                    }
+                    // Settings with "Earn back failed prints" ticked and a made-up debt (copy of the defaults, never saved)
+                    var payback = s.Clone();
+                    payback.FailedPayback = 1;
+                    using (var set = new SettingsForm(payback, 33.05))
+                    {
+                        Place(set);
+                        set.Show();
+                        Snap(set, folder, "settings_payback.png");
                         set.Hide();
                     }
 

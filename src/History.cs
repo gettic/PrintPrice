@@ -7,7 +7,8 @@ using System.Web.Script.Serialization;
 
 namespace PrintPrice
 {
-    /// One colour line of a saved multi-colour quote (enough to rebuild the colour rows without re-slicing).
+    /// One colour line of a saved quote (enough to rebuild the colour rows without re-slicing). A one-colour quote has
+    /// one line (same Grams / PricePerKg as the record), a multi-colour quote 2+; quotes from before v1.6 have none (null).
     public class HistoryFilament
     {
         public double Grams;
@@ -30,7 +31,7 @@ namespace PrintPrice
         public int Minutes;
         public double Grams;                 // total, incl. purge
         public double FilamentDkkPerKg;
-        public List<HistoryFilament> Filaments;   // null = one filament
+        public List<HistoryFilament> Filaments;   // 1 line = one colour, 2+ = multi-colour, null = old one-colour quote
         public double PurgeGrams = -1;       // -1 = unknown
         public double ElectricityDkkPerKwh;
 
@@ -51,13 +52,19 @@ namespace PrintPrice
         public double FriendsPrice;
         public double OthersPrice;
 
+        // failed prints payback (idea 9): what this quote added to pay back failed prints, and the settings used
+        public double PaybackCost;           // kr. in OthersPrice (and FriendsPrice when FailedPaybackWho = 1); 0 = none
+        public double FailedPaybackPct;
+        public double FailedPaybackWho;      // 1 = both prices, 2 = customers only (0 in old files = 2)
+
         // the user's own
         public int For = History.ForCustomer;   // 1 = friends & family, 2 = customer (old 0 = not set -> read as 2)
         public string Note = "";
 
-        // idea 9 (later): failed print, its cost made back by a surcharge
+        // idea 9: failed print, its cost (History.FailedCost) made back by a payback on later quotes
         public bool Failed;
         public string FailedAt = "";         // "" = not failed
+        public double PaidBack;              // failed only: kr. paid by quotes Trim has dropped (so the debt stays the same)
     }
 
     /// The file's top level: {"Version":1,"Quotes":[...]} (newest first).
@@ -113,6 +120,9 @@ namespace PrintPrice
                 foreach (var f in input.Filaments)
                     r.Filaments.Add(new HistoryFilament { Grams = f == null ? 0 : f.Grams, PricePerKg = f == null ? 0 : f.PricePerKg });
             }
+            else   // one colour: one line with the single-filament numbers Pricing used (ui fills its Name/Colour/Type)
+                r.Filaments = new List<HistoryFilament> {
+                    new HistoryFilament { Grams = input.FilamentGrams, PricePerKg = input.FilamentDkkPerKg } };
             r.ElectricityDkkPerKwh = input.ElectricityDkkPerKwh;
 
             r.PrinterWatts = s.PrinterWatts;
@@ -129,16 +139,23 @@ namespace PrintPrice
             r.BaseCost = result.BaseCost;
             r.FriendsPrice = result.FriendsPrice;
             r.OthersPrice = result.OthersPrice;
+            r.PaybackCost = result.PaybackCost;
+            r.FailedPaybackPct = s.FailedPaybackPct;
+            r.FailedPaybackWho = s.FailedPaybackWho == 1 ? 1 : 2;
             return r;
         }
 
-        /// The inputs of a record, ready for Pricing.Calculate or for filling the main window.
+        /// The inputs of a record, ready for Pricing.Calculate (with SavedSettings: the price as it was) or for filling the
+        /// main window. PaybackDebt = the record's own PaybackCost, so the old payback is reproduced; a new quote must set
+        /// its own PaybackDebt from FailedDebt. Filaments only for 2+ lines: a one-colour record (Filaments null or 1 line)
+        /// prices from Grams / FilamentDkkPerKg exactly as before; read its name/colour from r.Filaments[0] (SingleLine).
         public static QuoteInput ToInput(QuoteRecord r)
         {
             var q = new QuoteInput
             {
                 Hours = r.Hours, Minutes = r.Minutes, FilamentGrams = r.Grams,
-                FilamentDkkPerKg = r.FilamentDkkPerKg, ElectricityDkkPerKwh = r.ElectricityDkkPerKwh
+                FilamentDkkPerKg = r.FilamentDkkPerKg, ElectricityDkkPerKwh = r.ElectricityDkkPerKwh,
+                PaybackDebt = r.PaybackCost
             };
             if (r.Filaments != null && r.Filaments.Count >= 2)
             {
@@ -147,6 +164,14 @@ namespace PrintPrice
                     q.Filaments.Add(new FilamentLine { Grams = f.Grams, PricePerKg = f.PricePerKg });
             }
             return q;
+        }
+
+        /// The one colour line of a one-colour record (Name, Colour, Type), or null for old records (Filaments null)
+        /// and multi-colour ones (2+ lines).
+        public static HistoryFilament SingleLine(QuoteRecord r)
+        {
+            if (r == null || r.Filaments == null || r.Filaments.Count != 1) return null;
+            return r.Filaments[0];
         }
 
         /// A copy of current (or defaults) with the record's settings snapshot: Pricing.Calculate(ToInput(r), this)
@@ -162,6 +187,9 @@ namespace PrintPrice
             s.OthersMarkupPct = r.OthersMarkupPct;
             s.MinimumPrice = r.MinimumPrice;
             s.RoundTo = r.RoundTo;
+            s.FailedPayback = r.PaybackCost > 0 ? 1 : 0;
+            s.FailedPaybackPct = r.FailedPaybackPct;
+            s.FailedPaybackWho = r.FailedPaybackWho == 1 ? 1 : 2;
             return s;
         }
 
@@ -200,6 +228,7 @@ namespace PrintPrice
             {
                 var old = list[0];
                 r.Id = old.Id; r.For = old.For; r.Note = old.Note; r.Failed = old.Failed; r.FailedAt = old.FailedAt;
+                r.PaidBack = old.PaidBack;
                 list[0] = r;
             }
             else list.Insert(0, r);
@@ -207,15 +236,112 @@ namespace PrintPrice
             return r;
         }
 
-        /// Keeps the newest max entries (list is newest first); older failed ones are kept too (idea 9 needs them).
+        /// Keeps the newest max entries (list is newest first). Older failed ones not yet made back are kept too; what the
+        /// dropped quotes paid towards them goes into their PaidBack, so FailedDebt is the same before and after.
         public static void Trim(List<QuoteRecord> list, int max)
         {
+            if (max < 0) max = 0;
             if (list.Count <= max) return;
+            var remaining = new double[list.Count];
+            var byDropped = new double[list.Count];
+            RunDebt(list, null, max, remaining, byDropped);
             var keep = new List<QuoteRecord>(max + 8);
             for (int i = 0; i < list.Count; i++)
-                if (i < max || (list[i] != null && list[i].Failed)) keep.Add(list[i]);
+            {
+                var r = list[i];
+                if (r == null) continue;
+                if (r.Failed && byDropped[i] > 0) r.PaidBack = Math.Max(0, r.PaidBack) + byDropped[i];
+                if (i < max) { keep.Add(r); continue; }
+                // beyond max: only failed ones that dropped quotes haven't fully paid back
+                if (r.Failed && FailedCost(r) - Math.Max(0, r.PaidBack) > 1e-9) keep.Add(r);
+            }
             list.Clear();
             list.AddRange(keep);
+        }
+
+        // ---------- failed prints payback (idea 9) ----------
+
+        /// What a failed print cost: material + power + wear for its print hours (no markup, no failed-% share).
+        public static double FailedCost(QuoteRecord r)
+        {
+            if (r == null) return 0;
+            return r.MaterialCost + r.PowerCost + (r.Hours + r.Minutes / 60.0) * r.MachineRatePerHour;
+        }
+
+        /// True if r's PaybackCost counts against the debt: not failed, and it was in both prices or the quote is for a customer.
+        public static bool PaysBack(QuoteRecord r)
+        {
+            return r != null && !r.Failed && r.PaybackCost > 0 && (r.FailedPaybackWho == 1 || r.For != ForFriends);
+        }
+
+        /// Failed prints not made back yet (kr., >= 0). Timeline oldest first: a failure adds FailedCost - PaidBack at
+        /// FailedAt (SavedAt if unreadable), a paying quote (PaysBack) subtracts its PaybackCost at SavedAt, paying the
+        /// oldest open failure first; payback with nothing open is lost (no credit). excludeId (null/"" = none): that
+        /// record's payback is left out (the quote the current job saved, so saving it again gives the same price).
+        public static double FailedDebt(List<QuoteRecord> list, string excludeId)
+        {
+            if (list == null || list.Count == 0) return 0;
+            return RunDebt(list, excludeId, int.MaxValue, new double[list.Count], new double[list.Count]);
+        }
+
+        class DebtEvent
+        {
+            public DateTime T;
+            public int Kind;     // 0 = failure, 1 = payback (failures first at the same time)
+            public int Index;    // in list (newest first)
+            public double Amount;
+        }
+
+        static DateTime EventTime(string primary, string fallback)
+        {
+            DateTime t;
+            if (TryTime(primary, out t)) return t;
+            if (TryTime(fallback, out t)) return t;
+            return DateTime.MinValue;
+        }
+
+        // remaining[i] = left of failure i; byDropped[i] = paid to failure i by records with index >= dropFrom. Returns the debt.
+        static double RunDebt(List<QuoteRecord> list, string excludeId, int dropFrom, double[] remaining, double[] byDropped)
+        {
+            bool exclude = !string.IsNullOrEmpty(excludeId);
+            var ev = new List<DebtEvent>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                var r = list[i];
+                if (r == null) continue;
+                if (r.Failed)
+                {
+                    double cost = FailedCost(r) - Math.Max(0, r.PaidBack);
+                    if (cost > 0) ev.Add(new DebtEvent { T = EventTime(r.FailedAt, r.SavedAt), Kind = 0, Index = i, Amount = cost });
+                }
+                else if (PaysBack(r) && !(exclude && r.Id == excludeId))
+                    ev.Add(new DebtEvent { T = EventTime(r.SavedAt, null), Kind = 1, Index = i, Amount = r.PaybackCost });
+            }
+            ev.Sort(delegate(DebtEvent a, DebtEvent b)
+            {
+                int c = a.T.CompareTo(b.T);
+                if (c != 0) return c;
+                if (a.Kind != b.Kind) return a.Kind.CompareTo(b.Kind);
+                return b.Index.CompareTo(a.Index);   // older (higher index) first
+            });
+            var open = new List<int>();
+            foreach (var e in ev)
+            {
+                if (e.Kind == 0) { remaining[e.Index] = e.Amount; open.Add(e.Index); continue; }
+                double x = e.Amount;
+                while (x > 1e-12 && open.Count > 0)
+                {
+                    int f = open[0];
+                    double pay = Math.Min(x, remaining[f]);
+                    remaining[f] -= pay;
+                    if (e.Index >= dropFrom) byDropped[f] += pay;
+                    x -= pay;
+                    if (remaining[f] <= 1e-9) { remaining[f] = 0; open.RemoveAt(0); }
+                }
+            }
+            double debt = 0;
+            foreach (int f in open) debt += remaining[f];
+            return debt;
         }
 
         public static bool Remove(List<QuoteRecord> list, string id)
@@ -269,7 +395,7 @@ namespace PrintPrice
                         if (x.Type == null) x.Type = "";
                         if (x.Name == null) x.Name = "";
                     }
-                    if (r.Filaments.Count < 2) r.Filaments = null;
+                    if (r.Filaments.Count == 0) r.Filaments = null;   // 1 line = a one-colour quote (name/colour kept)
                 }
                 list.Add(r);
             }

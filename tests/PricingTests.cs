@@ -54,7 +54,20 @@ namespace PrintPrice.Tests
             Eq("History Grams", 120, rec.Grams);
             Eq("History FilamentDkkPerKg", 180, rec.FilamentDkkPerKg);
             Eq("History Electricity", 2.00, rec.ElectricityDkkPerKwh);
-            True("History single filament -> Filaments null", rec.Filaments == null);
+            // one colour: one line with the record's own numbers (120 g, 180 kr./kg); ui fills Name/Colour/Type
+            True("History single filament -> 1 line", rec.Filaments != null && rec.Filaments.Count == 1);
+            Eq("History single line grams 120", 120, rec.Filaments[0].Grams);
+            Eq("History single line price 180", 180, rec.Filaments[0].PricePerKg);
+            True("History single line name empty until ui fills it", rec.Filaments[0].Name == "" && rec.Filaments[0].Colour == "");
+            True("History SingleLine = that line", History.SingleLine(rec) == rec.Filaments[0]);
+            True("History ToInput one line -> single formula (Filaments null)", History.ToInput(rec).Filaments == null);
+            // an input with a 1-line Filaments list is saved from FilamentGrams/FilamentDkkPerKg too (what Pricing used)
+            var oneIn = Example();
+            oneIn.Filaments = new List<FilamentLine> { new FilamentLine { Grams = 120, PricePerKg = 180 } };
+            var oneRec = History.FromQuote(oneIn, Pricing.Calculate(oneIn, s), s, "Benchy", "", t0);
+            True("History 1-line input -> 1 line 120 g x 180", oneRec.Filaments.Count == 1 && oneRec.Filaments[0].Grams == 120
+                 && oneRec.Filaments[0].PricePerKg == 180);
+            Eq("History 1-line input same customer price 54,6975", 54.6975, oneRec.OthersPrice);
             Eq("History MaterialCost 21,60", 21.60, rec.MaterialCost);
             Eq("History PowerCost 1,10", 1.10, rec.PowerCost);
             Eq("History FailedPrintCost 2,27", 2.27, rec.FailedPrintCost);
@@ -78,6 +91,15 @@ namespace PrintPrice.Tests
             True("History SavedSettings doesn't change current", today.FriendsMarkupPct == 50);
             // 24,97 x 1,50 = 37,455 + 11 = 48,455
             Eq("History today: friends 48,455", 48.455, Pricing.Calculate(History.ToInput(rec), today).FriendsPrice);
+            // old one-colour record (before v1.6: Filaments null) prices exactly as the new 1-line one
+            var oldRec = HistRecord(t0);
+            oldRec.Filaments = null;
+            True("History SingleLine old record -> null", History.SingleLine(oldRec) == null);
+            var oldWas = Pricing.Calculate(History.ToInput(oldRec), History.SavedSettings(oldRec, today));
+            Eq("History old record as it was: material 21,60", 21.60, oldWas.MaterialCost);
+            Eq("History old record as it was: friends 42,2125", 42.2125, oldWas.FriendsPrice);
+            Eq("History old record as it was: customer 54,6975", 54.6975, oldWas.OthersPrice);
+            Eq("History old record today: friends 48,455", 48.455, Pricing.Calculate(History.ToInput(oldRec), today).FriendsPrice);
 
             // multi-colour: 50 g x 200 = 10,00 + 30 g x 300 = 9,00 -> 19,00 material
             var mi = new QuoteInput { Hours = 1, Minutes = 0, FilamentGrams = 80, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00,
@@ -97,6 +119,7 @@ namespace PrintPrice.Tests
                 System.Threading.Thread.CurrentThread.CurrentCulture = new System.Globalization.CultureInfo("da-DK");
                 var two = new List<QuoteRecord> { rec, mrec };
                 rec.Note = "Til Anne, rød"; rec.For = 2; rec.ElectricityDkkPerKwh = 2.27;
+                rec.Filaments[0].Name = "Bambu PLA Matte"; rec.Filaments[0].Colour = "#FFFFFF"; rec.Filaments[0].Type = "PLA";
                 json = History.ToJson(two);
                 back = History.ParseJson(json);
             }
@@ -109,7 +132,13 @@ namespace PrintPrice.Tests
                 Eq("History round trip 2,27 kr./kWh", 2.27, back[0].ElectricityDkkPerKwh);
                 True("History round trip Note/For/Id", back[0].Note == "Til Anne, rød" && back[0].For == 2 && back[0].Id == rec.Id);
                 Eq("History round trip FriendsPrice", 42.2125, back[0].FriendsPrice);
-                True("History round trip single -> null lines", back[0].Filaments == null);
+                True("History round trip single -> 1 line with name/colour", back[0].Filaments != null && back[0].Filaments.Count == 1
+                     && back[0].Filaments[0].Name == "Bambu PLA Matte" && back[0].Filaments[0].Colour == "#FFFFFF"
+                     && back[0].Filaments[0].Type == "PLA");
+                Eq("History round trip single line price 180", 180, back[0].Filaments[0].PricePerKg);
+                // 2,27 kr./kWh: power 0,55 x 2,27 = 1,2485; base (21,60 + 1,2485) x 1,10 = 25,13335; x 1,75 = 43,98336 + 11 = 54,98336
+                Eq("History round trip single as it was 54,9834",
+                   54.98336, Pricing.Calculate(History.ToInput(back[0]), History.SavedSettings(back[0], null)).OthersPrice);
                 True("History round trip multi lines", back[1].Filaments != null && back[1].Filaments.Count == 2
                      && back[1].Filaments[0].Colour == "#FF0000" && back[1].Filaments[0].Type == "PLA"
                      && back[1].Filaments[0].Name == "Bambu PLA Basic");
@@ -119,6 +148,20 @@ namespace PrintPrice.Tests
                    19.00, Pricing.Calculate(History.ToInput(back[1]), History.SavedSettings(back[1], null)).MaterialCost);
             }
             rec.Note = ""; rec.For = History.ForCustomer; rec.ElectricityDkkPerKwh = 2.00;
+            rec.Filaments[0].Name = ""; rec.Filaments[0].Colour = ""; rec.Filaments[0].Type = "";
+
+            // an old file's one-colour quote (no Filaments) still loads and prices as before (numbers as Example + HistSettings)
+            var oldJson = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Hours\":5,\"Minutes\":30,\"Grams\":120,\"FilamentDkkPerKg\":180,"
+                + "\"ElectricityDkkPerKwh\":2,\"PrinterWatts\":100,\"MachineRatePerHour\":2,\"FailedPrintPct\":10,"
+                + "\"FriendsMarkupPct\":25,\"OthersMarkupPct\":75},{\"Grams\":5,\"Filaments\":[]}]}");
+            True("History old JSON: 2 quotes, no lines", oldJson != null && oldJson.Count == 2 && oldJson[0].Filaments == null
+                 && oldJson[1].Filaments == null);
+            if (oldJson != null && oldJson.Count == 2)
+            {
+                var ow = Pricing.Calculate(History.ToInput(oldJson[0]), History.SavedSettings(oldJson[0], null));
+                Eq("History old JSON as it was: friends 42,2125", 42.2125, ow.FriendsPrice);
+                Eq("History old JSON as it was: customer 54,6975", 54.6975, ow.OthersPrice);
+            }
 
             // ParseJson: not a history file -> null; missing fields -> defaults
             True("History ParseJson empty -> null", History.ParseJson("") == null);
@@ -165,6 +208,7 @@ namespace PrintPrice.Tests
             big.Clear();
             for (int i = 0; i < 502; i++) { var q = new QuoteRecord(); q.Id = "q" + i; big.Add(q); }
             History.MarkFailed(big[501], true, t0);
+            big[501].MaterialCost = 10;   // a failed print that cost something (a 0 kr. one counts as made back)
             History.Trim(big, 500);
             True("History Trim keeps old failed", big.Count == 501 && big[500].Id == "q501" && !big.Exists(x => x.Id == "q500"));
             True("History MarkFailed sets date", big[500].Failed && big[500].FailedAt == "2026-11-03 14:05:00");
@@ -219,6 +263,197 @@ namespace PrintPrice.Tests
             }
             True("History FilePath back to %APPDATA%", string.Equals(History.FilePath,
                  System.IO.Path.Combine(AppSettings.RealFolder, "history.json"), StringComparison.OrdinalIgnoreCase));
+        }
+
+        // ---------- failed prints payback (idea 9) ----------
+        static AppSettings PaySettings(double who)
+        {
+            var s = HistSettings();
+            s.FailedPayback = 1; s.FailedPaybackPct = 25; s.FailedPaybackWho = who;
+            return s;
+        }
+
+        static QuoteInput Owing(double debt)
+        {
+            var q = Example();
+            q.PaybackDebt = debt;
+            return q;
+        }
+
+        // a saved quote that paid back `payback` kr.
+        static QuoteRecord Payer(DateTime t, double payback, int forWho, double who)
+        {
+            var r = HistRecord(t);
+            r.PaybackCost = payback; r.For = forWho; r.FailedPaybackWho = who;
+            return r;
+        }
+
+        static void PaybackTests()
+        {
+            // Example with HistSettings: material 21,60 + power 1,10 = 22,70; failed 10 % = 2,27; base 24,97; wear 5,5 h x 2 = 11
+            // friends 42,2125, customer 54,6975 (see HistoryTests). Payback share 22,70 x 25 % = 5,675.
+            // Failed cost of the Example record = 21,60 + 1,10 + 11 = 33,70.
+            var d = new AppSettings();
+            Eq("FailedPayback default 0 (off)", 0, d.FailedPayback);
+            Eq("FailedPaybackPct default 25", 25, d.FailedPaybackPct);
+            Eq("FailedPaybackWho default 2 (customers only)", 2, d.FailedPaybackWho);
+            Eq("Clone keeps FailedPaybackWho", 1, new AppSettings { FailedPaybackWho = 1 }.Clone().FailedPaybackWho);
+
+            var off = Pricing.Calculate(Owing(33.70), HistSettings());
+            Eq("Payback off: payback 0", 0, off.PaybackCost);
+            Eq("Payback off: left 0", 0, off.PaybackLeft);
+            Eq("Payback off: friends 42,2125", 42.2125, off.FriendsPrice);
+            Eq("Payback off: customer 54,6975", 54.6975, off.OthersPrice);
+
+            var both = Pricing.Calculate(Owing(33.70), PaySettings(1));
+            Eq("Payback both: 22,70 x 25 % = 5,675", 5.675, both.PaybackCost);
+            Eq("Payback both: left 33,70 - 5,675 = 28,025", 28.025, both.PaybackLeft);
+            True("Payback both: PaybackBothPrices", both.PaybackBothPrices);
+            Eq("Payback both: friends 42,2125 + 5,675 = 47,8875", 47.8875, both.FriendsPrice);
+            Eq("Payback both: customer 54,6975 + 5,675 = 60,3725", 60.3725, both.OthersPrice);
+            Eq("Payback not in base cost (24,97)", 24.97, both.BaseCost);
+
+            var cust = Pricing.Calculate(Owing(33.70), PaySettings(2));
+            Eq("Payback customers only: payback 5,675", 5.675, cust.PaybackCost);
+            True("Payback customers only: not both", !cust.PaybackBothPrices);
+            Eq("Payback customers only: friends unchanged 42,2125", 42.2125, cust.FriendsPrice);
+            Eq("Payback customers only: customer 60,3725", 60.3725, cust.OthersPrice);
+
+            var little = Pricing.Calculate(Owing(3.00), PaySettings(1));
+            Eq("Payback capped at debt: min(3,00, 5,675) = 3,00", 3.00, little.PaybackCost);
+            Eq("Payback capped: left 0", 0, little.PaybackLeft);
+            Eq("Payback capped: friends 42,2125 + 3 = 45,2125", 45.2125, little.FriendsPrice);
+            Eq("Payback capped: customer 54,6975 + 3 = 57,6975", 57.6975, little.OthersPrice);
+            Eq("Payback no debt: 0", 0, Pricing.Calculate(Owing(0), PaySettings(1)).PaybackCost);
+
+            var smin = PaySettings(2); smin.MinimumPrice = 100;
+            Eq("Payback after minimum: max(54,6975, 100) + 5,675 = 105,675", 105.675, Pricing.Calculate(Owing(33.70), smin).OthersPrice);
+            var sround = PaySettings(1); sround.RoundTo = 5;
+            var rounded = Pricing.Calculate(Owing(33.70), sround);
+            Eq("Payback then rounding: friends 47,8875 -> 50", 50, rounded.FriendsPrice);
+            Eq("Payback then rounding: customer 60,3725 -> 65", 65, rounded.OthersPrice);
+            Eq("Payback rounding extra not counted (5,675)", 5.675, rounded.PaybackCost);
+
+            // record keeps the payback; as it was, even after today's settings change
+            var t = new DateTime(2026, 11, 3, 10, 0, 0);
+            var ps = PaySettings(1);
+            var prec = History.FromQuote(Owing(33.70), Pricing.Calculate(Owing(33.70), ps), ps, "Benchy", "", t);
+            Eq("Record PaybackCost 5,675", 5.675, prec.PaybackCost);
+            Eq("Record FailedPaybackPct 25", 25, prec.FailedPaybackPct);
+            Eq("Record FailedPaybackWho 1", 1, prec.FailedPaybackWho);
+            var today = PaySettings(2); today.FailedPaybackPct = 50; today.FailedPayback = 0;
+            var asWas = Pricing.Calculate(History.ToInput(prec), History.SavedSettings(prec, today));
+            Eq("Payback as it was: friends 47,8875", 47.8875, asWas.FriendsPrice);
+            Eq("Payback as it was: customer 60,3725", 60.3725, asWas.OthersPrice);
+            var crec = History.FromQuote(Owing(33.70), cust, PaySettings(2), "Benchy", "", t);
+            var asWas2 = Pricing.Calculate(History.ToInput(crec), History.SavedSettings(crec, today));
+            Eq("Payback as it was, customers only: friends 42,2125", 42.2125, asWas2.FriendsPrice);
+            Eq("Payback as it was, customers only: customer 60,3725", 60.3725, asWas2.OthersPrice);
+
+            // debt timeline. A = failed Example (saved 10:00, failed 10:30); B, C pay 5,675 at 11:00, 12:00 (customer)
+            var A = HistRecord(t);
+            History.MarkFailed(A, true, t.AddMinutes(30));
+            Eq("FailedCost 21,60 + 1,10 + 5,5 x 2 = 33,70", 33.70, History.FailedCost(A));
+            var B = Payer(t.AddHours(1), 5.675, History.ForCustomer, 2);
+            var C = Payer(t.AddHours(2), 5.675, History.ForCustomer, 2);
+            Eq("Debt: A only 33,70", 33.70, History.FailedDebt(new List<QuoteRecord> { A }, null));
+            Eq("Debt: empty list 0", 0, History.FailedDebt(new List<QuoteRecord>(), null));
+            Eq("Debt: no failed, only payers 0", 0, History.FailedDebt(new List<QuoteRecord> { C, B }, null));
+            var abc = new List<QuoteRecord> { C, B, A };
+            Eq("Debt: A+B+C 33,70 - 11,35 = 22,35", 22.35, History.FailedDebt(abc, null));
+            Eq("Debt: exclude C 33,70 - 5,675 = 28,025", 28.025, History.FailedDebt(abc, C.Id));
+            Eq("Debt: exclude \"\" = none, 22,35", 22.35, History.FailedDebt(abc, ""));
+            // customers only: a Friends quote doesn't pay back; with both prices it does
+            B.For = History.ForFriends;
+            Eq("Debt: B for friends (customers only) doesn't count, 28,025", 28.025, History.FailedDebt(abc, null));
+            B.FailedPaybackWho = 1;
+            Eq("Debt: B for friends but in both prices counts, 22,35", 22.35, History.FailedDebt(abc, null));
+            B.For = History.ForCustomer; B.FailedPaybackWho = 2;
+            // a failed record's own payback is ignored
+            A.PaybackCost = 2;
+            Eq("Debt: A's own PaybackCost ignored, 33,70", 33.70, History.FailedDebt(new List<QuoteRecord> { A }, null));
+            A.PaybackCost = 0;
+            // a payer saved before the failure doesn't count for it
+            var early = Payer(t.AddMinutes(15), 5, History.ForCustomer, 2);
+            Eq("Debt: payback before the failure (10:15 < 10:30) no count, 33,70", 33.70,
+               History.FailedDebt(new List<QuoteRecord> { early, A }, null));
+            // delete a payer -> debt comes back
+            var ac = new List<QuoteRecord> { C, B, A };
+            History.Remove(ac, B.Id);
+            Eq("Debt: B deleted 33,70 - 5,675 = 28,025", 28.025, History.FailedDebt(ac, null));
+            // unreadable FailedAt -> SavedAt (10:00) is used
+            A.FailedAt = "x";
+            Eq("Debt: unreadable FailedAt uses SavedAt, 22,35", 22.35, History.FailedDebt(abc, null));
+            History.MarkFailed(A, true, t.AddMinutes(30));
+            // PaidBack counts
+            A.PaidBack = 10;
+            Eq("Debt: PaidBack 10 -> 33,70 - 10 = 23,70", 23.70, History.FailedDebt(new List<QuoteRecord> { A }, null));
+            A.PaidBack = 0;
+            // two failures: 2 x 33,70 - 11,35 = 56,05
+            var E = HistRecord(t.AddMinutes(75));
+            History.MarkFailed(E, true, t.AddMinutes(90));
+            Eq("Debt: two failures 67,40 - 11,35 = 56,05", 56.05, History.FailedDebt(new List<QuoteRecord> { C, E, B, A }, null));
+            // unmark A: B and C paid for nothing -> 0, and no credit for a later failure D (saved 12:30, failed 13:00)
+            History.MarkFailed(A, false, t);
+            Eq("Debt: A unmarked 0", 0, History.FailedDebt(abc, null));
+            var D = HistRecord(t.AddMinutes(150));
+            History.MarkFailed(D, true, t.AddHours(3));
+            Eq("Debt: new failure after unmark 33,70 (no credit)", 33.70, History.FailedDebt(new List<QuoteRecord> { D, C, B, A }, null));
+
+            // Trim keeps the debt: q0 (kept, newest) pays 5,675 at 12:00; P (index 500, dropped) pays 5,675 at 11:00;
+            // A (index 501) failed 10:30. Debt 33,70 - 11,35 = 22,35 before and after; A keeps PaidBack 5,675.
+            History.MarkFailed(A, true, t.AddMinutes(30));
+            var big = TrimList(A, 5.675, 5.675);
+            Eq("Trim payback: debt before 22,35", 22.35, History.FailedDebt(big, null));
+            History.Trim(big, 500);
+            True("Trim payback: P dropped, A kept (501)", big.Count == 501 && big[500] == A && !big.Exists(x => x.Id == "P"));
+            Eq("Trim payback: A.PaidBack 5,675", 5.675, A.PaidBack);
+            Eq("Trim payback: debt after 22,35", 22.35, History.FailedDebt(big, null));
+            // dropped P (40) pays A in full -> A dropped too
+            A.PaidBack = 0;
+            big = TrimList(A, 0, 40);
+            History.Trim(big, 500);
+            True("Trim payback: fully paid A dropped (500)", big.Count == 500 && !big.Contains(A));
+            Eq("Trim payback: debt 0 after", 0, History.FailedDebt(big, null));
+            // paid in full only with the kept q0 (30): A kept (PaidBack 5,675), debt stays 0
+            A.PaidBack = 0;
+            big = TrimList(A, 30, 5.675);
+            Eq("Trim payback: debt before 0 (33,70 - 35,675)", 0, History.FailedDebt(big, null));
+            History.Trim(big, 500);
+            True("Trim payback: A kept while kept quotes still pay it", big.Count == 501 && big.Contains(A));
+            Eq("Trim payback: debt after still 0", 0, History.FailedDebt(big, null));
+
+            // JSON keeps the new fields (da-DK); an old file without them reads 0
+            var oldCulture = System.Threading.Thread.CurrentThread.CurrentCulture;
+            List<QuoteRecord> back;
+            try
+            {
+                System.Threading.Thread.CurrentThread.CurrentCulture = new System.Globalization.CultureInfo("da-DK");
+                A.PaidBack = 2.5;
+                back = History.ParseJson(History.ToJson(new List<QuoteRecord> { prec, A }));
+            }
+            finally { System.Threading.Thread.CurrentThread.CurrentCulture = oldCulture; }
+            True("Payback JSON round trip", back != null && back.Count == 2);
+            Eq("Payback JSON PaybackCost 5,675", 5.675, back[0].PaybackCost);
+            Eq("Payback JSON FailedPaybackPct 25", 25, back[0].FailedPaybackPct);
+            Eq("Payback JSON FailedPaybackWho 1", 1, back[0].FailedPaybackWho);
+            Eq("Payback JSON PaidBack 2,5", 2.5, back[1].PaidBack);
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"Failed\":true}]}");
+            True("Payback old file: new fields 0", old != null && old.Count == 1 && old[0].PaybackCost == 0
+                 && old[0].PaidBack == 0 && old[0].FailedPaybackWho == 0);
+        }
+
+        // 502 records newest first: q0 pays q0Pay at 12:00 (kept), q1..q499 plain, P (index 500) pays pPay at 11:00, A at index 501
+        static List<QuoteRecord> TrimList(QuoteRecord a, double q0Pay, double pPay)
+        {
+            var t = new DateTime(2026, 11, 3, 10, 0, 0);
+            var big = new List<QuoteRecord>();
+            for (int i = 0; i < 500; i++) { var q = new QuoteRecord(); q.Id = "q" + i; big.Add(q); }
+            big[0] = Payer(t.AddHours(2), q0Pay, History.ForCustomer, 2); big[0].Id = "q0";
+            var p = Payer(t.AddHours(1), pPay, History.ForCustomer, 2); p.Id = "P";
+            big.Add(p);
+            big.Add(a);
+            return big;
         }
 
         // slice_info.config pieces (trimmed from the real 4-colour Benchy slices, scratchpad multi-colour_test\fixtures)
@@ -619,12 +854,54 @@ namespace PrintPrice.Tests
                 s5.FriendsMarkupPct = 37;
                 s5.Language = "da";
                 s5.LastFilamentPrice = 189.5;
+                s5.FailedPayback = 1; s5.FailedPaybackPct = 40; s5.FailedPaybackWho = 1;
                 s5.Save();
                 True("Save wrote the test file", System.IO.File.Exists(testFile));
                 var r5 = AppSettings.Load();
                 Eq("round trip FriendsMarkupPct", 37, r5.FriendsMarkupPct);
+                Eq("round trip FailedPayback", 1, r5.FailedPayback);
+                Eq("round trip FailedPaybackPct", 40, r5.FailedPaybackPct);
+                Eq("round trip FailedPaybackWho", 1, r5.FailedPaybackWho);
                 Eq("round trip LastFilamentPrice", 189.5, r5.LastFilamentPrice);
                 True("round trip Language", r5.Language == "da");
+                // 5b. remembered price per filament: round trip under da-DK, names with spaces, +, -, =, |
+                var s6 = new AppSettings();
+                s6.LastFilamentPrice = 189.5;
+                Eq("PriceFor nothing remembered -> LastFilamentPrice 189,5", 189.5, s6.PriceFor("Bambu PLA Matte"));
+                s6.RememberPrice("Bambu PLA Matte", 200);
+                s6.RememberPrice("Elegoo PLA+ Silk - Rainbow = 2|x", 249.5);
+                s6.RememberPrice(" Bambu PETG HF ", 150);
+                s6.RememberPrice("Bambu PETG HF", 165.25);        // replaces (names trimmed)
+                s6.RememberPrice("", 99);                          // ignored
+                s6.RememberPrice("Bad", -1);                       // ignored
+                s6.RememberPrice("NaN", double.NaN);               // ignored
+                Eq("RememberPrice: 3 names", 3, s6.FilamentPrices.Count);
+                Eq("RememberPrice doesn't touch LastFilamentPrice", 189.5, s6.LastFilamentPrice);
+                var c6 = s6.Clone();
+                c6.RememberPrice("Bambu PLA Matte", 300);
+                Eq("Clone has its own price list", 200, s6.PriceFor("Bambu PLA Matte"));
+                Eq("Clone keeps the prices", 300, c6.PriceFor("Bambu PLA Matte"));
+                var cult6 = System.Threading.Thread.CurrentThread.CurrentCulture;
+                AppSettings r6;
+                string ini6;
+                try
+                {
+                    System.Threading.Thread.CurrentThread.CurrentCulture = new System.Globalization.CultureInfo("da-DK");
+                    s6.Save();
+                    ini6 = System.IO.File.ReadAllText(testFile);
+                    System.IO.File.AppendAllText(testFile, "FilamentPrice=abc|Broken\r\nFilamentPrice=12\r\nFilamentPrice=-5|Neg\r\n");
+                    r6 = AppSettings.Load();
+                }
+                finally { System.Threading.Thread.CurrentThread.CurrentCulture = cult6; }
+                True("ini: decimal point, number first", ini6.Contains("FilamentPrice=249.5|Elegoo PLA+ Silk - Rainbow = 2|x")
+                     && ini6.Contains("FilamentPrice=165.25|Bambu PETG HF") && !ini6.Contains("249,5"));
+                Eq("round trip PriceFor Bambu PLA Matte 200", 200, r6.PriceFor("Bambu PLA Matte"));
+                Eq("round trip PriceFor odd name 249,5", 249.5, r6.PriceFor("Elegoo PLA+ Silk - Rainbow = 2|x"));
+                Eq("round trip PriceFor Bambu PETG HF 165,25", 165.25, r6.PriceFor("Bambu PETG HF"));
+                Eq("round trip: bad lines skipped (3 names)", 3, r6.FilamentPrices.Count);
+                Eq("unknown name -> LastFilamentPrice 189,5", 189.5, r6.PriceFor("Unknown filament"));
+                Eq("empty / null name -> LastFilamentPrice", 189.5, r6.PriceFor(null));
+                Eq("other settings still load (LastFilamentPrice)", 189.5, r6.LastFilamentPrice);
                 // 6. command line
                 var o = StartOptions.Parse(new[] { "--settings", @"C:\t", "--hidden" });
                 True("Parse --settings --hidden", o.Error == null && o.SettingsFolder == @"C:\t" && o.Hidden && !o.Minimized);
@@ -651,6 +928,7 @@ namespace PrintPrice.Tests
             True("ClearTestFolder -> real path", !AppSettings.TestMode && string.Equals(AppSettings.FilePath, realFile, StringComparison.OrdinalIgnoreCase));
 
             HistoryTests();
+            PaybackTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;

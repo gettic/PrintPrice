@@ -20,6 +20,8 @@ namespace PrintPrice
         // Optional: 2+ lines = material is the sum of the lines (FilamentGrams/FilamentDkkPerKg are then not used
         // for the cost). Null, empty or 1 line = today's single-filament formula.
         public List<FilamentLine> Filaments;
+        // Failed prints not made back yet (History.FailedDebt), DKK. 0 = none. Used only when AppSettings.FailedPayback is on.
+        public double PaybackDebt;
     }
 
     public class QuoteResult
@@ -33,6 +35,11 @@ namespace PrintPrice
         public double BaseCost;          // material + power + failed prints
         public double FriendsPrice;
         public double OthersPrice;
+        // Failed prints payback: min(debt, (material + power) × FailedPaybackPct / 100), added after markup (not marked up)
+        // to the customer price, and to the friends price too when PaybackBothPrices. 0 = none.
+        public double PaybackCost;
+        public double PaybackLeft;       // debt still left after this quote (debt - PaybackCost); 0 when payback is off
+        public bool PaybackBothPrices;   // true = also in FriendsPrice (FailedPaybackWho = 1)
     }
 
     /// Estimated wear & tear for a Bambu Lab A1 per print hour, depending on nozzle, filament and build plate.
@@ -171,6 +178,17 @@ namespace PrintPrice
                             + r.PrintHours * s.MachineRatePerHour;
             if (r.BaseCost > 0 && others < s.MinimumPrice) others = s.MinimumPrice;
             r.OthersPrice = others;
+
+            // Failed prints payback: after markup, wear and minimum price, before rounding (rounding extra not counted).
+            if (s.FailedPayback != 0 && input.PaybackDebt > 0)
+            {
+                double share = (r.MaterialCost + r.PowerCost) * (Math.Max(0, s.FailedPaybackPct) / 100.0);
+                r.PaybackCost = Math.Min(input.PaybackDebt, share);
+                r.PaybackLeft = input.PaybackDebt - r.PaybackCost;
+                r.PaybackBothPrices = s.FailedPaybackWho == 1;
+                r.OthersPrice += r.PaybackCost;
+                if (r.PaybackBothPrices) r.FriendsPrice += r.PaybackCost;
+            }
 
             r.FriendsPrice = RoundUp(r.FriendsPrice, s.RoundTo);
             r.OthersPrice = RoundUp(r.OthersPrice, s.RoundTo);

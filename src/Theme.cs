@@ -88,6 +88,7 @@ namespace PrintPrice
                 tb.BackColor = Input;
                 tb.ForeColor = Text;
                 tb.BorderStyle = BorderStyle.FixedSingle;
+                TextMargins(tb);
             }
             else if (c is Button)
             {
@@ -111,6 +112,7 @@ namespace PrintPrice
                     cb.DrawMode = DrawMode.OwnerDrawFixed;
                     cb.DrawItem += DrawComboItem;
                 }
+                ComboFrame.Attach(cb);   // Border-grey frame + dark arrow button instead of the white flat ones
             }
             else if (c is ListBox)
             {
@@ -136,6 +138,172 @@ namespace PrintPrice
             c.Invalidate();
         }
 
+        // ---------- one-line text boxes: text line vertically centred, 4 px inner margin ----------
+        // A one-line Windows edit always draws its text (and caret) at the top of the box (y 1 of 25 px: ~2 px above the
+        // labels' text line, caret touching the top border) and can't be told otherwise. A multiline edit limited to one line
+        // (no wrap, line breaks -> spaces) accepts EM_SETRECT: the text line is centred and kept 4 px (scaled) inside the
+        // left/right border (style rule "text boxes: 4 px inner margin"). Such an edit draws its own 1 px border INSIDE its
+        // client area (WS_BORDER) and may paint over it while typing, so BoxBorder redraws the frame in Border grey.
+        // Opt out with Tag = "single" (needed for a cue banner: EM_SETCUEBANNER only works on single-line edits; those keep
+        // the 4 px margin via EM_SETMARGINS). Grid cell editors are left alone (they follow the cell padding).
+        static readonly HashSet<TextBox> oneLine = new HashSet<TextBox>();
+        const int EM_SETMARGINS = 0x00D3, EC_LEFTMARGIN = 1, EC_RIGHTMARGIN = 2, EM_SETRECT = 0x00B3;
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wp, IntPtr lp);
+        [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wp, ref RECT lp);
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct RECT { public int Left, Top, Right, Bottom; }
+
+        static int ScaledPx(Control c, float v) { return (int)Math.Round(v * c.DeviceDpi / 96f); }
+
+        static void TextMargins(TextBox tb)
+        {
+            if (tb is DataGridViewTextBoxEditingControl) return;
+            bool single = "single".Equals(tb.Tag as string);
+            if (oneLine.Add(tb))
+            {
+                if (!single)
+                {
+                    tb.WordWrap = false;          // ES_AUTOHSCROLL: long text scrolls sideways like a one-line box
+                    tb.AcceptsReturn = false;     // Enter still goes to the form / KeyDown handlers
+                    tb.ScrollBars = ScrollBars.None;
+                    tb.Multiline = true;
+                    tb.SizeChanged += delegate { FitOneLine(tb); };
+                    tb.BorderStyleChanged += delegate { FitOneLine(tb); };
+                    tb.TextChanged += delegate { NoLineBreaks(tb); };
+                    // Enter / Ctrl+Enter would insert a line break (shown as a space): do nothing. Enter still reaches the
+                    // form first (Settings OK) and KeyDown handlers (link box: Get time & weight), as in a one-line box.
+                    tb.KeyPress += (s, e) => { if (e.KeyChar == '\r' || e.KeyChar == '\n') e.Handled = true; };
+                }
+                new BoxBorder(tb);   // themed frame on every box (also "single" ones: else Windows' 100,100,100 shows)
+                tb.HandleCreated += delegate { FitOneLine(tb); };
+                tb.FontChanged += delegate { FitOneLine(tb); };
+                tb.Disposed += delegate { oneLine.Remove(tb); };
+            }
+            FitOneLine(tb);
+        }
+
+        /// Top of the text line (font line height) in a box `boxHeight` tall so that its text sits on the same baseline as a
+        /// label of that font centred beside it (labels, text boxes, drop-downs and their units share one line). Measured
+        /// (qol, v1.6.0): 25 px box, Segoe UI 10 (line 18) -> 4 (2 put box digits 2 px above the labels' baseline).
+        public static int TextLineTop(int boxHeight, Font font)
+        {
+            return Math.Max(2, (boxHeight - font.Height + 1) / 2);
+        }
+
+        /// y (client) of the text line in a one-line box (TextLineTop in window coordinates, minus a non-client frame if any).
+        public static int OneLineTop(TextBox tb)
+        {
+            int frame = Math.Max(0, (tb.Height - tb.ClientSize.Height) / 2);   // 0 when the edit draws its border inside
+            return Math.Max(0, TextLineTop(tb.Height, tb.Font) - frame);
+        }
+
+        static void FitOneLine(TextBox tb)
+        {
+            if (tb.IsDisposed) return;
+            int m = ScaledPx(tb, 4);
+            if (!tb.Multiline)
+            {
+                if (tb.IsHandleCreated)
+                    SendMessage(tb.Handle, EM_SETMARGINS, (IntPtr)(EC_LEFTMARGIN | EC_RIGHTMARGIN), (IntPtr)((m & 0xFFFF) | (m << 16)));
+                return;
+            }
+            if (tb.Height != tb.PreferredHeight) tb.Height = tb.PreferredHeight;   // = a one-line box's height (raises SizeChanged)
+            ApplyLineRect(tb);
+        }
+
+        /// EM_SETRECT: the text line on TextLineTop, 4 px (scaled) inside the side borders. The edit resets its rect itself on
+        /// WM_SIZE and WM_SETFONT, so BoxBorder calls this again after those (boxes never resized by the form, e.g. the h/m
+        /// and kr/kg boxes, kept Windows' top-of-box line: digits 2 px above the labels).
+        static void ApplyLineRect(TextBox tb)
+        {
+            if (tb.IsDisposed || !tb.IsHandleCreated || !tb.Multiline) return;
+            int m = ScaledPx(tb, 4), top = OneLineTop(tb), w = tb.ClientSize.Width;
+            var r = new RECT { Left = 1 + m, Top = top, Right = Math.Max(2 + m, w - 1 - m), Bottom = top + tb.Font.Height };
+            SendMessage(tb.Handle, EM_SETRECT, IntPtr.Zero, ref r);
+            tb.Invalidate();
+        }
+
+        /// One line only: pasted / Ctrl+Enter line breaks become spaces (raises TextChanged once more, without breaks).
+        static void NoLineBreaks(TextBox tb)
+        {
+            string t = tb.Text;
+            if (t.IndexOf('\r') < 0 && t.IndexOf('\n') < 0) return;
+            int caret = tb.SelectionStart;
+            tb.Text = t.Replace("\r\n", " ").Replace('\r', ' ').Replace('\n', ' ');
+            tb.SelectionStart = Math.Min(caret, tb.Text.Length);
+        }
+
+        /// Draws a one-line box's 1 px frame again (Border grey) after everything that can make the edit paint over it.
+        sealed class BoxBorder : NativeWindow
+        {
+            readonly TextBox tb;
+            bool inRect;
+            public BoxBorder(TextBox tb)
+            {
+                this.tb = tb;
+                tb.HandleCreated += delegate { if (Handle != IntPtr.Zero) ReleaseHandle(); AssignHandle(tb.Handle); };
+                tb.HandleDestroyed += delegate { ReleaseHandle(); };
+                if (tb.IsHandleCreated) AssignHandle(tb.Handle);
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                base.WndProc(ref m);
+                // the edit resets its formatting rect on WM_SIZE / WM_SETFONT / EM_SETMARGINS: put the centred line back
+                if ((m.Msg == 0x0005 || m.Msg == 0x0030 || m.Msg == 0x00D3) && !inRect)
+                {
+                    inRect = true;
+                    try { ApplyLineRect(tb); } finally { inRect = false; }
+                }
+                // A multiline edit sends no EN_CHANGE for WM_SETTEXT, so text set from outside WinForms (UI Automation,
+                // screen readers, tools) raised no TextChanged and the prices didn't follow. Send it ourselves: WinForms
+                // reflects it to the box, and ignores it while it sets the text itself (it raises TextChanged then anyway).
+                if (m.Msg == 0x000C && tb.Multiline && !tb.IsDisposed)   // WM_SETTEXT
+                {
+                    IntPtr parent = GetParent(m.HWnd);
+                    if (parent != IntPtr.Zero)
+                    {
+                        int id = GetDlgCtrlID(m.HWnd);
+                        SendMessage(parent, 0x0111 /* WM_COMMAND */, (IntPtr)((id & 0xFFFF) | (0x0300 /* EN_CHANGE */ << 16)), m.HWnd);
+                    }
+                }
+                switch (m.Msg)
+                {
+                    case 0x000F: if (m.WParam != IntPtr.Zero) return; goto case 0x0085;   // WM_PAINT (not the print path)
+                    case 0x0085:                                                          // WM_NCPAINT
+                    case 0x0047: case 0x0005:                                             // WM_WINDOWPOSCHANGED, WM_SIZE (moved / shown)
+                    case 0x0102: case 0x0100: case 0x0101:                                // WM_CHAR, WM_KEYDOWN, WM_KEYUP
+                    case 0x0201: case 0x0202: case 0x0200:                                // mouse down / up / move
+                    case 0x000C: case 0x0007: case 0x0008: case 0x000A:                   // WM_SETTEXT, focus, WM_ENABLE
+                    case 0x00B1: case 0x00C2:                                             // EM_SETSEL, EM_REPLACESEL
+                    case 0x0300: case 0x0302: case 0x0303: case 0x0304:                   // cut, paste, clear, undo
+                        DrawFrame(m.HWnd);
+                        break;
+                }
+            }
+
+            void DrawFrame(IntPtr hwnd)
+            {
+                if (tb.IsDisposed || !tb.IsHandleCreated || tb.BorderStyle == BorderStyle.None) return;
+                IntPtr dc = GetWindowDC(hwnd);
+                if (dc == IntPtr.Zero) return;
+                try
+                {
+                    using (var g = Graphics.FromHdc(dc))
+                    using (var p = new Pen(Border))
+                        g.DrawRectangle(p, 0, 0, tb.Width - 1, tb.Height - 1);
+                }
+                catch { }
+                finally { ReleaseDC(hwnd, dc); }
+            }
+
+            [DllImport("user32.dll")] static extern IntPtr GetWindowDC(IntPtr hwnd);
+            [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+            [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr hwnd);
+            [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr hwnd);
+        }
+
         /// Dark red call-to-action button (e.g. "Update to vX"). Call after Apply, which resets button colours.
         public static void AccentButton(Button b)
         {
@@ -152,13 +320,266 @@ namespace PrintPrice
             var cb = (ComboBox)sender;
             bool selected = (e.State & DrawItemState.Selected) != 0 && (e.State & DrawItemState.ComboBoxEdit) == 0;
             Color back = selected ? InfoAccent : Input;
-            Color fore = selected ? Color.White : Text;
+            Color fore = selected ? Color.White : (e.State & DrawItemState.Disabled) != 0 || !cb.Enabled ? Muted : Text;   // greyed out when disabled
             using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
             if (e.Index >= 0)
             {
                 TextRenderer.DrawText(e.Graphics, cb.GetItemText(cb.Items[e.Index]), cb.Font, e.Bounds, fore,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             }
+        }
+
+        /// Paints DropDownList combo boxes completely itself (WM_PAINT / WM_PRINTCLIENT handled here, never passed on):
+        /// dark field, Border-grey frame (lighter on hover / focus), dark arrow button. WinForms' flat style (white border,
+        /// light button) and Windows' themed hot-tracking never draw, so nothing flashes white on hover.
+        /// Attached once per combo by Apply (also the DataGridView's combo editing control); survives handle recreation.
+        sealed class ComboFrame : NativeWindow
+        {
+            static readonly HashSet<ComboBox> framed = new HashSet<ComboBox>();
+            readonly ComboBox cb;
+
+            ComboFrame(ComboBox cb)
+            {
+                this.cb = cb;
+                cb.HandleCreated += delegate { Hook(); };
+                cb.HandleDestroyed += delegate { ReleaseHandle(); };
+                cb.Disposed += delegate { framed.Remove(cb); };
+                EventHandler redraw = delegate { if (!cb.IsDisposed) cb.Invalidate(); };
+                cb.DropDown += redraw;            // button lighter while the list is open
+                cb.DropDown += delegate { if (!cb.IsDisposed) HookList(); };   // in case the list window is new
+                cb.DropDownClosed += redraw;
+                cb.SelectedIndexChanged += redraw;
+                cb.GotFocus += redraw;
+                cb.LostFocus += redraw;
+                cb.EnabledChanged += redraw;
+                if (cb.IsHandleCreated) Hook();
+            }
+
+            public static void Attach(ComboBox cb)
+            {
+                if (framed.Add(cb)) new ComboFrame(cb);   // kept alive by the combo's event handlers
+            }
+
+            void Hook()
+            {
+                if (Handle != IntPtr.Zero) ReleaseHandle();
+                AssignHandle(cb.Handle);
+                HookList();
+                cb.Invalidate();
+            }
+
+            ListFrame list;   // the opened list (ComboLBox popup): red frame, dark scroll bar
+
+            /// The combo's own list window lives as long as the combo's handle; found via GetComboBoxInfo.
+            void HookList()
+            {
+                try
+                {
+                    if (!cb.IsHandleCreated) return;
+                    var info = new COMBOBOXINFO { cbSize = Marshal.SizeOf(typeof(COMBOBOXINFO)) };
+                    if (!GetComboBoxInfo(cb.Handle, ref info) || info.hwndList == IntPtr.Zero) return;
+                    if (list != null && list.Handle == info.hwndList) return;
+                    if (list != null && list.Handle != IntPtr.Zero) list.ReleaseHandle();
+                    list = new ListFrame(info.hwndList);
+                }
+                catch { /* looks only */ }
+            }
+
+            /// The popup list of a combo: dark scroll bar (DarkMode_Explorer, as HistoryForm's grid) and a 1 px frame in
+            /// InfoAccent red instead of Windows' blue. Windows never draws its own frame: WM_NCPAINT is passed on with
+            /// a region that leaves the outer pixel out (the scroll bar, also non-client, still draws), then the red frame.
+            sealed class ListFrame : NativeWindow
+            {
+                public ListFrame(IntPtr hwnd)
+                {
+                    AssignHandle(hwnd);
+                    try { SetWindowTheme(hwnd, "DarkMode_Explorer", null); } catch { }
+                }
+
+                protected override void WndProc(ref Message m)
+                {
+                    const int WM_NCPAINT = 0x0085;
+                    if (m.Msg != WM_NCPAINT) { base.WndProc(ref m); return; }
+                    RECT wr;
+                    if (!GetWindowRect(m.HWnd, out wr)) { base.WndProc(ref m); return; }
+                    IntPtr inner = CreateRectRgn(wr.Left + 1, wr.Top + 1, wr.Right - 1, wr.Bottom - 1);
+                    IntPtr given = m.WParam;
+                    try
+                    {
+                        if (given != (IntPtr)1 && given != IntPtr.Zero) CombineRgn(inner, inner, given, 1 /* RGN_AND */);
+                        m.WParam = inner;
+                        base.WndProc(ref m);
+                    }
+                    finally { m.WParam = given; DeleteObject(inner); }
+                    IntPtr dc = GetWindowDC(m.HWnd);
+                    if (dc == IntPtr.Zero) return;
+                    try
+                    {
+                        using (var g = Graphics.FromHdc(dc))
+                        using (var p = new Pen(InfoAccent))
+                            g.DrawRectangle(p, 0, 0, wr.Right - wr.Left - 1, wr.Bottom - wr.Top - 1);
+                    }
+                    catch { }
+                    finally { ReleaseDC(m.HWnd, dc); }
+                    m.Result = IntPtr.Zero;
+                }
+            }
+
+            [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)] static extern int SetWindowTheme(IntPtr hwnd, string app, string idList);
+            [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+            [DllImport("user32.dll")] static extern IntPtr GetWindowDC(IntPtr hwnd);
+            [DllImport("gdi32.dll")] static extern IntPtr CreateRectRgn(int l, int t, int r, int b);
+            [DllImport("gdi32.dll")] static extern int CombineRgn(IntPtr dest, IntPtr a, IntPtr b, int mode);
+            [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr obj);
+
+            bool hot;   // mouse over the box
+
+            bool Ours { get { return !cb.IsDisposed && cb.DropDownStyle == ComboBoxStyle.DropDownList; } }
+
+            protected override void WndProc(ref Message m)
+            {
+                const int WM_PAINT = 0x000F, WM_ERASEBKGND = 0x0014, WM_PRINTCLIENT = 0x0318, WM_SETFOCUS = 0x0007,
+                          WM_KILLFOCUS = 0x0008, WM_ENABLE = 0x000A, CB_SETCURSEL = 0x014E, CB_SHOWDROPDOWN = 0x014F,
+                          WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202, WM_CAPTURECHANGED = 0x0215,
+                          WM_MOUSEMOVE = 0x0200, WM_MOUSELEAVE = 0x02A3, WM_KEYDOWN = 0x0100;
+                if (!Ours) { base.WndProc(ref m); return; }
+                switch (m.Msg)
+                {
+                    // the whole box is painted here and Windows / WinForms never paint it at all (their flat style has a white
+                    // border and a light arrow button, their themed style a light hot-tracking frame: both flashed on hover)
+                    case WM_PAINT:
+                        if (m.WParam != IntPtr.Zero) PaintTo(m.WParam);   // DrawToBitmap / WM_PRINT: draw into the given DC
+                        else
+                        {
+                            var ps = new PAINTSTRUCT();
+                            IntPtr hdc = BeginPaint(m.HWnd, ref ps);
+                            try { if (hdc != IntPtr.Zero) PaintTo(hdc); }
+                            finally { EndPaint(m.HWnd, ref ps); }
+                        }
+                        m.Result = IntPtr.Zero;
+                        return;
+                    case WM_PRINTCLIENT:
+                        if (m.WParam != IntPtr.Zero) PaintTo(m.WParam);
+                        m.Result = IntPtr.Zero;
+                        return;
+                    case WM_ERASEBKGND:
+                        m.Result = (IntPtr)1;   // no background flash: WM_PAINT fills everything
+                        return;
+                }
+                base.WndProc(ref m);
+                switch (m.Msg)
+                {
+                    case WM_MOUSEMOVE:
+                        if (!hot)
+                        {
+                            hot = true;
+                            var tme = new TRACKMOUSEEVENT { cbSize = Marshal.SizeOf(typeof(TRACKMOUSEEVENT)), dwFlags = 2 /* TME_LEAVE */, hwndTrack = m.HWnd };
+                            TrackMouseEvent(ref tme);
+                            cb.Invalidate();
+                        }
+                        break;
+                    case WM_MOUSELEAVE:
+                        hot = false;
+                        cb.Invalidate();
+                        break;
+                    // the native combo may draw its selection field itself (GetDC, outside WM_PAINT) on these:
+                    // paint the box again at once, so nothing of Windows' own drawing stays visible
+                    case WM_SETFOCUS: case WM_KILLFOCUS: case WM_ENABLE: case CB_SETCURSEL: case CB_SHOWDROPDOWN:
+                    case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_CAPTURECHANGED: case WM_KEYDOWN:
+                        if (cb.IsHandleCreated && cb.Visible)
+                        {
+                            IntPtr hdc = GetDC(m.HWnd);
+                            if (hdc != IntPtr.Zero) try { PaintTo(hdc); } finally { ReleaseDC(m.HWnd, hdc); }
+                        }
+                        break;
+                }
+            }
+
+            /// Double-buffered: no half-drawn frames.
+            void PaintTo(IntPtr hdc)
+            {
+                try
+                {
+                    var r = cb.ClientRectangle;
+                    if (r.Width < 1 || r.Height < 1) return;
+                    using (var buf = BufferedGraphicsManager.Current.Allocate(hdc, r))
+                    {
+                        Draw(buf.Graphics);
+                        buf.Render(hdc);
+                    }
+                }
+                catch { /* painting only */ }
+            }
+
+            /// Field (Input), selected item's text where Windows puts it (rcItem), dark arrow button (rcButton, lighter on
+            /// hover / while open), 1 px border: Border grey, lighter on hover or keyboard focus; disabled = muted text + arrow.
+            void Draw(Graphics g)
+            {
+                var r = cb.ClientRectangle;
+                float scale = cb.DeviceDpi / 96f;
+                int bw = Math.Max(SystemInformation.VerticalScrollBarWidth, (int)Math.Round(17 * scale));
+                Rectangle item = new Rectangle(3, 3, Math.Max(1, r.Width - bw - 6), Math.Max(1, r.Height - 6));
+                Rectangle btn = new Rectangle(r.Right - 1 - bw, 1, bw, r.Height - 2);
+                var info = new COMBOBOXINFO { cbSize = Marshal.SizeOf(typeof(COMBOBOXINFO)) };
+                if (cb.IsHandleCreated && GetComboBoxInfo(cb.Handle, ref info))
+                {
+                    item = Rectangle.FromLTRB(info.rcItem.Left, info.rcItem.Top, info.rcItem.Right, info.rcItem.Bottom);
+                    btn = new Rectangle(info.rcButton.Left, 1, Math.Max(1, r.Right - 1 - info.rcButton.Left), r.Height - 2);
+                }
+                bool enabled = cb.Enabled, open = cb.DroppedDown;
+                g.Clear(Input);
+                if (cb.SelectedIndex >= 0)
+                {
+                    // on the labels' text line (same rule as the text boxes), not centred in rcItem (that was 2-3 px low)
+                    // TextRenderer puts glyphs 1 px lower than the edit control does for the same line top (measured:
+                    // baseline = top + 14 vs + 13 at Segoe UI 10), hence - 1
+                    int lineTop = Math.Max(1, TextLineTop(r.Height, cb.Font) - 1);
+                    var line = new Rectangle(item.Left, lineTop, item.Width, cb.Font.Height);
+                    TextRenderer.DrawText(g, cb.GetItemText(cb.SelectedItem), cb.Font, line, enabled ? Text : Muted,
+                        TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                }
+                using (var b = new SolidBrush(!enabled ? Input : (hot || open) ? ButtonHover : ButtonBack)) g.FillRectangle(b, btn);
+                Color frame = enabled && (hot || open || cb.Focused) ? Color.FromArgb(110, 110, 116) : Border;   // = PrinterCard's hover border
+                using (var p = new Pen(frame)) g.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+                // small down arrow, centred in the button
+                float aw = Math.Max(6f, 8 * scale), cx = btn.Left + btn.Width / 2f, top = r.Height / 2f - aw / 4f;
+                var pts = new[] { new PointF(cx - aw / 2f, top), new PointF(cx + aw / 2f, top), new PointF(cx, top + aw / 2f) };
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var b = new SolidBrush(enabled ? Text : Muted)) g.FillPolygon(b, pts);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            struct RECT { public int Left, Top, Right, Bottom; }
+
+            [StructLayout(LayoutKind.Sequential)]
+            struct COMBOBOXINFO
+            {
+                public int cbSize;
+                public RECT rcItem, rcButton;
+                public int stateButton;
+                public IntPtr hwndCombo, hwndItem, hwndList;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            struct PAINTSTRUCT
+            {
+                public IntPtr hdc;
+                public bool fErase;
+                public RECT rcPaint;
+                public bool fRestore, fIncUpdate;
+                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)] public byte[] rgbReserved;
+            }
+
+            [StructLayout(LayoutKind.Sequential)]
+            struct TRACKMOUSEEVENT { public int cbSize; public int dwFlags; public IntPtr hwndTrack; public int dwHoverTime; }
+
+            [DllImport("user32.dll")] static extern bool GetComboBoxInfo(IntPtr hwnd, ref COMBOBOXINFO info);
+            [DllImport("user32.dll")] static extern IntPtr BeginPaint(IntPtr hwnd, ref PAINTSTRUCT ps);
+            [DllImport("user32.dll")] static extern bool EndPaint(IntPtr hwnd, ref PAINTSTRUCT ps);
+            [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+            [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
+            [DllImport("user32.dll")] static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT tme);
         }
 
         [DllImport("dwmapi.dll")]
@@ -180,7 +601,7 @@ namespace PrintPrice
 
     public enum InfoKind { Info, Success, Warning, Error }
 
-    /// A shaded box with a coloured stripe for help and status text. Hidden while it has no text.
+    /// A shaded box with a coloured stripe for help and status text. Hidden while it has no text (unless KeepWhenEmpty).
     public class InfoBox : TableLayoutPanel
     {
         readonly Label label;
@@ -267,10 +688,29 @@ namespace PrintPrice
                 Controls.Add(note, 0, 2);
                 noteMuted = true;
             }
-            Visible = label.Text.Length > 0 || note != null;
+            Visible = keepWhenEmpty || label.Text.Length > 0 || note != null;
             ApplyTheme();
             ResumeLayout(true);
         }
+
+        /// true = the box stays shown with no text: just the empty box with its stripe, one text line tall
+        /// (e.g. MainForm's live-price box, so the Update button beside it and the layout never move).
+        public bool KeepWhenEmpty
+        {
+            get { return keepWhenEmpty; }
+            set
+            {
+                keepWhenEmpty = value;
+                // an empty AutoSize label may measure 0 high: keep one line's height (device px, measured)
+                label.MinimumSize = value ? new Size(0, TextRenderer.MeasureText("Ag", label.Font).Height) : Size.Empty;
+                if (value) Visible = true;
+                else Visible = label.Text.Length > 0 || note != null || grid != null;
+            }
+        }
+        bool keepWhenEmpty;
+
+        /// Height of the box with one line of text (real px), e.g. for a button beside it.
+        public int OneLineHeight { get { return TextRenderer.MeasureText("Ag", label.Font).Height + Padding.Vertical; } }
 
         /// The muted line of SetText ("" if none).
         public string MutedLine { get { return noteMuted && note != null ? note.Text : ""; } }
@@ -285,7 +725,7 @@ namespace PrintPrice
                 ClearTable();
                 label.Text = value ?? "";
                 label.Visible = true;
-                Visible = label.Text.Length > 0;
+                Visible = keepWhenEmpty || label.Text.Length > 0;
             }
         }
 

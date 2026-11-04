@@ -14,6 +14,9 @@ namespace PrintPrice
         public double MachineRatePerHour = Wear.DefaultRate;   // DKK/h added to both prices (A1 wear & tear)
         public double AutoWearRate = 1;                        // 1 = calculate from nozzle, filament & plate
         public double FailedPrintPct = 0;       // % added to material + power for failed prints / reprints (0 = off)
+        public double FailedPayback = 0;        // 1 = add a payback to new quotes until failed prints are made back (0 = off)
+        public double FailedPaybackPct = 25;    // payback per quote: % of material + power (never more than what's left)
+        public double FailedPaybackWho = 2;     // 1 = both prices, 2 = customers only
         public double MinimumPrice = 0;         // DKK, customer price floor
         public double RoundTo = 0;              // round prices up to nearest N kr. (0 = off)
         public double LastFilamentPrice = 180;  // DKK/kg
@@ -35,7 +38,53 @@ namespace PrintPrice
 
         public string Language = "";            // "" = auto (Danish if Windows is Danish), "en", "da"
 
+        // Remembered kr./kg per filament short name ("Bambu PLA Matte" -> 200). Saved as one line per name:
+        // FilamentPrice=200|Bambu PLA Matte (number first, so any name works; older versions ignore the line).
+        public Dictionary<string, double> FilamentPrices = new Dictionary<string, double>(StringComparer.Ordinal);
+
+        const string FilamentPriceKey = "FilamentPrice";
+
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+        static string CleanName(string name)
+        {
+            if (name == null) return "";
+            return name.Replace("\r", "").Replace("\n", "").Trim();
+        }
+
+        static bool ValidPrice(double kr)
+        {
+            return kr >= 0 && !double.IsNaN(kr) && !double.IsInfinity(kr);
+        }
+
+        /// The remembered kr./kg for this filament, else LastFilamentPrice.
+        public double PriceFor(string name)
+        {
+            double v;
+            string n = CleanName(name);
+            if (n.Length > 0 && FilamentPrices != null && FilamentPrices.TryGetValue(n, out v)) return v;
+            return LastFilamentPrice;
+        }
+
+        /// Remembers kr./kg for this filament (replaces an older value). Empty name or a negative/NaN price is ignored.
+        /// Doesn't touch LastFilamentPrice and doesn't save: call Save().
+        public void RememberPrice(string name, double kr)
+        {
+            string n = CleanName(name);
+            if (n.Length == 0 || !ValidPrice(kr)) return;
+            if (FilamentPrices == null) FilamentPrices = new Dictionary<string, double>(StringComparer.Ordinal);
+            FilamentPrices[n] = kr;
+        }
+
+        // "200|Bambu PLA Matte" -> remembered (bad lines are skipped)
+        void ReadFilamentPrice(string val)
+        {
+            int bar = val.IndexOf('|');
+            if (bar <= 0) return;
+            double v;
+            if (!double.TryParse(val.Substring(0, bar).Trim(), NumberStyles.Float, Inv, out v)) return;
+            RememberPrice(val.Substring(bar + 1), v);
+        }
 
         // "da" -> true, "en" -> false, anything else (incl. "") -> follow Windows' UI language
         public static bool IsDanish(string language)
@@ -108,6 +157,9 @@ namespace PrintPrice
             d["OthersMarkupPct"] = OthersMarkupPct;
             d["MachineRatePerHour"] = MachineRatePerHour;
             d["FailedPrintPct"] = FailedPrintPct;
+            d["FailedPayback"] = FailedPayback;
+            d["FailedPaybackPct"] = FailedPaybackPct;
+            d["FailedPaybackWho"] = FailedPaybackWho;
             d["MinimumPrice"] = MinimumPrice;
             d["RoundTo"] = RoundTo;
             d["LastFilamentPrice"] = LastFilamentPrice;
@@ -142,6 +194,9 @@ namespace PrintPrice
                 case "OthersMarkupPct": OthersMarkupPct = v; break;
                 case "MachineRatePerHour": MachineRatePerHour = v; break;
                 case "FailedPrintPct": FailedPrintPct = v; break;
+                case "FailedPayback": FailedPayback = v != 0 ? 1 : 0; break;
+                case "FailedPaybackPct": if (v >= 0) FailedPaybackPct = v; break;
+                case "FailedPaybackWho": if (v == 1 || v == 2) FailedPaybackWho = v; break;
                 case "MinimumPrice": MinimumPrice = v; break;
                 case "RoundTo": RoundTo = v; break;
                 case "LastFilamentPrice": LastFilamentPrice = v; break;
@@ -181,6 +236,7 @@ namespace PrintPrice
                     int eq = line.IndexOf('=');
                     if (eq <= 0) continue;
                     string key = line.Substring(0, eq).Trim(), val = line.Substring(eq + 1).Trim();
+                    if (key == FilamentPriceKey) { s.ReadFilamentPrice(val); continue; }
                     if (stringKeys.ContainsKey(key)) { s.SetString(key, val); continue; }
                     double v;
                     if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0) s.SetNumber(key, v);
@@ -200,6 +256,18 @@ namespace PrintPrice
                     lines.Add(kv.Key + "=" + kv.Value.ToString("R", Inv));
                 foreach (var kv in Strings())
                     lines.Add(kv.Key + "=" + (kv.Value ?? "").Replace("\r", "").Replace("\n", ""));
+                if (FilamentPrices != null)
+                {
+                    var names = new List<string>(FilamentPrices.Keys);
+                    names.Sort(StringComparer.Ordinal);
+                    foreach (var n in names)
+                    {
+                        string clean = CleanName(n);
+                        double v = FilamentPrices[n];
+                        if (clean.Length == 0 || !ValidPrice(v)) continue;
+                        lines.Add(FilamentPriceKey + "=" + v.ToString("R", Inv) + "|" + clean);
+                    }
+                }
                 File.WriteAllLines(FilePath, lines.ToArray());
             }
             catch { /* non-fatal */ }
@@ -207,7 +275,11 @@ namespace PrintPrice
 
         public AppSettings Clone()
         {
-            return (AppSettings)MemberwiseClone();
+            var c = (AppSettings)MemberwiseClone();
+            c.FilamentPrices = FilamentPrices != null
+                ? new Dictionary<string, double>(FilamentPrices, StringComparer.Ordinal)
+                : new Dictionary<string, double>(StringComparer.Ordinal);
+            return c;
         }
     }
 

@@ -11,8 +11,9 @@ namespace PrintPrice
         public AppSettings Result;
         readonly AppSettings source;
         readonly string exe;
-        TextBox txtWatts, txtFriends, txtOthers, txtRate, txtMin, txtRound, txtFailed, txtAddOn, txtSlicer;
-        CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate;
+        TextBox txtWatts, txtFriends, txtOthers, txtRate, txtMin, txtRound, txtFailed, txtPayback, txtAddOn, txtSlicer;
+        CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate, chkPayback;
+        ComboBox cmbPaybackWho;   // 0 = customers only (FailedPaybackWho 2), 1 = both prices (1)
         Label lblCheck, lnkCheck;   // "v1.1.0 –" / check result, and the clickable "check now"
         /// Called when "check now" finds a newer version (MainForm shows its red update button).
         public Action<UpdateInfo> UpdateFound;
@@ -27,7 +28,10 @@ namespace PrintPrice
         Panel divider;   // red line between the two columns
         bool filling;   // suppress change events while filling the form
 
-        public SettingsForm(AppSettings current)
+        public SettingsForm(AppSettings current) : this(current, 0) { }
+
+        /// failedDebt = History.FailedDebt(history, null): shown as "Not made back yet: x kr." (also while payback is off).
+        public SettingsForm(AppSettings current, double failedDebt)
         {
             source = current;
             exe = BambuSlicer.FindExe(current.SlicerPath);
@@ -72,8 +76,22 @@ namespace PrintPrice
             txtMin = Row(t, L.S("Minimum price", "Minimumspris"), L.S("kr.  (0 = off)", "kr.  (0 = fra)"), null);
 
             Section(t, L.S("Optional – both prices", "Valgfrit – begge priser"));
-            txtFailed = Row(t, L.S("Failed prints", "Fejlprint"), L.S("%  (0 = off)", "%  (0 = fra)"),
-                L.S("Added to material + power for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler."));
+            txtFailed = Row(t, L.S("Failed prints", "Fejlprint"), L.S("%  (0 = off)", "%  (0 = fra)"), null);
+            // the hint's grey second line = failed prints marked in the price history that new quotes haven't made back yet
+            Hint(t, "").SetText(L.S("Added to material + power for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler."),
+                                L.F("Not made back yet: {0} kr.", "Ikke tjent ind endnu: {0} kr.", failedDebt.ToString("N2", Num.Dk)));
+            // earn back failed prints: the checkbox is the caption of its % row; % and "paid by" only work while ticked
+            int pr = t.RowCount++;
+            chkPayback = new CheckBox { Text = L.S("Earn back failed prints", "Tjen fejlprint ind igen"), AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, Theme.LabelGap, 6) };
+            t.Controls.Add(chkPayback, 0, pr);
+            txtPayback = new TextBox { Width = 90, TextAlign = HorizontalAlignment.Right, Anchor = AnchorStyles.Left };
+            txtPayback.Enter += delegate { BeginInvoke((MethodInvoker)delegate { txtPayback.SelectAll(); }); };
+            t.Controls.Add(txtPayback, 1, pr);
+            t.Controls.Add(new Label { Text = L.S("% per quote", "% pr. tilbud"), AutoSize = true, Anchor = AnchorStyles.Left, Tag = "muted" }, 2, pr);
+            cmbPaybackWho = Combo(t, L.S("Paid by", "Betales af"));
+            cmbPaybackWho.Items.Add(L.S("Customers only", "Kun kunder"));
+            cmbPaybackWho.Items.Add(L.S("Both prices", "Begge priser"));
+            chkPayback.CheckedChanged += delegate { txtPayback.Enabled = cmbPaybackWho.Enabled = chkPayback.Checked; };
             txtRound = Row(t, L.S("Round up to nearest", "Rund op til nærmeste"), L.S("kr.  (0 = off)", "kr.  (0 = fra)"), null);
 
             // ----- right: printer setup -----
@@ -129,7 +147,7 @@ namespace PrintPrice
             var bottom = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0) };
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            chkAutoUpdate = new CheckBox { Text = L.S("Check for a new version at startup", "Søg efter ny version ved opstart"), AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 4) };
+            chkAutoUpdate = new CheckBox { Text = L.S("Check for new versions automatically", "Søg automatisk efter nye versioner"), AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 4) };
             bottom.Controls.Add(chkAutoUpdate, 0, 0);
             var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Anchor = AnchorStyles.Right, Margin = Padding.Empty, WrapContents = false };
             bottom.Controls.Add(buttons, 1, 0);
@@ -170,6 +188,23 @@ namespace PrintPrice
             Fill(current);
             if (current.AutoUpdateCheck != 0 && !AppSettings.TestMode && !Screenshots.Active)
                 Shown += delegate { QuietCheckOnOpen(); };   // auto update on: look when Settings opens
+            Load += delegate { FitCombos(this); };
+        }
+
+        /// Every drop-down exactly as tall as the number boxes (owner-drawn: height = ItemHeight + its frame, measured),
+        /// so its text sits on the captions' line like the boxes' digits.
+        void FitCombos(Control c)
+        {
+            foreach (Control child in c.Controls)
+            {
+                var cb = child as ComboBox;
+                if (cb != null && cb.DrawMode == DrawMode.OwnerDrawFixed)
+                {
+                    int frame = cb.Height - cb.ItemHeight;
+                    if (txtWatts.Height - frame > 0 && cb.ItemHeight != txtWatts.Height - frame) cb.ItemHeight = txtWatts.Height - frame;
+                }
+                FitCombos(child);
+            }
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -206,7 +241,9 @@ namespace PrintPrice
             t.Controls.Add(Caption(caption), 0, r);
             // stretches to the right edge of the info boxes (Width is only the minimum, kept small so the
             // info boxes, not caption + combo, decide the column width)
-            var cb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120, Anchor = AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(3, 3, 0, 3), MaxDropDownItems = 20 };
+            // Top-anchored like a centred number box (row 31 = box 25 + 3 + 3): the table centres a combo by a height
+            // smaller than the one it really gets, which put it 2 px low; its height = a box's (FitCombos, on Load)
+            var cb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right, Margin = new Padding(3, 3, 0, 3), MaxDropDownItems = 20 };
             t.Controls.Add(cb, 1, r);
             t.SetColumnSpan(cb, 2);
             return cb;
@@ -339,6 +376,10 @@ namespace PrintPrice
             txtMin.Text = Num.Fmt(s.MinimumPrice);
             txtRound.Text = Num.Fmt(s.RoundTo);
             txtFailed.Text = Num.Fmt(s.FailedPrintPct);
+            txtPayback.Text = Num.Fmt(s.FailedPaybackPct);
+            cmbPaybackWho.SelectedIndex = s.FailedPaybackWho == 1 ? 1 : 0;
+            chkPayback.Checked = s.FailedPayback != 0;
+            txtPayback.Enabled = cmbPaybackWho.Enabled = chkPayback.Checked;   // CheckedChanged doesn't fire when it stays the same
             cmbNozzle.SelectedIndex = Array.IndexOf(Wear.Nozzles, Wear.FindNozzle(s.Nozzle));
             RefillPresets(BambuSlicer.ShortName(s.ProcessPreset), BambuSlicer.ShortName(s.FilamentPreset));
             cmbBed.SelectedIndex = Array.IndexOf(Wear.Plates, Wear.FindPlate(s.BedType));
@@ -364,6 +405,15 @@ namespace PrintPrice
             ok &= Num.Read(txtRound, out round) == FieldState.Ok;
             ok &= Num.Read(txtFailed, out failed) == FieldState.Ok;
             ok &= Num.Read(txtAddOn, out addOn) == FieldState.Ok;
+            // payback %: checked only while it is used (a greyed-out box can't be fixed); off = a valid number is kept, else the old one
+            double payback = source.FailedPaybackPct;
+            if (chkPayback.Checked) ok &= Num.Read(txtPayback, out payback) == FieldState.Ok;
+            else
+            {
+                double v;
+                if (Num.TryParse(txtPayback.Text, out v)) payback = v;
+                txtPayback.BackColor = Theme.Input;
+            }
             if (!ok)
             {
                 RestartRequested = false;
@@ -383,6 +433,9 @@ namespace PrintPrice
             Result.MinimumPrice = min;
             Result.RoundTo = round;
             Result.FailedPrintPct = failed;
+            Result.FailedPayback = chkPayback.Checked ? 1 : 0;
+            Result.FailedPaybackPct = payback;
+            Result.FailedPaybackWho = cmbPaybackWho.SelectedIndex == 1 ? 1 : 2;
             Result.Nozzle = SelectedNozzle.Key;
             Result.ProcessPreset = (string)cmbProcess.SelectedItem ?? source.ProcessPreset;
             Result.FilamentPreset = (string)cmbFilament.SelectedItem ?? source.FilamentPreset;
