@@ -22,6 +22,9 @@ namespace PrintPrice
         public List<FilamentUse> Filaments = new List<FilamentUse>();   // per slot, summed over plates, sorted by slot
         public double PurgeGrams = -1;          // flush/purge waste (already inside Grams); -1 = unknown
         public double ColourChangeHours = -1;   // extra print time from colour changes (inside Seconds); -1 = unknown
+        // file to open in Bambu Studio: ReadSliceInfo sets the .3mf it read (our out.3mf in the work folder, or the user's
+        // .gcode.3mf); after a slice, KeepForStudio moves it out of the work folder. null = nothing to open
+        public string StudioFile;
     }
 
     /// One filament slot used by a sliced print (summed over all plates).
@@ -331,6 +334,7 @@ namespace PrintPrice
             if (res != null)
             {
                 res.Picture = FromProject(path3mf);
+                res.StudioFile = path3mf;
                 var profiles = ParseFilamentSlots(settings);
                 foreach (var f in res.Filaments)
                     if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
@@ -677,6 +681,102 @@ namespace PrintPrice
             double v;
             if (a != null && double.TryParse(a.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && v > 0) return v;
             return 0;
+        }
+
+        // ---- open in Bambu Studio (idea 13) ----
+        // Our out.3mf (model + our A1 profiles + plate gcode) opens in Studio's Prepare tab with our printer, process, plate
+        // and filament (system names, not "modified"); Studio needs one "Slice plate" click before printing. A model-less
+        // .gcode.3mf opens ready to print (Preview). Studio's "single_instance" setting (off by default) decides between a
+        // new window and the open one.
+
+        /// Folder for files kept for "Open in Bambu Studio": %TEMP%\PrintPrice\studio.
+        public static string StudioRoot
+        {
+            get { return Path.Combine(Path.GetTempPath(), "PrintPrice", "studio"); }
+        }
+
+        /// Copies a sliced .3mf out of the (soon deleted) work folder into StudioRoot\<guid>\<model name>.3mf and deletes the
+        /// older kept copies. Returns the copy's path, or null on any failure (never throws).
+        public static string KeepForStudio(string sliced3mf, string modelName)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(sliced3mf) || !File.Exists(sliced3mf)) return null;
+                string stem = Path.GetFileNameWithoutExtension(modelName ?? "");
+                if (stem.EndsWith(".gcode", StringComparison.OrdinalIgnoreCase)) stem = stem.Substring(0, stem.Length - 6);
+                stem = Printables.SafeFileName(stem).Trim();
+                if (stem.Length == 0) stem = "model";
+                if (stem.Length > 80) stem = stem.Substring(0, 80);
+                string dir = Path.Combine(StudioRoot, Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                string target = Path.Combine(dir, stem + ".3mf");
+                File.Copy(sliced3mf, target);
+                CleanStudioFiles(target);
+                return target;
+            }
+            catch { return null; }
+        }
+
+        /// Deletes every folder in StudioRoot except the one holding `keep` (null = all). Never throws; a file Studio
+        /// still has open just stays until next time.
+        public static void CleanStudioFiles(string keep)
+        {
+            try
+            {
+                if (!Directory.Exists(StudioRoot)) return;
+                foreach (var dir in StudioFoldersToDelete(Directory.GetDirectories(StudioRoot), keep))
+                    try { Directory.Delete(dir, true); } catch { }
+            }
+            catch { }
+        }
+
+        /// Pure: the folders to delete = all except the kept file's own folder (compared without case and trailing '\').
+        public static List<string> StudioFoldersToDelete(IEnumerable<string> folders, string keepFile)
+        {
+            string keepDir = string.IsNullOrEmpty(keepFile) ? null : TrimSlash(Path.GetDirectoryName(keepFile));
+            var list = new List<string>();
+            if (folders == null) return list;
+            foreach (var f in folders)
+            {
+                if (string.IsNullOrEmpty(f)) continue;
+                if (keepDir != null && string.Equals(TrimSlash(f), keepDir, StringComparison.OrdinalIgnoreCase)) continue;
+                list.Add(f);
+            }
+            return list;
+        }
+
+        static string TrimSlash(string p)
+        {
+            return (p ?? "").TrimEnd('\\', '/');
+        }
+
+        /// Pure: Bambu Studio's command line for one file = the full path in quotes.
+        public static string StudioArguments(string file)
+        {
+            return Quote(Path.GetFullPath(file));
+        }
+
+        /// Starts Bambu Studio with the file (no shell, doesn't wait). Throws SliceException with a user-facing text.
+        public static void OpenInStudio(string exe, string file)
+        {
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                throw new SliceException(L.S("Bambu Studio was not found. Install it from bambulab.com, or set its location in Settings.",
+                                             "Bambu Studio blev ikke fundet. Installér det fra bambulab.com, eller angiv stien i Indstillinger."));
+            if (string.IsNullOrEmpty(file) || file.IndexOf('"') >= 0 || !IsModelFile(file) || !Path.IsPathRooted(file) || !File.Exists(file))
+                throw new SliceException(L.S("The sliced file is gone. Slice again to open it in Bambu Studio.",
+                                             "Den slicede fil er væk. Slice igen for at åbne den i Bambu Studio."));
+            try
+            {
+                var psi = new ProcessStartInfo(exe, StudioArguments(file))
+                {
+                    UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe)
+                };
+                using (Process.Start(psi)) { }
+            }
+            catch (Exception ex)
+            {
+                throw new SliceException(L.F("Bambu Studio could not be started: {0}", "Bambu Studio kunne ikke startes: {0}", ex.Message));
+            }
         }
     }
 }

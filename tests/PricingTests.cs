@@ -863,7 +863,40 @@ namespace PrintPrice.Tests
             True("PickPicture plate_2 over small", BambuSlicer.PickPictureEntry(new[] { "Metadata/plate_2_small.png", "Metadata/plate_2.png" }) == "Metadata/plate_2.png");
             True("PickPicture only pick -> null", BambuSlicer.PickPictureEntry(new[] { "Metadata/pick_1.png" }) == null);
             True("PickPicture ignores subfolders and 3D", BambuSlicer.PickPictureEntry(new[] { "Metadata/sub/x.png", "3D/x.png" }) == null);
-            True("IsImage PNG", Net.IsImage(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }));
+            // Bambu Studio hand-over (pure parts + refusals only; nothing is ever started)
+            var stAll = new List<string> { @"C:\t\a", @"C:\t\B\", @"C:\t\c" };
+            True("StudioFolders keeps own folder", J(BambuSlicer.StudioFoldersToDelete(stAll, @"C:\t\a\x.3mf")) == @"C:\t\B\|C:\t\c");
+            True("StudioFolders case + trailing slash", J(BambuSlicer.StudioFoldersToDelete(stAll, @"c:\T\b\x.3mf")) == @"C:\t\a|C:\t\c");
+            True("StudioFolders keep listed with slash", J(BambuSlicer.StudioFoldersToDelete(new List<string> { @"C:\t\a\" }, @"C:\t\A\x.3mf")) == "");
+            True("StudioFolders null keep -> all", J(BambuSlicer.StudioFoldersToDelete(stAll, null)) == @"C:\t\a|C:\t\B\|C:\t\c");
+            True("StudioFolders null list -> empty", BambuSlicer.StudioFoldersToDelete(null, @"C:\t\a\x.3mf").Count == 0);
+            True("StudioArgs spaces quoted", BambuSlicer.StudioArguments(@"C:\my dir\a b.3mf") == "\"C:\\my dir\\a b.3mf\"");
+            True("StudioArgs æøå quoted", BambuSlicer.StudioArguments(@"C:\blå\æøå.3mf") == "\"C:\\blå\\æøå.3mf\"");
+            string stRel = BambuSlicer.StudioArguments(@"rel\a.3mf");
+            True("StudioArgs relative -> full path", stRel.StartsWith("\"") && stRel.EndsWith("\"") && stRel.IndexOf(@":\") == 2 && stRel.EndsWith(@"\rel\a.3mf""") );
+            string stTmp = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pricing_studio_test_" + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(stTmp);
+            try
+            {
+                string fakeExe = System.Reflection.Assembly.GetExecutingAssembly().Location;   // the test program itself; refused before any start
+                string txt = System.IO.Path.Combine(stTmp, "a.txt");
+                System.IO.File.WriteAllText(txt, "x");
+                string missing3mf = System.IO.Path.Combine(stTmp, "gone.3mf");
+                string[][] stCases = new string[][] {
+                    new string[] { null, missing3mf }, new string[] { System.IO.Path.Combine(stTmp, "nope.exe"), missing3mf },
+                    new string[] { fakeExe, txt }, new string[] { fakeExe, missing3mf }, new string[] { fakeExe, null } };
+                string[] stNames = { "null exe", "missing exe", ".txt file", "missing file", "null file" };
+                for (int i = 0; i < stCases.Length; i++)
+                {
+                    bool right = false;
+                    try { BambuSlicer.OpenInStudio(stCases[i][0], stCases[i][1]); }
+                    catch (SliceException) { right = true; }
+                    catch (Exception) { }
+                    True("OpenInStudio refuses: " + stNames[i], right);
+                }
+            }
+            finally { try { System.IO.Directory.Delete(stTmp, true); } catch { } }
+            True("IsImage PNG",Net.IsImage(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }));
             True("IsImage JPEG", Net.IsImage(new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, 0x4A, 0x46 }));
             True("IsImage null", !Net.IsImage(null));
             True("IsImage short", !Net.IsImage(new byte[] { 0x89, 0x50, 0x4E }));

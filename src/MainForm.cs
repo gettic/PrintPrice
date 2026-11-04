@@ -54,6 +54,13 @@ namespace PrintPrice
         bool autoIsError;
         CancellationTokenSource cts;
 
+        // "Open in Studio" (idea 13): after a successful slice the first top button opens the sliced file in Bambu Studio
+        string studioFile;              // file the button opens (null = the button is "Get time & weight")
+        Bitmap studioIcon, studioIconGrey;   // Bambu Studio's icon at 16 px (scaled) + grey copy for disabled; null = text only
+        string studioIconExe = "?";     // slicer exe the icon was read from ("?" = not yet)
+        int studioClickTick;            // Environment.TickCount of the last Open click (2 s guard against double launches)
+        bool studioClicked;
+
         // model picture under the "Model link" label (logo + "No model yet" while empty)
         PictureBox picModel;
         int picRequest;   // bumped for every new job / Clear, so a late picture of an old job is dropped
@@ -133,7 +140,8 @@ namespace PrintPrice
             // grey example text while empty; re-applied whenever the handle is recreated (e.g. theme change)
             txtUrl.HandleCreated += delegate { ApplyUrlCue(); };
             // typing/pasting brings the grey example text back
-            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; fromExample = false; };   // a new link = no model name yet
+            // a new link = no model name yet, and the button slices again (no "Open in Studio" for the old file)
+            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; fromExample = false; SetStudioFile(null); };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
@@ -142,9 +150,11 @@ namespace PrintPrice
             btnLoadFile = new Button { Text = L.S("Load file…", "Åbn fil…"), Width = 128, Height = 32, Margin = new Padding(0, 6, 6, 4) };
             btnHistory = new Button { Text = L.S("History…", "Historik…"), Width = 128, Height = 32, Margin = new Padding(0, 6, 0, 4) };
             btnAnalyze.Click += delegate { AnalyzeClicked(); };
+            btnAnalyze.Paint += (s, e) => PaintStudioIcon(e.Graphics);
             btnLoadFile.Click += delegate { BrowseForModel(); };
             btnHistory.Click += delegate { OpenHistory(); };
-            // Enter in the link box = "Get time & weight" (not while a job runs, so it never cancels by accident)
+            // Enter in the link box = what the first button shows: "Get time & weight", or "Open in Studio" on an unchanged
+            // sliced link (any edit switches back to slicing); not while a job runs, so it never cancels by accident
             txtUrl.KeyDown += (s, e) =>
             {
                 if (e.KeyCode != Keys.Enter || e.Modifiers != Keys.None) return;
@@ -396,6 +406,7 @@ namespace PrintPrice
             FormClosed += delegate
             {
                 picRequest++; SetModelPicture(null);
+                SetStudioIcon(null);
                 if (statusTimer != null) { statusTimer.Stop(); statusTimer.Dispose(); statusTimer = null; }
                 if (updateTimer != null) { updateTimer.Stop(); updateTimer.Dispose(); updateTimer = null; }
                 if (hintTimer != null) { hintTimer.Stop(); hintTimer.Dispose(); hintTimer = null; }
@@ -414,6 +425,8 @@ namespace PrintPrice
             RefreshSettingsLabels();
             ShowAutoIdle();
             if (!offline && !AppSettings.TestMode) Shown += delegate { StartupUpdateCheck(); };
+            // sliced files kept for "Open in Studio" by an earlier run (off the UI thread; files Studio still has open stay)
+            if (!offline) Shown += delegate { Task.Run(() => BambuSlicer.CleanStudioFiles(null)); };
             if (settings.AutoPowerPrice != 0) { if (!offline) Shown += delegate { FetchPowerPrice(); }; }
             else SetPowerInfo(L.S("Live price is off (Settings). Click Update to fetch it once.",
                                   "Live-pris er slået fra (Indstillinger). Klik Opdatér for at hente den én gang."), false);
@@ -485,6 +498,8 @@ namespace PrintPrice
             SetSampleRowPrices("200");
             txtGrams.Text = "135,85";
             SetJobLoaded(true);
+            // shows the "Open in Studio" button (with Studio's icon if it's installed); never clicked in picture mode
+            SetStudioFile(Path.Combine(BambuSlicer.StudioRoot, "sample", "Multicolor_Benchy.3mf"));
             Recalculate();
         }
 
@@ -630,6 +645,7 @@ namespace PrintPrice
         void AnalyzeClicked()
         {
             if (cts != null) { cts.Cancel(); return; }
+            if (studioFile != null) { OpenInStudio(); return; }
             string src = txtUrl.Text.Trim().Trim('"');
             if (src.Length == 0) { txtUrl.Text = ""; SetUrlHint(true); txtUrl.Focus(); return; }
             if (File.Exists(src)) { Analyze(null, new List<string> { src }); return; }
@@ -648,9 +664,145 @@ namespace PrintPrice
 
         static string AnalyzeText { get { return L.S("Get time && weight", "Hent tid og vægt"); } }
 
+        // ---------- "Open in Studio" (the first top button after a successful slice) ----------
+        /// The file "Open in Studio" opens (null = back to "Get time & weight"). Switched back by: a link edit (TextChanged),
+        /// a new job (Analyze start: Load file / drop / Get time), errors and Cancel, Clear, Reopen and slicing settings changes.
+        void SetStudioFile(string file)
+        {
+            studioFile = string.IsNullOrEmpty(file) ? null : file;
+            if (studioFile != null) SetStudioIcon(BambuSlicer.FindExe(settings.SlicerPath));
+            UpdateAnalyzeButton();
+        }
+
+        /// Text, icon room and tooltip of the first top button: Cancel (job running), Open in Studio, or Get time & weight.
+        void UpdateAnalyzeButton()
+        {
+            if (btnAnalyze == null) return;
+            bool open = cts == null && studioFile != null;
+            // with the icon, PaintStudioIcon draws icon + text itself (the button's own text placement can't be lined up
+            // exactly): the button's Text is empty then and the name goes to AccessibleName; no icon = normal button text
+            bool own = open && studioIcon != null;
+            btnAnalyze.Text = own ? "" : cts != null ? L.S("Cancel", "Annullér") : open ? StudioText : AnalyzeText;
+            btnAnalyze.AccessibleName = own ? StudioText : null;
+            if (printerTip != null)
+                printerTip.SetToolTip(btnAnalyze, open
+                    ? L.S("Opens the sliced file in Bambu Studio.\nClick \"Slice plate\" there before printing.\nChange the link to slice again.",
+                          "Åbner den slicede fil i Bambu Studio.\nKlik \"Slice plate\" der, før du printer.\nRet linket for at slice igen.")
+                    : null);
+            btnAnalyze.Invalidate();
+        }
+
+        /// Reads Bambu Studio's icon from its exe once per exe (16 px at 96 dpi, scaled) + a grey copy for the disabled button.
+        void SetStudioIcon(string exe)
+        {
+            if (exe == studioIconExe) return;
+            studioIconExe = exe;
+            if (studioIcon != null) { studioIcon.Dispose(); studioIcon = null; }
+            if (studioIconGrey != null) { studioIconGrey.Dispose(); studioIconGrey = null; }
+            if (exe == null || !File.Exists(exe)) return;
+            try
+            {
+                int size = ScalePx(16);
+                using (var exeIcon = Icon.ExtractAssociatedIcon(exe))
+                using (var src = exeIcon.ToBitmap())
+                {
+                    studioIcon = new Bitmap(size, size);
+                    using (var g = Graphics.FromImage(studioIcon))
+                    {
+                        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                        g.DrawImage(src, new Rectangle(0, 0, size, size));
+                    }
+                    // grey copy: luminance only, dimmed to about Theme.Muted on the button back
+                    studioIconGrey = new Bitmap(size, size);
+                    var m = new System.Drawing.Imaging.ColorMatrix(new[]
+                    {
+                        new[] { 0.3f, 0.3f, 0.3f, 0f, 0f }, new[] { 0.59f, 0.59f, 0.59f, 0f, 0f }, new[] { 0.11f, 0.11f, 0.11f, 0f, 0f },
+                        new[] { 0f, 0f, 0f, 0.5f, 0f }, new[] { 0f, 0f, 0f, 0f, 1f }
+                    });
+                    using (var attr = new System.Drawing.Imaging.ImageAttributes())
+                    using (var g = Graphics.FromImage(studioIconGrey))
+                    {
+                        attr.SetColorMatrix(m);
+                        g.DrawImage(studioIcon, new Rectangle(0, 0, size, size), 0, 0, size, size, GraphicsUnit.Pixel, attr);
+                    }
+                }
+            }
+            catch
+            {
+                if (studioIcon != null) { studioIcon.Dispose(); studioIcon = null; }
+                if (studioIconGrey != null) { studioIconGrey.Dispose(); studioIconGrey = null; }
+            }
+        }
+
+        static string StudioText { get { return L.S("Open in Studio", "Åbn i Studio"); } }
+
+        const TextFormatFlags StudioTextFlags = TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.SingleLine |
+                                                TextFormatFlags.VerticalCenter;
+        string studioInkKey;          // text + font the ink columns below were measured for
+        int studioInkLeft, studioInkWidth;
+
+        /// Measures where the text's ink really is (first lit column, width) by drawing it once into a small bitmap,
+        /// so icon, 4 px gap and text can be centred to the pixel (TextRenderer's widths include side bearings).
+        void MeasureStudioInk(string text, Font font)
+        {
+            string key = text + "|" + font.Name + "|" + font.Size + "|" + DeviceDpi;
+            if (key == studioInkKey) return;
+            Size sz = TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), StudioTextFlags);
+            studioInkLeft = 0; studioInkWidth = sz.Width;
+            using (var bmp = new Bitmap(Math.Max(1, sz.Width + 4), Math.Max(1, sz.Height)))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Theme.ButtonBack);
+                    TextRenderer.DrawText(g, text, font, new Rectangle(0, 0, bmp.Width, bmp.Height), Theme.Text, Theme.ButtonBack, StudioTextFlags);
+                }
+                int bg = Theme.ButtonBack.ToArgb(), first = -1, last = -1;
+                for (int x = 0; x < bmp.Width; x++)
+                    for (int y = 0; y < bmp.Height; y++)
+                        if (bmp.GetPixel(x, y).ToArgb() != bg) { if (first < 0) first = x; last = x; break; }
+                if (first >= 0) { studioInkLeft = first; studioInkWidth = last - first + 1; }
+            }
+            studioInkKey = key;
+        }
+
+        /// "Open in Studio" with the icon: draws icon + 4 px + text as one group, centred by the ink (the button's Text is empty).
+        /// Text colour like the other buttons: Text, Muted when disabled; the button itself still paints back, hover and focus.
+        void PaintStudioIcon(Graphics g)
+        {
+            if (cts != null || studioFile == null || studioIcon == null) return;
+            string text = StudioText;
+            Font font = btnAnalyze.Font;
+            MeasureStudioInk(text, font);
+            int gap = ScalePx(4);
+            int groupW = studioIcon.Width + gap + studioInkWidth;
+            int x = (btnAnalyze.Width - groupW + 1) / 2;   // odd leftover: the extra px goes to the left side
+            int y = (btnAnalyze.Height - studioIcon.Height) / 2;
+            g.DrawImageUnscaled(btnAnalyze.Enabled ? studioIcon : studioIconGrey, x, y);
+            int textX = x + studioIcon.Width + gap - studioInkLeft;
+            TextRenderer.DrawText(g, text, font, new Rectangle(textX, 0, btnAnalyze.Width - textX, btnAnalyze.Height),
+                                  btnAnalyze.Enabled ? Theme.Text : Theme.Muted, StudioTextFlags);
+        }
+
+        /// The click: starts Bambu Studio with the sliced file (2 s guard against double launches). Errors go in the info box;
+        /// a file that is gone switches the button back to slicing.
+        void OpenInStudio()
+        {
+            if (studioClicked && unchecked(Environment.TickCount - studioClickTick) < 2000) return;
+            studioClicked = true;
+            studioClickTick = Environment.TickCount;
+            string file = studioFile;
+            try { BambuSlicer.OpenInStudio(BambuSlicer.FindExe(settings.SlicerPath), file); }
+            catch (SliceException ex)
+            {
+                SetAuto(ex.Message, true);
+                if (!File.Exists(file)) SetStudioFile(null);
+            }
+        }
+
         void SetBusy(bool busy)
         {
-            btnAnalyze.Text = busy ? L.S("Cancel", "Annullér") : AnalyzeText;
+            UpdateAnalyzeButton();   // Cancel while busy (cts is set first), else Get time / Open in Studio
             btnLoadFile.Enabled = !busy;
             btnHistory.Enabled = !busy;   // "Open again" would clash with a running job
             txtUrl.ReadOnly = busy;
@@ -660,6 +812,7 @@ namespace PrintPrice
         async void Analyze(string printablesId, List<string> localFiles)
         {
             if (offline || cts != null) return;
+            SetStudioFile(null);   // a new job: back to "Get time & weight" until it has sliced
             string exe = BambuSlicer.FindExe(settings.SlicerPath);
             bool presliced = localFiles != null && localFiles.Count == 1 && BambuSlicer.IsSlicedProject(localFiles[0]);
             if (exe == null && !presliced)
@@ -748,6 +901,14 @@ namespace PrintPrice
                 SetAuto("✓ " + what + ": " + summary + " (" + how +
                         (parts > 1 ? L.F(", {0} files", ", {0} filer", parts) : "") +
                         (result.Plates > parts ? L.F(", {0} plates", ", {0} plader", result.Plates) : "") + ").", false);
+                SetStudioFile(result.StudioFile);   // null (nothing kept) = stays "Get time & weight"
+                if (studioFile != null && parts > 1)
+                {
+                    // several files: Studio gets the first one only (muted second line; ClearJob takes it away again)
+                    lblAuto.SetText(lblAuto.Text, L.F("\"Open in Studio\" opens only the first file (1 of {0}).",
+                                                      "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", parts));
+                    SetAutoColor();
+                }
             }
             catch (OperationCanceledException) { SetAuto(L.S("Cancelled.", "Annulleret."), false); }
             catch (SliceException ex) { SetAuto(ex.Message, true); }
@@ -806,9 +967,12 @@ namespace PrintPrice
                     total.Grams += r.Grams;
                     total.Plates += r.Plates;
                     if (total.Picture == null) total.Picture = r.Picture;   // first model's plate picture
+                    if (i == 0) total.StudioFile = r.StudioFile;            // "Open in Studio" opens the first model's slice
                     MergeFilaments(total, r);
                 }
                 total.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+                // copy the slice out of the work folder before the finally below deletes it (null = nothing to open)
+                total.StudioFile = BambuSlicer.KeepForStudio(total.StudioFile, models[0].Key);
                 return total;
             }
             finally
@@ -1466,8 +1630,18 @@ namespace PrintPrice
         {
             using (var b = new SolidBrush(Theme.InfoBack)) e.Graphics.FillRectangle(b, e.Bounds);
             using (var p = new Pen(Theme.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
-            TextRenderer.DrawText(e.Graphics, e.ToolTipText, e.Font, e.Bounds, Theme.Text,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            string text = e.ToolTipText ?? "";
+            if (text.IndexOf('\n') < 0)
+            {
+                TextRenderer.DrawText(e.Graphics, text, e.Font, e.Bounds, Theme.Text,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                return;
+            }
+            // several lines (VerticalCenter only works on one line): centre the measured block, each line centred
+            const TextFormatFlags multi = TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix;
+            Size sz = TextRenderer.MeasureText(e.Graphics, text, e.Font, e.Bounds.Size, multi);
+            var r = new Rectangle(e.Bounds.X, e.Bounds.Y + (e.Bounds.Height - sz.Height) / 2, e.Bounds.Width, sz.Height);
+            TextRenderer.DrawText(e.Graphics, text, e.Font, r, Theme.Text, multi);
         }
 
         /// Clickable printer card: photo on top, "Bambu Lab A1 · 100 W" centred under it, framed like an info box
@@ -1885,6 +2059,10 @@ namespace PrintPrice
                                             old.PowerIncludeVat != settings.PowerIncludeVat ||
                                             (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
                         if (powerChanged && settings.AutoPowerPrice != 0) BeginInvoke((MethodInvoker)FetchPowerPrice);
+                        // other slicing settings make the slice out of date: the button slices again instead of opening it
+                        if (old.ProcessPreset != settings.ProcessPreset || old.FilamentPreset != settings.FilamentPreset ||
+                            old.Nozzle != settings.Nozzle || old.BedType != settings.BedType || old.SlicerPath != settings.SlicerPath)
+                            SetStudioFile(null);
                         SaveLastPrices();
                         RefreshSettingsLabels();
                         foreach (var cb in rowCombo) cb.Tag = null;   // nozzle / slicer may have changed: re-read the list when opened
@@ -2136,6 +2314,7 @@ namespace PrintPrice
             savedId = null;    // saving it again is a new sale: it pays back again
             SetUrlHint(false);
             txtUrl.Text = r.Source ?? "";
+            SetStudioFile(null);   // no slice from this session (also when the link was the same, so TextChanged didn't fire)
             jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)
             ResetModelPicture();
             SetJobLoaded(true);   // no picture (Printables link, missing file) = logo without "No model yet"
@@ -2211,6 +2390,7 @@ namespace PrintPrice
             savedId = null;
             if (lblAuto.MutedLine.Length > 0) ShowAutoIdle();   // the "Opened from history" lines go with the job
             txtUrl.Text = "";
+            SetStudioFile(null);   // back to "Get time & weight" (also if the box was already empty)
             SetUrlHint(false);
             SetColours(null);   // back to the single-filament layout
             txtGrams.Text = "";
