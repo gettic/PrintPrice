@@ -63,12 +63,49 @@ namespace PrintPrice
                 base.OnKeyDown(e);
             }
 
-            protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
-            protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+            /// Muted link (e.g. the main window's "GitHub"): Theme.Muted and no underline when idle; on hover or keyboard
+            /// focus Theme.Text + an underline drawn 2 px under the baseline. Use a regular (not underlined) font.
+            public bool MutedLink
+            {
+                get { return mutedLink; }
+                set { mutedLink = value; SetHot(hovered || Focused); }
+            }
+            bool mutedLink, hovered, hot;
+
+            void SetHot(bool on)
+            {
+                hot = on;
+                if (mutedLink) ForeColor = on ? Theme.Text : Theme.Muted;
+                Invalidate();
+            }
+
+            protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hovered = true; SetHot(true); }
+            protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hovered = false; SetHot(Focused); }
+            protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); SetHot(true); }
+            protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); SetHot(hovered); }
 
             protected override void OnPaint(PaintEventArgs e)
             {
                 base.OnPaint(e);
+                if (mutedLink && hot && Text.Length > 0)
+                {
+                    // underline under the drawn glyphs (GDI+ text as the label draws it), at baseline + 2
+                    var g = e.Graphics;
+                    using (var sf = new StringFormat(StringFormat.GenericDefault))
+                    {
+                        sf.SetMeasurableCharacterRanges(new[] { new CharacterRange(0, Text.Length) });
+                        var area = new RectangleF(Padding.Left, Padding.Top, Math.Max(1, ClientSize.Width - Padding.Horizontal), Math.Max(1, ClientSize.Height - Padding.Vertical));
+                        var regions = g.MeasureCharacterRanges(Text, Font, area, sf);
+                        RectangleF r = regions.Length > 0 ? regions[0].GetBounds(g) : area;
+                        foreach (var rg in regions) rg.Dispose();
+                        var fam = Font.FontFamily;
+                        float ascent = Font.SizeInPoints * g.DpiY / 72f * fam.GetCellAscent(Font.Style) / fam.GetEmHeight(Font.Style);
+                        int y = (int)Math.Round(Padding.Top + ascent) + (int)Math.Round(2 * g.DpiY / 96f);
+                        if (y > ClientSize.Height - 1) y = ClientSize.Height - 1;
+                        using (var pen = new Pen(ForeColor, Math.Max(1f, (float)Math.Floor(g.DpiY / 96f))))
+                            g.DrawLine(pen, (int)Math.Floor(r.Left), y, (int)Math.Ceiling(r.Right) - 1, y);
+                    }
+                }
                 if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(e.Graphics, ClientRectangle, ForeColor, BackColor);
             }
         }

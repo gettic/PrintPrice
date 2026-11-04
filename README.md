@@ -88,6 +88,7 @@ The app sends no personal information anywhere. It has no account, cookies or tr
 |---|---|---|
 | GitHub | At startup, every 10 minutes while the program is open, and when you open Settings, to look for a new version (all of it can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version. Unchanged answers are not downloaded again (ETag), and if GitHub says "too many requests" the app quietly waits longer |
 | Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
+| Your browser | Only when you click **GitHub** in "Made by Gettic · GitHub" at the bottom of the main window | Opens this project's page (github.com/gettic/PrintPrice). Nothing is sent before the click |
 | Printables | Only when you paste a Printables link | The model's ID, then the file and a small model picture (~10 KB, from media.printables.com) download |
 
 Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer, and reads its A1 filament profiles (for the material drop-down) and the A1 printer picture from its install folder. This stays on your PC and is never sent anywhere.

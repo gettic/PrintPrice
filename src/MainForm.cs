@@ -21,6 +21,10 @@ namespace PrintPrice
         TableLayoutPanel breakTable;           // the Cost breakdown's table (rows: 0 material rows, 1 purge, 2 Power, 3 Failed, 4 Base, 5 payback)
         Label lblFriends, lblOthers, lblFriendsInfo, lblOthersInfo, lblStatus;
         Button btnCopy, btnUpdate;
+        Panel leftCell;                   // left of the bottom buttons: update button or "Made by Gettic · GitHub"
+        FlowLayoutPanel bottomButtons;
+        Label lblMadeBy;
+        Theme.LinkText lnkGitHub;
         UpdateInfo pendingUpdate;   // newer version found at startup (null = none)
         System.Windows.Forms.Timer updateTimer;   // quiet check every 10 min while running (null in picture mode)
         bool checkingUpdate, updateDialogOpen;
@@ -332,7 +336,7 @@ namespace PrintPrice
                 Anchor = AnchorStyles.Left, Visible = false, Font = new Font(Font, FontStyle.Bold)
             };
             btnUpdate.Click += delegate { if (pendingUpdate != null) ShowUpdate(pendingUpdate); };
-            var buttons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
+            var buttons = bottomButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
             // four buttons, 340 px = 76 + 84 + 70 + 92 + 3 × 6 gap, ending at the Customers box's right edge;
             // the update button left of them takes the rest of the row
             var btnClear = new Button { Text = L.S("Clear", "Ryd"), Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
@@ -356,8 +360,26 @@ namespace PrintPrice
             buttons.Controls.Add(btnSettings);
             buttons.Controls.Add(btnSave);
             buttons.Controls.Add(btnCopy);
-            bottom.Controls.Add(btnUpdate, 0, 0);
+            // left of the buttons: "Made by Gettic · GitHub" (muted, "GitHub" = muted link); the update button takes its place when shown
+            leftCell = new Panel { Size = new Size(100, 38), Dock = DockStyle.Fill, Margin = Padding.Empty };   // 38 = the row's height (button 32 + 3 + 3)
+            btnUpdate.Location = new Point(0, 3);
+            lblMadeBy = new Theme.PlainLabel { Text = L.S("Made by Gettic ·", "Lavet af Gettic ·"), AutoSize = true, Tag = "muted", UseMnemonic = false,
+                Font = new Font("Segoe UI", 9f), Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 2) };
+            lnkGitHub = new Theme.LinkText { Text = "GitHub", AutoSize = true, Tag = "muted", MutedLink = true,
+                Font = new Font("Segoe UI", 9f), Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 2) };
+            lnkGitHub.Click += delegate { OpenProjectPage(); };
+            printerTip.SetToolTip(lnkGitHub, "github.com/gettic/PrintPrice");
+            leftCell.Controls.Add(btnUpdate);
+            leftCell.Controls.Add(lblMadeBy);
+            leftCell.Controls.Add(lnkGitHub);
+            btnUpdate.TabIndex = 0;
+            lnkGitHub.TabIndex = 1;
+            Load += delegate { PlaceMadeBy(btnClear); };
+            bottom.Controls.Add(leftCell, 0, 0);
             bottom.Controls.Add(buttons, 1, 0);
+            // tab order: the link last (after Copy quote); the update button (shown instead of the line) stays first
+            buttons.TabIndex = 0;
+            leftCell.TabIndex = 1;
             root.Controls.Add(bottom);
             root.Controls.Add(lblStatus);
 
@@ -1930,6 +1952,58 @@ namespace PrintPrice
             pendingUpdate = found;
             btnUpdate.Text = L.S("⬆  Update to v", "⬆  Opdatér til v") + Updater.Short(found.Version);
             btnUpdate.Visible = true;
+            // the update button wins the place left of the buttons: hide "Made by Gettic · GitHub", Update first in tab order
+            lblMadeBy.Visible = false;
+            lnkGitHub.Visible = false;
+            leftCell.TabIndex = 0;
+            bottomButtons.TabIndex = 1;
+        }
+
+        /// "Made by Gettic · GitHub" on the button row: left edge at the content edge (x 14), text on the buttons' text
+        /// baseline (measured: button text is centred in the button, GDI+ label text starts at the label's top).
+        void PlaceMadeBy(Button reference)
+        {
+            int buttonTop = leftCell.PointToClient(reference.PointToScreen(Point.Empty)).Y;
+            int baseline = buttonTop + (reference.Height - reference.Font.Height) / 2 + Ascent(reference.Font);
+            int top = baseline - Ascent(lblMadeBy.Font);
+            lblMadeBy.Location = new Point(0, top);
+            // "GitHub" as far after the "·" as the "·" is after "Gettic" (measured glyph boxes, both labels draw with GDI+)
+            string t = lblMadeBy.Text;
+            RectangleF before = GlyphBox(lblMadeBy, 0, t.Length - 2);   // "Made by Gettic" (without " ·")
+            RectangleF dot = GlyphBox(lblMadeBy, t.Length - 1, 1);
+            RectangleF link = GlyphBox(lnkGitHub, 0, lnkGitHub.Text.Length);
+            float gap = dot.Left - before.Right;
+            lnkGitHub.Location = new Point((int)Math.Round(lblMadeBy.Left + dot.Right + gap - link.Left), top);
+            lnkGitHub.BringToFront();   // overlaps only the label's empty right padding
+        }
+
+        /// Where the glyphs of text[start, start+length) are drawn inside a GDI+ (UseCompatibleTextRendering) label.
+        static RectangleF GlyphBox(Label l, int start, int length)
+        {
+            using (var g = l.CreateGraphics())
+            using (var sf = new StringFormat(StringFormat.GenericDefault))
+            {
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+                sf.SetMeasurableCharacterRanges(new[] { new CharacterRange(start, length) });
+                var area = new RectangleF(l.Padding.Left, l.Padding.Top, 10000, Math.Max(1, l.ClientSize.Height));
+                var regions = g.MeasureCharacterRanges(l.Text, l.Font, area, sf);
+                RectangleF r = regions.Length > 0 ? regions[0].GetBounds(g) : RectangleF.Empty;
+                foreach (var rg in regions) rg.Dispose();
+                return r;
+            }
+        }
+
+        int Ascent(Font f)
+        {
+            var fam = f.FontFamily;
+            return (int)Math.Round(f.SizeInPoints * DeviceDpi / 72f * fam.GetCellAscent(f.Style) / fam.GetEmHeight(f.Style));
+        }
+
+        /// Opens the project page in the browser (fixed address; nothing is sent before the click).
+        void OpenProjectPage()
+        {
+            try { Process.Start("https://github.com/gettic/PrintPrice"); }
+            catch { }
         }
 
         /// What's new + Update now / Later. Later keeps the button.
