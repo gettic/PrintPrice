@@ -54,6 +54,8 @@ namespace PrintPrice
             Controls.Add(outer);
             var t = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
             var t2 = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, Margin = new Padding(0, 2, 0, 0) };
+            // the tables lay out once at the end, not after every added control (most of the time Settings took to open)
+            outer.SuspendLayout(); t.SuspendLayout(); t2.SuspendLayout();
             // red divider centred in the 28 px gap (13 + 2 + 13), from the top down to just above the bottom row
             divider = new Panel { Width = 2, Anchor = AnchorStyles.Top | AnchorStyles.Bottom, Margin = new Padding(13, 0, 13, 0) };
             outer.Controls.Add(t, 0, 0);
@@ -145,6 +147,7 @@ namespace PrintPrice
 
             // bottom row: update-check switch on the left, version link + buttons on the right
             var bottom = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 12, 0, 0) };
+            bottom.SuspendLayout();
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
             bottom.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             chkAutoUpdate = new CheckBox { Text = L.S("Check for new versions automatically", "Søg automatisk efter nye versioner"), AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 4, 12, 4) };
@@ -184,10 +187,13 @@ namespace PrintPrice
             CancelButton = cancel;
             Theme.Apply(this);
             divider.BackColor = Theme.InfoAccent;   // after Apply, which paints panels in the background colour
+            Fill(current);   // while layout is paused: the texts and lists don't each trigger a layout pass
+            // inner tables first, each laid out once (AutoSize: the outer ones need their real sizes), then the form
+            bottom.ResumeLayout(true); t2.ResumeLayout(true); t.ResumeLayout(true); outer.ResumeLayout(true);
             ResumeLayout(true);
-            Fill(current);
             if (current.AutoUpdateCheck != 0 && !AppSettings.TestMode && !Screenshots.Active)
                 Shown += delegate { QuietCheckOnOpen(); };   // auto update on: look when Settings opens
+            // stays in Load: a drop-down's real height (ItemHeight + frame) is only known once its window exists
             Load += delegate { FitCombos(this); };
         }
 

@@ -230,15 +230,26 @@ namespace PrintPrice
             return "\"" + a.Replace("\"", "\\\"") + "\"";
         }
 
-        /// Slices one model file (all plates) with the profiles written by PrepareProfiles.
+        /// Slices one model file (all plates) with the profiles written by PrepareProfiles (one filament, slot 1).
         public static SliceResult SliceFile(string exe, string model, string workDir, CancellationToken ct)
+        {
+            return SliceFile(exe, model, workDir, null, null, ct);
+        }
+
+        /// As above; a project .3mf with 2+ filament slots gets one filament profile per slot (SlotFilaments):
+        /// slots naming nothing (IsUnstatedFilament) get `defaultFilament` (Settings' filament), named ones keep theirs.
+        /// nozzleSize / defaultFilament null = one filament as before.
+        public static SliceResult SliceFile(string exe, string model, string workDir, string nozzleSize, string defaultFilament, CancellationToken ct)
         {
             string outDir = Path.Combine(workDir, "out_" + Guid.NewGuid().ToString("N").Substring(0, 8));
             Directory.CreateDirectory(outDir);
+            string filaments = null;
+            if (!string.IsNullOrEmpty(nozzleSize) && !string.IsNullOrEmpty(defaultFilament))
+                filaments = SlotFilaments(exe, model, nozzleSize, defaultFilament, outDir);
             var args = new[] {
                 "--slice", "0", "--arrange", "1", "--orient", "0",
                 "--load-settings", Path.Combine(workDir, "machine.json") + ";" + Path.Combine(workDir, "process.json"),
-                "--load-filaments", Path.Combine(workDir, "filament.json"),
+                "--load-filaments", filaments ?? Path.Combine(workDir, "filament.json"),
                 "--outputdir", outDir, "--export-3mf", "out.3mf", model };
             var psi = new ProcessStartInfo(exe, string.Join(" ", args.Select(Quote)))
             {
@@ -308,18 +319,13 @@ namespace PrintPrice
         /// Sums print time and filament weight over all sliced plates in a Bambu .3mf.
         public static SliceResult ReadSliceInfo(string path3mf)
         {
-            string xml, settings = null;
+            string xml, settings;
             using (var zip = ZipFile.OpenRead(path3mf))
             {
                 var entry = zip.GetEntry("Metadata/slice_info.config");
                 if (entry == null) return null;
                 using (var sr = new StreamReader(entry.Open())) xml = sr.ReadToEnd();
-                var ps = zip.GetEntry("Metadata/project_settings.config");
-                if (ps != null && ps.Length > 0 && ps.Length < 64 * 1048576)
-                {
-                    try { using (var sr = new StreamReader(ps.Open())) settings = sr.ReadToEnd(); }
-                    catch { settings = null; }
-                }
+                settings = ProjectSettings(zip);
             }
             var res = ParseSliceInfo(xml);
             if (res != null)
@@ -336,13 +342,19 @@ namespace PrintPrice
         /// Index 0 = slot 1. Empty list on missing or bad input, never null.
         public static List<string> ParseFilamentSlots(string projectSettingsJson)
         {
+            return ParseSlotStrings(projectSettingsJson, "filament_settings_id");
+        }
+
+        /// One string per slot from a project_settings.config array (e.g. "filament_colour"). Empty list on missing or bad input.
+        public static List<string> ParseSlotStrings(string projectSettingsJson, string key)
+        {
             var list = new List<string>();
             if (string.IsNullOrEmpty(projectSettingsJson)) return list;
             try
             {
                 var d = Json().Deserialize<Dictionary<string, object>>(projectSettingsJson);
                 object v;
-                if (d == null || !d.TryGetValue("filament_settings_id", out v) || v == null) return list;
+                if (d == null || !d.TryGetValue(key, out v) || v == null) return list;
                 if (v is string) { list.Add((string)v); return list; }
                 var items = v as System.Collections.IEnumerable;
                 if (items != null)
@@ -350,6 +362,129 @@ namespace PrintPrice
             }
             catch { list.Clear(); }
             return list;
+        }
+
+        /// Metadata/project_settings.config of an open 3MF as text, null if missing, too big (64 MB) or unreadable.
+        static string ProjectSettings(ZipArchive zip)
+        {
+            var ps = zip.GetEntry("Metadata/project_settings.config");
+            if (ps == null || ps.Length <= 0 || ps.Length >= 64 * 1048576) return null;
+            try { using (var sr = new StreamReader(ps.Open())) return sr.ReadToEnd(); }
+            catch { return null; }
+        }
+
+        // ---------- default filament per colour (idea 17) ----------
+
+        /// A filament name without its printer part (" @BBL X1C", " @System" …) and a " - Copy" / "(Copy)" ending, trimmed.
+        public static string FilamentBaseName(string profile)
+        {
+            string s = Regex.Replace(profile ?? "", @"\s*@.*$", "").Trim();
+            string before;
+            do
+            {
+                before = s;
+                s = Regex.Replace(s, @"\s*(-\s*copy|\(\s*copy\s*\))\s*$", "", RegexOptions.IgnoreCase).Trim();
+            } while (s != before);
+            return s;
+        }
+
+        /// True when a slot names no real filament: empty, or a generic PLA placeholder ("PLA", "Generic PLA",
+        /// "Creality Generic PLA", "PLA @BBL A1", "PLA - Copy"). Named filaments ("Bambu PLA Silk+", "PLA+",
+        /// "Generic PETG", "Generic PLA Silk") are stated.
+        public static bool IsUnstatedFilament(string profile)
+        {
+            string s = FilamentBaseName(profile);
+            return s.Length == 0 || Regex.IsMatch(s, @"^(?:.*\bgeneric\s+)?pla$", RegexOptions.IgnoreCase);
+        }
+
+        /// Per slot, the A1 filament profile to load: unstated slots -> a1Name(default), named ones -> a1Name(their base
+        /// name); null = no A1 profile, the slot keeps the file's own filament (empty --load-filaments entry).
+        /// a1Name maps a short name to the A1 profile name, or null when it doesn't exist. Never null.
+        public static List<string> SlotPlan(List<string> fileProfiles, string defaultShort, Func<string, string> a1Name)
+        {
+            var plan = new List<string>();
+            if (fileProfiles == null || a1Name == null) return plan;
+            foreach (var p in fileProfiles)
+            {
+                string name = IsUnstatedFilament(p) ? FilamentBaseName(defaultShort) : FilamentBaseName(p);
+                string a1 = null;
+                if (name.Length > 0) { try { a1 = a1Name(name); } catch { a1 = null; } }
+                plan.Add(a1);
+            }
+            return plan;
+        }
+
+        /// The A1 profile name for a short filament name (the nozzle's own, else the 0.4 one), null if neither exists.
+        static string A1Filament(List<string> roots, string shortName, string nozzleSize)
+        {
+            foreach (var name in new[] { shortName + Suffix(nozzleSize), shortName + Suffix("0.4") })
+                foreach (var r in roots)
+                {
+                    string dir = Path.Combine(r, "filament");
+                    if (!Directory.Exists(dir)) continue;
+                    if (File.Exists(Path.Combine(dir, name + ".json")) ||
+                        Directory.GetFiles(dir, name + ".json", SearchOption.AllDirectories).Length > 0) return name;
+                }
+            return null;
+        }
+
+        /// For a project .3mf with 2+ filament slots: writes one flattened filament profile per planned slot into outDir
+        /// (colour = the file's slot colour, "from" kept) and returns the --load-filaments value ("a;b;;d", empty = the
+        /// file's own). Null = use filament.json as before: not a .3mf, 0-1 slots, no slot with an A1 profile, or any error.
+        static string SlotFilaments(string exe, string model, string nozzleSize, string defaultFilament, string outDir)
+        {
+            if (!model.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase)) return null;
+            try
+            {
+                string settings;
+                using (var zip = ZipFile.OpenRead(model)) settings = ProjectSettings(zip);
+                var profiles = ParseFilamentSlots(settings);
+                if (profiles.Count < 2) return null;
+                var colours = ParseSlotStrings(settings, "filament_colour");
+                var roots = Roots(exe);
+                var plan = SlotPlan(profiles, ShortName(defaultFilament), n => A1Filament(roots, n, nozzleSize));
+                if (plan.All(p => p == null)) return null;
+                var json = Json();
+                var flat = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
+                var parts = new List<string>();
+                for (int i = 0; i < plan.Count; i++)
+                {
+                    if (plan[i] == null) { parts.Add(""); continue; }
+                    Dictionary<string, object> f;
+                    if (!flat.TryGetValue(plan[i], out f)) { f = Flatten(roots, "filament", plan[i], 0); flat[plan[i]] = f; }
+                    var slot = new Dictionary<string, object>(f);
+                    string colour = i < colours.Count ? NormColour(colours[i]) : "";
+                    if (colour.Length > 0) slot["filament_colour"] = new[] { colour };
+                    string path = Path.Combine(outDir, "slot" + (i + 1) + ".json");
+                    File.WriteAllText(path, json.Serialize(slot));
+                    parts.Add(path);
+                }
+                return string.Join(";", parts);
+            }
+            catch (Exception) { return null; }
+        }
+
+        /// Reads an already-sliced .3mf like ReadSliceInfo(path); with 2+ colours, colours naming no filament get
+        /// `defaultFilament` as their name (ApplyDefaultFilament). Grams and time stay the file's.
+        public static SliceResult ReadSliceInfo(string path3mf, string defaultFilament)
+        {
+            var res = ReadSliceInfo(path3mf);
+            if (res != null) ApplyDefaultFilament(res.Filaments, defaultFilament);
+            return res;
+        }
+
+        /// 2+ filaments only: each one whose Profile is unstated (IsUnstatedFilament) and whose Type is empty or PLA gets
+        /// Profile = defaultFilament. One filament, null list or empty default: unchanged.
+        public static void ApplyDefaultFilament(List<FilamentUse> filaments, string defaultFilament)
+        {
+            if (filaments == null || string.IsNullOrEmpty(defaultFilament)) return;
+            if (filaments.Count(f => f != null) < 2) return;
+            foreach (var f in filaments)
+            {
+                if (f == null || !IsUnstatedFilament(f.Profile)) continue;
+                string type = (f.Type ?? "").Trim();
+                if (type.Length == 0 || string.Equals(type, "PLA", StringComparison.OrdinalIgnoreCase)) f.Profile = defaultFilament;
+            }
         }
 
         /// Per-filament model/total grams and model/total time from the CLI's result.json, summed over plates.

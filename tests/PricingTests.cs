@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 
 namespace PrintPrice.Tests
@@ -12,6 +12,15 @@ namespace PrintPrice.Tests
             bool ok = Math.Abs(expected - actual) < 0.005;
             Console.WriteLine((ok ? "PASS " : "FAIL ") + name + ": expected " + expected.ToString("0.00") + ", got " + actual.ToString("0.00"));
             if (!ok) failures++;
+        }
+
+        /// List joined with "|", null entries shown as "~", null list as "NULL".
+        static string J(List<string> l)
+        {
+            if (l == null) return "NULL";
+            var parts = new List<string>();
+            foreach (var s in l) parts.Add(s == null ? "~" : s);
+            return string.Join("|", parts.ToArray());
         }
 
         static void True(string name, bool cond)
@@ -791,8 +800,54 @@ namespace PrintPrice.Tests
             string benchyDir = "media/prints/3161/images/20206_70fde6a0-6da1-4522-ba46-25f1bece7199/";
             string benchyThumb = "https://media.printables.com/" + benchyDir + "thumbs/inside/320x240/jpg/benchy.jpg";
             True("ThumbUrl benchy jpg", Printables.ThumbUrl(benchyDir + "benchy.jpg") == benchyThumb);
-            True("ThumbUrl png -> jpg", Printables.ThumbUrl(benchyDir + "benchy.png") == benchyThumb);
-            True("ThumbUrl webp -> jpg", Printables.ThumbUrl(benchyDir + "benchy.webp") == benchyThumb);
+            string thumbBase = "https://media.printables.com/" + benchyDir + "thumbs/inside/320x240/";
+            True("ThumbUrl png folder, file .jpg", Printables.ThumbUrl(benchyDir + "benchy.png") == thumbBase + "png/benchy.jpg");
+            True("ThumbUrl webp folder, file .jpg", Printables.ThumbUrl(benchyDir + "benchy.webp") == thumbBase + "webp/benchy.jpg");
+            True("ThumbUrl jpeg folder, file .jpg", Printables.ThumbUrl(benchyDir + "x.jpeg") == thumbBase + "jpeg/x.jpg");
+            True("ThumbUrl no extension -> jpg folder", Printables.ThumbUrl(benchyDir + "benchy") == thumbBase + "jpg/benchy.jpg");
+            True("ThumbUrl odd extension -> jpg folder", Printables.ThumbUrl(benchyDir + "x.p-g") == thumbBase + "jpg/x.jpg");
+            // BambuSlicer default filament per colour (idea 17)
+            True("Unstated: empty", BambuSlicer.IsUnstatedFilament("") && BambuSlicer.IsUnstatedFilament(null));
+            foreach (var u in new[] { "PLA", "Generic PLA", "Generic PLA @BBL A1", "Creality Generic PLA", "PLA - Copy" })
+                True("Unstated: " + u, BambuSlicer.IsUnstatedFilament(u));
+            foreach (var stSt in new[] { "Bambu PLA Matte @BBL A1", "Bambu PLA Basic @BBL X1C", "Generic PETG", "PETG", "PLA+", "Generic PLA Silk", "Prusament PLA" })
+                True("Stated: " + stSt, !BambuSlicer.IsUnstatedFilament(stSt));
+            True("BaseName strips printer", BambuSlicer.FilamentBaseName("Bambu PLA Basic @BBL X1C") == "Bambu PLA Basic");
+            True("BaseName strips (Copy)", BambuSlicer.FilamentBaseName("PLA (Copy)") == "PLA");
+            Func<string, string> toA1 = n => n + " @BBL A1";
+            True("SlotPlan 4x PLA -> 4x Matte A1",
+                J(BambuSlicer.SlotPlan(new List<string> { "PLA", "PLA", "PLA", "PLA" }, "Bambu PLA Matte", toA1))
+                == "Bambu PLA Matte @BBL A1|Bambu PLA Matte @BBL A1|Bambu PLA Matte @BBL A1|Bambu PLA Matte @BBL A1");
+            Func<string, string> known = n => (n == "Bambu PLA Silk+" || n == "Bambu PLA Matte") ? n + " @BBL A1" : null;
+            True("SlotPlan mixed: named kept, unknown null, unstated default",
+                J(BambuSlicer.SlotPlan(new List<string> { "Bambu PLA Silk+ @BBL X1C", "PLA", "Prusament PLA", "" }, "Bambu PLA Matte", known))
+                == "Bambu PLA Silk+ @BBL A1|Bambu PLA Matte @BBL A1|~|Bambu PLA Matte @BBL A1");
+            True("SlotPlan null -> empty", BambuSlicer.SlotPlan(null, "Bambu PLA Matte", toA1).Count == 0);
+            True("SlotPlan default Basic for unstated",
+                J(BambuSlicer.SlotPlan(new List<string> { "PLA", "Generic PLA" }, "Bambu PLA Basic", toA1))
+                == "Bambu PLA Basic @BBL A1|Bambu PLA Basic @BBL A1");
+            var fu = new List<FilamentUse> {
+                new FilamentUse { Slot = 1, Profile = "PLA", Type = "PLA" },
+                new FilamentUse { Slot = 2, Profile = "Bambu PETG HF @BBL A1", Type = "PETG" },
+                new FilamentUse { Slot = 3, Profile = "", Type = "" } };
+            BambuSlicer.ApplyDefaultFilament(fu, "Bambu PLA Matte");
+            True("ApplyDefault: unstated PLA and empty get default, named PETG kept",
+                fu[0].Profile == "Bambu PLA Matte" && fu[1].Profile == "Bambu PETG HF @BBL A1" && fu[2].Profile == "Bambu PLA Matte");
+            var fe = new List<FilamentUse> {
+                new FilamentUse { Slot = 1, Profile = "PLA", Type = "PLA" },
+                new FilamentUse { Slot = 2, Profile = "", Type = "PETG" } };
+            BambuSlicer.ApplyDefaultFilament(fe, "Bambu PLA Matte");
+            True("ApplyDefault: empty profile with PETG type kept", fe[1].Profile == "" && fe[0].Profile == "Bambu PLA Matte");
+            var f1 = new List<FilamentUse> { new FilamentUse { Slot = 1, Profile = "PLA", Type = "PLA" } };
+            BambuSlicer.ApplyDefaultFilament(f1, "Bambu PLA Matte");
+            True("ApplyDefault: single filament unchanged", f1[0].Profile == "PLA");
+            var fn = new List<FilamentUse> {
+                new FilamentUse { Slot = 1, Profile = "PLA", Type = "PLA" }, new FilamentUse { Slot = 2, Profile = "", Type = "" } };
+            BambuSlicer.ApplyDefaultFilament(fn, null);
+            True("ApplyDefault: null default changes nothing", fn[0].Profile == "PLA" && fn[1].Profile == "");
+            var colArr = BambuSlicer.ParseSlotStrings("{\"filament_colour\":[\"#FF0000\",\"#00FF00\"]}", "filament_colour");
+            True("ParseSlotStrings array", J(colArr) == "#FF0000|#00FF00");
+            True("ParseSlotStrings missing key -> empty", BambuSlicer.ParseSlotStrings("{\"a\":[\"x\"]}", "filament_colour").Count == 0);
             True("ThumbUrl leading slash", Printables.ThumbUrl("/" + benchyDir + "benchy.jpg") == benchyThumb);
             True("ThumbUrl null", Printables.ThumbUrl(null) == null);
             True("ThumbUrl empty", Printables.ThumbUrl("") == null);

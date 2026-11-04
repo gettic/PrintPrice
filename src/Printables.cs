@@ -144,8 +144,10 @@ namespace PrintPrice
             return null;
         }
 
-        /// "media/prints/1/images/2_x/benchy.png" -> "https://media.printables.com/media/prints/1/images/2_x/thumbs/inside/320x240/jpg/benchy.jpg".
-        /// Null for anything that isn't a plain relative path under media/.
+        /// 320x240 JPEG thumbnail address. The folder after 320x240/ is the ORIGINAL's extension (as-is), the file is always
+        /// "<stem>.jpg" (the server converts), e.g. ".../2_x/x.png" -> ".../2_x/thumbs/inside/320x240/png/x.jpg",
+        /// ".../img.jpeg" -> ".../320x240/jpeg/img.jpg" (checked against media.printables.com 2026-11-04; "jpg/x.jpg" 404s for png/jpeg).
+        /// No or odd extension -> "jpg" folder. Null for anything that isn't a plain relative path under media/.
         public static string ThumbUrl(string filePath)
         {
             if (string.IsNullOrEmpty(filePath)) return null;
@@ -157,8 +159,10 @@ namespace PrintPrice
             int dot = file.LastIndexOf('.');
             string stem = dot > 0 ? file.Substring(0, dot) : file;
             if (stem.Length == 0) return null;
+            string ext = dot > 0 ? file.Substring(dot + 1) : "";
+            if (!Regex.IsMatch(ext, @"^[A-Za-z0-9]{1,5}$")) ext = "jpg";
             var parts = dir.Split('/').Select(Uri.EscapeDataString);
-            return MediaHost + string.Join("/", parts) + "/thumbs/inside/320x240/jpg/" + Uri.EscapeDataString(stem) + ".jpg";
+            return MediaHost + string.Join("/", parts) + "/thumbs/inside/320x240/" + ext + "/" + Uri.EscapeDataString(stem) + ".jpg";
         }
 
         /// Downloads a Printables picture (media.printables.com only, max 2 MB). Null on any failure; never throws.

@@ -31,7 +31,7 @@ namespace PrintPrice
         System.Windows.Forms.Timer statusTimer;   // clears a green ✓ status line after a few seconds
 
         // price history (history.json next to settings.ini; loaded on first use, never in picture mode)
-        Button btnHistory, btnSave;
+        Button btnHistory, btnSave, btnSettings;
         List<QuoteRecord> history;
         string historyProblem;          // load problem, shown once in the history window
         string jobModel;                // model name of the current job (Printables name / file name), null = none
@@ -129,7 +129,7 @@ namespace PrintPrice
             // grey example text while empty; re-applied whenever the handle is recreated (e.g. theme change)
             txtUrl.HandleCreated += delegate { ApplyUrlCue(); };
             // typing/pasting brings the grey example text back
-            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; };   // a new link = no model name yet
+            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; fromExample = false; };   // a new link = no model name yet
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
@@ -151,6 +151,7 @@ namespace PrintPrice
                     // empty box + Enter = try the example (the button still shows the red hint)
                     txtUrl.Text = ExampleLink;
                     txtUrl.SelectionStart = 0;   // caret at the start: a link longer than the box shows its beginning
+                    fromExample = true;   // after setting the text (TextChanged clears it): slice the 4-colour Benchy without the file picker
                 }
                 AnalyzeClicked();
             };
@@ -335,7 +336,7 @@ namespace PrintPrice
             // four buttons, 340 px = 76 + 84 + 70 + 92 + 3 × 6 gap, ending at the Customers box's right edge;
             // the update button left of them takes the rest of the row
             var btnClear = new Button { Text = L.S("Clear", "Ryd"), Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
-            var btnSettings = new Button { Text = L.S("Settings…", "Indstillinger…"), Size = new Size(84, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
+            btnSettings = new Button { Text = L.S("Settings…", "Indstillinger…"), Size = new Size(84, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
             btnSave = new Button { Text = L.S("Save", "Gem"), Size = new Size(70, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
             btnCopy = new Button { Text = L.S("Copy quote", "Kopiér tilbud"), Size = new Size(92, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3) };
             // same total width (scaled), split by the measured text widths so longer (Danish) texts fit
@@ -680,6 +681,7 @@ namespace PrintPrice
                     if (sliceable.Count == 0) throw new SliceException(L.F("\"{0}\" has no STL, 3MF or STEP files to slice.",
                                                                            "\"{0}\" har ingen STL-, 3MF- eller STEP-filer at slice.", model.Name));
                     if (sliceable.Count == 1) chosen = sliceable;
+                    else if (fromExample && ExampleFile(sliceable) != null) chosen = new List<RemoteFile> { ExampleFile(sliceable) };
                     else
                     {
                         using (var picker = new FilePickerForm(model.Name, sliceable))
@@ -762,7 +764,7 @@ namespace PrintPrice
 
                 if (models.Count == 1 && BambuSlicer.IsSlicedProject(models[0].Value))
                 {
-                    var r = BambuSlicer.ReadSliceInfo(models[0].Value);
+                    var r = BambuSlicer.ReadSliceInfo(models[0].Value, filament);
                     r.FromSlicedFile = true;
                     return r;
                 }
@@ -777,7 +779,7 @@ namespace PrintPrice
                     ct.ThrowIfCancellationRequested();
                     progress.Report(L.S("Slicing ", "Slicer ") + models[i].Key + (models.Count > 1 ? " (" + (i + 1) + "/" + models.Count + ")" : "") +
                                     L.S(" in Bambu Studio…", " i Bambu Studio…"));
-                    var r = BambuSlicer.SliceFile(exe, models[i].Value, work, ct);
+                    var r = BambuSlicer.SliceFile(exe, models[i].Value, work, nozzle, filament, ct);
                     total.Seconds += r.Seconds;
                     total.Grams += r.Grams;
                     total.Plates += r.Plates;
@@ -819,6 +821,15 @@ namespace PrintPrice
 
         /// Empty link box + Enter puts this in (the 4-colour Benchy: shows the multi-colour rows).
         const string ExampleLink = "https://www.printables.com/model/1648230-four-color-multicolor-test-benchy";
+        /// true while the link box holds the example put there by Enter (cleared when the text changes).
+        bool fromExample;
+
+        /// The example's 4-colour Benchy file (Printables file id 6930756), so the example skips the file picker; null = not found (picker as usual).
+        static RemoteFile ExampleFile(List<RemoteFile> files)
+        {
+            return files.FirstOrDefault(f => f.Id == "6930756") ??
+                   files.FirstOrDefault(f => string.Equals(f.Name, "Multicolor_Benchy.3mf", StringComparison.OrdinalIgnoreCase));
+        }
         /// The single-colour Benchy: picture mode's main example job (SetSampleJob) only.
         const string SingleBenchyLink = "https://www.printables.com/model/3161-3d-benchy";
 
@@ -1004,9 +1015,15 @@ namespace PrintPrice
                 {
                     double sc = Math.Min((double)aw / pic.Width, (double)ah / pic.Height);
                     int w = Math.Max(1, (int)Math.Round(pic.Width * sc)), h = Math.Max(1, (int)Math.Round(pic.Height * sc));
+                    var state = g.Save();   // the half-pixel offset must not reach the border below (it moved it 1 px up-left)
                     g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                     g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
-                    g.DrawImage(pic, new Rectangle(m + (aw - w) / 2, m + (ah - h) / 2, w, h));
+                    using (var ia = new System.Drawing.Imaging.ImageAttributes())
+                    {
+                        ia.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);   // no faint seam at the picture's edges
+                        g.DrawImage(pic, new Rectangle(m + (aw - w) / 2, m + (ah - h) / 2, w, h), 0, 0, pic.Width, pic.Height, GraphicsUnit.Pixel, ia);
+                    }
+                    g.Restore(state);
                 }
             }
             else
@@ -1821,35 +1838,47 @@ namespace PrintPrice
 
         void OpenSettings()
         {
-            EnsureHistory();   // for "Not made back yet: x kr." (picture mode: empty list)
-            using (var dlg = new SettingsForm(settings, offline ? sampleDebt : History.FailedDebt(history, null)))
+            // building Settings takes a moment: say so on the button (also when opened from the printer card)
+            string btnText = btnSettings.Text;
+            var oldCursor = Cursor.Current;
+            btnSettings.Text = L.S("Opening…", "Åbner…");
+            Cursor.Current = Cursors.WaitCursor;
+            btnSettings.Update();
+            MethodInvoker restore = delegate { btnSettings.Text = btnText; Cursor.Current = oldCursor; };
+            try
             {
-                if (!offline) dlg.UpdateFound = ShowUpdateButton;   // "check now" in Settings
-                if (dlg.ShowDialog(this) == DialogResult.OK)
+                EnsureHistory();   // for "Not made back yet: x kr." (picture mode: empty list)
+                using (var dlg = new SettingsForm(settings, offline ? sampleDebt : History.FailedDebt(history, null)))
                 {
-                    var old = settings;
-                    settings = dlg.Result;
-                    if (old.AutoUpdateCheck == 0 && settings.AutoUpdateCheck != 0 && pendingUpdate == null)
-                        BeginInvoke((MethodInvoker)StartupUpdateCheck);   // switched back on: check now
-                    SyncUpdateTimer();   // the 10-minute check follows the setting
-                    bool powerChanged = old.PriceArea != settings.PriceArea || old.PowerAddOn != settings.PowerAddOn ||
-                                        old.PowerIncludeVat != settings.PowerIncludeVat ||
-                                        (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
-                    if (powerChanged && settings.AutoPowerPrice != 0) BeginInvoke((MethodInvoker)FetchPowerPrice);
-                    SaveLastPrices();
-                    RefreshSettingsLabels();
-                    foreach (var cb in rowCombo) cb.Tag = null;   // nozzle / slicer may have changed: re-read the list when opened
-                    if (!jobLoaded && cts == null) SetColours(null);   // no model yet: the row follows Settings' filament profile
-                    Recalculate();
-                    if (cts == null) ShowAutoIdle();
-                    if (dlg.RestartRequested && !offline)
+                    if (!offline) dlg.UpdateFound = ShowUpdateButton;   // "check now" in Settings
+                    dlg.Shown += delegate { restore(); };   // back to normal once the window is up
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
                     {
-                        // new language: settings are already saved above; Restart closes this window (saves again) and starts anew
-                        if (cts != null) cts.Cancel();
-                        BeginInvoke((MethodInvoker)Program.Restart);   // same arguments (test mode stays in its folder)
+                        var old = settings;
+                        settings = dlg.Result;
+                        if (old.AutoUpdateCheck == 0 && settings.AutoUpdateCheck != 0 && pendingUpdate == null)
+                            BeginInvoke((MethodInvoker)StartupUpdateCheck);   // switched back on: check now
+                        SyncUpdateTimer();   // the 10-minute check follows the setting
+                        bool powerChanged = old.PriceArea != settings.PriceArea || old.PowerAddOn != settings.PowerAddOn ||
+                                            old.PowerIncludeVat != settings.PowerIncludeVat ||
+                                            (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
+                        if (powerChanged && settings.AutoPowerPrice != 0) BeginInvoke((MethodInvoker)FetchPowerPrice);
+                        SaveLastPrices();
+                        RefreshSettingsLabels();
+                        foreach (var cb in rowCombo) cb.Tag = null;   // nozzle / slicer may have changed: re-read the list when opened
+                        if (!jobLoaded && cts == null) SetColours(null);   // no model yet: the row follows Settings' filament profile
+                        Recalculate();
+                        if (cts == null) ShowAutoIdle();
+                        if (dlg.RestartRequested && !offline)
+                        {
+                            // new language: settings are already saved above; Restart closes this window (saves again) and starts anew
+                            if (cts != null) cts.Cancel();
+                            BeginInvoke((MethodInvoker)Program.Restart);   // same arguments (test mode stays in its folder)
+                        }
                     }
                 }
             }
+            finally { restore(); }   // also if building the window failed
         }
 
         // ---------- updates from GitHub ----------
