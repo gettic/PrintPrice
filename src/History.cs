@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -60,11 +60,64 @@ namespace PrintPrice
         // the user's own
         public int For = History.ForCustomer;   // 1 = friends & family, 2 = customer (old 0 = not set -> read as 2)
         public string Note = "";
+        public string Customer = "";         // idea 21: who the quote is for ("" = not named)
 
         // idea 9: failed print, its cost (History.FailedCost) made back by a payback on later quotes
         public bool Failed;
         public string FailedAt = "";         // "" = not failed
         public double PaidBack;              // failed only: kr. paid by quotes Trim has dropped (so the debt stays the same)
+
+        // idea 22: the user ticked "Printed" (the quote was really printed). New records false; a file saved before the
+        // tick existed has no "Printed" key and reads as true (ParseJson, via printedRead).
+        bool printed;
+        internal bool printedRead;           // not in the JSON (not public): set when the deserializer sets Printed
+        public bool Printed
+        {
+            get { return printed; }
+            set { printed = value; printedRead = true; }
+        }
+
+        // idea 23: repeat print of an earlier record (its Id); "" = not a repeat. Never merged with the original (SameQuote).
+        public string RepeatOf = "";
+
+        // invoice (History.MakeInvoice): number like "2026-006" ("" = no invoice yet) and the date it was made (TimeFormat)
+        public string InvoiceNo = "";
+        public string BilledAt = "";
+
+        // invoice snapshot, made with a new number (MakeInvoice), so a re-issued invoice shows what the customer got.
+        // "" in older records (History.InvoiceInfo then uses today's settings). InvoiceDue set = snapshot exists.
+        public string InvoiceDue = "";             // "yyyy-MM-dd"
+        public string InvoicePayMobilePay = "";
+        public string InvoicePayBank = "";
+        public string InvoiceFromName = "";        // AppSettings.QuoteName at the time
+    }
+
+    /// What an invoice shows besides the prices (History.InvoiceInfo): its saved snapshot, else today's settings.
+    public class InvoiceDetails
+    {
+        public DateTime Due;                       // date only
+        public string MobilePay = "";
+        public string Bank = "";
+        public string FromName = "";
+        public bool FromSnapshot;                  // true = saved with the invoice; false = today's settings
+    }
+
+    /// One month of the price history (History.MonthSummary). kr. as saved; hours as decimal hours.
+    public class MonthTotals
+    {
+        public int Year, Month;
+        public int Prints;                   // Printed and not Failed
+        public int FailedPrints;             // Failed (Printed or not)
+        public double PrintHours;            // prints only
+        public double Grams;                 // prints only
+        public double CustomerIncome; public int CustomerCount;
+        public double FriendsIncome; public int FriendsCount;
+        public double Income;                // CustomerIncome + FriendsIncome (PriceFor: incl. failed-% share and payback)
+        public double MaterialCost, PowerCost, WearCost;   // prints only; wear = hours x MachineRatePerHour
+        public double Costs;                 // MaterialCost + PowerCost + WearCost
+        public double Lost;                  // failed prints: sum of History.FailedCost
+        public double Profit;                // Income - Costs - Lost
+        public double ProfitPct;             // Profit / Income x 100; 0 when Income is 0
     }
 
     /// The file's top level: {"Version":1,"Quotes":[...]} (newest first).
@@ -78,7 +131,7 @@ namespace PrintPrice
     public static class History
     {
         public const int Version = 1;
-        public const int MaxQuotes = 500;
+        public const int MaxQuotes = 5000;
         public const int ForFriends = 1;
         public const int ForCustomer = 2;
         public const string TimeFormat = "yyyy-MM-dd HH:mm:ss";
@@ -205,6 +258,10 @@ namespace PrintPrice
         public static bool SameQuote(QuoteRecord a, QuoteRecord b)
         {
             if (a == null || b == null) return false;
+            // a repeat print is never the same as its original (or as a repeat of something else)
+            string ra = a.RepeatOf ?? "", rb = b.RepeatOf ?? "";
+            if (ra != rb) return false;
+            if (ra.Length > 0 && (ra == (b.Id ?? "") || rb == (a.Id ?? ""))) return false;
             DateTime ta, tb;
             if (!TryTime(a.SavedAt, out ta) || !TryTime(b.SavedAt, out tb)) return false;
             if (Math.Abs((ta - tb).TotalMinutes) > 10) return false;
@@ -221,19 +278,192 @@ namespace PrintPrice
         }
 
         /// Adds r as the newest (index 0). The same quote as the newest one within 10 min replaces it, keeping its
-        /// Id, For, Note and Failed mark. Then trims to MaxQuotes. Returns the record now in the list.
+        /// Id, For, Note, Failed mark and Printed tick (Printed if either was; r's own Customer is kept). A repeat print
+        /// (RepeatOf) never replaces its original. Then trims to MaxQuotes. Returns the record now in the list.
         public static QuoteRecord Add(List<QuoteRecord> list, QuoteRecord r)
         {
             if (list.Count > 0 && SameQuote(list[0], r))
             {
                 var old = list[0];
+                if (r.Customer == null) r.Customer = "";
                 r.Id = old.Id; r.For = old.For; r.Note = old.Note; r.Failed = old.Failed; r.FailedAt = old.FailedAt;
                 r.PaidBack = old.PaidBack;
+                if (!string.IsNullOrEmpty(old.InvoiceNo))
+                {
+                    r.InvoiceNo = old.InvoiceNo; r.BilledAt = old.BilledAt ?? "";
+                    r.InvoiceDue = old.InvoiceDue ?? ""; r.InvoicePayMobilePay = old.InvoicePayMobilePay ?? "";
+                    r.InvoicePayBank = old.InvoicePayBank ?? ""; r.InvoiceFromName = old.InvoiceFromName ?? "";
+                }
+                r.Printed = old.Printed || r.Printed;
                 list[0] = r;
             }
             else list.Insert(0, r);
             Trim(list, MaxQuotes);
             return r;
+        }
+
+        /// Customer names used before: distinct (trimmed, case-insensitive; first spelling kept), newest first
+        /// (list order, index 0 = newest), empty names skipped, at most max.
+        public static List<string> RecentCustomers(List<QuoteRecord> list, int max)
+        {
+            var res = new List<string>();
+            if (list == null) return res;
+            foreach (var q in list)
+            {
+                if (res.Count >= max) break;
+                if (q == null || q.Customer == null) continue;
+                string n = q.Customer.Trim();
+                if (n.Length == 0) continue;
+                bool dup = false;
+                foreach (var x in res)
+                    if (string.Equals(x, n, StringComparison.OrdinalIgnoreCase)) { dup = true; break; }
+                if (!dup) res.Add(n);
+            }
+            return res;
+        }
+
+        /// Quote export: Add, then For = forWho (ForFriends / ForCustomer; anything else = ForCustomer), also when Add
+        /// replaced a same newest quote (whose old For would otherwise be kept). Returns the record now in the list.
+        public static QuoteRecord AddFor(List<QuoteRecord> list, QuoteRecord r, int forWho)
+        {
+            var kept = Add(list, r);
+            kept.For = forWho == ForFriends ? ForFriends : ForCustomer;
+            return kept;
+        }
+
+        /// Quote number from the saved time: "yyMMdd-HHmm" (2026-11-04 14:05:33 -> "261104-1405"); "" if SavedAt is bad.
+        public static string QuoteNumber(QuoteRecord r)
+        {
+            DateTime t;
+            if (r == null || !TryTime(r.SavedAt, out t)) return "";
+            return QuoteNumber(t);
+        }
+
+        public static string QuoteNumber(DateTime t) { return t.ToString("yyMMdd-HHmm", Inv); }
+
+        // ---------- invoices ----------
+
+        /// Characters of an invoice code: upper case, no 0/O, 1/I/L or 5/S (easy to misread). 29 characters.
+        public const string InvoiceAlphabet = "ABCDEFGHJKMNPQRTUVWXYZ2346789";
+        public const int InvoiceCodeLength = 4;
+        public const int MaxUsedInvoiceNos = 2000;
+
+        static readonly System.Security.Cryptography.RNGCryptoServiceProvider crypto = new System.Security.Cryptography.RNGCryptoServiceProvider();
+
+        /// Crypto-random int in [0, max) without modulo bias.
+        static int CryptoIndex(int max)
+        {
+            var b = new byte[4];
+            uint limit = uint.MaxValue - (uint.MaxValue % (uint)max);
+            uint v;
+            lock (crypto)
+                do { crypto.GetBytes(b); v = BitConverter.ToUInt32(b, 0); } while (v >= limit);
+            return (int)(v % (uint)max);
+        }
+
+        /// A new invoice number "<year>-<4 random characters>" (e.g. "2026-K7Q4"), different from every InvoiceNo in list
+        /// and from every code in usedCsv (comma-separated, AppSettings.UsedInvoiceNos). Crypto-random.
+        public static string NextInvoiceNo(List<QuoteRecord> list, int year, string usedCsv)
+        {
+            return NextInvoiceNo(list, year, usedCsv, null);
+        }
+
+        /// As above with an own random source: pick(n) returns an int in [0, n) (null = crypto). For tests.
+        public static string NextInvoiceNo(List<QuoteRecord> list, int year, string usedCsv, Func<int, int> pick)
+        {
+            if (pick == null) pick = CryptoIndex;
+            var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (list != null)
+                foreach (var r in list)
+                    if (r != null && !string.IsNullOrEmpty(r.InvoiceNo)) taken.Add(r.InvoiceNo.Trim());
+            foreach (var u in (usedCsv ?? "").Split(','))
+                if (u.Trim().Length > 0) taken.Add(u.Trim());
+            string prefix = year.ToString("0000", Inv) + "-";
+            int len = InvoiceCodeLength;
+            for (int attempt = 1; ; attempt++)
+            {
+                if (attempt % 1000 == 0) len++;   // (practically never) a full code space: longer codes
+                var sb = new StringBuilder(prefix);
+                for (int i = 0; i < len; i++) sb.Append(InvoiceAlphabet[pick(InvoiceAlphabet.Length)]);
+                string no = sb.ToString();
+                if (!taken.Contains(no)) return no;
+            }
+        }
+
+        /// Adds a code to a comma-separated used list, keeping the last MaxUsedInvoiceNos.
+        public static string AddUsedInvoiceNo(string usedCsv, string no)
+        {
+            var parts = new List<string>();
+            foreach (var u in (usedCsv ?? "").Split(','))
+                if (u.Trim().Length > 0) parts.Add(u.Trim());
+            if (!string.IsNullOrEmpty(no)) parts.Add(no.Trim());
+            if (parts.Count > MaxUsedInvoiceNos) parts.RemoveRange(0, parts.Count - MaxUsedInvoiceNos);
+            return string.Join(",", parts.ToArray());
+        }
+
+        /// Makes the invoice for r: with no InvoiceNo yet it gets a new random code (NextInvoiceNo, year of now),
+        /// BilledAt = Stamp(now) and Printed = true, and the code is added to s.UsedInvoiceNos (s may be null; the caller
+        /// saves the settings too). A new number also saves the snapshot from s: InvoiceDue (s.InvoiceDue(now),
+        /// "yyyy-MM-dd"), InvoicePayMobilePay, InvoicePayBank, InvoiceFromName (QuoteName); s null = no snapshot.
+        /// With a number it keeps the same number, date and snapshot. Returns the number. Does not save.
+        public static string MakeInvoice(List<QuoteRecord> list, QuoteRecord r, DateTime now, AppSettings s)
+        {
+            return MakeInvoice(list, r, now, s, null);
+        }
+
+        public static string MakeInvoice(List<QuoteRecord> list, QuoteRecord r, DateTime now, AppSettings s, Func<int, int> pick)
+        {
+            if (r == null) throw new ArgumentNullException();
+            if (string.IsNullOrEmpty(r.InvoiceNo))
+            {
+                r.InvoiceNo = NextInvoiceNo(list, now.Year, s == null ? "" : s.UsedInvoiceNos, pick);
+                if (s != null) s.UsedInvoiceNos = AddUsedInvoiceNo(s.UsedInvoiceNos, r.InvoiceNo);
+                r.BilledAt = Stamp(now);
+                r.Printed = true;
+                if (s != null)
+                {
+                    r.InvoiceDue = s.InvoiceDue(now).ToString(DueFormat, Inv);
+                    r.InvoicePayMobilePay = s.PayMobilePay ?? "";
+                    r.InvoicePayBank = s.PayBank ?? "";
+                    r.InvoiceFromName = s.QuoteName ?? "";
+                }
+            }
+            return r.InvoiceNo;
+        }
+
+        public const string DueFormat = "yyyy-MM-dd";
+
+        /// Due date, MobilePay, bank and "from" name for r's invoice: the snapshot saved with it (r.InvoiceDue is a valid
+        /// date) or, for an old invoice / one not made yet, today's settings s (null = defaults): due = s.InvoiceDue(BilledAt,
+        /// or today when not billed). Never null.
+        public static InvoiceDetails InvoiceInfo(QuoteRecord r, AppSettings s)
+        {
+            return InvoiceInfo(r, s, DateTime.Now);
+        }
+
+        /// As above with "today" given (tests).
+        public static InvoiceDetails InvoiceInfo(QuoteRecord r, AppSettings s, DateTime today)
+        {
+            var d = new InvoiceDetails();
+            DateTime due;
+            if (r != null && !string.IsNullOrEmpty(r.InvoiceDue) &&
+                DateTime.TryParseExact(r.InvoiceDue.Trim(), DueFormat, Inv, DateTimeStyles.None, out due))
+            {
+                d.Due = due.Date;
+                d.MobilePay = r.InvoicePayMobilePay ?? "";
+                d.Bank = r.InvoicePayBank ?? "";
+                d.FromName = r.InvoiceFromName ?? "";
+                d.FromSnapshot = true;
+                return d;
+            }
+            if (s == null) s = new AppSettings();
+            DateTime billed;
+            if (r == null || string.IsNullOrEmpty(r.InvoiceNo) || !TryTime(r.BilledAt, out billed)) billed = today;
+            d.Due = s.InvoiceDue(billed);
+            d.MobilePay = s.PayMobilePay ?? "";
+            d.Bank = s.PayBank ?? "";
+            d.FromName = s.QuoteName ?? "";
+            return d;
         }
 
         /// Keeps the newest max entries (list is newest first). Older failed ones not yet made back are kept too; what the
@@ -265,7 +495,72 @@ namespace PrintPrice
         public static double FailedCost(QuoteRecord r)
         {
             if (r == null) return 0;
-            return r.MaterialCost + r.PowerCost + (r.Hours + r.Minutes / 60.0) * r.MachineRatePerHour;
+            return r.MaterialCost + r.PowerCost + WearCost(r);
+        }
+
+        /// Wear of a record: print hours x its saved MachineRatePerHour (0 for null).
+        public static double WearCost(QuoteRecord r)
+        {
+            if (r == null) return 0;
+            return (r.Hours + r.Minutes / 60.0) * r.MachineRatePerHour;
+        }
+
+        // ---------- month summary (idea 22) ----------
+
+        /// The year and month a record was saved in; false if SavedAt is unreadable.
+        static bool SavedMonth(QuoteRecord r, out int year, out int month)
+        {
+            DateTime t;
+            year = 0; month = 0;
+            if (r == null || !TryTime(r.SavedAt, out t)) return false;
+            year = t.Year; month = t.Month;
+            return true;
+        }
+
+        /// Totals of the records saved in that month (by SavedAt). Prints = Printed and not Failed: they give income
+        /// (PriceFor by For) and costs (material + power + wear). Failed ones (ticked Printed or not) give Lost
+        /// (FailedCost). Not printed, not failed quotes count for nothing. Empty month / null list = all 0.
+        public static MonthTotals MonthSummary(List<QuoteRecord> list, int year, int month)
+        {
+            var m = new MonthTotals { Year = year, Month = month };
+            if (list != null)
+                foreach (var r in list)
+                {
+                    int y, mo;
+                    if (!SavedMonth(r, out y, out mo) || y != year || mo != month) continue;
+                    if (r.Failed) { m.FailedPrints++; m.Lost += FailedCost(r); continue; }
+                    if (!r.Printed) continue;
+                    m.Prints++;
+                    m.PrintHours += r.Hours + r.Minutes / 60.0;
+                    m.Grams += r.Grams;
+                    double price = PriceFor(r);
+                    if (r.For == ForFriends) { m.FriendsIncome += price; m.FriendsCount++; }
+                    else { m.CustomerIncome += price; m.CustomerCount++; }
+                    m.MaterialCost += r.MaterialCost;
+                    m.PowerCost += r.PowerCost;
+                    m.WearCost += WearCost(r);
+                }
+            m.Income = m.CustomerIncome + m.FriendsIncome;
+            m.Costs = m.MaterialCost + m.PowerCost + m.WearCost;
+            m.Profit = m.Income - m.Costs - m.Lost;
+            m.ProfitPct = Math.Abs(m.Income) < 1e-9 ? 0 : m.Profit / m.Income * 100;
+            return m;
+        }
+
+        /// The months that have records (any kind, readable SavedAt), as the 1st of each month, newest first, no doubles.
+        public static List<DateTime> Months(List<QuoteRecord> list)
+        {
+            var res = new List<DateTime>();
+            if (list == null) return res;
+            foreach (var r in list)
+            {
+                int y, mo;
+                if (!SavedMonth(r, out y, out mo)) continue;
+                var d = new DateTime(y, mo, 1);
+                if (!res.Contains(d)) res.Add(d);
+            }
+            res.Sort(delegate(DateTime a, DateTime b) { return b.CompareTo(a); });
+            return res;
         }
 
         /// True if r's PaybackCost counts against the debt: not failed, and it was in both prices or the quote is for a customer.
@@ -384,7 +679,16 @@ namespace PrintPrice
                 if (r.Model == null) r.Model = "";
                 if (r.Source == null) r.Source = "";
                 if (r.Note == null) r.Note = "";
+                if (r.Customer == null) r.Customer = "";
                 if (r.FailedAt == null) r.FailedAt = "";
+                if (r.RepeatOf == null) r.RepeatOf = "";
+                if (r.InvoiceNo == null) r.InvoiceNo = "";
+                if (r.BilledAt == null) r.BilledAt = "";
+                if (r.InvoiceDue == null) r.InvoiceDue = "";
+                if (r.InvoicePayMobilePay == null) r.InvoicePayMobilePay = "";
+                if (r.InvoicePayBank == null) r.InvoicePayBank = "";
+                if (r.InvoiceFromName == null) r.InvoiceFromName = "";
+                if (!r.printedRead) r.Printed = true;   // saved before the Printed tick existed: those were printed
                 if (r.For != ForFriends) r.For = ForCustomer;   // old 0 (not set) or unknown -> customer
                 if (r.Filaments != null)
                 {

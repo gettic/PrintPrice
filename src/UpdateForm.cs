@@ -58,9 +58,10 @@ namespace PrintPrice
             t.Controls.Add(status);
 
             var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
-            btnLater = new Button { Text = L.S("Later", "Senere"), AutoSize = true, DialogResult = DialogResult.Cancel };
-            btnUpdate = new Button { Text = L.S("Update now", "Opdatér nu"), AutoSize = true };
-            btnPage = new Button { Text = L.S("Open download page", "Åbn download-siden"), AutoSize = true, Visible = false };
+            // 32 px high like every button; 6 px apart, the right one ending on the notes box's right edge (no right margin)
+            btnLater = new Button { Text = L.S("Later", "Senere"), AutoSize = true, DialogResult = DialogResult.Cancel, MinimumSize = new Size(75, 32), Margin = new Padding(6, 0, 0, 0) };
+            btnUpdate = new Button { Text = L.S("Update now", "Opdatér nu"), AutoSize = true, MinimumSize = new Size(75, 32), Margin = new Padding(6, 0, 0, 0) };
+            btnPage = new Button { Text = L.S("Open download page", "Åbn download-siden"), AutoSize = true, Visible = false, MinimumSize = new Size(75, 32), Margin = new Padding(6, 0, 0, 0) };
             btnUpdate.Click += delegate { UpdateNow(); };
             btnPage.Click += delegate { OpenPage(); };
             buttons.Controls.Add(btnLater);

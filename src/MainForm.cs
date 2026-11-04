@@ -21,7 +21,14 @@ namespace PrintPrice
         TableLayoutPanel breakTable;           // the Cost breakdown's table (rows: 0 material rows, 1 purge, 2 Power, 3 Failed, 4 Base, 5 payback)
         Label lblFriends, lblOthers, lblFriendsInfo, lblOthersInfo, lblStatus;
         Button btnCopy, btnUpdate;
+        // quote export (idea 5 + 21): "Show quote… ▾" split button (btnCopy) + its menu (section "quote export" after QuoteText)
+        ContextMenuStrip quoteMenu;
+        ToolStripMenuItem miQuoteInfo;   // muted first line of the menu: "No name · customer price · dark"
+        DateTime quoteWhen;              // date/number the quote window shows (now, or the saved record's time)
+        int copyArrowWidth;          // the ▾ part of btnCopy (real px, set on Load)
+        bool copyArrowPressed;       // the mouse press was on ▾: the Click that follows opens the menu instead of copying
         Panel leftCell;                   // left of the bottom buttons: update button or "Made by Gettic · GitHub"
+        int autoMinHeight;                // the info box's normal minimum height (2 lines); raised to its height while a job runs (idea 26)
         FlowLayoutPanel bottomButtons;
         Label lblMadeBy;
         Theme.LinkText lnkGitHub;
@@ -41,6 +48,11 @@ namespace PrintPrice
         string jobModel;                // model name of the current job (Printables name / file name), null = none
         double jobPurge = -1;           // purge grams of the current multi-colour job (-1 = unknown)
         QuoteRecord reopened;           // quote opened from the history (its line stays in the model info box)
+        QuoteRecord repeatOf;           // "Repeat print": the original (saving sets RepeatOf + its For); cleared by a new link, Clear, Open again
+        QuoteRecord repeatLine;         // the repeat's "Was → now" lines in the model info box (cleared by SetAuto)
+        string repeatWhy;               // null = sliced again; else why not (warning stripe, saved time and weight kept)
+        string elecToday;               // the electricity box before "Open again" put a saved price in (Repeat print goes back to it)
+        bool elecSaved;                 // the electricity box holds a saved quote's price
 
         // failed prints payback (idea 9): the record this job saved is left out of the debt, so saving it again keeps the price
         string savedId;                 // Id of the history record the current job saved (null = none yet); cleared by a new job, ClearJob, Reopen
@@ -141,7 +153,7 @@ namespace PrintPrice
             txtUrl.HandleCreated += delegate { ApplyUrlCue(); };
             // typing/pasting brings the grey example text back
             // a new link = no model name yet, and the button slices again (no "Open in Studio" for the old file)
-            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; fromExample = false; SetStudioFile(null); };
+            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; fromExample = false; SetStudioFile(null); repeatOf = null; };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
@@ -176,7 +188,7 @@ namespace PrintPrice
             int picRow = inputs.RowCount;
             AddRow(inputs, "", autoRow, null);
             inputs.SetColumnSpan(autoRow, 2);
-            lblAuto = new InfoBox(394, 9.5f) { Margin = new Padding(3, 4, 0, 10) };
+            lblAuto = new InfoBox(394, 9.5f) { Margin = new Padding(3, 4, 0, 8) };   // bottom 8: 11 px above the printer card (measured)
             AddRow(inputs, "", lblAuto, null);
             // model picture in the label column, beside the buttons and the info box (size measured on Load)
             picModel = new PictureBox
@@ -215,7 +227,7 @@ namespace PrintPrice
             txtElecPrice = NumBox(Num.Fmt(settings.LastElectricityPrice));
             var elecRow = WithUnit(txtElecPrice, "kr/kWh");
             AddRow(inputs, L.S("Electricity price", "Elpris"), elecRow, null);
-            lblPowerInfo = new InfoBox(394, 9.5f) { Margin = new Padding(3, 2, 0, 8) };
+            lblPowerInfo = new InfoBox(394, 9.5f) { Margin = new Padding(3, 8, 0, 8) };   // top 8: 11 px under the printer card, as above it (measured)
             int powerInfoRow = inputs.RowCount;
             AddRow(inputs, "", lblPowerInfo, null);
             inputs.SetColumnSpan(lblPowerInfo, 2);
@@ -244,7 +256,7 @@ namespace PrintPrice
 
             // printer card in the free space right of the Print time … Electricity rows (see "Printer card")
             printerCard = new PrinterCard { Size = new Size(161, 80), Margin = Padding.Empty, Anchor = AnchorStyles.Top | AnchorStyles.Left };
-            printerCard.Click += delegate { OpenSettings(); };
+            printerCard.Click += delegate { OpenSettings(SettingsForm.TabPrinter); };
             printerTip = new ToolTip { OwnerDraw = true, InitialDelay = 400 };
             printerTip.Draw += DrawDarkTip;
             printerTip.SetToolTip(printerCard, L.S("Change in Settings", "Ret i Indstillinger"));
@@ -258,6 +270,10 @@ namespace PrintPrice
             var bt = new TableLayoutPanel { ColumnCount = 2, Dock = DockStyle.Fill, Padding = new Padding(6, 2, 6, 2) };
             breakTable = bt;
             for (int i = 0; i < 6; i++) bt.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // rows 2-5 fixed on Load (SetBreakRows)
+            // empty last row takes the box's spare height (~4 px at the bottom), so the last visible row is 28 px like the
+            // others (a table stretches its last row: Base cost / payback sat 4 px low)
+            bt.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            bt.RowCount = 7;
             bt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             bt.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             lblPower = BreakLabel(); lblFailed = BreakLabel(); lblBase = BreakLabel();
@@ -313,10 +329,13 @@ namespace PrintPrice
                 int twoLines;
                 using (var probe = new Label { AutoSize = true, Font = new Font("Segoe UI", 9.5f), Text = "Ag\nAg" })
                     twoLines = probe.GetPreferredSize(Size.Empty).Height + lblAuto.Padding.Vertical;
+                autoMinHeight = twoLines;
                 lblAuto.MinimumSize = new Size(lblAuto.MinimumSize.Width, twoLines);
                 picModel.Margin = new Padding(0, btnAnalyze.Margin.Top, 0, 0);
                 picBaseHeight = btnAnalyze.Height + btnAnalyze.Margin.Bottom + lblAuto.Margin.Top + twoLines;
                 picModel.Size = new Size(labelsRight - picModel.Left, picBaseHeight);
+                // idea 25: the electricity "Update" button exactly as wide as the model picture (same column, both margin left 0)
+                btnPower.Width = picModel.Width;
                 FitModelPicture();
             };
             // a 3+ line info box: the picture box grows with it, so both still end at the same line
@@ -343,29 +362,47 @@ namespace PrintPrice
             btnUpdate = new Button
             {
                 Size = new Size(264, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3),
-                Anchor = AnchorStyles.Left, Visible = false, Font = new Font(Font, FontStyle.Bold)
+                Anchor = AnchorStyles.Left, Visible = false, Font = new Font(Font, FontStyle.Bold), AutoEllipsis = true
             };
             btnUpdate.Click += delegate { if (pendingUpdate != null) ShowUpdate(pendingUpdate); };
             var buttons = bottomButtons = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Anchor = AnchorStyles.Right, Margin = Padding.Empty };
-            // four buttons, 340 px = 76 + 84 + 70 + 92 + 3 × 6 gap, ending at the Customers box's right edge;
-            // the update button left of them takes the rest of the row
-            var btnClear = new Button { Text = L.S("Clear", "Ryd"), Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
-            btnSettings = new Button { Text = L.S("Settings…", "Indstillinger…"), Size = new Size(84, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
-            btnSave = new Button { Text = L.S("Save", "Gem"), Size = new Size(70, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3) };
-            btnCopy = new Button { Text = L.S("Copy quote", "Kopiér tilbud"), Size = new Size(92, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3) };
-            // same total width (scaled), split by the measured text widths so longer (Danish) texts fit
+            // four buttons lined up with the price boxes above: Save to history + Show quote… ▾ exactly under the Customers box
+            // (50/50, 6 px apart; split by text if a text needs more than half), Clear + Settings (text + 14 px each, 6 apart)
+            // ending at the Friends & family box's right edge. "Made by Gettic · GitHub" left of them only if it fits with
+            // 12 px to spare (else hidden); the update button takes the rest of the row. AutoEllipsis = one line, never wrapped.
+            var btnClear = new Button { Text = L.S("Clear", "Ryd"), Size = new Size(56, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3), AutoEllipsis = true };
+            btnSettings = new Button { Text = L.S("Settings", "Indstillinger"), Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3), AutoEllipsis = true };
+            btnSave = new Button { Text = L.S("Save to history", "Gem i historik"), Size = new Size(114, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3), AutoEllipsis = true };
+            btnCopy = new Button { Text = L.S("Show quote…", "Vis tilbud…"), Size = new Size(128, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3), AutoEllipsis = true };
+            BuildQuoteMenu();   // split button: main part = quote window, ▾ part = quick exports without a name
             Load += delegate
             {
+                copyArrowWidth = ScalePx(22);
+                btnCopy.Padding = new Padding(0, 0, copyArrowWidth, 0);   // text centred in the main part; SizeByText counts it
                 var row = new[] { btnClear, btnSettings, btnSave, btnCopy };
-                SplitByText(row);
+                SizeByText(row, ScalePx(14));
+                // the left pair a little tighter (text + 10 still fits on one line) so the credit fits before Clear
+                SizeByText(new[] { btnClear, btnSettings }, ScalePx(10));
+                // the price boxes' measured edges (same 540 px content width, so the row's right edge = Customers' right edge)
+                Control friendsBox = prices.GetControlFromPosition(0, 0);
+                int boxGap = friendsBox.Margin.Right;   // the 12 px between the boxes (scaled)
+                int pair = custBox.Width - btnSave.Margin.Right;
+                if (btnSave.Width <= pair / 2 && btnCopy.Width <= pair - pair / 2) btnSave.Width = pair / 2;
+                else btnSave.Width = (int)Math.Round((double)pair * btnSave.Width / (btnSave.Width + btnCopy.Width));
+                btnCopy.Width = pair - btnSave.Width;
+                btnSettings.Margin = new Padding(0, 3, boxGap, 3);   // Settings ends where Friends & family ends
                 int used = 0;
                 foreach (var b in row) used += b.Width + b.Margin.Horizontal;
-                btnUpdate.Width = Math.Max(btnUpdate.Height, bottom.Width - used - btnClear.Margin.Right);   // same 6 px gap
+                btnUpdate.Width = Math.Max(btnUpdate.Height, bottom.Width - used - btnClear.Margin.Right);   // same 6 px gap (ellipsis if short)
             };
             btnClear.Click += delegate { ClearJob(); };
-            btnSettings.Click += delegate { OpenSettings(); };
+            btnSettings.Click += delegate { OpenSettings(-1); };
             btnSave.Click += delegate { SaveClicked(); };
-            btnCopy.Click += delegate { CopyQuote(); };
+            btnCopy.Click += delegate
+            {
+                if (copyArrowPressed) { copyArrowPressed = false; ShowQuoteMenu(); }   // click on the ▾ part
+                else ShowQuoteWindow();
+            };
             buttons.Controls.Add(btnClear);
             buttons.Controls.Add(btnSettings);
             buttons.Controls.Add(btnSave);
@@ -373,10 +410,11 @@ namespace PrintPrice
             // left of the buttons: "Made by Gettic · GitHub" (muted, "GitHub" = muted link); the update button takes its place when shown
             leftCell = new Panel { Size = new Size(100, 38), Dock = DockStyle.Fill, Margin = Padding.Empty };   // 38 = the row's height (button 32 + 3 + 3)
             btnUpdate.Location = new Point(0, 3);
-            lblMadeBy = new Theme.PlainLabel { Text = L.S("Made by Gettic ·", "Lavet af Gettic ·"), AutoSize = true, Tag = "muted", UseMnemonic = false,
-                Font = new Font("Segoe UI", 9f), Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 2) };
+            // two lines (PlaceMadeBy), Segoe UI 10: widest line "Made by Gettic" 103 px, ends ~34 px (DA ~26) before Clear
+            lblMadeBy = new Theme.PlainLabel { Text = L.S("Made by Gettic", "Lavet af Gettic"), AutoSize = true, Tag = "muted", UseMnemonic = false,
+                Font = new Font("Segoe UI", 10f), Margin = Padding.Empty, Padding = Padding.Empty };
             lnkGitHub = new Theme.LinkText { Text = "GitHub", AutoSize = true, Tag = "muted", MutedLink = true,
-                Font = new Font("Segoe UI", 9f), Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 2) };
+                Font = new Font("Segoe UI", 10f), Margin = Padding.Empty, Padding = new Padding(0, 0, 0, 2) };   // room for the hover underline
             lnkGitHub.Click += delegate { OpenProjectPage(); };
             printerTip.SetToolTip(lnkGitHub, "github.com/gettic/PrintPrice");
             leftCell.Controls.Add(btnUpdate);
@@ -384,7 +422,15 @@ namespace PrintPrice
             leftCell.Controls.Add(lnkGitHub);
             btnUpdate.TabIndex = 0;
             lnkGitHub.TabIndex = 1;
-            Load += delegate { PlaceMadeBy(btnClear); };
+            Load += delegate
+            {
+                PlaceMadeBy(btnClear);
+                // the credit only where it fits: its right end at least 12 px before Clear (measured), else hidden
+                bottom.PerformLayout();
+                int creditRight = Math.Max(lblMadeBy.PointToScreen(new Point(lblMadeBy.Width, 0)).X, lnkGitHub.PointToScreen(new Point(lnkGitHub.Width, 0)).X);
+                bool fits = creditRight + ScalePx(12) <= btnClear.PointToScreen(Point.Empty).X;
+                if (!fits) { lblMadeBy.Visible = false; lnkGitHub.Visible = false; }
+            };
             bottom.Controls.Add(leftCell, 0, 0);
             bottom.Controls.Add(buttons, 1, 0);
             // tab order: the link last (after Copy quote); the update button (shown instead of the line) stays first
@@ -437,12 +483,18 @@ namespace PrintPrice
         /// Wear rate from the chosen nozzle, filament (abrasive? type?) and build plate.
         static double AutoWearRate(AppSettings s)
         {
+            return WearBreakdown(s).Total;
+        }
+
+        /// The whole wear split behind the auto rate (printer, parts, hotend, plate per hour); also the quote's wear lines.
+        static Wear.Breakdown WearBreakdown(AppSettings s)
+        {
             var nozzle = Wear.FindNozzle(s.Nozzle);
             string type = "";
             bool abrasive = false;
             try { BambuSlicer.FilamentInfo(BambuSlicer.FindExe(s.SlicerPath), s.FilamentPreset, nozzle.Size, out type, out abrasive); }
             catch { /* Bambu Studio missing: treat as normal filament */ }
-            return Wear.Calculate(nozzle, abrasive, type, Wear.FindPlate(s.BedType)).Total;
+            return Wear.Calculate(nozzle, abrasive, type, Wear.FindPlate(s.BedType));
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -472,6 +524,7 @@ namespace PrintPrice
             SetJobLoaded(true);
             SetPowerInfo(L.S("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.",
                              "Live-pris DK1 17:45: spot 2,37 + afg. 0,55 + moms = 3,65 kr."), false);
+            jobModel = "3D Benchy";   // after the link (its TextChanged clears it); the quote picture's model name
             Recalculate();
         }
 
@@ -500,6 +553,7 @@ namespace PrintPrice
             SetJobLoaded(true);
             // shows the "Open in Studio" button (with Studio's icon if it's installed); never clicked in picture mode
             SetStudioFile(Path.Combine(BambuSlicer.StudioRoot, "sample", "Multicolor_Benchy.3mf"));
+            jobModel = "Four-Color Multicolor Test Benchy";   // the quote picture's model name
             Recalculate();
         }
 
@@ -557,6 +611,7 @@ namespace PrintPrice
                 if (txtElecPrice.Text == before)
                 {
                     txtElecPrice.Text = total.ToString("0.00", Num.Dk);
+                    elecSaved = false;   // the box holds today's price again
                     // non-breaking spaces: "= 3,65 kr." wraps as one piece, never a lone "kr." on line 2
                     SetPowerInfo(L.S("Live ", "Live-pris ") + when + ": " + breakdown + " = " + total.ToString("0.00", Num.Dk) + " kr.", false);
                 }
@@ -583,7 +638,8 @@ namespace PrintPrice
         // ---------- Auto-detect: link / file → Bambu Studio → time & grams ----------
         void SetAuto(string text, bool error)
         {
-            reopened = null;   // any other message replaces the "Opened from history" lines
+            reopened = null;   // any other message replaces the "Opened from history" / "Repeat print" lines
+            repeatLine = null;
             autoIsError = error;
             lblAuto.Text = text;
             SetAutoColor();
@@ -591,8 +647,10 @@ namespace PrintPrice
 
         void SetAutoColor()
         {
-            // results keep the red info stripe too (the ✓ in the text already shows it worked)
-            if (lblAuto != null) lblAuto.Kind = autoIsError ? InfoKind.Error : InfoKind.Info;
+            // results keep the red info stripe too (the ✓ in the text already shows it worked); a repeat print that
+            // couldn't slice again gets the warning stripe
+            if (lblAuto != null)
+                lblAuto.Kind = autoIsError ? InfoKind.Error : repeatLine != null && repeatWhy != null ? InfoKind.Warning : InfoKind.Info;
         }
 
         void ShowAutoIdle()
@@ -601,8 +659,9 @@ namespace PrintPrice
                 SetAuto(L.S("Bambu Studio was not found. Install it to detect time and weight automatically.",
                             "Bambu Studio blev ikke fundet. Installér det for at finde tid og vægt automatisk."), false);
             else
-                SetAuto(L.F("Paste a Printables link, or drop a model file (STL/3MF) on this window. Slices with {0} mm nozzle · {1} · {2}.",
-                            "Indsæt et Printables-link, eller træk en modelfil (STL/3MF) ind i vinduet. Slicer med {0} mm dyse · {1} · {2}.",
+                // 2 lines with the default profiles (idea 26: 3 lines made the box shrink when a job started)
+                SetAuto(L.F("Paste a Printables link or drop an STL/3MF file here. Slices with {0} mm nozzle · {1} · {2}.",
+                            "Indsæt et Printables-link eller træk en STL/3MF-fil hertil. Slicer med {0} mm dyse · {1} · {2}.",
                             L.Danish ? Wear.FindNozzle(settings.Nozzle).Size.Replace('.', ',') : Wear.FindNozzle(settings.Nozzle).Size,
                             BambuSlicer.ShortName(settings.ProcessPreset), BambuSlicer.ShortName(settings.FilamentPreset)), false);
         }
@@ -809,9 +868,17 @@ namespace PrintPrice
             UseWaitCursor = false;
         }
 
-        async void Analyze(string printablesId, List<string> localFiles)
+        void Analyze(string printablesId, List<string> localFiles)
         {
-            if (offline || cts != null) return;
+            var job = AnalyzeAsync(printablesId, localFiles, null);   // errors are shown by AnalyzeAsync itself
+        }
+
+        /// Gets time and weight (Printables model or local files); true when it worked. beforeFill (may be null) can
+        /// adjust the slice before the colour rows are filled (Repeat print keeps the saved materials).
+        async Task<bool> AnalyzeAsync(string printablesId, List<string> localFiles, Action<SliceResult> beforeFill)
+        {
+            if (offline || cts != null) return false;
+            bool ok = false;
             SetStudioFile(null);   // a new job: back to "Get time & weight" until it has sliced
             string exe = BambuSlicer.FindExe(settings.SlicerPath);
             bool presliced = localFiles != null && localFiles.Count == 1 && BambuSlicer.IsSlicedProject(localFiles[0]);
@@ -819,7 +886,7 @@ namespace PrintPrice
             {
                 SetAuto(L.S("Bambu Studio was not found. Install it from bambulab.com, or set its location in Settings.",
                             "Bambu Studio blev ikke fundet. Installér det fra bambulab.com, eller angiv stien i Indstillinger."), true);
-                return;
+                return false;
             }
 
             string process = settings.ProcessPreset, filament = settings.FilamentPreset, bed = settings.BedType;
@@ -827,6 +894,9 @@ namespace PrintPrice
             cts = new CancellationTokenSource();
             var token = cts.Token;
             SetBusy(true);
+            // idea 26: the info box keeps its height while the job runs ("Slicing…" is 1 line, the start hint 2-3), so the
+            // picture and the window don't change size until the result is in (released in finally)
+            lblAuto.MinimumSize = new Size(lblAuto.MinimumSize.Width, Math.Max(autoMinHeight, lblAuto.Height));
             IProgress<string> progress = new Progress<string>(s => SetAuto(s, false));
             string modelName = null;
             // model picture: a picked .3mf shows its own picture at once; Printables photo / slice render follow below
@@ -881,6 +951,7 @@ namespace PrintPrice
                 if (totalMinutes == 0 && result.Seconds > 0) totalMinutes = 1;
                 txtHours.Text = (totalMinutes / 60).ToString();
                 txtMinutes.Text = (totalMinutes % 60).ToString();
+                if (beforeFill != null) beforeFill(result);
                 SetColours(result);   // 2+ colours: one row per colour in the Cost breakdown, else today's layout
                 bool multi = filaments != null;
                 // several colours: grams with 2 decimals, like the colour rows
@@ -909,6 +980,7 @@ namespace PrintPrice
                                                       "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", parts));
                     SetAutoColor();
                 }
+                ok = true;
             }
             catch (OperationCanceledException) { SetAuto(L.S("Cancelled.", "Annulleret."), false); }
             catch (SliceException ex) { SetAuto(ex.Message, true); }
@@ -917,8 +989,10 @@ namespace PrintPrice
             {
                 cts.Dispose();
                 cts = null;
+                lblAuto.MinimumSize = new Size(lblAuto.MinimumSize.Width, autoMinHeight);   // one size change, with the result
                 SetBusy(false);
             }
+            return ok;
         }
 
         static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local,
@@ -1327,7 +1401,7 @@ namespace PrintPrice
                 using (var probe = new Theme.PlainLabel { AutoSize = true, Font = Font, Text = unit.Text })   // the font it gets from the form
                     unit.Size = new Size(probe.PreferredWidth, 10);
                 unit.Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Bottom;
-                unit.Margin = new Padding(2, 0, 10, 0);
+                unit.Margin = new Padding(3, 0, 10, 0);   // text 6 px after the kr/kg box (measured: 2 gave 5)
                 unit.Padding = new Padding(0, 5, 0, 0);   // row 28 px, box centred 1 px down: text 1 px lower than before
                 unit.TextAlign = ContentAlignment.TopLeft;
                 rowPrice[i] = box;
@@ -1607,6 +1681,9 @@ namespace PrintPrice
             Func<Control, Rectangle> inTable = c => t.RectangleToClient(c.Parent.RectangleToScreen(c.Bounds));
             Rectangle hours = inTable(txtHours), elec = inTable(txtElecPrice);
             int right = inTable(txtUrl).Right;   // = the live-price box's, the buttons' and the Cost breakdown's right edge
+            // never over the units: at most its whole cell (column 2 starts after the Print time / Filament / Electricity rows'
+            // units; measured with the card at its smallest), so the default name always shows in full
+            printerCard.MaxWidth = Math.Max(0, right - printerCard.Left);
             printerCard.FitTo(Math.Max(1, elec.Bottom - hours.Top));   // Print time box top to Electricity price box bottom
             int cellLeft = printerCard.Left, cellTop = printerCard.Top;   // margins are 0 here
             printerCard.Margin = new Padding(Math.Max(0, right - printerCard.Width - cellLeft), Math.Max(0, hours.Top - cellTop), 0, 0);
@@ -1649,7 +1726,9 @@ namespace PrintPrice
         sealed class PrinterCard : Control
         {
             static readonly Color HotBack = Color.FromArgb(52, 55, 60), HotBorder = Color.FromArgb(110, 110, 116);
-            const TextFormatFlags TextFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter;
+            const TextFormatFlags TextFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis;
+            /// Widest the card may get (device px, 0 = no limit): a long printer name is cut with … (LayoutPrinterCard).
+            public int MaxWidth;
             Bitmap photo;
             int photoHeight;   // device px, set by FitTo
             bool hot;
@@ -1676,10 +1755,13 @@ namespace PrintPrice
             /// one text line under it.
             public void FitTo(int height)
             {
-                Size ts = TextRenderer.MeasureText(Text.Length > 0 ? Text : "Ag", Font, Size.Empty, TextFlags);
+                // measured without EndEllipsis: with it (and no width given) the text measured as cut, so the card shrank to "Bambu…"
+                Size ts = TextRenderer.MeasureText(Text.Length > 0 ? Text : "Ag", Font, Size.Empty, TextFlags & ~TextFormatFlags.EndEllipsis);
                 int rest = Px(5) + Px(3) + ts.Height + Px(5);
                 photoHeight = Math.Max(Px(16), Math.Min(Px(88), height - rest));
-                Size = new Size(Math.Max(PhotoWidth(photoHeight), ts.Width) + Px(20), Math.Max(height, photoHeight + rest));
+                int w = Math.Max(PhotoWidth(photoHeight), ts.Width) + Px(20);
+                if (MaxWidth > 0) w = Math.Max(PhotoWidth(photoHeight) + Px(20), Math.Min(w, MaxWidth));
+                Size = new Size(w, Math.Max(height, photoHeight + rest));
                 Invalidate();
             }
 
@@ -1715,7 +1797,7 @@ namespace PrintPrice
                 else DrawA1(g, pr);
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
                 int ty = pr.Bottom + Px(3);
-                TextRenderer.DrawText(g, Text, Font, new Rectangle(0, ty, Width, Math.Max(1, Height - ty)), hot ? Theme.Text : Theme.Muted, TextFlags);
+                TextRenderer.DrawText(g, Text, Font, new Rectangle(Px(6), ty, Width - Px(12), Math.Max(1, Height - ty)), hot ? Theme.Text : Theme.Muted, TextFlags);
             }
 
             /// Simple Bambu Lab A1 on a 24 × 28 grid: base + bed, frame, X gantry, red toolhead.
@@ -1782,31 +1864,17 @@ namespace PrintPrice
             return cap;
         }
 
-        /// Keeps the buttons' total width (real px, after DPI scaling) and gives each one its measured text
-        /// width plus an equal share of the spare room.
-        static void SplitByText(Button[] buttons)
+        /// Each button exactly its measured text (TextRenderer, as the button draws it, real px) + room (both sides
+        /// together) + its Padding (e.g. the ▾ part of "Show quote…"). The pictures showed text + 8 wraps, text + 10 fits.
+        static void SizeByText(Button[] buttons, int room)
         {
-            int total = 0, need = 0;
-            var natural = new int[buttons.Length];
-            for (int i = 0; i < buttons.Length; i++)
-            {
-                total += buttons[i].Width;
-                natural[i] = TextRenderer.MeasureText(buttons[i].Text, buttons[i].Font).Width + buttons[i].Height / 2;
-                need += natural[i];
-            }
-            int spare = total - need, used = 0;
-            for (int i = 0; i < buttons.Length; i++)
-            {
-                int w = i == buttons.Length - 1 ? total - used
-                      : natural[i] + (spare >= 0 ? spare / buttons.Length : spare * natural[i] / need);
-                buttons[i].Width = w;
-                used += w;
-            }
+            foreach (var b in buttons)
+                b.Width = TextRenderer.MeasureText(b.Text, b.Font).Width + room + b.Padding.Horizontal;
         }
 
         static Label Unit(string text)
         {
-            return new Theme.PlainLabel { Text = text, AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(2, 6, 10, 0) };
+            return new Theme.PlainLabel { Text = text, AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 10, 0) };   // text 6 px after the box (measured)
         }
 
         static Control WithUnit(Control box, string unit)
@@ -1840,7 +1908,8 @@ namespace PrintPrice
                 Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Tag = colorTag,
                 Font = new Font("Segoe UI", 22f, FontStyle.Bold)
             };
-            info = new Label { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleCenter, Tag = "muted" };
+            // grey line under the price: PlainLabel (grayscale text, no ClearType colour fringes), one line
+            info = new Theme.PlainLabel { Dock = DockStyle.Bottom, Height = 24, TextAlign = ContentAlignment.MiddleCenter, Tag = "muted", UseMnemonic = false };
             g.Controls.Add(price);
             g.Controls.Add(info);
             return g;
@@ -1955,8 +2024,10 @@ namespace PrintPrice
 
         void RefreshSettingsLabels()
         {
-            printerCard.Text = "Bambu Lab A1 · " + Num.Fmt(settings.PrinterWatts) + " W";
+            // Settings > Electricity > Printer name (N2); a long name is cut with … on the card, full text in the tooltip
+            printerCard.Text = AppSettings.CleanPrinterName(settings.PrinterName) + " · " + Num.Fmt(settings.PrinterWatts) + " W";
             printerCard.AccessibleName = printerCard.Text;
+            printerTip.SetToolTip(printerCard, printerCard.Text + "\n" + L.S("Change in Settings", "Ret i Indstillinger"));
             string exe = BambuSlicer.FindExe(settings.SlicerPath);
             if (exe != printerPhotoExe)   // first time, or the slicer path changed in Settings
             {
@@ -1966,8 +2037,11 @@ namespace PrintPrice
             LayoutPrinterCard();   // the text width may have changed
             string wear = settings.MachineRatePerHour > 0 ? L.F(", {0} kr/h wear", ", {0} kr/t slid", Num.Fmt(settings.MachineRatePerHour)) : "";
             lblFriendsInfo.Text = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.FriendsMarkupPct)) + wear;
-            string o = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.OthersMarkupPct)) + wear;
-            if (settings.MinimumPrice > 0) o += L.F(", min {0} kr.", ", min. {0} kr.", Num.Fmt(settings.MinimumPrice));
+            // with a minimum price the line drops "markup" so "min. 50 kr." fits: "+75 %, 1,71 kr/h wear, min. 50 kr."
+            string o;
+            if (settings.MinimumPrice > 0)
+                o = L.F("+{0} %", "+{0} %", Num.Fmt(settings.OthersMarkupPct)) + wear + L.F(", min. {0} kr.", ", min. {0} kr.", Num.Fmt(settings.MinimumPrice));
+            else o = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.OthersMarkupPct)) + wear;
             lblOthersInfo.Text = o;
             UpdateFailedRow();
         }
@@ -2023,28 +2097,29 @@ namespace PrintPrice
             UpdateBreakHeight();
         }
 
-        /// Picture mode: a made-up debt of failed prints with payback on (0 = back to the defaults: off, no debt).
+        /// Picture mode: a made-up debt of failed prints with payback on (0 = back to the defaults: no debt).
         internal void SetSamplePayback(double debt)
         {
             if (!offline) return;
             sampleDebt = debt;
-            settings.FailedPayback = debt > 0 ? 1 : 0;
+            settings.FailedPayback = debt > 0 ? 1 : new AppSettings().FailedPayback;   // 0 = back to the default (on since v1.8.0; no debt = no row)
             Recalculate();
         }
 
-        void OpenSettings()
+        /// tab = SettingsForm.TabPrices … TabApp, or -1 = the tab used last.
+        void OpenSettings(int tab)
         {
             // building Settings takes a moment: say so on the button (also when opened from the printer card)
             string btnText = btnSettings.Text;
             var oldCursor = Cursor.Current;
-            btnSettings.Text = L.S("Opening…", "Åbner…");
+            btnSettings.Text = L.S("Wait…", "Åbner…");   // short: the button is only "Settings" wide (no ellipsis)
             Cursor.Current = Cursors.WaitCursor;
             btnSettings.Update();
             MethodInvoker restore = delegate { btnSettings.Text = btnText; Cursor.Current = oldCursor; };
             try
             {
                 EnsureHistory();   // for "Not made back yet: x kr." (picture mode: empty list)
-                using (var dlg = new SettingsForm(settings, offline ? sampleDebt : History.FailedDebt(history, null)))
+                using (var dlg = new SettingsForm(settings, offline ? sampleDebt : History.FailedDebt(history, null), tab))
                 {
                     if (!offline) dlg.UpdateFound = ShowUpdateButton;   // "check now" in Settings
                     dlg.Shown += delegate { restore(); };   // back to normal once the window is up
@@ -2128,7 +2203,16 @@ namespace PrintPrice
         internal void ShowUpdateButton(UpdateInfo found)
         {
             pendingUpdate = found;
-            btnUpdate.Text = L.S("⬆  Update to v", "⬆  Opdatér til v") + Updater.Short(found.Version);
+            // the longest text that fits on the button without "…" (full text in its tooltip when shortened)
+            string ver = Updater.Short(found.Version);
+            string full = L.S("⬆  Update to v", "⬆  Opdatér til v") + ver;
+            btnUpdate.Text = full;
+            foreach (string t in new[] { full, L.S("⬆  Update v", "⬆  Opdatér v") + ver, L.S("⬆  v" + ver, "⬆  Opdatér") })   // Danish keeps the word, not the version
+            {
+                btnUpdate.Text = t;
+                if (TextRenderer.MeasureText(t, btnUpdate.Font).Width + ScalePx(10) <= btnUpdate.Width) break;
+            }
+            printerTip.SetToolTip(btnUpdate, btnUpdate.Text == full ? null : full.Replace("⬆  ", ""));
             btnUpdate.Visible = true;
             // the update button wins the place left of the buttons: hide "Made by Gettic · GitHub", Update first in tab order
             lblMadeBy.Visible = false;
@@ -2137,24 +2221,19 @@ namespace PrintPrice
             bottomButtons.TabIndex = 1;
         }
 
-        /// "Made by Gettic · GitHub" on the button row: left edge at the content edge (x 14), text on the buttons' text
-        /// baseline (measured: button text is centred in the button, GDI+ label text starts at the label's top).
+        /// The credit on the button row, two lines: "Made by Gettic" over the "GitHub" link, the block centred on the row
+        /// (button + its margins), both lines' first glyphs at the same x (measured glyph boxes, both labels draw with GDI+).
         void PlaceMadeBy(Button reference)
         {
-            int buttonTop = leftCell.PointToClient(reference.PointToScreen(Point.Empty)).Y;
-            int baseline = buttonTop + (reference.Height - reference.Font.Height) / 2 + Ascent(reference.Font);
-            int top = baseline - Ascent(lblMadeBy.Font);
+            int rowTop = leftCell.PointToClient(reference.PointToScreen(Point.Empty)).Y - reference.Margin.Top;
+            int rowHeight = reference.Height + reference.Margin.Vertical;
+            int line = lblMadeBy.Font.Height;   // normal line gap
+            int top = rowTop + (rowHeight - 2 * line) / 2;
             lblMadeBy.Location = new Point(0, top);
-            // "GitHub" as far after the "·" as the "·" is after "Gettic" (measured glyph boxes, both labels draw with GDI+)
-            string t = lblMadeBy.Text;
-            RectangleF before = GlyphBox(lblMadeBy, 0, t.Length - 2);   // "Made by Gettic" (without " ·")
-            RectangleF dot = GlyphBox(lblMadeBy, t.Length - 1, 1);
-            RectangleF link = GlyphBox(lnkGitHub, 0, lnkGitHub.Text.Length);
-            float gap = dot.Left - before.Right;
-            lnkGitHub.Location = new Point((int)Math.Round(lblMadeBy.Left + dot.Right + gap - link.Left), top);
-            lnkGitHub.BringToFront();   // overlaps only the label's empty right padding
+            RectangleF first = GlyphBox(lblMadeBy, 0, 1), link = GlyphBox(lnkGitHub, 0, 1);
+            lnkGitHub.Location = new Point((int)Math.Round(lblMadeBy.Left + first.Left - link.Left), top + line);
+            lnkGitHub.BringToFront();
         }
-
         /// Where the glyphs of text[start, start+length) are drawn inside a GDI+ (UseCompatibleTextRendering) label.
         static RectangleF GlyphBox(Label l, int start, int length)
         {
@@ -2205,32 +2284,580 @@ namespace PrintPrice
             settings.Save();
         }
 
-        void CopyQuote()
+        /// The quote as plain text (Copy text): model, time and grams, both prices; "For: <name>" when a customer is given.
+        string QuoteText(string customer)
         {
-            if (last == null) return;
             string nl = Environment.NewLine;
             string text = L.S("3D print quote", "Tilbud på 3D-print") + nl;
+            if (!string.IsNullOrEmpty(customer)) text += L.S("For: ", "Til: ") + customer + nl;
             if (txtUrl.Text.Trim().Length > 0) text += "Model: " + txtUrl.Text.Trim() + nl;
             text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g",
                         lastHours, lastMinutes, txtGrams.Text.Trim()) +
                     (filaments != null ? L.F(" ({0} colours)", " ({0} farver)", filaments.Count) : "") + nl;
             text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(last.FriendsPrice) + nl;
             text += L.S("Customer: ", "Kunde: ") + Num.Kr(last.OthersPrice);
+            return text;
+        }
+
+        // ---------- quote export (idea 5 + 21): "Show quote… ▾" → QuoteForm, or quick exports from the ▾ menu ----------
+        /// The ▾ menu of "Show quote…": quick exports without a customer name, with the remembered price and look
+        /// (both are chosen in the quote window); a muted first line says which.
+        void BuildQuoteMenu()
+        {
+            quoteMenu = new ContextMenuStrip
+            {
+                ShowImageMargin = false, Renderer = new QuoteMenuRenderer(),
+                BackColor = Theme.Input, ForeColor = Theme.Text
+            };
+            Func<string, QuoteExport, ToolStripMenuItem> Item = (text, kind) =>
+            {
+                var mi = new ToolStripMenuItem(text) { ForeColor = Theme.Text };
+                mi.Click += delegate { MenuExport(kind); };
+                return mi;
+            };
+            miQuoteInfo = new ToolStripMenuItem("") { Enabled = false };
+            quoteMenu.Items.Add(miQuoteInfo);
+            quoteMenu.Items.Add(new ToolStripSeparator());
+            quoteMenu.Items.Add(Item(L.S("Copy picture", "Kopiér billede"), QuoteExport.Copy));
+            quoteMenu.Items.Add(Item(L.S("Save picture…", "Gem billede…"), QuoteExport.Png));
+            quoteMenu.Items.Add(Item(L.S("Save as PDF…", "Gem som PDF…"), QuoteExport.Pdf));
+            quoteMenu.Items.Add(Item(L.S("Copy text", "Kopiér tekst"), QuoteExport.Text));
+            quoteMenu.Opening += delegate { UpdateQuoteMenu(); };
+            Disposed += delegate { quoteMenu.Dispose(); };
+
+            // split button: a press on the ▾ part opens the menu (on its Click); keyboard: Down / menu key
+            btnCopy.MouseDown += (s, e) =>
+            {
+                copyArrowPressed = e.Button == MouseButtons.Left && copyArrowWidth > 0 && e.X >= btnCopy.Width - copyArrowWidth;
+            };
+            btnCopy.PreviewKeyDown += (s, e) => { if (e.KeyCode == Keys.Down) e.IsInputKey = true; };
+            btnCopy.KeyDown += (s, e) =>
+            {
+                copyArrowPressed = false;
+                if (e.KeyCode == Keys.Down || e.KeyCode == Keys.Apps) { ShowQuoteMenu(); e.Handled = true; }
+            };
+            btnCopy.Paint += (s, e) => PaintCopyArrow(e.Graphics);
+            btnCopy.AccessibleDescription = L.S("Down arrow: quick copy or save without a name", "Pil ned: hurtig kopi eller gem uden navn");
+        }
+
+        void ShowQuoteMenu()
+        {
+            if (!btnCopy.Enabled) return;
+            quoteMenu.Show(btnCopy, new Point(btnCopy.Width, 0), ToolStripDropDownDirection.AboveLeft);
+        }
+
+        /// The menu's muted first line: "No name · customer price · dark".
+        void UpdateQuoteMenu()
+        {
+            miQuoteInfo.Text = L.S("No name · ", "Uden navn · ")
+                + (settings.QuoteFriends ? L.S("friends && family price", "venne- og familiepris") : L.S("customer price", "kundepris"))
+                + " · " + (settings.QuoteDark != 0 ? L.S("dark", "mørk") : L.S("light", "lys"));
+        }
+
+        void MenuExport(QuoteExport kind)
+        {
+            bool failed;
+            string msg = ExportQuote(this, kind, settings.QuoteFriends, settings.QuoteDark != 0, "", out failed);
+            if (msg == null) return;   // file dialog cancelled
+            if (failed) SetStatus(msg, false);
+            else FlashStatus(msg);
+        }
+
+        /// The ▾ part of the split button: a 1 px Border divider and a small arrow (Muted when disabled).
+        void PaintCopyArrow(Graphics g)
+        {
+            if (copyArrowWidth <= 0) return;
+            int x = btnCopy.Width - copyArrowWidth, inset = ScalePx(6);
+            using (var pen = new Pen(Theme.Border)) g.DrawLine(pen, x, inset, x, btnCopy.Height - 1 - inset);
+            float cx = x + copyArrowWidth / 2f, cy = btnCopy.Height / 2f, w = ScalePx(4.5f);
+            var st = g.Save();
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var br = new SolidBrush(btnCopy.Enabled ? Theme.Text : Theme.Muted))
+                g.FillPolygon(br, new[] { new PointF(cx - w, cy - w / 2), new PointF(cx + w, cy - w / 2), new PointF(cx, cy + w / 2) });
+            g.Restore(st);
+        }
+
+        /// "Show quote…": the quote window (preview, customer name, price, look, copy / save). Nothing is saved by opening it.
+        void ShowQuoteWindow()
+        {
+            if (last == null || lastInput == null || cts != null) return;
+            using (var f = NewQuoteForm("")) f.ShowDialog(this);
+        }
+
+        QuoteForm NewQuoteForm(string customer)
+        {
+            EnsureHistory();
+            quoteWhen = DateTime.Now;   // the preview's number/date until an export saves the quote (then the record's)
+            return new QuoteForm(QuoteModelName(), customer, settings.QuoteFriends, settings.QuoteDark != 0,
+                new List<string>(History.RecentCustomers(history, 10)), last.OthersPrice, last.FriendsPrice,
+                (friends, name) => BuildQuote(friends, quoteWhen, History.QuoteNumber(quoteWhen), name),
+                ExportQuote,
+                (friends, dark) =>
+                {
+                    settings.QuotePrice = friends ? AppSettings.QuotePriceFriends : AppSettings.QuotePriceCustomer;
+                    settings.QuoteDark = dark ? 1 : 0;
+                    if (!offline) settings.Save();
+                });
+        }
+
+        /// One export (window or ▾ menu): Copy picture / Save picture / Save as PDF ask for the file first (null = cancelled),
+        /// then the quote goes into the history with this price and customer (History.AddFor), then the page is drawn
+        /// (PDF always light) and copied / written. Returns the status text; failed = it is an error text.
+        string ExportQuote(IWin32Window owner, QuoteExport kind, bool friends, bool dark, string customer, out bool failed)
+        {
+            failed = false;
+            if (last == null || lastInput == null)
+            {
+                failed = true;
+                return L.S("Nothing to send yet.", "Der er ikke noget at sende endnu.");
+            }
+            customer = (customer ?? "").Trim();
+            if (kind == QuoteExport.History)
+            {
+                // "Save to history": the quote with this price and name, nothing else
+                QuoteRecord saved;
+                string e = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, out saved);
+                if (saved != null) { DateTime w; if (History.TryTime(saved.SavedAt, out w)) quoteWhen = w; }
+                if (e != null) { failed = true; return e; }
+                return L.S("✓ Saved to history.", "✓ Gemt i historikken.");
+            }
+            string path = null;
+            if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
+            {
+                bool pdf = kind == QuoteExport.Pdf;
+                using (var dlg = new SaveFileDialog
+                {
+                    Title = pdf ? L.S("Save quote as PDF", "Gem tilbud som PDF") : L.S("Save quote picture", "Gem tilbud som billede"),
+                    Filter = pdf ? "PDF (*.pdf)|*.pdf" : L.S("PNG picture", "PNG-billede") + " (*.png)|*.png",
+                    FileName = QuoteFileName(DateTime.Now, customer) + (pdf ? ".pdf" : ".png"),
+                    AddExtension = true, OverwritePrompt = true
+                })
+                {
+                    if (dlg.ShowDialog(owner) != DialogResult.OK) return null;
+                    path = dlg.FileName;
+                }
+            }
+            QuoteRecord rec;
+            string err = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, out rec);
+            DateTime when;
+            if (rec == null || !History.TryTime(rec.SavedAt, out when)) when = DateTime.Now;
+            quoteWhen = when;
+            string done;
             try
             {
-                Clipboard.SetText(text);
+                if (kind == QuoteExport.Text)
+                {
+                    Clipboard.SetText(QuoteText(customer));
+                    done = L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
+                }
+                else
+                {
+                    var data = BuildQuote(friends, when, History.QuoteNumber(when), customer);
+                    using (var bmp = QuotePage.Render(data, dark && kind != QuoteExport.Pdf))   // a printed PDF is always light
+                    {
+                        if (kind == QuoteExport.Copy) QuotePage.CopyToClipboard(bmp);
+                        else if (kind == QuoteExport.Png) bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                        else QuotePage.SavePdf(bmp, path);
+                    }
+                    done = kind == QuoteExport.Copy ? L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede")
+                         : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
+                }
             }
             catch (Exception ex)
             {
-                // hidden test start: no message box (it would pop up on screen), red status line instead
-                if (Program.Hidden) SetStatus(L.S("Clipboard: ", "Udklipsholder: ") + ex.Message, false);
-                else MessageBox.Show(this, ex.Message, L.S("Clipboard", "Udklipsholder"));
-                return;
+                failed = true;
+                return (kind == QuoteExport.Copy || kind == QuoteExport.Text ? L.S("Clipboard: ", "Udklipsholder: ") : "") + ex.Message;
             }
-            // a copied quote is one that was sent: it goes into the price history too
-            string err = SaveToHistory();
-            if (err == null) FlashStatus(L.S("✓ Quote copied to clipboard and saved to history.", "✓ Tilbuddet er kopieret og gemt i historikken."));
-            else SetStatus(L.S("Quote copied to clipboard. ", "Tilbuddet er kopieret. ") + err, false);
+            if (err != null) { failed = true; return done + ". " + err; }
+            return done + L.S(" and saved to history.", " og gemt i historikken.");
+        }
+
+        /// Default file name of a quote: "2026-11-04 3D Benchy" (+ " - Mette Hansen" with a customer).
+        string QuoteFileName(DateTime date, string customer)
+        {
+            return ShortFileName(date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), QuoteModelName(), customer);
+        }
+
+        /// "<lead> <model> - <customer>": model cut to 40 characters, customer to 30, no characters Windows forbids.
+        static string ShortFileName(string lead, string model, string customer)
+        {
+            Func<string, int, string> cut = (s, max) => { s = (s ?? "").Trim(); return s.Length > max ? s.Substring(0, max).TrimEnd() : s; };
+            string name = lead;
+            string m = cut(model, 40), c = cut(customer, 30);
+            if (m.Length > 0) name += " " + m;
+            if (c.Length > 0) name += " - " + c;
+            return Printables.SafeFileName(name).Trim();
+        }
+
+        /// The model's name for the quote: the job's model name, else "3D print".
+        string QuoteModelName()
+        {
+            string m = (jobModel ?? "").Trim();
+            return m.Length > 0 ? m : L.S("3D print", "3D-print");
+        }
+
+        /// Short link for the quote: "printables.com/model/1648230"; other web links without "https://www."; local
+        /// files (paths) are never shown.
+        static string ShortLink(string url)
+        {
+            string u = (url ?? "").Trim();
+            if (!u.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !u.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                return "";
+            string id = Printables.ParseId(u);
+            if (id != null) return "printables.com/model/" + id;
+            u = u.Substring(u.IndexOf("//", StringComparison.Ordinal) + 2);
+            if (u.StartsWith("www.", StringComparison.OrdinalIgnoreCase)) u = u.Substring(4);
+            return u.Length > 60 ? u.Substring(0, 60) + "…" : u;
+        }
+
+        /// Everything the quote page shows, from the quote on screen (lastInput / last) and the settings.
+        QuoteData BuildQuote(bool friends, DateTime date, string number, string customer)
+        {
+            var wear = settings.AutoWearRate != 0 ? WearBreakdown(settings) : null;
+            string plate = QuotePlate();
+            var d = new QuoteData
+            {
+                Name = (settings.QuoteName ?? "").Trim(),
+                Customer = (customer ?? "").Trim(),
+                Model = QuoteModelName(),
+                Link = ShortLink(txtUrl.Text),
+                Picture = modelImage,
+                Logo = Logo,
+                Hours = lastInput.Hours, Minutes = lastInput.Minutes,
+                Weight = Num.Fmt(lastInput.FilamentGrams) + " g",
+                Printer = PrinterText(),
+                Number = number, Date = date, ValidUntil = settings.QuoteValidUntil(date),
+                PlateName = plate,
+                PurgeGrams = filaments != null ? jobPurge : -1,
+                Breakdown = Pricing.Breakdown(lastInput, settings, friends, wear)
+            };
+            var used = filaments ?? (single != null ? new List<FilamentUse> { single } : null);
+            if (used != null)
+                foreach (var f in used)
+                {
+                    d.MaterialNames.Add(MaterialName(f));
+                    d.MaterialColours.Add(ParseColour(f.Colour));
+                }
+            else d.MaterialNames.Add(BambuSlicer.ShortName(settings.FilamentPreset).Trim());
+            if (filaments != null && filaments.Count >= 2)
+            {
+                var types = filaments.Select(f => (f.Type ?? "").Trim()).Where(t => t.Length > 0).Distinct().ToList();
+                string n = L.F("{0} colours", "{0} farver", filaments.Count);
+                d.Material = types.Count > 0 ? string.Join(" + ", types) + ", " + n : n;
+            }
+            else d.Material = d.MaterialNames[0];
+            return d;
+        }
+
+        /// The build plate's short name for the wear line: "Smooth PEI / High Temp Plate" -> "Smooth PEI" ("Glat PEI").
+        string QuotePlate()
+        {
+            string plate = Wear.FindPlate(settings.BedType).Label;
+            int cut = plate.IndexOf(" / ", StringComparison.Ordinal);
+            if (cut > 0) plate = plate.Substring(0, cut);
+            if (L.Danish && plate == "Smooth PEI") plate = "Glat PEI";
+            return plate;
+        }
+
+        string PrinterText()
+        {
+            var nozzle = Wear.FindNozzle(settings.Nozzle);
+            return L.F("{0}, {1} mm nozzle", "{0}, {1} mm dyse", AppSettings.CleanPrinterName(settings.PrinterName),
+                       L.Danish ? nozzle.Size.Replace('.', ',') : nozzle.Size);
+        }
+
+        // ---------- quote / invoice of a saved record (History's Quote… / Invoice…) ----------
+        DateTime? invoiceWhen;   // picture mode: fixed invoice date; null = now
+
+        /// The quote window for a history record, with its saved prices. Exports put the typed name and the chosen
+        /// price (For) on the record and save the history; Invoice also makes the invoice (History.MakeInvoice: number,
+        /// date, Printed). Nothing new is added to the history.
+        internal void ShowRecordQuote(IWin32Window owner, QuoteRecord r, bool invoice)
+        {
+            if (r == null) return;
+            using (var f = NewRecordQuoteForm(r, invoice)) f.ShowDialog(owner);
+        }
+
+        QuoteForm NewRecordQuoteForm(QuoteRecord r, bool invoice)
+        {
+            EnsureHistory();
+            bool owned;
+            Image pic = RecordPicture(r, out owned);
+            string help = invoice
+                ? L.S("Making the invoice (copy or save) gives it a number and ticks Printed in the history. Esc closes.",
+                      "Når fakturaen laves (kopi eller gem), får den et nummer, og Printet bliver sat i historikken. Esc lukker.")
+                : L.S("Copying or saving puts the name and price on this quote in the history. Esc closes.",
+                      "Når du kopierer eller gemmer, kommer navn og pris på dette tilbud i historikken. Esc lukker.");
+            var f = new QuoteForm(RecordModelName(r), r.Customer ?? "", r.For == History.ForFriends, settings.QuoteDark != 0,
+                new List<string>(History.RecentCustomers(history, 10)), r.OthersPrice, r.FriendsPrice,
+                (friends, name) => BuildRecordQuote(r, friends, name, invoice, pic),
+                (IWin32Window o, QuoteExport kind, bool friends, bool dark, string customer, out bool failed) =>
+                    ExportRecord(o, r, invoice, kind, friends, dark, customer, pic, out failed),
+                (friends, dark) =>
+                {
+                    settings.QuoteDark = dark ? 1 : 0;   // the price choice belongs to the record (For), not to Settings
+                    if (!offline) settings.Save();
+                },
+                invoice, help);
+            if (owned && pic != null) f.FormClosed += delegate { pic.Dispose(); };
+            return f;
+        }
+
+        /// The record's picture: the model on screen when it is the same link/file, else a local .3mf's own picture.
+        Image RecordPicture(QuoteRecord r, out bool owned)
+        {
+            owned = false;
+            string src = (r.Source ?? "").Trim();
+            if (src.Length > 0 && jobLoaded && modelImage != null && string.Equals(src, txtUrl.Text.Trim(), StringComparison.OrdinalIgnoreCase))
+                return modelImage;
+            string file = src.Trim('"');
+            if (offline || !file.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase)) return null;
+            try
+            {
+                if (!File.Exists(file)) return null;
+                var bytes = BambuSlicer.FromProject(file);
+                if (bytes == null) return null;
+                owned = true;
+                return PrepareModelPicture(bytes);
+            }
+            catch { owned = false; return null; }
+        }
+
+        static string RecordModelName(QuoteRecord r)
+        {
+            string m = (r.Model ?? "").Trim();
+            return m.Length > 0 ? m : L.S("3D print", "3D-print");
+        }
+
+        /// The page of a saved record: its saved inputs and prices (History.ToInput + SavedSettings), quote number and
+        /// date from SavedAt; invoice: its number and date (or the next number and today while it isn't made yet),
+        /// due date and the payment ways set in Settings.
+        QuoteData BuildRecordQuote(QuoteRecord r, bool friends, string customer, bool invoice, Image pic)
+        {
+            DateTime saved;
+            if (!History.TryTime(r.SavedAt, out saved)) saved = DateTime.Now;
+            var d = new QuoteData
+            {
+                Name = (settings.QuoteName ?? "").Trim(),
+                Customer = (customer ?? "").Trim(),
+                Model = RecordModelName(r),
+                Link = ShortLink(r.Source),
+                Picture = pic,
+                Logo = Logo,
+                Hours = r.Hours, Minutes = r.Minutes,
+                Weight = Num.Fmt(r.Grams) + " g",
+                Printer = PrinterText(),
+                Number = History.QuoteNumber(r), Date = saved, ValidUntil = settings.QuoteValidUntil(saved),
+                PlateName = QuotePlate(),
+                PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? r.PurgeGrams : -1,
+                Breakdown = Pricing.Breakdown(History.ToInput(r), History.SavedSettings(r, settings), friends, null)
+            };
+            // N4: the page shows the saved price (as Copy text and the History list do), even if the inputs no longer give it
+            MatchSavedTotal(d.Breakdown, friends ? r.FriendsPrice : r.OthersPrice);
+            var types = new List<string>();
+            if (r.Filaments != null)
+                for (int k = 0; k < r.Filaments.Count; k++)
+                {
+                    var f = r.Filaments[k];
+                    d.MaterialNames.Add(MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
+                    d.MaterialColours.Add(ParseColour(f.Colour));
+                    string t = (f.Type ?? "").Trim();
+                    if (t.Length > 0 && !types.Contains(t)) types.Add(t);
+                }
+            else d.MaterialNames.Add(BambuSlicer.ShortName(settings.FilamentPreset).Trim());
+            if (r.Filaments != null && r.Filaments.Count >= 2)
+            {
+                string n = L.F("{0} colours", "{0} farver", r.Filaments.Count);
+                d.Material = types.Count > 0 ? string.Join(" + ", types) + ", " + n : n;
+            }
+            else d.Material = d.MaterialNames[0];
+            if (invoice)
+            {
+                DateTime billed = DateTime.MinValue;
+                bool made = !string.IsNullOrEmpty(r.InvoiceNo) && History.TryTime(r.BilledAt, out billed);
+                if (!made) billed = invoiceWhen ?? DateTime.Now;
+                d.Invoice = true;
+                d.InvoiceNo = made ? r.InvoiceNo : L.S("(new)", "(ny)");   // the random code is drawn when the invoice is made
+                d.Date = billed;
+                // N3: a made invoice keeps what it said then (its snapshot); older ones and new ones use today's settings
+                var inv = History.InvoiceInfo(r, settings, billed);
+                d.Due = inv.Due;
+                d.PayMobilePay = (inv.MobilePay ?? "").Trim();
+                d.PayBank = (inv.Bank ?? "").Trim();
+                d.Name = (inv.FromName ?? "").Trim();
+            }
+            return d;
+        }
+
+        /// Scales a recomputed breakdown to a record's saved price (when they differ: hand-edited file, older formula), so
+        /// the page's lines and total agree with the saved price. Nothing changes when they already match.
+        static void MatchSavedTotal(QuoteBreakdown b, double saved)
+        {
+            if (b == null || b.Lines == null || saved <= 0) return;
+            long want = Pricing.ShownOre(saved);
+            if (want == b.TotalOre) return;
+            double sum = 0;
+            foreach (var l in b.Lines) sum += Math.Max(0, l.Exact);
+            if (sum <= 0) return;
+            double k = want / 100.0 / sum;
+            foreach (var l in b.Lines) l.Exact = Math.Max(0, l.Exact) * k;
+            b.Price = saved;
+            b.TotalOre = want;
+            Pricing.SplitOre(b.Lines, want);
+            foreach (var l in b.Lines)
+                if (l.Parts != null)
+                {
+                    foreach (var part in l.Parts) part.Exact *= k;
+                    Pricing.SplitOre(l.Parts, l.Ore);
+                }
+        }
+
+        /// One export of a record's quote / invoice: file dialog first (null = cancelled), then the record gets the name
+        /// and For (and the invoice number), the history is saved, the page is drawn (PDF always light) and copied / written.
+        string ExportRecord(IWin32Window owner, QuoteRecord r, bool invoice, QuoteExport kind, bool friends, bool dark,
+                            string customer, Image pic, out bool failed)
+        {
+            failed = false;
+            customer = (customer ?? "").Trim();
+            if (kind == QuoteExport.History)
+            {
+                // "Save to history" of a saved record: only its name and price (For); an invoice is not made by this
+                r.Customer = customer;
+                r.For = friends ? History.ForFriends : History.ForCustomer;
+                string e = offline ? null : History.Save(history);
+                if (e != null) { failed = true; return e; }
+                return L.S("✓ Saved to history.", "✓ Gemt i historikken.");
+            }
+            if (invoice && customer.Length == 0)
+            {
+                failed = true;
+                return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
+            }
+            DateTime now = invoiceWhen ?? DateTime.Now;
+            string path = null;
+            if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
+            {
+                bool pdf = kind == QuoteExport.Pdf;
+                string title = invoice ? (pdf ? L.S("Save invoice as PDF", "Gem faktura som PDF") : L.S("Save invoice picture", "Gem faktura som billede"))
+                                       : (pdf ? L.S("Save quote as PDF", "Gem tilbud som PDF") : L.S("Save quote picture", "Gem tilbud som billede"));
+                // "2026-11-02 Model - Name": the quote's date, for an invoice its date (today while it isn't made yet)
+                DateTime qd;
+                if (invoice) { if (string.IsNullOrEmpty(r.InvoiceNo) || !History.TryTime(r.BilledAt, out qd)) qd = now; }
+                else if (!History.TryTime(r.SavedAt, out qd)) qd = DateTime.Now;
+                string name = ShortFileName(qd.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), RecordModelName(r), customer);
+                using (var dlg = new SaveFileDialog
+                {
+                    Title = title,
+                    Filter = pdf ? "PDF (*.pdf)|*.pdf" : L.S("PNG picture", "PNG-billede") + " (*.png)|*.png",
+                    FileName = name + (pdf ? ".pdf" : ".png"), AddExtension = true, OverwritePrompt = true
+                })
+                {
+                    if (dlg.ShowDialog(owner) != DialogResult.OK) return null;
+                    path = dlg.FileName;
+                }
+            }
+            r.Customer = customer;
+            r.For = friends ? History.ForFriends : History.ForCustomer;
+            string err = null;
+            if (invoice)
+            {
+                History.MakeInvoice(history, r, now, settings);   // random code (never given twice: settings.UsedInvoiceNos), date, Printed
+                if (!offline) settings.Save();
+            }
+            if (!offline) err = History.Save(history);
+            string done;
+            try
+            {
+                if (kind == QuoteExport.Text)
+                {
+                    Clipboard.SetText(RecordText(r, friends, invoice));
+                    done = invoice ? L.S("✓ Invoice text copied", "✓ Fakturaen er kopieret som tekst") : L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
+                }
+                else
+                {
+                    var data = BuildRecordQuote(r, friends, customer, invoice, pic);
+                    using (var bmp = QuotePage.Render(data, dark && kind != QuoteExport.Pdf))   // a printed PDF is always light
+                    {
+                        if (kind == QuoteExport.Copy) QuotePage.CopyToClipboard(bmp);
+                        else if (kind == QuoteExport.Png) bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                        else QuotePage.SavePdf(bmp, path);
+                    }
+                    done = kind == QuoteExport.Copy
+                        ? (invoice ? L.S("✓ Invoice picture copied", "✓ Fakturaen er kopieret som billede") : L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede"))
+                        : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
+                }
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                return (kind == QuoteExport.Copy || kind == QuoteExport.Text ? L.S("Clipboard: ", "Udklipsholder: ") : "") + ex.Message;
+            }
+            if (err != null) { failed = true; return done + ". " + err; }
+            return done + (invoice ? L.F(". Invoice no. {0} is in the history.", ". Faktura nr. {0} er gemt i historikken.", r.InvoiceNo)
+                                   : L.S(" and saved to history.", " og gemt i historikken."));
+        }
+
+        /// A record as plain text: title, name, model, time and grams, the chosen price; invoice: number, dates, payment.
+        string RecordText(QuoteRecord r, bool friends, bool invoice)
+        {
+            string nl = Environment.NewLine;
+            string text = (invoice ? L.S("Invoice", "Faktura") + " " + r.InvoiceNo : L.S("3D print quote", "Tilbud på 3D-print") + " " + History.QuoteNumber(r)) + nl;
+            if (!string.IsNullOrEmpty(r.Customer)) text += (invoice ? L.S("Bill to: ", "Kunde: ") : L.S("For: ", "Til: ")) + r.Customer + nl;
+            text += "Model: " + RecordModelName(r) + nl;
+            string link = ShortLink(r.Source);
+            if (link.Length > 0) text += link + nl;
+            text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g", r.Hours, r.Minutes, Num.Fmt(r.Grams)) + nl;
+            text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(friends ? r.FriendsPrice : r.OthersPrice);
+            if (invoice)
+            {
+                DateTime billed;
+                if (!History.TryTime(r.BilledAt, out billed)) billed = DateTime.Now;
+                var inv = History.InvoiceInfo(r, settings, billed);   // N3: the invoice's own snapshot when it has one
+                text += nl + L.F("Invoice date {0}, please pay by {1}", "Fakturadato {0}, betales senest {1}",
+                                 QuotePage.LongDate(billed), QuotePage.LongDate(inv.Due));
+                string mp = (inv.MobilePay ?? "").Trim(), bank = (inv.Bank ?? "").Trim();
+                if (mp.Length > 0) text += nl + "MobilePay: " + mp;
+                if (bank.Length > 0) text += nl + L.S("Bank: ", "Bank: ") + bank;
+                if (mp.Length > 0 || bank.Length > 0)
+                    text += nl + L.F("Please write invoice no. {0} with the payment.", "Skriv fakturanr. {0} ved betalingen.", r.InvoiceNo);
+            }
+            return text;
+        }
+
+        /// Picture mode: the invoice page of the job on screen (sample number, date, customer and payment ways; nothing saved).
+        internal Bitmap RenderSampleInvoice()
+        {
+            if (!offline || last == null || lastInput == null) return null;
+            var when = new DateTime(2026, 11, 4, 17, 45, 0);
+            var d = BuildQuote(false, when, History.QuoteNumber(when), "Lene Hansen");
+            d.Invoice = true;
+            d.InvoiceNo = "2026-K7Q4";
+            d.Due = settings.InvoiceDue(when);
+            d.PayMobilePay = "12 34 56 78";
+            d.PayBank = L.S("reg. 1234, account 0012345678", "reg.nr. 1234, konto 0012345678");
+            return QuotePage.Render(d, false);
+        }
+
+        /// Picture mode: the main window after "Repeat print" of a record (no slicing offline).
+        internal void SampleRepeat(QuoteRecord r) { Repeat(r); }
+
+        /// Picture mode: the quote page of the job on screen (fixed date 4 Nov 2026 17:45, nothing saved).
+        internal Bitmap RenderSampleQuote(bool dark, string customer)
+        {
+            if (!offline || last == null || lastInput == null) return null;
+            var when = new DateTime(2026, 11, 4, 17, 45, 0);
+            return QuotePage.Render(BuildQuote(settings.QuoteFriends, when, History.QuoteNumber(when), customer), dark);
+        }
+
+        /// Picture mode: the quote window for the job on screen, with a sample customer (fixed date; never saves:
+        /// exports in picture mode only write the in-memory history, and the window is never clicked).
+        internal QuoteForm SampleQuoteWindow(string customer)
+        {
+            if (!offline || last == null || lastInput == null) return null;
+            var f = NewQuoteForm(customer);
+            quoteWhen = new DateTime(2026, 11, 4, 17, 45, 0);
+            f.Redraw();
+            return f;
         }
 
         // ---------- price history ----------
@@ -2270,6 +2897,16 @@ namespace PrintPrice
         /// The same quote again within 10 minutes replaces the last entry (History.Add).
         string SaveToHistory()
         {
+            QuoteRecord saved;
+            return SaveToHistory(0, null, out saved);
+        }
+
+        /// forWho = History.ForFriends / ForCustomer: a quote export, saved with that For (History.AddFor) and Customer
+        /// (empty = none); 0 = the Save button (a reopened quote keeps its For; the same quote saved again keeps its
+        /// Customer). saved = the record now in the list (null if there was nothing to save).
+        string SaveToHistory(int forWho, string customer, out QuoteRecord saved)
+        {
+            saved = null;
             if (last == null || lastInput == null) return L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu.");
             EnsureHistory();
             var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", txtUrl.Text, DateTime.Now);
@@ -2286,7 +2923,18 @@ namespace PrintPrice
                 if (filaments != null) r.PurgeGrams = jobPurge;
             }
             if (reopened != null) r.For = reopened.For;   // opened again and re-saved: same person as before
-            savedId = History.Add(history, r).Id;   // left out of the payback debt from now on (same price when saved again)
+            if (repeatOf != null) { r.For = repeatOf.For; r.RepeatOf = repeatOf.Id ?? ""; }   // a repeat print: new record, same person
+            if (forWho != 0)
+            {
+                saved = History.AddFor(history, r, forWho);
+                saved.Customer = (customer ?? "").Trim();   // the name typed now (a same-quote replace takes it too)
+            }
+            else
+            {
+                if (history.Count > 0 && History.SameQuote(history[0], r)) r.Customer = history[0].Customer ?? "";
+                saved = History.Add(history, r);
+            }
+            savedId = saved.Id;   // left out of the payback debt from now on (same price when saved again)
             if (offline) return null;   // picture mode never writes
             return History.Save(history);
         }
@@ -2299,7 +2947,12 @@ namespace PrintPrice
             historyProblem = null;   // shown once
             using (var dlg = new HistoryForm(history, problem, offline))
             {
-                if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Selected != null) Reopen(dlg.Selected);
+                dlg.QuoteRequested = (owner, rec, invoice) => ShowRecordQuote(owner, rec, invoice);
+                if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Selected != null)
+                {
+                    if (dlg.RepeatSelected) Repeat(dlg.Selected);
+                    else Reopen(dlg.Selected);
+                }
                 else Recalculate();   // Failed / For / Delete in the list change the payback debt
             }
         }
@@ -2310,7 +2963,69 @@ namespace PrintPrice
         internal void Reopen(QuoteRecord r)
         {
             if (r == null || cts != null) return;
+            FillFromRecord(r, false);
+            reopened = r;   // after Recalculate/SetAuto, which clear it
+            UpdateReopenedLine();
+        }
+
+        /// "Repeat print" (History): the same print priced again with today's prices. Fills the saved time, grams and
+        /// colours at once (today's kr/kg per material and today's electricity price), then slices the saved link or
+        /// file again (the file picker opens again for multi-file Printables models). Slicing not possible (link or file
+        /// gone, no Bambu Studio, error, Cancel) = the saved time and weight stay, with a note. Saving it makes a new
+        /// record with RepeatOf = the original's Id and the same For.
+        internal async void Repeat(QuoteRecord r)
+        {
+            if (r == null || cts != null) return;
+            FillFromRecord(r, true);
+            repeatOf = r;
+            string src = (r.Source ?? "").Trim().Trim('"');
+            string id = src.Length > 0 ? Printables.ParseId(src) : null;
+            bool local = id == null && src.Length > 0 && File.Exists(src) && BambuSlicer.IsModelFile(src);
+            if (offline) { ShowRepeatLine(r, null); return; }   // picture mode never slices
+            if (id == null && !local)
+            {
+                ShowRepeatLine(r, src.Length == 0 ? L.S("no link or file was saved", "der blev ikke gemt et link eller en fil")
+                                                  : L.S("the link or file isn't there any more", "linket eller filen findes ikke længere"));
+                return;
+            }
+            bool ok = await AnalyzeAsync(id, local ? new List<string> { src } : null, res => KeepSavedMaterials(res, r));
+            if (ok) { repeatOf = r; ShowRepeatLine(r, null); return; }
+            string why = (lblAuto.Text ?? "").Trim().TrimEnd('.');
+            FillFromRecord(r, true);   // back to the saved time, grams and colours (Analyze reset the job)
+            repeatOf = r;
+            ShowRepeatLine(r, why.Length > 0 ? why : L.S("slicing failed", "slicing mislykkedes"));
+        }
+
+        /// A repeat's new slice keeps the saved material per colour (name and type) when the colour count is the same,
+        /// so the kr/kg is today's price of the same material.
+        static void KeepSavedMaterials(SliceResult res, QuoteRecord r)
+        {
+            if (res == null || r.Filaments == null || res.Filaments.Count != r.Filaments.Count) return;
+            for (int k = 0; k < res.Filaments.Count; k++)
+            {
+                var saved = r.Filaments[k];
+                if (!string.IsNullOrEmpty(saved.Name)) res.Filaments[k].Profile = saved.Name;
+                if (!string.IsNullOrEmpty(saved.Type)) res.Filaments[k].Type = saved.Type;
+            }
+        }
+
+        /// Shows the repeat lines in the model info box (why = not sliced again: warning stripe + the reason).
+        void ShowRepeatLine(QuoteRecord r, string why)
+        {
+            autoIsError = false;
+            repeatLine = r;
+            repeatWhy = why;
+            UpdateReopenedLine();
+            SetAutoColor();
+        }
+
+        /// The boxes from a saved record. repeat = false ("Open again"): its saved kr/kg and electricity price (today's
+        /// box value is kept to come back to); repeat = true: today's kr/kg per material and today's electricity price.
+        void FillFromRecord(QuoteRecord r, bool repeat)
+        {
             reopened = null;   // no half-updated lines of an earlier one while the boxes fill
+            repeatLine = null;
+            repeatOf = null;
             savedId = null;    // saving it again is a new sale: it pays back again
             SetUrlHint(false);
             txtUrl.Text = r.Source ?? "";
@@ -2342,36 +3057,57 @@ namespace PrintPrice
                 }
             }
             SetColours(slice);   // old record (no saved material): neutral swatch + Settings' filament profile
-            fillingColours = true;   // the saved kr/kg, not the material's remembered one (and not remembered again)
-            if (filaments != null)
-                for (int i = 0; i < colourRows; i++)   // "+N more" row: one shared box, the first of its colours' price
-                    rowPrice[i].Text = Num.Fmt(r.Filaments[filaments[rowItems[i][0]].Slot - 1].PricePerKg);
-            else rowPrice[0].Text = Num.Fmt(one != null ? one.PricePerKg : r.FilamentDkkPerKg);
-            fillingColours = false;
+            if (!repeat)   // a repeat keeps SetColours' kr/kg = today's remembered price of each material
+            {
+                fillingColours = true;   // the saved kr/kg, not the material's remembered one (and not remembered again)
+                if (filaments != null)
+                    for (int i = 0; i < colourRows; i++)   // "+N more" row: one shared box, the first of its colours' price
+                        rowPrice[i].Text = Num.Fmt(r.Filaments[filaments[rowItems[i][0]].Slot - 1].PricePerKg);
+                else rowPrice[0].Text = Num.Fmt(one != null ? one.PricePerKg : r.FilamentDkkPerKg);
+                fillingColours = false;
+            }
             txtGrams.Text = Num.Fmt(r.Grams);
             txtHours.Text = r.Hours.ToString();
             txtMinutes.Text = r.Minutes.ToString();
-            txtElecPrice.Text = r.ElectricityDkkPerKwh.ToString("0.00##", Num.Dk);
-            SetPowerInfo(L.F("Electricity price {0} kr/kWh from the saved quote. Click Update for today's.",
-                             "Elpris {0} kr/kWh fra det gemte tilbud. Klik Opdatér for dagens.",
-                             r.ElectricityDkkPerKwh.ToString("0.00", Num.Dk)), false);
+            string savedElec = r.ElectricityDkkPerKwh.ToString("0.00", Num.Dk);
+            if (!repeat)
+            {
+                if (!elecSaved) elecToday = txtElecPrice.Text;   // today's value, for a later Repeat print
+                elecSaved = true;
+                txtElecPrice.Text = r.ElectricityDkkPerKwh.ToString("0.00##", Num.Dk);
+                SetPowerInfo(L.F("Electricity price {0} kr/kWh from the saved quote. Click Update for today's.",
+                                 "Elpris {0} kr/kWh fra det gemte tilbud. Klik Opdatér for dagens.", savedElec), false);
+            }
+            else
+            {
+                if (elecSaved && elecToday != null) txtElecPrice.Text = elecToday;   // an earlier "Open again" put an old price in
+                elecSaved = false;
+                SetPowerInfo(L.F("Today's electricity price; the saved quote used {0} kr/kWh. Click Update for the live price.",
+                                 "Dagens elpris; det gemte tilbud brugte {0} kr/kWh. Klik Opdatér for live-prisen.", savedElec), false);
+                if (!offline && settings.AutoPowerPrice != 0) FetchPowerPrice();
+            }
             autoIsError = false;
             SetAutoColor();
             Recalculate();
-            reopened = r;   // after Recalculate/SetAuto, which clear it
-            UpdateReopenedLine();
+        }
+
+        /// The record's name for the info box lines: "model name", else the file name, else "a quote".
+        static string RecordName(QuoteRecord r)
+        {
+            return !string.IsNullOrEmpty(r.Model) ? "\"" + r.Model + "\""
+                 : (r.Source ?? "").Length > 0 ? Path.GetFileName((r.Source ?? "").Trim().Trim('"')) : L.S("a quote", "et tilbud");
         }
 
         /// "↻ Opened from history: …, saved …" + muted "Saved price a / b kr. — now c / d kr. (today's settings)".
         /// Follows every recalculation (typing, new settings) while the quote is open.
         void UpdateReopenedLine()
         {
+            if (repeatLine != null) { UpdateRepeatLine(); return; }
             if (reopened == null) return;
             var r = reopened;
             DateTime t;
             string when = History.TryTime(r.SavedAt, out t) ? t.ToString("dd-MM-yyyy HH:mm", Num.Dk) : r.SavedAt;
-            string name = !string.IsNullOrEmpty(r.Model) ? "\"" + r.Model + "\""
-                        : (r.Source ?? "").Length > 0 ? Path.GetFileName((r.Source ?? "").Trim().Trim('"')) : L.S("a quote", "et tilbud");
+            string name = RecordName(r);
             string main = L.F("↻ Opened from history: {0}, saved {1}.", "↻ Åbnet fra historikken: {0}, gemt {1}.", name, when);
             Func<double, string> n = v => v.ToString("0.00", Num.Dk);
             string now = last != null ? n(last.FriendsPrice) + " / " + n(last.OthersPrice) + " kr." : "–";
@@ -2384,9 +3120,42 @@ namespace PrintPrice
             }
         }
 
+        /// "↻ Repeat print of "X" (first quoted dd-MM-yyyy) with today's prices." (or "…: not sliced again (why), so the
+        /// saved time and weight are used.") + muted "Was a kr. → now b kr. (+c kr.)" for the record's own price (For).
+        void UpdateRepeatLine()
+        {
+            var r = repeatLine;
+            DateTime t;
+            string when = History.TryTime(r.SavedAt, out t) ? t.ToString("dd-MM-yyyy", Num.Dk) : r.SavedAt;
+            string main = repeatWhy == null
+                ? L.F("↻ Repeat print of {0} (first quoted {1}) with today's prices.", "↻ Print igen af {0} (første tilbud {1}) med dagens priser.",
+                      RecordName(r), when)
+                : L.F("↻ Repeat print of {0}: not sliced again ({1}), so the saved time and weight are used.",
+                      "↻ Print igen af {0}: ikke slicet igen ({1}), så den gemte tid og vægt bruges.", RecordName(r), repeatWhy);
+            bool friends = r.For == History.ForFriends;
+            double was = History.PriceFor(r);
+            string muted;
+            if (last == null) muted = L.F("Was {0}", "Før {0}", Num.Kr(was));
+            else
+            {
+                double now = friends ? last.FriendsPrice : last.OthersPrice;
+                double diff = Math.Round(now - was, 2);
+                string change = diff > 0 ? "+" + Num.Kr(diff) : diff < 0 ? "−" + Num.Kr(-diff) : L.S("same price", "samme pris");
+                muted = L.F("Was {0} → now {1} ({2}), {3} price", "Før {0} → nu {1} ({2}), {3}", Num.Kr(was), Num.Kr(now), change,
+                            friends ? L.S("friends & family", "venne- og familiepris") : L.S("customer", "kundepris"));
+            }
+            if (lblAuto.Text != main || lblAuto.MutedLine != muted)
+            {
+                lblAuto.SetText(main, muted);
+                SetAutoColor();
+            }
+        }
+
         void ClearJob()
         {
             reopened = null;
+            repeatLine = null;
+            repeatOf = null;
             savedId = null;
             if (lblAuto.MutedLine.Length > 0) ShowAutoIdle();   // the "Opened from history" lines go with the job
             txtUrl.Text = "";

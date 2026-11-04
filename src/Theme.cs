@@ -25,6 +25,25 @@ namespace PrintPrice
         public static readonly Color InfoAccent = Color.FromArgb(150, 30, 35);    // dark red
         public static readonly Color Warning = Color.FromArgb(240, 180, 70);
 
+        /// Customer-facing quote page (QuotePage), light look: printed / sent, so it is NOT the app's dark theme.
+        /// The dark quote look uses the app colours above (Back, InfoBack, Border, Text, Muted, InfoAccent, Others, Friends).
+        public static class QuoteLight
+        {
+            public static readonly Color Page = Color.White;
+            public static readonly Color Header = Color.FromArgb(32, 32, 32);          // = Back: dark header band behind the logo
+            public static readonly Color HeaderText = Color.White;
+            public static readonly Color HeaderMuted = Color.FromArgb(175, 175, 180);
+            public static readonly Color Ink = Color.FromArgb(30, 30, 32);
+            public static readonly Color Muted = Color.FromArgb(110, 110, 116);
+            public static readonly Color Faint = Color.FromArgb(150, 150, 156);
+            public static readonly Color Line = Color.FromArgb(222, 222, 226);
+            public static readonly Color PictureBack = Color.FromArgb(245, 245, 247);
+            public static readonly Color TotalBack = Color.FromArgb(250, 240, 240);
+            public static readonly Color Customer = Color.FromArgb(150, 30, 35);      // = InfoAccent: customer total on white
+            public static readonly Color Friends = Color.FromArgb(25, 135, 85);       // darker Friends green, readable on white
+            public static readonly Color DotRing = Color.FromArgb(160, 160, 165);
+        }
+
         /// Right margin after a row caption (96 dpi units): ~30 px clear gap to the box after the longest label,
         /// in the main window and Settings alike (label columns are AutoSize, so this follows the real text width).
         public const int LabelGap = 21;
@@ -1207,9 +1226,14 @@ namespace PrintPrice
             textMenu.Show(l, at);
         }
 
-        sealed class DarkMenuColours : ProfessionalColorTable
+        internal sealed class DarkMenuColours : ProfessionalColorTable
         {
             public override Color ToolStripDropDownBackground { get { return Theme.Input; } }
+            public override Color SeparatorDark { get { return Theme.Border; } }
+            public override Color SeparatorLight { get { return Theme.Input; } }
+            public override Color CheckBackground { get { return Theme.Input; } }
+            public override Color CheckSelectedBackground { get { return Theme.InfoAccent; } }
+            public override Color CheckPressedBackground { get { return Theme.InfoAccent; } }
             public override Color MenuBorder { get { return Theme.Border; } }
             public override Color MenuItemBorder { get { return Theme.InfoAccent; } }
             public override Color MenuItemSelected { get { return Theme.InfoAccent; } }

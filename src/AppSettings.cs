@@ -14,13 +14,32 @@ namespace PrintPrice
         public double MachineRatePerHour = Wear.DefaultRate;   // DKK/h added to both prices (A1 wear & tear)
         public double AutoWearRate = 1;                        // 1 = calculate from nozzle, filament & plate
         public double FailedPrintPct = 0;       // % added to material + power for failed prints / reprints (0 = off)
-        public double FailedPayback = 0;        // 1 = add a payback to new quotes until failed prints are made back (0 = off)
-        public double FailedPaybackPct = 25;    // payback per quote: % of material + power (never more than what's left)
+        public double FailedPayback = 1;        // 1 = add a payback to new quotes until failed prints are made back (0 = off)
+        public double FailedPaybackPct = 10;    // payback per quote: % of material + power (never more than what's left)
         public double FailedPaybackWho = 2;     // 1 = both prices, 2 = customers only
-        public double MinimumPrice = 0;         // DKK, customer price floor
+        public double MinimumPrice = 50;        // DKK, customer price floor
         public double RoundTo = 0;              // round prices up to nearest N kr. (0 = off)
         public double LastFilamentPrice = 180;  // DKK/kg
         public double LastElectricityPrice = 2.00; // DKK/kWh
+
+        // Settings file version. 2 = v1.8.0 defaults (MinimumPrice 50, FailedPayback on, FailedPaybackPct 10).
+        // A file without the key (or below 2) gets UpgradeOldDefaults once on Load; new files are 2 straight away.
+        public const int CurrentSettingsVersion = 2;
+        public double SettingsVersion = CurrentSettingsVersion;
+
+        /// One-time step for a settings file older than version 2: a value still at the OLD default counts as "never
+        /// changed" and gets the new default (MinimumPrice 0 -> 50, FailedPayback 0 -> 1, FailedPaybackPct 25 -> 10).
+        /// Any other value is kept. Sets SettingsVersion = 2. Doesn't save.
+        internal void UpgradeOldDefaults()
+        {
+            if (SettingsVersion < 2)
+            {
+                if (MinimumPrice == 0) MinimumPrice = 50;
+                if (FailedPayback == 0) FailedPayback = 1;
+                if (FailedPaybackPct == 25) FailedPaybackPct = 10;
+            }
+            SettingsVersion = CurrentSettingsVersion;
+        }
 
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
@@ -36,7 +55,56 @@ namespace PrintPrice
         public string FilamentPreset = "Bambu PLA Matte";
         public string BedType = "High Temp Plate";      // = Smooth PEI plate (Bambu's internal name)
 
+        public const string DefaultPrinterName = "Bambu Lab A1";
+        public string PrinterName = DefaultPrinterName;   // shown by "Power (avg.)"; trimmed, max 40, empty = default
+
+        public static string CleanPrinterName(string v)
+        {
+            v = (v ?? "").Trim();
+            if (v.Length > 40) v = v.Substring(0, 40).Trim();
+            return v.Length == 0 ? DefaultPrinterName : v;
+        }
+
         public string Language = "";            // "" = auto (Danish if Windows is Danish), "en", "da"
+
+        // Quote export (picture / PDF)
+        public const string QuotePriceCustomer = "customer", QuotePriceFriends = "friends";
+        public string QuoteName = "Gettic";     // name on the quote (may be empty)
+        public double QuoteValidDays = 14;      // valid until = quote date + N days (whole days, min 1)
+        public string QuotePrice = QuotePriceCustomer;   // which price the quote shows: "customer" or "friends"
+        public double QuoteDark = 1;            // 1 = quote picture in the dark look (default), 0 = light; saved as "QuoteLook" (the old "QuoteDark" key is ignored so the dark default reaches everyone once)
+
+        // Invoice: days to pay (1-365), and how to pay (shown on the invoice only when not empty)
+        public double InvoiceDueDays = 14;
+        public string PayMobilePay = "";
+        public string PayBank = "";
+        public string UsedInvoiceNos = "";   // invoice codes ever given out, comma-separated, last 2000 (History.AddUsedInvoiceNo): a code is never given twice
+
+        /// Payment due date: the billed date (time dropped) + InvoiceDueDays (whole, 1-365; bad values -> 14).
+        public DateTime InvoiceDue(DateTime billed)
+        {
+            double d = InvoiceDueDays;
+            int days = double.IsNaN(d) || d < 1 || d > 365 ? 14 : (int)Math.Round(d);
+            return billed.Date.AddDays(days);
+        }
+
+        /// True when the quote shows the friends & family price.
+        public bool QuoteFriends { get { return QuotePrice == QuotePriceFriends; } }
+
+        /// The History.For value of the chosen quote price (History.ForFriends / ForCustomer).
+        public int QuoteFor { get { return QuoteFriends ? History.ForFriends : History.ForCustomer; } }
+
+        /// Last day the quote is valid: the quote's date (time dropped) + QuoteValidDays (at least 1).
+        public DateTime QuoteValidUntil(DateTime quoteDate)
+        {
+            return ValidUntil(quoteDate, QuoteValidDays);
+        }
+
+        public static DateTime ValidUntil(DateTime quoteDate, double days)
+        {
+            int d = double.IsNaN(days) || days < 1 ? 1 : (days > 3650 ? 3650 : (int)Math.Round(days));
+            return quoteDate.Date.AddDays(d);
+        }
 
         // Remembered kr./kg per filament short name ("Bambu PLA Matte" -> 200). Saved as one line per name:
         // FilamentPrice=200|Bambu PLA Matte (number first, so any name works; older versions ignore the line).
@@ -169,6 +237,10 @@ namespace PrintPrice
             d["AutoUpdateCheck"] = AutoUpdateCheck;
             d["PowerAddOn"] = PowerAddOn;
             d["PowerIncludeVat"] = PowerIncludeVat;
+            d["QuoteValidDays"] = QuoteValidDays;
+            d["QuoteLook"] = QuoteDark;
+            d["InvoiceDueDays"] = InvoiceDueDays;
+            d["SettingsVersion"] = SettingsVersion;
             return d;
         }
 
@@ -182,6 +254,12 @@ namespace PrintPrice
             d["BedType"] = BedType;
             d["PriceArea"] = PriceArea;
             d["Language"] = Language;
+            d["PrinterName"] = CleanPrinterName(PrinterName);
+            d["QuoteName"] = QuoteName;
+            d["QuotePrice"] = QuotePrice;
+            d["PayMobilePay"] = PayMobilePay;
+            d["PayBank"] = PayBank;
+            d["UsedInvoiceNos"] = UsedInvoiceNos;
             return d;
         }
 
@@ -206,6 +284,10 @@ namespace PrintPrice
                 case "AutoUpdateCheck": AutoUpdateCheck = v; break;
                 case "PowerAddOn":PowerAddOn = v; break;
                 case "PowerIncludeVat": PowerIncludeVat = v; break;
+                case "QuoteValidDays": if (v >= 1 && v <= 3650) QuoteValidDays = Math.Round(v); break;
+                case "QuoteLook": QuoteDark = v != 0 ? 1 : 0; break;
+                case "InvoiceDueDays": if (v >= 1 && v <= 365) InvoiceDueDays = Math.Round(v); break;
+                case "SettingsVersion": SettingsVersion = Math.Floor(v); break;
             }
         }
 
@@ -221,15 +303,23 @@ namespace PrintPrice
                 case "BedType": if (v.Length > 0) BedType = v; break;
                 case "PriceArea": if (v == "DK1" || v == "DK2") PriceArea = v; break;
                 case "Language": if (v == "" || v == "en" || v == "da") Language = v; break;
+                case "PrinterName": PrinterName = CleanPrinterName(v); break;
+                case "QuoteName": QuoteName = v; break;
+                case "QuotePrice": if (v == QuotePriceCustomer || v == QuotePriceFriends) QuotePrice = v; break;
+                case "PayMobilePay": PayMobilePay = v; break;
+                case "PayBank": PayBank = v; break;
+                case "UsedInvoiceNos": UsedInvoiceNos = v; break;
             }
         }
 
         public static AppSettings Load()
         {
             var s = new AppSettings();
+            bool read = false;
             try
             {
-                if (!File.Exists(FilePath)) return s;
+                if (!File.Exists(FilePath)) return s;   // new install: version 2 defaults
+                s.SettingsVersion = 0;                  // a file without the key is from before version 2
                 var stringKeys = s.Strings();
                 foreach (var line in File.ReadAllLines(FilePath))
                 {
@@ -241,8 +331,14 @@ namespace PrintPrice
                     double v;
                     if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0) s.SetNumber(key, v);
                 }
+                read = true;
             }
             catch { /* fall back to defaults */ }
+            if (read && s.SettingsVersion < CurrentSettingsVersion)   // unreadable file: no step, nothing saved
+            {
+                s.UpgradeOldDefaults();
+                s.Save();   // writes SettingsVersion=2, so the step runs only once
+            }
             return s;
         }
 

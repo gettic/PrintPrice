@@ -30,16 +30,32 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 - **Wear & tear:** a machine-time rate is worked out from the chosen **nozzle**, **filament** and **build plate**. It is added to both prices.
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Failed prints:** optional. Set a % in Settings and material and power are raised by it for failed prints and reprints, before the markup. The default is 0 % (off). When it is above 0, the Cost breakdown shows a "Failed prints" line.
-- **Failed prints payback:** optional. In the price history, tick **Failed** on a saved quote. With **Earn back failed prints** on in Settings, new quotes get a payback of 25 % (**% per quote**) of material + power until the failed print's material, power and wear are made back. It never adds more than what is left. It is shown as **Failed prints payback** in the Cost breakdown, is not marked up, and is added after the minimum price and before rounding. **Paid by** is **Customers only** (default; only quotes saved For = Customer count) or **Both prices**. Settings shows **Not made back yet**. A saved quote counts as sold, so delete quotes you didn't sell.
-- **Configurable:** set the markups, minimum price, rounding, failed prints, printer power, print profile, price area and language in Settings.
+- **Failed prints payback:** on by default. In the price history, tick **Failed** on a saved quote. With **Earn back failed prints** on in Settings, new quotes get a payback of 10 % (**% per quote**) of material + power until the failed print's material, power and wear are made back. It never adds more than what is left. It is shown as **Failed prints payback** in the Cost breakdown, is not marked up, and is added after the minimum price and before rounding. **Paid by** is **Customers only** (default; only quotes saved For = Customer count) or **Both prices**. Settings shows **Not made back yet**. A saved quote counts as sold, so delete quotes you didn't sell.
+- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (nozzle, print profile, filament, build plate, wear rate), **Electricity** (price area, tariffs and fees, VAT, printer power and name), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank) and **App** (language, update check, Bambu Studio path). Clicking the printer card opens the Printer tab. **Printer name** is shown on the printer card and the quote.
 - **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
-- **Copy quote:** puts a ready-to-send text on the clipboard and saves the quote in the price history.
-- **Price history:** **Save** also saves the quote (the status line shows "Saved to history."). **History…** (next to **Load file…**) lists the saved quotes.
+- **Quote page:** **Show quote…** opens a window with a live preview of an A4 quote page: logo, model picture, print time, weight, printer, material, a full price breakdown (material per colour, electricity, machine wear split into printer / spare parts / nozzle / build plate, "Work & handling", and failed prints payback, minimum price or rounding when used), the total, a quote number, a valid-until date and small print.
+  - **For:** an optional customer name (recent names from the history are offered).
+  - **Price:** Customers or Friends & family.
+  - **Look:** Dark (default) or Light for the picture. The PDF is always light.
+  - **Export:** **Copy picture**, **Save picture…**, **Save as PDF…** or **Copy text**. The **▾** on the button gives the same four as quick exports without a name.
+  - **Save to history** saves the quote with the chosen price and name without making a file. Every export is also saved to the price history. Just opening the window saves nothing.
+  - The window is large and can be resized. Click the page to zoom to 100 %, and drag to move around.
+  - The name on the quote, the number of days it is valid (default 14) and the printer name are set in Settings.
+
+<p align="center"><img src="assets/screenshot-quote.png" width="480" alt="Screenshot of a quote"></p>
+
+- **Price history:** **Save to history** saves the quote (the status line shows "Saved to history."). **History…** (next to **Load file…**) lists the saved quotes.
+  - **Month** picker (all months or one month, ‹ › to step) with six cards for that month: prints and failed prints, print time and filament, customers, friends & family, costs (material + power + wear) and profit with % of income.
   - You can search and filter the list. One **Price** column shows the friends & family or the customer price, following each row's **For** choice (Customer by default).
   - **For** and **Note** can be edited in the list and are saved at once. **Delete** asks for a second click.
-  - **Failed** is a tick column: tick a quote that was a failed print (see Failed prints payback above).
+  - **Printed** and **Failed** are tick columns. Click to tick. Quotes saved before **Printed** existed count as printed. Failed quotes feed the payback (see Failed prints payback above).
+  - **Quote…** opens the quote page of a saved quote with its saved prices.
+  - **Invoice…** makes a bill: the title is Invoice, with a random invoice code (for example 2026-K7Q4), the invoice date and a due date. A customer name is required ("Bill to"). A **Payment** block with MobilePay and/or bank details shows only if you set them in Settings. Making an invoice ticks **Printed**. The code shows in the **Invoice** column. The due date and payment details are kept with the invoice.
+  - **Repeat print** prices the same print again with today's filament and electricity prices and slices the saved link or file again. If that isn't possible, the saved time and weight are used, with a note. The info box shows "Was … → now …". A repeat is never merged with its original.
   - **Open again** (or double-click, or Enter) puts the inputs back, including the filament name and colour, and recalculates with today's settings. The model box shows the saved price next to today's.
-  - The same quote saved again within 10 minutes replaces the last one. The newest 500 quotes are kept.
+  - All actions are also in the right-click menu.
+  - The same quote saved again within 10 minutes replaces the last one. The newest 5000 quotes are kept.
+  - Saved quote and invoice files are named `<date> <model> - <name>`.
 
 <p align="center"><img src="assets/screenshot-history.png" width="480" alt="Screenshot of the History window"></p>
 
@@ -54,7 +70,7 @@ Base       = (Material + Power) × (1 + failed prints %)
 Friends    = Base × (1 + friends markup) + hours × machine-time rate
 Customers  = Base × (1 + customer markup) + hours × machine-time rate   (at least the minimum price)
 ```
-The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr. Failed prints are 0 % by default and do not affect the machine-time rate. The failed prints payback (off by default) is added to the price after the minimum price and before rounding.
+The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr. Failed prints are 0 % by default and do not affect the machine-time rate. The failed prints payback (on by default) is added to the price after the minimum price and before rounding.
 
 **Machine-time rate** (kr per print hour):
 
@@ -75,12 +91,17 @@ The default setup (0.4 stainless nozzle, PLA, smooth PEI plate) comes to **1,71 
 | Printer power | 100 W (A1 average when printing PLA) |
 | Markups | 25 % friends & family, 75 % customers |
 | Failed prints | 0 % (off; % of material + power) |
-| Failed prints payback | Off; 25 % per quote; paid by customers only |
+| Minimum price | 50 kr. (customers only) |
+| Failed prints payback | On; 10 % per quote; paid by customers only |
+| Quote | Name "Gettic", valid 14 days, customer price, dark picture |
+| Invoice | Due after 14 days; MobilePay and bank empty |
 | Language | Automatic (Danish if Windows is Danish, otherwise English) |
 | Slicing | 0.4 mm nozzle, 0.16mm Optimal, Bambu PLA Matte, Smooth PEI plate |
 | Electricity | DK1, 0,55 kr/kWh fees on top of spot, 25 % VAT |
 
 Settings, including the remembered kr/kg price per filament, are saved in `%APPDATA%\PrintPrice\settings.ini`.
+
+When you update from an older version, the old untouched defaults move to the new ones once (minimum price 50 kr., earn back failed prints on at 10 %). Values you changed are kept. The **Defaults** button in Settings uses the new defaults.
 
 ## Privacy
 The app sends no personal information anywhere. It has no account, cookies or tracking. It only connects to these services:
@@ -98,7 +119,9 @@ Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\h
 
 **Open in Studio** starts the Bambu Studio program on your PC with a copy of the sliced file. The copy is kept in `%TEMP%\PrintPrice\studio\` (older copies are deleted) and is never sent anywhere. Bambu Studio may add it to its own list of recent projects.
 
-Nothing is installed. The app writes only its settings file, the price history and temporary slicing files. To uninstall, delete PrintPrice.exe and the folder %APPDATA%\PrintPrice.
+Quotes and invoices are made on your PC. A quote picture or PDF is written only where you choose to save it, and **Copy picture** and **Copy text** put it on the clipboard. Nothing is uploaded. The invoice codes already used are kept in `settings.ini`.
+
+Nothing is installed. The app writes only its settings file, the price history, the files you save and temporary slicing files. To uninstall, delete PrintPrice.exe and the folder %APPDATA%\PrintPrice.
 
 ## Build from source
 ```powershell
@@ -120,6 +143,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/Updater.cs` | Update check and install from GitHub releases |
 | `src/History.cs` | Saved quotes (price history) |
 | `src/HistoryForm.cs` | The History window |
+| `src/QuotePage.cs`, `src/QuoteForm.cs` | The quote and invoice page (picture, PDF) and its window |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |
 | `src/Lang.cs` | English and Danish texts |
 | `src/Screenshots.cs` | Hidden `--screenshots` picture mode |

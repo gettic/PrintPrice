@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 
 namespace PrintPrice
 {
@@ -40,6 +41,40 @@ namespace PrintPrice
         public double PaybackCost;
         public double PaybackLeft;       // debt still left after this quote (debt - PaybackCost); 0 when payback is off
         public bool PaybackBothPrices;   // true = also in FriendsPrice (FailedPaybackWho = 1)
+    }
+
+    /// One line of a quote breakdown (Pricing.QuoteBreakdown). Amount is whole øre; texts belong to the ui (by Key).
+    public class QuoteLine
+    {
+        public const string Material = "material", Power = "power", Wear = "wear", Failed = "failed", Payback = "payback",
+            Work = "work", Minimum = "minimum", Rounding = "rounding";
+        // wear split (QuoteLine.Parts of the wear line)
+        public const string WearPrinter = "wear.printer", WearParts = "wear.parts", WearHotend = "wear.hotend", WearPlate = "wear.plate";
+
+        public string Key;
+        public long Ore;                  // the shown amount in øre; Amount = Ore / 100
+        public double Amount { get { return Ore / 100.0; } }
+        public double Exact;              // unrounded kr.
+        public int Index = -1;            // material: the colour's index in QuoteInput.Filaments (0 for one filament)
+        // Detail values (0 when not used):
+        //   material: Quantity = grams, UnitPrice = kr./kg      power: Quantity = kWh, UnitPrice = kr./kWh
+        //   wear: Quantity = hours, UnitPrice = kr./h (MachineRatePerHour)      failed: Quantity = FailedPrintPct
+        //   work: Quantity = markup %      payback: Quantity = FailedPaybackPct
+        //   minimum: Quantity = MinimumPrice      rounding: Quantity = RoundTo
+        public double Quantity;
+        public double UnitPrice;
+        public List<QuoteLine> Parts;     // wear only (AutoWearRate on + a Wear.Breakdown given): printer, parts, hotend,
+                                          // plate, scaled to the rate used; their Ore sum = this line's Ore. Else null.
+    }
+
+    public class QuoteBreakdown
+    {
+        public bool Friends;              // true = friends & family price, false = customer price
+        public List<QuoteLine> Lines;     // top-level lines in order; their Ore sum = TotalOre
+        public long TotalOre;             // = the shown price (Num.Kr of Price) in øre
+        public double Total { get { return TotalOre / 100.0; } }
+        public double Price;              // the price from Pricing.Calculate (FriendsPrice or OthersPrice)
+        public QuoteResult Result;        // the full Pricing.Calculate result
     }
 
     /// Estimated wear & tear for a Bambu Lab A1 per print hour, depending on nozzle, filament and build plate.
@@ -199,6 +234,117 @@ namespace PrintPrice
         {
             if (step <= 0) return value;
             return Math.Ceiling(value / step - 1e-9) * step;
+        }
+
+        // ---------- quote breakdown (quote export) ----------
+
+        /// The price shown in the app in øre: the same 2-decimal rounding as Num.Kr ("N2").
+        public static long ShownOre(double price)
+        {
+            return (long)decimal.Round(decimal.Parse(price.ToString("F2", CultureInfo.InvariantCulture),
+                CultureInfo.InvariantCulture) * 100m);
+        }
+
+        /// Line-by-line breakdown of one price (friends = friends & family price, else the customer price). The lines'
+        /// whole-øre amounts add up exactly to the shown price (largest remainder split). wear = the auto rate's split
+        /// (Wear.Calculate for the chosen nozzle/filament/plate); null or AutoWearRate off = one wear line without Parts.
+        /// Lines: material (one per colour), power, wear, failed (FailedPrintPct > 0), payback (when it is in this price),
+        /// work (markup), minimum (customer top-up), rounding; lines that are 0 are left out, except material/power/work.
+        public static QuoteBreakdown Breakdown(QuoteInput input, AppSettings s, bool friends, Wear.Breakdown wear)
+        {
+            var r = Calculate(input, s);
+            var b = new QuoteBreakdown { Friends = friends, Result = r, Price = friends ? r.FriendsPrice : r.OthersPrice };
+            var lines = new List<QuoteLine>();
+
+            bool multi = r.FilamentCosts != null;
+            if (multi)
+                for (int i = 0; i < r.FilamentCosts.Length; i++)
+                    lines.Add(new QuoteLine { Key = QuoteLine.Material, Index = i, Exact = r.FilamentCosts[i],
+                        Quantity = input.Filaments[i].Grams, UnitPrice = input.Filaments[i].PricePerKg });
+            else
+                lines.Add(new QuoteLine { Key = QuoteLine.Material, Index = 0, Exact = r.MaterialCost,
+                    Quantity = input.FilamentGrams, UnitPrice = input.FilamentDkkPerKg });
+            lines.Add(new QuoteLine { Key = QuoteLine.Power, Exact = r.PowerCost, Quantity = r.PowerKwh,
+                UnitPrice = input.ElectricityDkkPerKwh });
+
+            double wearExact = r.PrintHours * s.MachineRatePerHour;
+            var wearLine = new QuoteLine { Key = QuoteLine.Wear, Exact = wearExact, Quantity = r.PrintHours,
+                UnitPrice = s.MachineRatePerHour };
+            if (wearExact > 0) lines.Add(wearLine);
+            if (s.FailedPrintPct > 0)
+                lines.Add(new QuoteLine { Key = QuoteLine.Failed, Exact = r.FailedPrintCost, Quantity = s.FailedPrintPct });
+
+            double pct = friends ? s.FriendsMarkupPct : s.OthersMarkupPct;
+            double work = r.BaseCost * (pct / 100.0);
+            double before = r.BaseCost + work + wearExact;   // the price before minimum, payback and rounding
+            bool paid = r.PaybackCost > 0 && (!friends || r.PaybackBothPrices);
+            if (paid)
+                lines.Add(new QuoteLine { Key = QuoteLine.Payback, Exact = r.PaybackCost, Quantity = s.FailedPaybackPct });
+            lines.Add(new QuoteLine { Key = QuoteLine.Work, Exact = work, Quantity = pct });
+            if (!friends && r.BaseCost > 0 && before < s.MinimumPrice)
+                lines.Add(new QuoteLine { Key = QuoteLine.Minimum, Exact = s.MinimumPrice - before, Quantity = s.MinimumPrice });
+            if (s.RoundTo > 0)
+            {
+                double sum = 0;
+                foreach (var l in lines) sum += l.Exact;
+                lines.Add(new QuoteLine { Key = QuoteLine.Rounding, Exact = Math.Max(0, b.Price - sum), Quantity = s.RoundTo });
+            }
+
+            b.TotalOre = ShownOre(b.Price);
+            SplitOre(lines, b.TotalOre);
+
+            // optional lines that came out as 0,00 are left out (they add nothing)
+            lines.RemoveAll(l => l.Ore == 0 && l.Key != QuoteLine.Material && l.Key != QuoteLine.Power && l.Key != QuoteLine.Work);
+
+            if (s.AutoWearRate != 0 && wear != null && lines.Contains(wearLine))
+            {
+                double[] w = { wear.Printer, wear.Parts, wear.Hotend, wear.Plate };
+                string[] k = { QuoteLine.WearPrinter, QuoteLine.WearParts, QuoteLine.WearHotend, QuoteLine.WearPlate };
+                double wsum = w[0] + w[1] + w[2] + w[3];
+                if (wsum > 0)
+                {
+                    wearLine.Parts = new List<QuoteLine>();
+                    for (int i = 0; i < 4; i++)
+                    {
+                        double rate = s.MachineRatePerHour * w[i] / wsum;   // scaled to the rate actually used
+                        wearLine.Parts.Add(new QuoteLine { Key = k[i], Exact = r.PrintHours * rate, Quantity = r.PrintHours, UnitPrice = rate });
+                    }
+                    SplitOre(wearLine.Parts, wearLine.Ore);
+                }
+            }
+            b.Lines = lines;
+            return b;
+        }
+
+        /// Gives each line whole øre so they sum to total: floor of each exact amount, then the øre left over go one by
+        /// one to the lines with the largest remainders (ties: the earlier line); too many (only from float noise) are
+        /// taken back from the smallest remainders.
+        public static void SplitOre(List<QuoteLine> lines, long total)
+        {
+            int n = lines.Count;
+            if (n == 0) return;
+            var frac = new double[n];
+            long sum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                double c = Math.Max(0, lines[i].Exact) * 100.0;
+                double f = Math.Floor(c + 1e-7);
+                lines[i].Ore = (long)f;
+                frac[i] = Math.Max(0, c - f);
+                sum += lines[i].Ore;
+            }
+            long left = total - sum;
+            var order = new List<int>();
+            for (int i = 0; i < n; i++) order.Add(i);
+            order.Sort((a, c) => frac[a] != frac[c] ? frac[c].CompareTo(frac[a]) : a.CompareTo(c));   // largest first
+            for (int j = 0; left > 0; j = (j + 1) % n) { lines[order[j]].Ore++; left--; }
+            for (int guard = 0; left < 0 && guard < 100000; guard++)
+            {
+                bool took = false;
+                for (int j = n - 1; j >= 0 && left < 0; j--)
+                    if (lines[order[j]].Ore > 0) { lines[order[j]].Ore--; left++; took = true; }
+                if (!took) break;
+            }
         }
     }
 }

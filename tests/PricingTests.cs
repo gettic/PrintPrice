@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace PrintPrice.Tests
@@ -39,7 +39,7 @@ namespace PrintPrice.Tests
         {
             var s = new AppSettings();
             s.PrinterWatts = 100; s.FriendsMarkupPct = 25; s.OthersMarkupPct = 75; s.MachineRatePerHour = 2;
-            s.FailedPrintPct = 10; s.MinimumPrice = 0; s.RoundTo = 0;
+            s.FailedPrintPct = 10; s.MinimumPrice = 0; s.RoundTo = 0; s.FailedPayback = 0;
             return s;
         }
 
@@ -202,6 +202,33 @@ namespace PrintPrice.Tests
             True("History SameQuote 11 min -> no", !History.SameQuote(HistRecord(t0), HistRecord(t0.AddMinutes(11))));
             History.Add(list, HistRecord(t0.AddMinutes(9 + 11)));
             True("History Add 11 min later -> new entry", list.Count == 2 && list[0].SavedAt == "2026-11-03 14:25:00");
+
+            // idea 21: customer name
+            True("Customer default empty", new QuoteRecord().Customer == "");
+            var cl = new List<QuoteRecord>();
+            var c1 = HistRecord(t0); c1.Customer = "Anne";
+            History.Add(cl, c1);
+            var c2 = HistRecord(t0.AddMinutes(5)); c2.Customer = "Bo";
+            History.Add(cl, c2);
+            True("History replace keeps the newer Customer", cl.Count == 1 && cl[0].Customer == "Bo");
+            var c3 = HistRecord(t0.AddMinutes(6)); c3.Customer = "";
+            History.Add(cl, c3);
+            True("History replace with empty newer Customer -> empty", cl.Count == 1 && cl[0].Customer == "");
+            var cj = History.ParseJson(History.ToJson(new List<QuoteRecord> { c1 }));
+            True("Customer JSON round trip", cj != null && cj.Count == 1 && cj[0].Customer == "Anne");
+            var cOld = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Hours\":1},{\"Customer\":null},{\"Customer\":\"Åse\"}]}");
+            True("Customer old file / null -> empty, name kept", cOld != null && cOld.Count == 3 && cOld[0].Customer == ""
+                 && cOld[1].Customer == "" && cOld[2].Customer == "Åse");
+            var rl = new List<QuoteRecord>();
+            foreach (var nm in new string[] { "Anne", " bo ", "", "ANNE", "  ", null, "Carl", "Bo", "Dan" })
+                rl.Add(new QuoteRecord { Customer = nm });
+            var rc = History.RecentCustomers(rl, 10);
+            True("RecentCustomers distinct, trimmed, case-insensitive, newest first, no empties",
+                 rc.Count == 4 && rc[0] == "Anne" && rc[1] == "bo" && rc[2] == "Carl" && rc[3] == "Dan");
+            var rc2 = History.RecentCustomers(rl, 2);
+            True("RecentCustomers max 2", rc2.Count == 2 && rc2[0] == "Anne" && rc2[1] == "bo");
+            True("RecentCustomers null/empty list/max 0", History.RecentCustomers(null, 5).Count == 0
+                 && History.RecentCustomers(new List<QuoteRecord>(), 5).Count == 0 && History.RecentCustomers(rl, 0).Count == 0);
             var other = HistRecord(t0.AddMinutes(21));
             other.Grams = 121;
             True("History SameQuote other grams -> no", !History.SameQuote(list[0], other));
@@ -225,6 +252,15 @@ namespace PrintPrice.Tests
             True("History MarkFailed off clears date", !big[500].Failed && big[500].FailedAt == "");
             True("History Remove by Id", History.Remove(big, "q7") && big.Count == 500 && !big.Exists(x => x.Id == "q7"));   // 501 - 1
             True("History Remove unknown Id", !History.Remove(big, "nope") && big.Count == 500);
+
+            // idea 22: limit 5000 (Add trims to MaxQuotes)
+            True("History MaxQuotes 5000", History.MaxQuotes == 5000);
+            var lim = new List<QuoteRecord>();
+            for (int i = 0; i < 5000; i++) { var q = new QuoteRecord(); q.Id = "L" + i; lim.Add(q); }
+            History.Add(lim, HistRecord(t0));
+            True("History Add 5001st -> 5000, oldest dropped", lim.Count == 5000 && lim[4999].Id == "L4998"
+                 && !lim.Exists(x => x.Id == "L4999"));
+            HistoryMonthTests();
 
             // files: only in bin\test-history (test mode), never %APPDATA%
             string histDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-history");
@@ -274,6 +310,473 @@ namespace PrintPrice.Tests
                  System.IO.Path.Combine(AppSettings.RealFolder, "history.json"), StringComparison.OrdinalIgnoreCase));
         }
 
+        // ---------- quote export (idea 5): breakdown, settings helpers, history helpers ----------
+        static string Line(QuoteBreakdown b, string key, int index)
+        {
+            foreach (var l in b.Lines) if (l.Key == key && (index < 0 || l.Index == index)) return l.Amount.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            return "none";
+        }
+
+        static string Parts(QuoteLine l)
+        {
+            if (l == null || l.Parts == null) return "NULL";
+            var p = new List<string>();
+            foreach (var x in l.Parts) p.Add(x.Amount.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
+            return string.Join("|", p.ToArray());
+        }
+
+        static QuoteLine Find(QuoteBreakdown b, string key)
+        {
+            foreach (var l in b.Lines) if (l.Key == key) return l;
+            return null;
+        }
+
+        // the øre add up (lines -> total, wear parts -> wear line), the total is the shown price, each line within 1 øre
+        static void Adds(string name, QuoteBreakdown b)
+        {
+            long sum = 0;
+            bool near = true;
+            foreach (var l in b.Lines)
+            {
+                sum += l.Ore;
+                if (Math.Abs(l.Ore - l.Exact * 100) > 1.0001) near = false;
+                if (l.Parts != null)
+                {
+                    long ps = 0;
+                    foreach (var p in l.Parts) { ps += p.Ore; if (Math.Abs(p.Ore - p.Exact * 100) > 1.0001) near = false; }
+                    True(name + ": wear parts sum to the wear line", ps == l.Ore);
+                }
+            }
+            double price = b.Friends ? b.Result.FriendsPrice : b.Result.OthersPrice;
+            True(name + ": lines sum to total " + b.Total.ToString("0.00"), sum == b.TotalOre);
+            True(name + ": total = shown price " + Num.Kr(price), Num.Kr(b.Total) == Num.Kr(price));
+            True(name + ": each line within 1 øre of exact", near);
+        }
+
+        static void QuoteTests()
+        {
+            var defWear = Wear.Calculate(Wear.Nozzles[0], false, "PLA", Wear.Plates[0]);
+            // 4-colour Benchy (see Main): customer 6,608 + 11,198 + 3,456 + 5,908 + power 3,91158 + wear 18,3255 +
+            // work 31,08158 x 0,75 = 23,31119 = 72,71827 -> 72,72. Floors 660+1119+345+590+391+1832+2331 = 7268 øre,
+            // 4 øre left -> remainders ,8 ,8 ,8 (lines 1, 2, 4) then ,6 (line 3): 6,61 11,20 3,46 5,91 | 3,91 18,32 23,31
+            var four = new List<FilamentLine> {
+                new FilamentLine { Grams = 33.04, PricePerKg = 200 }, new FilamentLine { Grams = 55.99, PricePerKg = 200 },
+                new FilamentLine { Grams = 17.28, PricePerKg = 200 }, new FilamentLine { Grams = 29.54, PricePerKg = 200 } };
+            var bin = new QuoteInput { Hours = 10, Minutes = 43, FilamentGrams = 135.85, FilamentDkkPerKg = 200,
+                ElectricityDkkPerKwh = 3.65, Filaments = four };
+            var bc = Pricing.Breakdown(bin, new AppSettings(), false, defWear);
+            Adds("Benchy customer", bc);
+            Eq("Benchy customer total 72,72", 72.72, bc.Total);
+            True("Benchy customer colours 6,61 11,20 3,46 5,91", Line(bc, "material", 0) == "6.61" && Line(bc, "material", 1) == "11.20"
+                 && Line(bc, "material", 2) == "3.46" && Line(bc, "material", 3) == "5.91");
+            True("Benchy customer power 3,91, wear 18,32, work 23,31", Line(bc, "power", -1) == "3.91" && Line(bc, "wear", -1) == "18.32"
+                 && Line(bc, "work", -1) == "23.31");
+            True("Benchy: no failed/payback/minimum/rounding lines", Line(bc, "failed", -1) == "none" && Line(bc, "payback", -1) == "none"
+                 && Line(bc, "minimum", -1) == "none" && Line(bc, "rounding", -1) == "none");
+            var bw = Find(bc, "wear");
+            // split 0,69967 / 0,4 / 0,278 / 0,33333 of 1,711, scaled to 1,71: x 10,716667 h -> 7,49372 4,28416 2,97749 3,57013
+            // floors 749+428+297+357 = 1831, 1 øre left -> largest remainder ,749 (hotend): 7,49 4,28 2,98 3,57 = 18,32
+            True("Benchy wear parts 7,49 4,28 2,98 3,57", Parts(bw) == "7.49|4.28|2.98|3.57");
+            True("Benchy wear parts keys", bw.Parts[0].Key == "wear.printer" && bw.Parts[1].Key == "wear.parts" &&
+                 bw.Parts[2].Key == "wear.hotend" && bw.Parts[3].Key == "wear.plate");
+            Eq("Benchy wear hours 10,7167", 10.7167, bw.Quantity);
+            Eq("Benchy wear rate 1,71", 1.71, bw.UnitPrice);
+            Eq("Benchy wear parts rates sum to 1,71", 1.71, bw.Parts[0].UnitPrice + bw.Parts[1].UnitPrice + bw.Parts[2].UnitPrice + bw.Parts[3].UnitPrice);
+            var m0 = bc.Lines[0];
+            True("material line details: index 0, 33,04 g, 200 kr./kg", m0.Key == "material" && m0.Index == 0 &&
+                 Math.Abs(m0.Quantity - 33.04) < 1e-9 && m0.UnitPrice == 200);
+            var pw = Find(bc, "power");
+            Eq("power line kWh 1,0717", 1.0717, pw.Quantity);
+            Eq("power line kr./kWh 3,65", 3.65, pw.UnitPrice);
+            Eq("work line markup 75 %", 75, Find(bc, "work").Quantity);
+            // friends: work 31,08158 x 0,25 = 7,770395; 57,17748 -> 57,18; floors 5714 + 4 øre (same ,8 ,8 ,8 ,6): work 7,77
+            var bf = Pricing.Breakdown(bin, new AppSettings(), true, defWear);
+            Adds("Benchy friends", bf);
+            Eq("Benchy friends total 57,18", 57.18, bf.Total);
+            True("Benchy friends work 7,77, wear 18,32", Line(bf, "work", -1) == "7.77" && Line(bf, "wear", -1) == "18.32");
+            Eq("Benchy friends markup 25 %", 25, Find(bf, "work").Quantity);
+
+            // AutoWearRate off: one wear line, no parts (even with a breakdown given)
+            var manual = new AppSettings { AutoWearRate = 0, MachineRatePerHour = 2.5 };
+            var bm = Pricing.Breakdown(bin, manual, false, defWear);
+            Adds("AutoWearRate off", bm);
+            True("AutoWearRate off: no wear parts", Find(bm, "wear") != null && Find(bm, "wear").Parts == null);
+            True("null wear breakdown: no parts", Find(Pricing.Breakdown(bin, new AppSettings(), false, null), "wear").Parts == null);
+            True("no wear rate: no wear line", Find(Pricing.Breakdown(bin, new AppSettings { MachineRatePerHour = 0 }, false, defWear), "wear") == null);
+
+            // one filament (Example: 120 g x 180, 5 h 30 m, 2,00 kr./kWh), minimum 50, no wear:
+            // material 21,60 + power 1,10 + work 22,70 x 0,75 = 17,025 = 39,725 < 50 -> minimum top-up 10,275; total 50,00
+            var smin = new AppSettings { MinimumPrice = 50, MachineRatePerHour = 0, FailedPrintPct = 0 };
+            var bmin = Pricing.Breakdown(Example(), smin, false, defWear);
+            Adds("minimum price", bmin);
+            Eq("minimum total 50,00", 50, bmin.Total);
+            True("minimum: one material line 21,60 (120 g, 180 kr./kg), power 1,10", Line(bmin, "material", 0) == "21.60" &&
+                 bmin.Lines[0].Quantity == 120 && bmin.Lines[0].UnitPrice == 180 && Line(bmin, "power", -1) == "1.10");
+            Eq("minimum: work + top-up = 50 - 22,70 = 27,30", 27.30, Find(bmin, "work").Amount + Find(bmin, "minimum").Amount);
+            Eq("minimum line keeps the minimum price", 50, Find(bmin, "minimum").Quantity);
+            var bminF = Pricing.Breakdown(Example(), smin, true, defWear);
+            Adds("minimum price, friends", bminF);
+            True("minimum: no top-up for friends (28,38)", Find(bminF, "minimum") == null && Math.Abs(bminF.Total - 28.38) < 1e-9);
+
+            // rounding: wear 5 kr./h (manual), minimum 50, round to 5: customer 21,60 + 1,10 + 27,50 + 17,025 = 67,225 -> 70
+            var sr = new AppSettings { AutoWearRate = 0, MachineRatePerHour = 5, MinimumPrice = 50, RoundTo = 5, FailedPrintPct = 0 };
+            var br = Pricing.Breakdown(Example(), sr, false, defWear);
+            Adds("rounding customer", br);
+            Eq("rounding total 70", 70, br.Total);
+            True("rounding: wear 27,50 (5,5 h x 5), no minimum line", Line(br, "wear", -1) == "27.50" && Find(br, "minimum") == null);
+            Eq("rounding: work + rounding = 70 - 50,20 = 19,80", 19.80, Find(br, "work").Amount + Find(br, "rounding").Amount);
+            var brf = Pricing.Breakdown(Example(), sr, true, defWear);
+            Adds("rounding friends", brf);
+            // friends 22,70 x 1,25 = 28,375 + 27,50 = 55,875 -> 60; rounding 4,125
+            Eq("rounding friends total 60", 60, brf.Total);
+            Eq("rounding friends: work + rounding = 60 - 50,20 = 9,80", 9.80, Find(brf, "work").Amount + Find(brf, "rounding").Amount);
+            var exact5 = Pricing.Breakdown(new QuoteInput { Hours = 1, FilamentGrams = 100, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 0 },
+                new AppSettings { AutoWearRate = 0, MachineRatePerHour = 0, OthersMarkupPct = 0, RoundTo = 5, MinimumPrice = 0 }, false, null);
+            // 100 g x 200 = 20,00 exactly on a 5 kr. step: no rounding line
+            True("rounding 0 left out (20,00)", Find(exact5, "rounding") == null && exact5.Total == 20);
+
+            // failed prints 10 % + payback (customers only) on the Example with HistSettings (wear 2 kr./h manual):
+            // 21,60 + 1,10 + failed 2,27 + wear 11,00 + payback 5,675 + work 24,97 x 0,75 = 18,7275 = 60,3725 -> 60,37
+            // floors 2160+110+227+1100+567+1872 = 6036, 1 øre -> largest remainder ,75 (work): payback 5,67, work 18,73
+            var ps = PaySettings(2); ps.AutoWearRate = 0;
+            var bp = Pricing.Breakdown(Owing(33.70), ps, false, defWear);
+            Adds("payback customer", bp);
+            Eq("payback customer total 60,37", 60.37, bp.Total);
+            True("payback customer: failed 2,27, wear 11,00, payback 5,67, work 18,73", Line(bp, "failed", -1) == "2.27" &&
+                 Line(bp, "wear", -1) == "11.00" && Line(bp, "payback", -1) == "5.67" && Line(bp, "work", -1) == "18.73");
+            Eq("failed line keeps 10 %", 10, Find(bp, "failed").Quantity);
+            Eq("payback line keeps 25 %", 25, Find(bp, "payback").Quantity);
+            // friends, customers-only payback: 42,2125 -> 42,21, no payback line, work 24,97 x 0,25 = 6,2425 -> 6,24
+            var bpf = Pricing.Breakdown(Owing(33.70), ps, true, defWear);
+            Adds("payback customers only, friends", bpf);
+            True("friends: no payback line, work 6,24, total 42,21", Find(bpf, "payback") == null && Line(bpf, "work", -1) == "6.24"
+                 && Math.Abs(bpf.Total - 42.21) < 1e-9);
+            var pb = PaySettings(1); pb.AutoWearRate = 0;
+            var bpb = Pricing.Breakdown(Owing(33.70), pb, true, defWear);
+            Adds("payback both, friends", bpb);
+            // 42,2125 + 5,675 = 47,8875 -> 47,89
+            True("payback both: friends has payback, total 47,89", Find(bpb, "payback") != null && Math.Abs(bpb.Total - 47.89) < 1e-9);
+
+            // awkward: 7 colours, odd grams/prices, odd hours, failed 16 %, payback both, minimum + rounding 0,5, auto wear
+            var seven = new List<FilamentLine>();
+            double[] g7 = { 12.345, 0.333, 7.777, 101.01, 3.3, 0.005, 44.444 }, p7 = { 199.95, 250, 180, 219.5, 333.33, 180, 123.45 };
+            for (int i = 0; i < 7; i++) seven.Add(new FilamentLine { Grams = g7[i], PricePerKg = p7[i] });
+            var awkIn = new QuoteInput { Hours = 3, Minutes = 7, ElectricityDkkPerKwh = 2.71, Filaments = seven, PaybackDebt = 19.99 };
+            var wearCf = Wear.Calculate(Wear.FindNozzle("0.4 hardened"), true, "PLA-CF", Wear.FindPlate("Textured PEI Plate"));
+            foreach (double round in new double[] { 0, 0.5, 1, 10 })
+                foreach (double min in new double[] { 0, 200, 999 })
+                    foreach (bool fr in new bool[] { false, true })
+                    {
+                        var sa = new AppSettings { FailedPrintPct = 16, FailedPayback = 1, FailedPaybackPct = 33, FailedPaybackWho = 1,
+                            MinimumPrice = min, RoundTo = round, MachineRatePerHour = wearCf.Total, FriendsMarkupPct = 17.5, OthersMarkupPct = 83.3 };
+                        string nm = "awkward round " + round + " min " + min + (fr ? " friends" : " customer");
+                        var ba = Pricing.Breakdown(awkIn, sa, fr, wearCf);
+                        Adds(nm, ba);
+                        int mats = 0;
+                        foreach (var l in ba.Lines) if (l.Key == "material") mats++;
+                        True(nm + ": 7 material lines, wear split, payback", mats == 7 && Find(ba, "wear").Parts != null && Find(ba, "payback") != null);
+                        True(nm + ": minimum line only when hit", (Find(ba, "minimum") != null) == (!fr && min >= 200));
+                    }
+            // many tiny amounts: 9 colours of 0,004 g -> all 0,00 but total still exact
+            var tiny = new List<FilamentLine>();
+            for (int i = 0; i < 9; i++) tiny.Add(new FilamentLine { Grams = 0.4, PricePerKg = 1.37 });
+            Adds("9 tiny colours", Pricing.Breakdown(new QuoteInput { Minutes = 1, ElectricityDkkPerKwh = 1.11, Filaments = tiny },
+                new AppSettings(), false, defWear));
+            var bz = Pricing.Breakdown(new QuoteInput(), new AppSettings(), false, defWear);
+            Adds("zero job", bz);
+            True("zero job: total 0, material/power/work lines", bz.TotalOre == 0 && Find(bz, "material") != null && Find(bz, "power") != null
+                 && Find(bz, "work") != null && Find(bz, "wear") == null);
+            True("ShownOre 57,175 -> 5718 (like N2)", Pricing.ShownOre(57.175) == 5718 && Pricing.ShownOre(0.004) == 0 && Pricing.ShownOre(72.71827) == 7272);
+
+            // settings defaults, Clone, valid-until
+            var d = new AppSettings();
+            True("quote defaults: Gettic, 14 days, customer, dark", d.QuoteName == "Gettic" && d.QuoteValidDays == 14 &&
+                 d.QuotePrice == "customer" && !d.QuoteFriends && d.QuoteFor == History.ForCustomer && d.QuoteDark == 1);
+            var dc = new AppSettings { QuoteName = "X", QuoteValidDays = 3, QuotePrice = "friends", QuoteDark = 0 }.Clone();
+            True("Clone keeps quote settings", dc.QuoteName == "X" && dc.QuoteValidDays == 3 && dc.QuotePrice == "friends" && dc.QuoteDark == 0);
+            var made = new DateTime(2026, 11, 4, 23, 59, 0);
+            True("valid until 4/11 23:59 + 14 = 18/11", d.QuoteValidUntil(made) == new DateTime(2026, 11, 18));
+            True("valid until over month end: 20/12 + 14 = 3/1", AppSettings.ValidUntil(new DateTime(2026, 12, 20, 9, 0, 0), 14) == new DateTime(2027, 1, 3));
+            True("valid until 0 / -3 / NaN days -> 1 day", AppSettings.ValidUntil(made, 0) == new DateTime(2026, 11, 5) &&
+                 AppSettings.ValidUntil(made, -3) == new DateTime(2026, 11, 5) && AppSettings.ValidUntil(made, double.NaN) == new DateTime(2026, 11, 5));
+
+            // history: quote number and For
+            var t = new DateTime(2026, 11, 4, 14, 5, 33);
+            var qr = HistRecord(t);
+            True("QuoteNumber 261104-1405", History.QuoteNumber(qr) == "261104-1405" && History.QuoteNumber(t) == "261104-1405");
+            True("QuoteNumber bad SavedAt -> empty", History.QuoteNumber(new QuoteRecord { SavedAt = "x" }) == "" && History.QuoteNumber((QuoteRecord)null) == "");
+            var hl = new List<QuoteRecord>();
+            var a1 = History.AddFor(hl, HistRecord(t), History.ForFriends);
+            True("AddFor friends", hl.Count == 1 && a1.For == History.ForFriends);
+            var a2 = History.AddFor(hl, HistRecord(t.AddMinutes(2)), History.ForCustomer);
+            True("AddFor replacing a same quote sets the new For", hl.Count == 1 && a2.Id == a1.Id && hl[0].For == History.ForCustomer);
+            True("AddFor odd value -> customer", History.AddFor(new List<QuoteRecord>(), HistRecord(t), 7).For == History.ForCustomer);
+        }
+
+        // ---------- invoices ----------
+        // fake random source: returns the given indices one after the other (alphabet index: A=0 B=1 C=2 D=3 E=4 F=5 G=6 H=7
+        // J=8 K=9 M=10 N=11 P=12 Q=13 R=14 ... '2'=22 '3'=23 '4'=24 '6'=25 '7'=26 '8'=27 '9'=28)
+        static Func<int, int> Seq(params int[] v)
+        {
+            int i = 0;
+            return delegate(int n) { return v[i++ % v.Length] % n; };
+        }
+
+        static bool CodeOk(string no, int year)
+        {
+            if (no == null || no.Length != 9 || !no.StartsWith(year.ToString() + "-")) return false;
+            for (int i = 5; i < 9; i++) if (History.InvoiceAlphabet.IndexOf(no[i]) < 0) return false;
+            return true;
+        }
+
+        static void InvoiceTests()
+        {
+            var t = new DateTime(2026, 11, 4, 14, 5, 33);
+            True("alphabet: 29 upper-case characters, no 0 O 1 I L 5 S", History.InvoiceAlphabet.Length == 29 &&
+                 History.InvoiceAlphabet == History.InvoiceAlphabet.ToUpperInvariant() &&
+                 History.InvoiceAlphabet.IndexOfAny("01ILO5S".ToCharArray()) < 0);
+            // format with the real crypto source
+            bool fmt = true; var seen = new HashSet<string>();
+            for (int i = 0; i < 200; i++)
+            {
+                string no = History.NextInvoiceNo(null, 2026, "");
+                fmt = fmt && CodeOk(no, 2026);
+                seen.Add(no);
+            }
+            True("200 crypto codes all look like 2026-XXXX", fmt);
+            True("200 crypto codes are (nearly) all different", seen.Count >= 195);
+            True("year in the code: 2027-", History.NextInvoiceNo(null, 2027, "").StartsWith("2027-"));
+            True("fake source: ABCD", History.NextInvoiceNo(null, 2026, "", Seq(0, 1, 2, 3)) == "2026-ABCD");
+            True("fake source: K7Q4", History.NextInvoiceNo(null, 2026, "", Seq(9, 26, 13, 24)) == "2026-K7Q4");
+
+            // unique against history and against the used list: the fake returns two taken codes first
+            var hist = new List<QuoteRecord> { new QuoteRecord { InvoiceNo = "2026-ABCD" }, null, new QuoteRecord { InvoiceNo = "" } };
+            string got = History.NextInvoiceNo(hist, 2026, "2026-EFGH,2025-XXXX", Seq(0, 1, 2, 3, 4, 5, 6, 7, 9, 26, 13, 24));
+            True("collision with history (ABCD) and used list (EFGH) -> K7Q4", got == "2026-K7Q4");
+            True("used list is trimmed and case-insensitive", History.NextInvoiceNo(null, 2026, " 2026-abcd , ", Seq(0, 1, 2, 3, 4, 5, 6, 7)) == "2026-EFGH");
+            // same code in another year is a different invoice number
+            True("same letters in another year is free", History.NextInvoiceNo(hist, 2027, "", Seq(0, 1, 2, 3)) == "2027-ABCD");
+
+            // MakeInvoice: new code, BilledAt, Printed, used list
+            var list = new List<QuoteRecord>();
+            var a = HistRecord(t);
+            list.Add(a);
+            var st = new AppSettings();
+            True("UsedInvoiceNos default empty", st.UsedInvoiceNos == "");
+            True("record without invoice: no number", a.InvoiceNo == "" && a.BilledAt == "" && !a.Printed);
+            string n1 = History.MakeInvoice(list, a, t, st, Seq(0, 1, 2, 3));
+            True("MakeInvoice: 2026-ABCD, BilledAt, Printed", n1 == "2026-ABCD" && a.InvoiceNo == n1 &&
+                 a.BilledAt == "2026-11-04 14:05:33" && a.Printed);
+            True("code added to the used list", st.UsedInvoiceNos == "2026-ABCD");
+            // a second invoice on the same record keeps code and date, the used list stays
+            string again = History.MakeInvoice(list, a, t.AddDays(30), st, Seq(4, 5, 6, 7));
+            True("second invoice on the same record: same code and date", again == "2026-ABCD" && a.BilledAt == "2026-11-04 14:05:33" &&
+                 st.UsedInvoiceNos == "2026-ABCD");
+            // never reused: the record is deleted, its code still can't come back
+            var b = HistRecord(t.AddHours(1)); b.Model = "Other";
+            list.Clear(); list.Add(b);
+            string n2 = History.MakeInvoice(list, b, t.AddDays(1), st, Seq(0, 1, 2, 3, 4, 5, 6, 7));
+            True("deleted record's code ABCD not given again -> EFGH", n2 == "2026-EFGH" && st.UsedInvoiceNos == "2026-ABCD,2026-EFGH");
+            // null settings: works, nothing remembered
+            var c = HistRecord(t); c.Model = "C";
+            True("MakeInvoice with null settings", History.MakeInvoice(list, c, t, null, Seq(9, 26, 13, 24)) == "2026-K7Q4" && c.Printed);
+            // a year change uses the new year
+            var d2 = HistRecord(t); d2.Model = "D";
+            True("MakeInvoice in 2027 -> 2027-...", History.MakeInvoice(list, d2, new DateTime(2027, 1, 2, 9, 0, 0), st, Seq(0, 1, 2, 3)) == "2027-ABCD");
+
+            // used list: last 2000 kept
+            string used = "";
+            for (int i = 0; i < 2005; i++) used = History.AddUsedInvoiceNo(used, "2026-N" + i);
+            string[] up = used.Split(',');
+            True("used list keeps the last 2000", up.Length == 2000 && up[0] == "2026-N5" && up[1999] == "2026-N2004");
+            True("AddUsedInvoiceNo ignores empty", History.AddUsedInvoiceNo("a", "") == "a" && History.AddUsedInvoiceNo(null, "x") == "x");
+
+            // Add (same-quote replace) keeps code and date
+            var al = new List<QuoteRecord>();
+            var first = History.Add(al, HistRecord(t));
+            History.MakeInvoice(al, first, t, null, Seq(0, 1, 2, 3));
+            var second = History.Add(al, HistRecord(t.AddMinutes(2)));
+            True("Add replace keeps InvoiceNo, BilledAt, Printed", al.Count == 1 && second.InvoiceNo == "2026-ABCD" &&
+                 second.BilledAt == "2026-11-04 14:05:33" && second.Printed);
+
+            // JSON round trip, and old files without the keys read ""
+            var back = History.ParseJson(History.ToJson(al));
+            True("JSON round trip keeps invoice fields", back[0].InvoiceNo == "2026-ABCD" && back[0].BilledAt == second.BilledAt);
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"Model\":\"m\"}]}");
+            True("old file: InvoiceNo and BilledAt are empty", old[0].InvoiceNo == "" && old[0].BilledAt == "");
+
+            // invoice snapshot: a new number saves due date, MobilePay, bank and "from" name
+            var ss = new AppSettings { InvoiceDueDays = 14, PayMobilePay = "12 34 56 78", PayBank = "Reg 1234 konto 0012345678", QuoteName = "Gettic 3D" };
+            var sl = new List<QuoteRecord>();
+            var sa = HistRecord(t); sl.Add(sa);
+            True("not invoiced: no snapshot", sa.InvoiceDue == "" && sa.InvoicePayMobilePay == "" && sa.InvoicePayBank == "" && sa.InvoiceFromName == "");
+            History.MakeInvoice(sl, sa, t, ss, Seq(0, 1, 2, 3));
+            // 4/11/2026 14:05 -> date 4/11 + 14 days = 18/11/2026
+            True("snapshot: due 2026-11-18, MobilePay, bank, from name", sa.InvoiceDue == "2026-11-18" &&
+                 sa.InvoicePayMobilePay == "12 34 56 78" && sa.InvoicePayBank == "Reg 1234 konto 0012345678" && sa.InvoiceFromName == "Gettic 3D");
+            // settings change later: re-invoice keeps the snapshot, InvoiceInfo shows it
+            ss.InvoiceDueDays = 30; ss.PayMobilePay = ""; ss.PayBank = "Other bank"; ss.QuoteName = "New name";
+            History.MakeInvoice(sl, sa, t.AddDays(10), ss, Seq(4, 5, 6, 7));
+            True("re-invoice keeps the snapshot", sa.InvoiceNo == "2026-ABCD" && sa.InvoiceDue == "2026-11-18" &&
+                 sa.InvoicePayMobilePay == "12 34 56 78" && sa.InvoicePayBank == "Reg 1234 konto 0012345678" && sa.InvoiceFromName == "Gettic 3D");
+            var ia = History.InvoiceInfo(sa, ss, t.AddDays(10));
+            True("InvoiceInfo uses the snapshot, not today's settings", ia.FromSnapshot && ia.Due == new DateTime(2026, 11, 18) &&
+                 ia.MobilePay == "12 34 56 78" && ia.Bank == "Reg 1234 konto 0012345678" && ia.FromName == "Gettic 3D");
+            // a snapshot with empty payment fields stays empty (not filled from today's settings)
+            var se = new AppSettings { PayMobilePay = "", PayBank = "", QuoteName = "" };
+            var sb2 = HistRecord(t.AddHours(2)); sb2.Model = "E"; sl.Add(sb2);
+            History.MakeInvoice(sl, sb2, t, se, Seq(9, 26, 13, 24));
+            var ib = History.InvoiceInfo(sb2, ss, t);
+            True("empty snapshot fields stay empty", ib.FromSnapshot && ib.MobilePay == "" && ib.Bank == "" && ib.FromName == "" &&
+                 ib.Due == new DateTime(2026, 11, 18));
+            // old invoice without a snapshot: today's settings; due = BilledAt 4/11 + 30 days = 4/12/2026
+            var so = HistRecord(t); so.InvoiceNo = "2026-OLD1"; so.BilledAt = "2026-11-04 14:05:33";
+            var io = History.InvoiceInfo(so, ss, t.AddDays(40));
+            True("old invoice: today's settings, due from BilledAt", !io.FromSnapshot && io.Due == new DateTime(2026, 12, 4) &&
+                 io.MobilePay == "" && io.Bank == "Other bank" && io.FromName == "New name");
+            // not invoiced yet (preview): due from today 10/11 + 30 = 10/12/2026
+            var inew = History.InvoiceInfo(HistRecord(t), ss, new DateTime(2026, 11, 10, 9, 0, 0));
+            True("not invoiced: due from today", !inew.FromSnapshot && inew.Due == new DateTime(2026, 12, 10));
+            // bad snapshot date -> today's settings; null record / settings never crash (defaults: 14 days, "Gettic")
+            var sbad = HistRecord(t); sbad.InvoiceNo = "2026-BAD1"; sbad.BilledAt = "2026-11-04 14:05:33"; sbad.InvoiceDue = "18/11/2026";
+            True("bad snapshot date -> settings", !History.InvoiceInfo(sbad, ss, t).FromSnapshot);
+            var inull = History.InvoiceInfo(null, null, t);
+            True("null record + settings -> defaults", inull != null && inull.Due == new DateTime(2026, 11, 18) && inull.FromName == "Gettic");
+            // null settings in MakeInvoice: no snapshot
+            var sn = HistRecord(t); sn.Model = "N";
+            History.MakeInvoice(sl, sn, t, null, Seq(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11));
+            True("MakeInvoice with null settings: no snapshot", sn.InvoiceNo != "" && sn.InvoiceDue == "");
+            // Add (same-quote replace) keeps the snapshot
+            var al2 = new List<QuoteRecord>();
+            var f2 = History.Add(al2, HistRecord(t));
+            History.MakeInvoice(al2, f2, t, new AppSettings { PayMobilePay = "MP", PayBank = "BK", QuoteName = "Q" }, Seq(0, 1, 2, 3));
+            var s2b = History.Add(al2, HistRecord(t.AddMinutes(2)));
+            True("Add replace keeps the snapshot", al2.Count == 1 && s2b.InvoiceDue == "2026-11-18" && s2b.InvoicePayMobilePay == "MP" &&
+                 s2b.InvoicePayBank == "BK" && s2b.InvoiceFromName == "Q");
+            // JSON round trip; old file without the keys reads ""
+            var sj = History.ParseJson(History.ToJson(al2));
+            True("JSON round trip keeps the snapshot", sj[0].InvoiceDue == "2026-11-18" && sj[0].InvoicePayMobilePay == "MP" &&
+                 sj[0].InvoicePayBank == "BK" && sj[0].InvoiceFromName == "Q");
+            True("old file: snapshot fields empty", old[0].InvoiceDue == "" && old[0].InvoicePayMobilePay == "" &&
+                 old[0].InvoicePayBank == "" && old[0].InvoiceFromName == "");
+            var jn = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"InvoiceDue\":null,\"InvoicePayBank\":null}]}");
+            True("null snapshot keys read as empty", jn[0].InvoiceDue == "" && jn[0].InvoicePayBank == "");
+
+            // due date: 14 days default, time dropped; month and year ends
+            var s = new AppSettings();
+            True("due 4/11 14:05 + 14 days = 18/11", s.InvoiceDue(t) == new DateTime(2026, 11, 18));
+            True("due 20/12 + 14 = 3/1", s.InvoiceDue(new DateTime(2026, 12, 20, 23, 0, 0)) == new DateTime(2027, 1, 3));
+            s.InvoiceDueDays = 30;
+            True("due 30 days: 4/11 -> 4/12", s.InvoiceDue(t) == new DateTime(2026, 12, 4));
+            s.InvoiceDueDays = 0;
+            True("bad days 0 -> 14", s.InvoiceDue(t) == new DateTime(2026, 11, 18));
+            s.InvoiceDueDays = 400;
+            True("bad days 400 -> 14", s.InvoiceDue(t) == new DateTime(2026, 11, 18));
+            var sc = new AppSettings { InvoiceDueDays = 7, PayMobilePay = "1", PayBank = "2", UsedInvoiceNos = "2026-ABCD,2026-EFGH" }.Clone();
+            True("Clone keeps invoice settings", sc.InvoiceDueDays == 7 && sc.PayMobilePay == "1" && sc.PayBank == "2" &&
+                 sc.UsedInvoiceNos == "2026-ABCD,2026-EFGH");
+        }
+
+        // ---------- Printed tick, month summary, repeat prints (ideas 22, 23) ----------
+        static void HistoryMonthTests()
+        {
+            var t = new DateTime(2026, 11, 3, 10, 0, 0);
+
+            // Printed: new records false, old file without the key -> true, the key kept both ways
+            True("Printed: FromQuote -> false", !HistRecord(t).Printed && !new QuoteRecord().Printed);
+            True("RepeatOf default empty", new QuoteRecord().RepeatOf == "" && HistRecord(t).RepeatOf == "");
+            var po = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\"},{\"Id\":\"b\",\"Printed\":false},"
+                + "{\"Id\":\"c\",\"Printed\":true},{\"Id\":\"d\",\"RepeatOf\":null}]}");
+            True("Printed old file: missing -> true, false/true kept", po != null && po.Count == 4 && po[0].Printed
+                 && !po[1].Printed && po[2].Printed && po[3].Printed);
+            True("RepeatOf old file / null -> empty", po != null && po[0].RepeatOf == "" && po[3].RepeatOf == "");
+            var pr1 = HistRecord(t); var pr2 = HistRecord(t.AddHours(1)); pr2.Printed = true; pr2.RepeatOf = pr1.Id;
+            string pj = History.ToJson(new List<QuoteRecord> { pr2, pr1 });
+            var pb = History.ParseJson(pj);
+            True("Printed/RepeatOf JSON round trip", pj.Contains("\"Printed\":true") && pj.Contains("\"Printed\":false")
+                 && !pj.Contains("printedRead") && pb != null && pb.Count == 2 && pb[0].Printed && !pb[1].Printed
+                 && pb[0].RepeatOf == pr1.Id && pb[1].RepeatOf == "");
+            // Add replacing a same quote keeps the Printed tick
+            var pl = new List<QuoteRecord>();
+            History.Add(pl, HistRecord(t)); pl[0].Printed = true;
+            History.Add(pl, HistRecord(t.AddMinutes(3)));
+            True("Add replace keeps Printed", pl.Count == 1 && pl[0].Printed);
+
+            // repeat print: never merged with its original, even 1 minute later with the same numbers
+            var orig = HistRecord(t);
+            var rep = HistRecord(t.AddMinutes(1)); rep.RepeatOf = orig.Id;
+            True("SameQuote repeat vs original -> no", !History.SameQuote(orig, rep) && !History.SameQuote(rep, orig));
+            var rl = new List<QuoteRecord>();
+            History.Add(rl, orig);
+            var kept = History.Add(rl, rep);
+            True("Add repeat -> own entry, own Id", rl.Count == 2 && rl[0] == rep && kept.Id != orig.Id && rl[1].Id == orig.Id);
+            var other = HistRecord(t.AddMinutes(2)); other.RepeatOf = "someone-else";
+            True("SameQuote repeats of different records -> no", !History.SameQuote(rep, other));
+            var again = HistRecord(t.AddMinutes(2)); again.RepeatOf = orig.Id;
+            True("SameQuote same repeat saved again (copy + export) -> same", History.SameQuote(rep, again));
+
+            // month summary. Example record (HistoryTests): material 21,60, power 1,10, wear 5,5 h x 2 = 11,
+            // friends 42,2125, customer 54,6975; FailedCost 33,70. With payback (customers only) customer 60,3725.
+            Eq("WearCost 5,5 h x 2 = 11", 11, History.WearCost(HistRecord(t)));
+            Eq("WearCost 1 h 15 min x 4 = 5", 5, History.WearCost(new QuoteRecord { Hours = 1, Minutes = 15, MachineRatePerHour = 4 }));
+            Eq("WearCost null 0", 0, History.WearCost(null));
+            var r1 = HistRecord(t); r1.Printed = true;                                          // customer 54,6975
+            var r2 = HistRecord(t.AddDays(1)); r2.Printed = true; r2.For = History.ForFriends;  // friends 42,2125
+            var r3 = HistRecord(t.AddDays(2));                                                  // not printed: nothing
+            var r4 = HistRecord(t.AddDays(3)); r4.Printed = true; History.MarkFailed(r4, true, t.AddDays(3));   // lost 33,70
+            var ps = PaySettings(2);
+            var r5 = History.FromQuote(Owing(33.70), Pricing.Calculate(Owing(33.70), ps), ps, "Benchy", "", t.AddDays(4));
+            r5.Printed = true;                                                                  // customer 60,3725
+            var r6 = HistRecord(new DateTime(2026, 12, 1, 0, 0, 0)); r6.Printed = true;         // December
+            var r7 = HistRecord(new DateTime(2026, 10, 31, 23, 59, 59)); r7.Printed = true;     // October
+            var r8 = HistRecord(t); r8.Printed = true; r8.SavedAt = "bad";                      // unreadable: no month
+            var ml = new List<QuoteRecord> { r6, r5, r4, r3, r2, r1, r7, r8 };
+            var nov = History.MonthSummary(ml, 2026, 11);
+            True("Month Nov: 3 prints, 1 failed, 2 customer, 1 friends", nov.Prints == 3 && nov.FailedPrints == 1
+                 && nov.CustomerCount == 2 && nov.FriendsCount == 1 && nov.Year == 2026 && nov.Month == 11);
+            Eq("Month Nov hours 3 x 5,5 = 16,5", 16.5, nov.PrintHours);
+            Eq("Month Nov grams 3 x 120 = 360", 360, nov.Grams);
+            Eq("Month Nov customer 54,6975 + 60,3725 = 115,07", 115.07, nov.CustomerIncome);
+            Eq("Month Nov friends 42,2125", 42.2125, nov.FriendsIncome);
+            Eq("Month Nov income 115,07 + 42,2125 = 157,2825", 157.2825, nov.Income);
+            Eq("Month Nov material 3 x 21,60 = 64,80", 64.80, nov.MaterialCost);
+            Eq("Month Nov power 3 x 1,10 = 3,30", 3.30, nov.PowerCost);
+            Eq("Month Nov wear 3 x 11 = 33", 33, nov.WearCost);
+            Eq("Month Nov costs 64,80 + 3,30 + 33 = 101,10", 101.10, nov.Costs);
+            Eq("Month Nov lost 33,70", 33.70, nov.Lost);
+            Eq("Month Nov profit 157,2825 - 101,10 - 33,70 = 22,4825", 22.4825, nov.Profit);
+            Eq("Month Nov profit % 22,4825 / 157,2825 = 14,2943", 14.2943, nov.ProfitPct);
+            var dec = History.MonthSummary(ml, 2026, 12);
+            True("Month Dec: 1 customer print", dec.Prints == 1 && dec.CustomerCount == 1 && dec.FailedPrints == 0);
+            // 54,6975 - 33,70 = 20,9975; 20,9975 / 54,6975 = 38,3884 %
+            Eq("Month Dec profit 54,6975 - 33,70 = 20,9975", 20.9975, dec.Profit);
+            Eq("Month Dec profit % 38,3884", 38.3884, dec.ProfitPct);
+            var empty = History.MonthSummary(ml, 2026, 9);
+            True("Month empty: all 0", empty.Prints == 0 && empty.FailedPrints == 0 && empty.Income == 0 && empty.Costs == 0
+                 && empty.Lost == 0 && empty.Profit == 0 && empty.ProfitPct == 0 && empty.PrintHours == 0 && empty.Grams == 0);
+            True("Month null list: all 0", History.MonthSummary(null, 2026, 11).Prints == 0
+                 && History.MonthSummary(null, 2026, 11).Profit == 0);
+            // only a failed print (not ticked Printed): lost 33,70, no income -> profit -33,70, % 0
+            var f = HistRecord(t); History.MarkFailed(f, true, t);
+            var fo = History.MonthSummary(new List<QuoteRecord> { f }, 2026, 11);
+            True("Month only failed: 0 prints, 1 failed", fo.Prints == 0 && fo.FailedPrints == 1 && fo.Income == 0);
+            Eq("Month only failed: profit -33,70", -33.70, fo.Profit);
+            Eq("Month only failed: profit % 0 (no income)", 0, fo.ProfitPct);
+            // payback for friends in both prices: friends 42,2125 + 5,675 = 47,8875 is income
+            var pb2 = PaySettings(1);
+            var rf = History.FromQuote(Owing(33.70), Pricing.Calculate(Owing(33.70), pb2), pb2, "Benchy", "", t);
+            rf.Printed = true; rf.For = History.ForFriends;
+            var fp = History.MonthSummary(new List<QuoteRecord> { rf }, 2026, 11);
+            Eq("Month friends with payback: income 47,8875", 47.8875, fp.FriendsIncome);
+            Eq("Month friends with payback: profit 47,8875 - 33,70 = 14,1875", 14.1875, fp.Profit);
+
+            var months = History.Months(ml);
+            True("Months: Dec, Nov, Oct (newest first, no doubles, bad skipped)", months.Count == 3
+                 && months[0] == new DateTime(2026, 12, 1) && months[1] == new DateTime(2026, 11, 1)
+                 && months[2] == new DateTime(2026, 10, 1));
+            True("Months null/empty -> none", History.Months(null).Count == 0 && History.Months(new List<QuoteRecord>()).Count == 0);
+        }
+
         // ---------- failed prints payback (idea 9) ----------
         static AppSettings PaySettings(double who)
         {
@@ -303,8 +806,9 @@ namespace PrintPrice.Tests
             // friends 42,2125, customer 54,6975 (see HistoryTests). Payback share 22,70 x 25 % = 5,675.
             // Failed cost of the Example record = 21,60 + 1,10 + 11 = 33,70.
             var d = new AppSettings();
-            Eq("FailedPayback default 0 (off)", 0, d.FailedPayback);
-            Eq("FailedPaybackPct default 25", 25, d.FailedPaybackPct);
+            Eq("FailedPayback default 1 (on)", 1, d.FailedPayback);
+            Eq("FailedPaybackPct default 10", 10, d.FailedPaybackPct);
+            Eq("MinimumPrice default 50", 50, d.MinimumPrice);
             Eq("FailedPaybackWho default 2 (customers only)", 2, d.FailedPaybackWho);
             Eq("Clone keeps FailedPaybackWho", 1, new AppSettings { FailedPaybackWho = 1 }.Clone().FailedPaybackWho);
 
@@ -527,10 +1031,16 @@ namespace PrintPrice.Tests
             True("IsDanish(da) true", AppSettings.IsDanish("da"));
             True("IsDanish(en) false", !AppSettings.IsDanish("en"));
             True("IsDanish(unknown) = IsDanish(auto)", AppSettings.IsDanish("xx") == AppSettings.IsDanish(""));
-            True("Clone keeps Language da", new AppSettings { Language = "da" }.Clone().Language == "da");
+            True("PrinterName default is Bambu Lab A1", new AppSettings().PrinterName == "Bambu Lab A1");
+            True("Clone keeps PrinterName", new AppSettings { PrinterName = "Prusa MK4" }.Clone().PrinterName == "Prusa MK4");
+            True("CleanPrinterName empty/spaces/null -> default", AppSettings.CleanPrinterName("") == "Bambu Lab A1"
+                 && AppSettings.CleanPrinterName("   ") == "Bambu Lab A1" && AppSettings.CleanPrinterName(null) == "Bambu Lab A1");
+            True("CleanPrinterName trims and caps at 40", AppSettings.CleanPrinterName("  X1C  ") == "X1C"
+                 && AppSettings.CleanPrinterName(new string('a', 50)) == new string('a', 40));
+            True("Clone keeps Language da",new AppSettings { Language = "da" }.Clone().Language == "da");
             Eq("FailedPrintPct default is 0 (off)", 0, new AppSettings().FailedPrintPct);
             Eq("Clone keeps FailedPrintPct", 12, new AppSettings { FailedPrintPct = 12 }.Clone().FailedPrintPct);
-            var s = new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 0 }; // 100 W, 25 %, 75 %, no wear, no fails (formula check)
+            var s = new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 0, MinimumPrice = 0 }; // 100 W, 25 %, 75 %, no wear, no fails (formula check)
             var r = Pricing.Calculate(Example(), s);
             Eq("material", 21.60, r.MaterialCost);
             Eq("power kWh", 0.55, r.PowerKwh);
@@ -541,7 +1051,7 @@ namespace PrintPrice.Tests
             Eq("others", 39.725, r.OthersPrice);
 
             // Failed prints 5 %: 22.70 × 0.05 = 1.135; base 23.835; × 1.25 = 29.79375; × 1.75 = 41.71125
-            var rf = Pricing.Calculate(Example(), new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 5 });
+            var rf = Pricing.Calculate(Example(), new AppSettings { MachineRatePerHour = 0, FailedPrintPct = 5, MinimumPrice = 0 });
             Eq("failed prints 5 %", 1.135, rf.FailedPrintCost);
             Eq("base with failed prints", 23.835, rf.BaseCost);
             Eq("friends with failed prints", 29.79375, rf.FriendsPrice);
@@ -559,12 +1069,14 @@ namespace PrintPrice.Tests
             Eq("friends w/ rate + rounding", 60, r2.FriendsPrice);
 
             var s4 = new AppSettings();   // defaults: failed prints off, A1 wear 5.5 h × 1.71 = 9.405
-            Eq("others with defaults", 49.13, Pricing.Calculate(Example(), s4).OthersPrice);   // 39.725 + 9.405
+            // 39.725 + 9.405 = 49.13 is under the default 50 kr. minimum -> customers pay 50
+            Eq("others with defaults (minimum 50)", 50, Pricing.Calculate(Example(), s4).OthersPrice);
             Eq("friends with defaults", 37.78, Pricing.Calculate(Example(), s4).FriendsPrice); // 28.375 + 9.405
 
             // Benchy: 0 h 38 m, 11.8 g, 200 DKK/kg, 3.65 DKK/kWh, defaults.
             // base = 2.36 + 0.6333 × 0.1 × 3.65 = 2.5912; wear = 0.6333 × 1.71 = 1.0830
-            var benchy = Pricing.Calculate(new QuoteInput { Hours = 0, Minutes = 38, FilamentGrams = 11.8, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 3.65 }, new AppSettings());
+            var benchy = Pricing.Calculate(new QuoteInput { Hours = 0, Minutes = 38, FilamentGrams = 11.8, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 3.65 }, new AppSettings { MinimumPrice = 0 });
+            Eq("benchy others with the default 50 kr. minimum", 50, Pricing.Calculate(new QuoteInput { Hours = 0, Minutes = 38, FilamentGrams = 11.8, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 3.65 }, new AppSettings()).OthersPrice);
             Eq("benchy friends", 4.32, benchy.FriendsPrice);   // 2.5912 × 1.25 + 1.0830 = 4.3220
             Eq("benchy others", 5.62, benchy.OthersPrice);     // 2.5912 × 1.75 + 1.0830 = 5.6175
 
@@ -952,6 +1464,87 @@ namespace PrintPrice.Tests
                 Eq("round trip FailedPaybackWho", 1, r5.FailedPaybackWho);
                 Eq("round trip LastFilamentPrice", 189.5, r5.LastFilamentPrice);
                 True("round trip Language", r5.Language == "da");
+                new AppSettings { PrinterName = "  Prusa MK4  " }.Save();
+                True("round trip PrinterName (trimmed)", AppSettings.Load().PrinterName == "Prusa MK4");
+                System.IO.File.WriteAllText(testFile, "PrinterName=\r\n");
+                True("empty PrinterName in file -> default", AppSettings.Load().PrinterName == "Bambu Lab A1");
+                System.IO.File.WriteAllText(testFile, "PrinterName=    \r\n");
+                True("spaces-only PrinterName in file -> default", AppSettings.Load().PrinterName == "Bambu Lab A1");
+                System.IO.File.WriteAllText(testFile, "PrinterName=" + new string('b', 60) + "\r\n");
+                Eq("long PrinterName in file capped at 40", 40, AppSettings.Load().PrinterName.Length);
+                // 5a. quote export settings
+                True("quote defaults in file", r5.QuoteName == "Gettic" && r5.QuoteValidDays == 14 &&
+                     r5.QuotePrice == "customer" && r5.QuoteDark == 1);
+                var sq = new AppSettings { QuoteName = "Gettic 3D = Print", QuoteValidDays = 30, QuotePrice = "friends", QuoteDark = 0 };
+                sq.Save();
+                var rq = AppSettings.Load();
+                True("round trip QuoteName", rq.QuoteName == "Gettic 3D = Print");
+                Eq("round trip QuoteValidDays", 30, rq.QuoteValidDays);
+                True("round trip QuotePrice friends", rq.QuotePrice == "friends" && rq.QuoteFriends && rq.QuoteFor == History.ForFriends);
+                Eq("round trip QuoteDark 0 (light)", 0, rq.QuoteDark);
+                True("settings file uses key QuoteLook, not QuoteDark", System.IO.File.ReadAllText(testFile).Contains("QuoteLook=0")
+                     && !System.IO.File.ReadAllText(testFile).Contains("QuoteDark"));
+                System.IO.File.WriteAllText(testFile, "QuoteDark=0\r\n");
+                Eq("old QuoteDark=0 key ignored -> dark default", 1, AppSettings.Load().QuoteDark);
+                new AppSettings { QuoteName = "" }.Save();
+                True("round trip empty QuoteName stays empty", AppSettings.Load().QuoteName == "");
+                System.IO.File.WriteAllText(testFile, "QuoteValidDays=0\r\nQuotePrice=boss\r\nQuoteLook=7\r\n");
+                var bq = AppSettings.Load();
+                True("bad quote values -> defaults (days 0 -> 14, price -> customer), QuoteLook 7 -> 1",
+                     bq.QuoteValidDays == 14 && bq.QuotePrice == "customer" && bq.QuoteDark == 1);
+                System.IO.File.WriteAllText(testFile, "QuoteValidDays=7.6\r\n");
+                Eq("QuoteValidDays 7,6 -> 8 whole days", 8, AppSettings.Load().QuoteValidDays);
+                // 5a2. invoice settings
+                new AppSettings().Save();
+                var ri0 = AppSettings.Load();
+                True("invoice defaults in file: 14 days, no MobilePay, no bank", ri0.InvoiceDueDays == 14 && ri0.PayMobilePay == "" && ri0.PayBank == "");
+                new AppSettings { InvoiceDueDays = 30, PayMobilePay = "12 34 56 78", PayBank = "Reg 1234 konto 0012345678", UsedInvoiceNos = "2026-ABCD,2026-K7Q4" }.Save();
+                var ri1 = AppSettings.Load();
+                True("round trip invoice settings", ri1.InvoiceDueDays == 30 && ri1.PayMobilePay == "12 34 56 78" &&
+                     ri1.PayBank == "Reg 1234 konto 0012345678" && ri1.UsedInvoiceNos == "2026-ABCD,2026-K7Q4");
+                True("UsedInvoiceNos default empty in file", ri0.UsedInvoiceNos == "");
+                System.IO.File.WriteAllText(testFile, "InvoiceDueDays=0\r\n");
+                Eq("InvoiceDueDays 0 -> 14", 14, AppSettings.Load().InvoiceDueDays);
+                System.IO.File.WriteAllText(testFile, "InvoiceDueDays=366\r\n");
+                Eq("InvoiceDueDays 366 -> 14", 14, AppSettings.Load().InvoiceDueDays);
+                System.IO.File.WriteAllText(testFile, "InvoiceDueDays=365\r\n");
+                Eq("InvoiceDueDays 365 kept", 365, AppSettings.Load().InvoiceDueDays);
+                // 5a3. SettingsVersion 2: the v1.8.0 defaults reach users who never changed the old ones
+                Eq("new install: SettingsVersion 2", 2, fresh.SettingsVersion);
+                Eq("new settings object: SettingsVersion 2", 2, new AppSettings().SettingsVersion);
+                // old file (no key) at the old defaults 0 / 0 / 25 -> 50 / 1 / 10; other values kept; version 2 written
+                System.IO.File.WriteAllText(testFile, "MinimumPrice=0\r\nFailedPayback=0\r\nFailedPaybackPct=25\r\nFriendsMarkupPct=30\r\n");
+                var v1 = AppSettings.Load();
+                True("old file, old defaults -> min 50, payback on, 10 %", v1.MinimumPrice == 50 && v1.FailedPayback == 1 && v1.FailedPaybackPct == 10);
+                True("old file: other values kept, version 2", v1.FriendsMarkupPct == 30 && v1.SettingsVersion == 2);
+                string iniV = System.IO.File.ReadAllText(testFile);
+                True("upgrade wrote SettingsVersion=2 and the new values", iniV.Contains("SettingsVersion=2") &&
+                     iniV.Contains("MinimumPrice=50") && iniV.Contains("FailedPaybackPct=10") && iniV.Contains("FriendsMarkupPct=30"));
+                // old file with custom values: kept (FailedPayback 0 is the old default, so it still turns on)
+                System.IO.File.WriteAllText(testFile, "SettingsVersion=1\r\nMinimumPrice=30\r\nFailedPayback=0\r\nFailedPaybackPct=15\r\n");
+                var v1c = AppSettings.Load();
+                True("old file, custom min 30 / pct 15 kept", v1c.MinimumPrice == 30 && v1c.FailedPaybackPct == 15 && v1c.SettingsVersion == 2);
+                Eq("old file: FailedPayback 0 (old default) -> 1", 1, v1c.FailedPayback);
+                System.IO.File.WriteAllText(testFile, "MinimumPrice=75\r\nFailedPayback=1\r\nFailedPaybackPct=40\r\n");
+                var v1d = AppSettings.Load();
+                True("old file, custom 75 / on / 40 kept", v1d.MinimumPrice == 75 && v1d.FailedPayback == 1 && v1d.FailedPaybackPct == 40);
+                // version 2 file: 0 / 0 / 25 are the user's own choices after the update -> kept, file not rewritten
+                System.IO.File.WriteAllText(testFile, "SettingsVersion=2\r\nMinimumPrice=0\r\nFailedPayback=0\r\nFailedPaybackPct=25\r\n");
+                var v2 = AppSettings.Load();
+                True("version 2 file: min 0, payback off, 25 % kept", v2.MinimumPrice == 0 && v2.FailedPayback == 0 && v2.FailedPaybackPct == 25);
+                True("version 2 file not rewritten by Load", System.IO.File.ReadAllText(testFile) ==
+                     "SettingsVersion=2\r\nMinimumPrice=0\r\nFailedPayback=0\r\nFailedPaybackPct=25\r\n");
+                // the upgrade runs once: loading the upgraded file again, then the user sets min 0 -> stays 0
+                System.IO.File.WriteAllText(testFile, "MinimumPrice=0\r\n");
+                var once = AppSettings.Load();
+                once.MinimumPrice = 0;
+                once.Save();
+                Eq("after the upgrade the user's min 0 stays 0", 0, AppSettings.Load().MinimumPrice);
+                // round trip
+                new AppSettings { MinimumPrice = 20, FailedPayback = 0, FailedPaybackPct = 25 }.Save();
+                var rv = AppSettings.Load();
+                True("round trip: version 2, 20 / off / 25 kept", rv.SettingsVersion == 2 && rv.MinimumPrice == 20 &&
+                     rv.FailedPayback == 0 && rv.FailedPaybackPct == 25);
                 // 5b. remembered price per filament: round trip under da-DK, names with spaces, +, -, =, |
                 var s6 = new AppSettings();
                 s6.LastFilamentPrice = 189.5;
@@ -1017,6 +1610,8 @@ namespace PrintPrice.Tests
 
             HistoryTests();
             PaybackTests();
+            QuoteTests();
+            InvoiceTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;

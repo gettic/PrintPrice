@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, main_reopened.png, history.png, ...; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, ...; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -39,21 +39,44 @@ namespace PrintPrice
                     // failed prints payback on, with a made-up debt (nothing is saved): the extra Cost breakdown row
                     main.SetSamplePayback(33.70);
                     Snap(main, folder, "main_payback.png");
-                    main.SetSamplePayback(0);   // back to the defaults (off) for the other pictures
+                    main.SetSamplePayback(0);   // back to the defaults (no debt) for the other pictures
                     // 4-colour Benchy: one row per colour in the Cost breakdown; picture = <folder>\model2.png if there
                     main.SetSampleMultiJob();
                     main.SetSamplePicture(Path.Combine(folder, "model2.png"));
                     Snap(main, folder, "main_multi.png");
+                    // quote export: the customer quote page of the 4-colour example (A4 at 150 dpi): light without a
+                    // customer name, dark with one; then the "Show quote…" window (made-up customer, nothing is saved)
+                    foreach (bool dark in new[] { false, true })
+                        using (var q = main.RenderSampleQuote(dark, dark ? "Mette Hansen" : ""))
+                            if (q != null) q.Save(Path.Combine(folder, dark ? "quote_dark.png" : "quote_light.png"), ImageFormat.Png);
+                    // the invoice page of the same job (sample code, customer and payment ways)
+                    using (var inv = main.RenderSampleInvoice())
+                        if (inv != null) inv.Save(Path.Combine(folder, "invoice_light.png"), ImageFormat.Png);
+                    using (var qf = main.SampleQuoteWindow("Mette Hansen"))
+                        if (qf != null)
+                        {
+                            Place(qf);
+                            qf.Show();
+                            Snap(qf, folder, "quote_window.png");
+                            qf.Hide();
+                        }
                     // price history: made-up quotes in memory (history.json is never read or written here)
                     var quotes = HistoryForm.SampleQuotes();
                     main.SetSampleJob();
                     main.Reopen(quotes[0]);   // "↻ Opened from history" + saved price next to today's
                     main.SetSamplePicture(sample);
                     Snap(main, folder, "main_reopened.png");
+                    // "Repeat print" of the 4-colour quote: today's prices, no slicing in picture mode
+                    main.SetSampleJob();
+                    main.SampleRepeat(quotes[1]);
+                    main.SetSamplePicture(Path.Combine(folder, "model2.png"));
+                    Snap(main, folder, "repeat.png");
                     using (var hist = new HistoryForm(quotes, null, true))
                     {
+                        hist.QuoteRequested = (owner, rec, isInvoice) => { };   // shows Quote… / Invoice… (never clicked here)
                         Place(hist);
                         hist.Show();
+                        hist.SelectMonth(new DateTime(2026, 10, 1));   // October: billed, failed and not-printed quotes
                         Snap(hist, folder, "history.png");
                         hist.Hide();
                     }
@@ -67,6 +90,16 @@ namespace PrintPrice
                         Place(set);
                         set.Show();
                         Snap(set, folder, "settings.png");
+                        // the other tabs (settings.png = Prices)
+                        set.SelectedTab = SettingsForm.TabPrinter;
+                        Snap(set, folder, "settings_printer.png");
+                        set.SelectedTab = SettingsForm.TabElectricity;
+                        Snap(set, folder, "settings_electricity.png");
+                        set.SelectedTab = SettingsForm.TabQuote;
+                        Snap(set, folder, "settings_quote.png");
+                        set.SelectedTab = SettingsForm.TabApp;
+                        Snap(set, folder, "settings_app.png");
+                        set.SelectedTab = SettingsForm.TabPrices;   // settings_found.png: the "check now" text, on the first tab
                         // longest "check now" result text, to check the bottom row still fits (no real check)
                         set.SetCheckText(SettingsForm.FoundText(fake), null, Theme.Text);
                         Snap(set, folder, "settings_found.png");
