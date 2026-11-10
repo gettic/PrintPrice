@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Web tests: the linked price code + the web's Json / WebCalc on .NET 10, as the website runs them.
        Run:  dotnet run - -project web\tests   (only a .dll is built, no .exe) -->
@@ -19,8 +19,11 @@
     <Compile Include="..\..\src\Num.cs" Link="Linked\Num.cs" />
     <Compile Include="..\..\src\History.cs" Link="Linked\History.cs" />
     <Compile Include="..\..\src\Lang.cs" Link="Linked\Lang.cs" />
+    <Compile Include="..\..\src\SliceInfo.cs" Link="Linked\SliceInfo.cs" />
     <Compile Include="..\Logic\Json.cs" Link="Web\Json.cs" />
     <Compile Include="..\Logic\WebCalc.cs" Link="Web\WebCalc.cs" />
+    <Compile Include="..\Logic\ZipRanges.cs" Link="Web\ZipRanges.cs" />
+    <Compile Include="..\Logic\SlicedFile.cs" Link="Web\SlicedFile.cs" />
   </ItemGroup>
 
 </Project>

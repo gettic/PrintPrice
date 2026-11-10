@@ -19,9 +19,14 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 ## Website
 There is also a calculator in the browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). Type the print time, grams, kr/kg and the electricity price, and you get both prices and the cost breakdown. It is in English and Danish. Settings are kept only in that browser.
 
-It does less than the Windows app: no slicing, no file upload, no History and no live electricity price (you type the price yourself).
+**Sliced files:** drop a sliced Bambu `.gcode.3mf` or Bambu G-code file on the page, or choose one. It fills in the print time, the grams, one row per colour (the kr/kg of each filament is remembered) and the plate picture.
+- The file is read in your browser only and is never uploaded. Big files are read in parts.
+- An unsliced STL or 3MF gets a message to slice it in Bambu Studio first and export the sliced plate.
+- A file sliced for another of your printers shows a warning and a button to switch printer. Unsupported printers are refused, like in the app.
 
-The site runs entirely in your browser. It stores your settings in the browser's own storage and sends nothing anywhere. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
+It does less than the Windows app: no slicing, no History and no live electricity price (you type the price yourself).
+
+The site runs entirely in your browser. It stores your settings in the browser's own storage and sends nothing anywhere. Files you drop on it are read on your PC and never leave it. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
 
 ## Features
 - **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with the profiles of the printer in use.
@@ -177,6 +182,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 |---|---|
 | `src/Pricing.cs` | Price formula and wear model per printer |
 | `src/Slicer.cs` | Bambu Studio command-line slicing; merges profile inheritance, which the CLI doesn't do |
+| `src/SliceInfo.cs` | Reading sliced files (time, filaments, printer); shared with the website |
 | `src/Printables.cs` | Printables API: model files and downloads |
 | `src/PowerPrice.cs` | Energi Data Service spot prices |
 | `src/Updater.cs` | Update check and install from GitHub releases |

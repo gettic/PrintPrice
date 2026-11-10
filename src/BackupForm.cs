@@ -482,15 +482,9 @@ namespace PrintPrice
         /// the wrong check character (Backup.Normalize).
         static bool CodeTypo(string typed)
         {
-            int n = 0;
-            foreach (char ch in (typed ?? "").ToUpperInvariant())
-            {
-                if (ch == '-' || char.IsWhiteSpace(ch)) continue;
-                char c = ch == 'O' ? '0' : (ch == 'I' || ch == 'L') ? '1' : ch;
-                if (Backup.Alphabet.IndexOf(c) < 0) return true;
-                n++;
-            }
-            return n > Backup.CodeLength || (n == Backup.CodeLength && Backup.Normalize(typed) == null);
+            string c = Backup.Clean(typed ?? "");
+            if (c == null) return true;
+            return c.Length > Backup.CodeLength || (c.Length == Backup.CodeLength && Backup.Normalize(typed) == null);
         }
 
         /// Restore tab state: which source row is on, the summary (or error), the How choices, the note under them.

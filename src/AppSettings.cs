@@ -498,7 +498,7 @@ namespace PrintPrice
             try
             {
                 if (!File.Exists(FilePath)) return s;   // new install: version 2 defaults
-                s.StartRead();
+                s.StartRead();   // also before reading: a file that exists but can't be read keeps these (ReadIni repeats it)
                 s.ReadIni(File.ReadAllLines(FilePath));
                 read = true;
             }
@@ -546,54 +546,51 @@ namespace PrintPrice
         // parses settings.ini lines into this (fresh) object; may throw (Load / FromIni catch)
         void ReadIni(IEnumerable<string> lines)
         {
-            var s = this;
+            StartRead();
+            string firstId = "1";
+            var stringKeys = Strings();
+            var extraIds = new List<string>();      // other printers, in file order
+            var extras = new Dictionary<string, AppSettings>(StringComparer.Ordinal);
+            foreach (var line in lines)
             {
-                s.StartRead();
-                string firstId = "1";
-                var stringKeys = s.Strings();
-                var extraIds = new List<string>();      // other printers, in file order
-                var extras = new Dictionary<string, AppSettings>(StringComparer.Ordinal);
-                foreach (var line in lines)
+                if (line == null) continue;
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                string key = line.Substring(0, eq).Trim(), val = line.Substring(eq + 1).Trim();
+                if (key == FilamentPriceKey) { ReadFilamentPrice(val); continue; }
+                if (key == PrinterIdKey) { if (ValidPrinterId(val)) firstId = val; continue; }
+                AppSettings target = this;
+                if (key.StartsWith(PrinterLinePrefix, StringComparison.Ordinal))   // Printer.<id>.<key>
                 {
-                    if (line == null) continue;
-                    int eq = line.IndexOf('=');
-                    if (eq <= 0) continue;
-                    string key = line.Substring(0, eq).Trim(), val = line.Substring(eq + 1).Trim();
-                    if (key == FilamentPriceKey) { s.ReadFilamentPrice(val); continue; }
-                    if (key == PrinterIdKey) { if (ValidPrinterId(val)) firstId = val; continue; }
-                    AppSettings target = s;
-                    if (key.StartsWith(PrinterLinePrefix, StringComparison.Ordinal))   // Printer.<id>.<key>
+                    int dot = key.IndexOf('.', PrinterLinePrefix.Length);
+                    if (dot < 0) continue;
+                    string id = key.Substring(PrinterLinePrefix.Length, dot - PrinterLinePrefix.Length);
+                    key = key.Substring(dot + 1);
+                    if (!ValidPrinterId(id) || (Array.IndexOf(PrinterNumberKeys, key) < 0
+                        && Array.IndexOf(PrinterStringKeys, key) < 0)) continue;
+                    if (!extras.TryGetValue(id, out target))
                     {
-                        int dot = key.IndexOf('.', PrinterLinePrefix.Length);
-                        if (dot < 0) continue;
-                        string id = key.Substring(PrinterLinePrefix.Length, dot - PrinterLinePrefix.Length);
-                        key = key.Substring(dot + 1);
-                        if (!ValidPrinterId(id) || (Array.IndexOf(PrinterNumberKeys, key) < 0
-                            && Array.IndexOf(PrinterStringKeys, key) < 0)) continue;
-                        if (!extras.TryGetValue(id, out target))
-                        {
-                            target = new AppSettings();
-                            extras[id] = target;
-                            extraIds.Add(id);
-                        }
+                        target = new AppSettings();
+                        extras[id] = target;
+                        extraIds.Add(id);
                     }
-                    if (stringKeys.ContainsKey(key)) { target.SetString(key, val); continue; }
-                    double v;
-                    if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0) target.SetNumber(key, v);
                 }
-                // printer list: the flat keys = the first printer, then the others (a doubled id is skipped)
-                s.printers = new List<PrinterProfile> { s.FromFields(firstId) };
-                s.NoteId(firstId);
-                foreach (var id in extraIds)
-                {
-                    if (s.PrinterIndex(id) >= 0) continue;
-                    s.printers.Add(extras[id].FromFields(id));
-                    s.NoteId(id);
-                }
-                int active = s.PrinterIndex(s.ActivePrinterId);
-                if (active < 0) s.ActivePrinterId = firstId;
-                else if (active > 0) s.ToFields(s.printers[active]);
+                if (stringKeys.ContainsKey(key)) { target.SetString(key, val); continue; }
+                double v;
+                if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0) target.SetNumber(key, v);
             }
+            // printer list: the flat keys = the first printer, then the others (a doubled id is skipped)
+            printers = new List<PrinterProfile> { FromFields(firstId) };
+            NoteId(firstId);
+            foreach (var id in extraIds)
+            {
+                if (PrinterIndex(id) >= 0) continue;
+                printers.Add(extras[id].FromFields(id));
+                NoteId(id);
+            }
+            int active = PrinterIndex(ActivePrinterId);
+            if (active < 0) ActivePrinterId = firstId;
+            else if (active > 0) ToFields(printers[active]);
         }
 
         public void Save()
@@ -609,40 +606,38 @@ namespace PrintPrice
         /// The settings.ini lines Save writes (also for the website's browser storage; read back with FromIni).
         public string[] ToIni()
         {
+            var lines = new List<string>();
+            SyncPrinters();
+            var nums = Numbers();
+            var strs = Strings();
+            PutPrinter(nums, strs, printers[0]);   // the flat keys always hold the first printer
+            foreach (var kv in nums)
+                lines.Add(kv.Key + "=" + kv.Value.ToString("R", Inv));
+            foreach (var kv in strs)
+                lines.Add(kv.Key + "=" + Line(kv.Value));
+            lines.Add(PrinterIdKey + "=" + printers[0].Id);
+            for (int i = 1; i < printers.Count; i++)
             {
-                var lines = new List<string>();
-                SyncPrinters();
-                var nums = Numbers();
-                var strs = Strings();
-                PutPrinter(nums, strs, printers[0]);   // the flat keys always hold the first printer
-                foreach (var kv in nums)
-                    lines.Add(kv.Key + "=" + kv.Value.ToString("R", Inv));
-                foreach (var kv in strs)
-                    lines.Add(kv.Key + "=" + Line(kv.Value));
-                lines.Add(PrinterIdKey + "=" + printers[0].Id);
-                for (int i = 1; i < printers.Count; i++)
-                {
-                    var pn = new Dictionary<string, double>();
-                    var ps = new Dictionary<string, string>();
-                    PutPrinter(pn, ps, printers[i]);
-                    string pre = PrinterLinePrefix + printers[i].Id + ".";
-                    foreach (var kv in pn) lines.Add(pre + kv.Key + "=" + kv.Value.ToString("R", Inv));
-                    foreach (var kv in ps) lines.Add(pre + kv.Key + "=" + Line(kv.Value));
-                }
-                if (FilamentPrices != null)
-                {
-                    var names = new List<string>(FilamentPrices.Keys);
-                    names.Sort(StringComparer.Ordinal);
-                    foreach (var n in names)
-                    {
-                        string clean = CleanName(n);
-                        double v = FilamentPrices[n];
-                        if (clean.Length == 0 || !ValidPrice(v)) continue;
-                        lines.Add(FilamentPriceKey + "=" + v.ToString("R", Inv) + "|" + clean);
-                    }
-                }
-                return lines.ToArray();
+                var pn = new Dictionary<string, double>();
+                var ps = new Dictionary<string, string>();
+                PutPrinter(pn, ps, printers[i]);
+                string pre = PrinterLinePrefix + printers[i].Id + ".";
+                foreach (var kv in pn) lines.Add(pre + kv.Key + "=" + kv.Value.ToString("R", Inv));
+                foreach (var kv in ps) lines.Add(pre + kv.Key + "=" + Line(kv.Value));
             }
+            if (FilamentPrices != null)
+            {
+                var names = new List<string>(FilamentPrices.Keys);
+                names.Sort(StringComparer.Ordinal);
+                foreach (var n in names)
+                {
+                    string clean = CleanName(n);
+                    double v = FilamentPrices[n];
+                    if (clean.Length == 0 || !ValidPrice(v)) continue;
+                    lines.Add(FilamentPriceKey + "=" + v.ToString("R", Inv) + "|" + clean);
+                }
+            }
+            return lines.ToArray();
         }
 
         static string Line(string v) { return (v ?? "").Replace("\r", "").Replace("\n", ""); }

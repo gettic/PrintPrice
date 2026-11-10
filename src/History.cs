@@ -18,6 +18,8 @@ namespace PrintPrice
         public string Colour = "";   // "#RRGGBB" or ""
         public string Type = "";     // e.g. "PLA"
         public string Name = "";     // filament profile / display name
+
+        internal object MemberwiseCopy() { return MemberwiseClone(); }   // History.CopyQuotes
     }
 
     /// One saved quote: inputs, the settings used, the result as shown, and the user's own notes.
@@ -98,6 +100,8 @@ namespace PrintPrice
         public string InvoicePayMobilePay = "";
         public string InvoicePayBank = "";
         public string InvoiceFromName = "";        // AppSettings.QuoteName at the time
+
+        internal object MemberwiseCopy() { return MemberwiseClone(); }   // History.CopyQuotes
     }
 
     /// What an invoice shows besides the prices (History.InvoiceInfo): its saved snapshot, else today's settings.
@@ -154,6 +158,13 @@ namespace PrintPrice
         public string App;
         public HistoryFile History;
         public List<string> Settings;
+    }
+
+    /// Reading only (History.ReadBackup): a backup file (BackupFile) or a plain history.json (HistoryFile: Version + Quotes)
+    /// in one parse. Never written.
+    public class BackupFileRead : BackupFile
+    {
+        public List<QuoteRecord> Quotes;
     }
 
     /// A read backup (History.ReadBackup): the records (cleaned like Load does) and the settings.ini lines (null = none:
@@ -589,6 +600,31 @@ namespace PrintPrice
             return m;
         }
 
+        /// Every month with records (as Months(list), newest first), each equal to MonthSummary(list, year, month), in one
+        /// pass over the list (each SavedAt read once). HistoryForm's "All months" cards add these up.
+        public static List<MonthTotals> MonthSummaries(List<QuoteRecord> list)
+        {
+            var res = new List<MonthTotals>();
+            if (list == null) return res;
+            var byMonth = new Dictionary<int, MonthTotals>();
+            foreach (var r in list)
+            {
+                int y, mo;
+                if (!SavedMonth(r, out y, out mo)) continue;
+                MonthTotals m;
+                if (!byMonth.TryGetValue(y * 12 + mo, out m))
+                {
+                    m = new MonthTotals { Year = y, Month = mo };
+                    byMonth[y * 12 + mo] = m;
+                    res.Add(m);
+                }
+                AddRecord(m, r);
+            }
+            foreach (var m in res) Finish(m);
+            res.Sort(delegate(MonthTotals a, MonthTotals b) { return (b.Year * 12 + b.Month).CompareTo(a.Year * 12 + a.Month); });
+            return res;
+        }
+
         static void Sum(MonthTotals m, List<QuoteRecord> list, int year, int month, string printerId)
         {
             if (list != null)
@@ -598,18 +634,30 @@ namespace PrintPrice
                     if (printerId != null && PrinterOf(r) != printerId) continue;
                     int y, mo;
                     if (year != 0 && (!SavedMonth(r, out y, out mo) || y != year || mo != month)) continue;
-                    if (r.Failed) { m.FailedPrints++; m.Lost += FailedCost(r); continue; }
-                    if (!r.Printed) continue;
-                    m.Prints++;
-                    m.PrintHours += r.Hours + r.Minutes / 60.0;
-                    m.Grams += r.Grams;
-                    double price = PriceFor(r);
-                    if (r.For == ForFriends) { m.FriendsIncome += price; m.FriendsCount++; }
-                    else { m.CustomerIncome += price; m.CustomerCount++; }
-                    m.MaterialCost += r.MaterialCost;
-                    m.PowerCost += r.PowerCost;
-                    m.WearCost += WearCost(r);
+                    AddRecord(m, r);
                 }
+            Finish(m);
+        }
+
+        // one record into the totals (MonthSummary's rules)
+        static void AddRecord(MonthTotals m, QuoteRecord r)
+        {
+            if (r.Failed) { m.FailedPrints++; m.Lost += FailedCost(r); return; }
+            if (!r.Printed) return;
+            m.Prints++;
+            m.PrintHours += r.Hours + r.Minutes / 60.0;
+            m.Grams += r.Grams;
+            double price = PriceFor(r);
+            if (r.For == ForFriends) { m.FriendsIncome += price; m.FriendsCount++; }
+            else { m.CustomerIncome += price; m.CustomerCount++; }
+            m.MaterialCost += r.MaterialCost;
+            m.PowerCost += r.PowerCost;
+            m.WearCost += WearCost(r);
+        }
+
+        // the derived totals, after the last AddRecord
+        static void Finish(MonthTotals m)
+        {
             m.Income = m.CustomerIncome + m.FriendsIncome;
             m.Costs = m.MaterialCost + m.PowerCost + m.WearCost;
             m.Profit = m.Income - m.Costs - m.Lost;
@@ -958,6 +1006,12 @@ namespace PrintPrice
             });
         }
 
+        /// "This is not a PrintPrice backup." (also Backup.Open)
+        internal static string NotBackupText()
+        {
+            return L.S("This is not a PrintPrice backup.", "Det er ikke en PrintPrice-sikkerhedskopi.");
+        }
+
         static bool IsPcOnly(string line)
         {
             if (line == null) return true;
@@ -971,12 +1025,12 @@ namespace PrintPrice
         public static string ReadBackup(string text, out BackupData data)
         {
             data = null;
-            string notBackup = L.S("This is not a PrintPrice backup.", "Det er ikke en PrintPrice-sikkerhedskopi.");
+            string notBackup = NotBackupText();
             string newer = L.S("This backup was made by a newer PrintPrice. Update the app first.",
                                "Sikkerhedskopien er lavet af en nyere PrintPrice. Opdater programmet først.");
             if (string.IsNullOrEmpty(text) || text.Trim().Length == 0) return notBackup;
-            BackupFile b;
-            try { b = Json.Deserialize<BackupFile>(text); }
+            BackupFileRead b;
+            try { b = Json.Deserialize<BackupFileRead>(text); }
             catch { return notBackup; }
             if (b == null) return notBackup;
             if (b.Format == BackupFormat)
@@ -996,13 +1050,10 @@ namespace PrintPrice
             }
             if (b.Format != null) return notBackup;
             // a plain history.json: {"Version":1,"Quotes":[...]}
-            HistoryFile f;
-            try { f = Json.Deserialize<HistoryFile>(text); }
-            catch { return notBackup; }
-            if (f == null || f.Quotes == null) return notBackup;
-            if (f.Version > Version) return newer;
-            if (f.Version != Version) return notBackup;
-            data = new BackupData { Quotes = CleanQuotes(f.Quotes) };
+            if (b.Quotes == null) return notBackup;
+            if (b.Version > Version) return newer;
+            if (b.Version != Version) return notBackup;
+            data = new BackupData { Quotes = CleanQuotes(b.Quotes) };
             return null;
         }
 
@@ -1014,11 +1065,27 @@ namespace PrintPrice
                 + "|" + r.Grams.ToString("R", Inv) + "|" + r.OthersPrice.ToString("R", Inv);
         }
 
-        // deep copies (through the JSON), so a restore never changes the caller's records
-        static List<QuoteRecord> CopyQuotes(List<QuoteRecord> list)
+        // deep copies, so a restore never changes the caller's records; the same as a JSON round trip (ParseJson(ToJson)):
+        // Printed set again (a written file always has the key), then CleanQuotes
+        internal static List<QuoteRecord> CopyQuotes(List<QuoteRecord> list)
         {
             if (list == null || list.Count == 0) return new List<QuoteRecord>();
-            return ParseJson(ToJson(list)) ?? new List<QuoteRecord>();
+            var copy = new List<QuoteRecord>(list.Count);
+            foreach (var r in list) copy.Add(r == null ? null : CopyRecord(r));
+            return CleanQuotes(copy);
+        }
+
+        static QuoteRecord CopyRecord(QuoteRecord r)
+        {
+            var c = (QuoteRecord)r.MemberwiseCopy();
+            c.Printed = r.Printed;
+            if (r.Filaments != null)
+            {
+                c.Filaments = new List<HistoryFilament>(r.Filaments.Count);
+                foreach (var f in r.Filaments)
+                    c.Filaments.Add(f == null ? null : (HistoryFilament)f.MemberwiseCopy());
+            }
+            return c;
         }
 
         // fills keep (this PC's) from other (the same record in the backup); true when something changed

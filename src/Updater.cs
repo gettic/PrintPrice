@@ -9,7 +9,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
-using System.Web.Script.Serialization;
 
 namespace PrintPrice
 {
@@ -84,7 +83,7 @@ namespace PrintPrice
         /// Reads GitHub's "latest release" JSON. Returns null if it has no usable PrintPrice.exe.
         public static UpdateInfo ParseRelease(string json)
         {
-            return FromRelease(new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(json));
+            return FromRelease(Json.Deserialize<Dictionary<string, object>>(json));
         }
 
         /// One release object from GitHub's JSON. Null if draft/prerelease, not a version tag, or no usable PrintPrice.exe.
@@ -249,7 +248,7 @@ namespace PrintPrice
         /// Returns null if there is nothing newer.
         public static UpdateInfo ParseReleases(string json, Version current)
         {
-            var list = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(json) as object[];
+            var list = Json.Deserialize<object>(json) as object[];
             if (list == null) return null;
             var all = new List<Dictionary<string, object>>();
             UpdateInfo target = null;

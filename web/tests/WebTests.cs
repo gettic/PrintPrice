@@ -86,6 +86,9 @@ static class WebTests
         // 6. Danish formatting works (culture data present)
         True("Num.Kr Danish: " + Num.Kr(1234.5), Num.Kr(1234.5) == "1.234,50 kr.");
 
+        // 7. stage 2: sliced files
+        FileTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

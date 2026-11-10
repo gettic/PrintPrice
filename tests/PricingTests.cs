@@ -479,6 +479,28 @@ namespace PrintPrice.Tests
             res = History.Combine(many, new AppSettings(), new BackupData { Quotes = more }, false, false);
             True("Merge 4990 + 20 -> 5000", res.Quotes.Count == 5000 && res.Added == 20);
 
+            // CopyQuotes (Combine's deep copy) = the JSON round trip it replaced: same text, same Printed rule, own objects
+            var odd = new QuoteRecord();   // fresh: Printed false, never set (printedRead false)
+            odd.Id = null; odd.Note = null; odd.Customer = null; odd.InvoiceNo = null; odd.PrinterName = null; odd.For = 0;
+            odd.Grams = 0.1 + 0.2; odd.OthersPrice = 1.0 / 3; odd.SavedAt = "2026-11-03 09:00:00";
+            var lines = BRec("M", "2026-11-04 10:00:00");
+            lines.Filaments = new List<HistoryFilament> { new HistoryFilament { Grams = 12.345678901234, PricePerKg = 199.99, Colour = "#FF0000", Name = "ÆØÅ \"q\" \\ x" },
+                                                          null, new HistoryFilament { Colour = null, Type = null, Name = null } };
+            var emptyLines = BRec("E", "2026-11-04 11:00:00"); emptyLines.Filaments = new List<HistoryFilament> { null };
+            var failed = BRec("F2", "2026-11-04 12:00:00"); History.MarkFailed(failed, true, t); failed.PaidBack = 2.5; failed.Printed = false;
+            var mix = new List<QuoteRecord> { A, odd, null, lines, emptyLines, failed };
+            var viaJson = History.ParseJson(History.ToJson(mix));
+            var copied = History.CopyQuotes(mix);
+            True("CopyQuotes = JSON round trip (text)", History.ToJson(copied) == History.ToJson(viaJson) && copied.Count == 5);
+            bool sameRead = copied.Count == viaJson.Count;
+            for (int i = 0; sameRead && i < copied.Count; i++) sameRead = copied[i].printedRead == viaJson[i].printedRead && copied[i].Printed == viaJson[i].Printed;
+            True("CopyQuotes Printed as the round trip (fresh record stays not printed)", sameRead && !copied[1].Printed);
+            True("CopyQuotes own objects", !ReferenceEquals(copied[0], A) && !ReferenceEquals(copied[2].Filaments, lines.Filaments)
+                 && !ReferenceEquals(copied[2].Filaments[0], lines.Filaments[0]));
+            copied[2].Filaments[0].Grams = 99; copied[0].Note = "changed";
+            True("CopyQuotes leaves the originals alone", lines.Filaments[0].Grams == 12.345678901234 && A.Note != "changed" && odd.Id == null);
+            True("CopyQuotes null / empty", History.CopyQuotes(null).Count == 0 && History.CopyQuotes(new List<QuoteRecord>()).Count == 0);
+
             BackupCodeTests();
             BackupFileTests();
         }
@@ -500,6 +522,8 @@ namespace PrintPrice.Tests
             True("Normalize wrong check char -> null", Backup.Normalize("01234-56789-ABCDE-FGHJG") == null);
             True("Normalize U -> null", Backup.Normalize("U1234-56789-ABCDE-FGHJF") == null);
             True("Normalize 19 chars -> null", Backup.Normalize("01234-56789-ABCDE-FGHJ") == null && Backup.Normalize(null) == null);
+            True("Clean any length, mapped", Backup.Clean(" o1-il ") == "0111" && Backup.Clean("") == "" && Backup.Clean(null) == null
+                 && Backup.Clean("01U") == null && Backup.Clean("01234-56789-ABCDE-FGHJF-0") == "01234567 89ABCDEFGHJF0".Replace(" ", ""));
 
             // fixed test vector (also in plans\history-backup\test vector.md; HMAC values checked with Python)
             True("Vector StorageId", Backup.StorageId(V) == "5c22a78a2694ed52be5c1efa1565dd0d");
@@ -1051,6 +1075,26 @@ namespace PrintPrice.Tests
                  && empty.Lost == 0 && empty.Profit == 0 && empty.ProfitPct == 0 && empty.PrintHours == 0 && empty.Grams == 0);
             True("Month null list: all 0", History.MonthSummary(null, 2026, 11).Prints == 0
                  && History.MonthSummary(null, 2026, 11).Profit == 0);
+            // MonthSummaries (one pass, HistoryForm's All months cards) = MonthSummary of each month in Months order, exactly
+            var sep = HistRecord(new DateTime(2026, 9, 2, 8, 0, 0));                            // only a not-printed quote
+            var oct2 = HistRecord(new DateTime(2026, 10, 5, 8, 0, 0)); oct2.Printed = true; oct2.For = History.ForFriends;
+            oct2.MaterialCost = 0.1; oct2.PowerCost = 0.2; oct2.FriendsPrice = 1.0 / 3; oct2.Minutes = 7;
+            var ml2 = new List<QuoteRecord>(ml) { null, sep, oct2 };
+            var monthList = History.Months(ml2);
+            var sums = History.MonthSummaries(ml2);
+            bool same = sums.Count == monthList.Count && sums.Count == 4;
+            for (int i = 0; same && i < sums.Count; i++)
+            {
+                var a = sums[i];
+                var b = History.MonthSummary(ml2, monthList[i].Year, monthList[i].Month);
+                same = a.Year == b.Year && a.Month == b.Month && a.Prints == b.Prints && a.FailedPrints == b.FailedPrints
+                    && a.PrintHours == b.PrintHours && a.Grams == b.Grams && a.CustomerIncome == b.CustomerIncome
+                    && a.CustomerCount == b.CustomerCount && a.FriendsIncome == b.FriendsIncome && a.FriendsCount == b.FriendsCount
+                    && a.Income == b.Income && a.MaterialCost == b.MaterialCost && a.PowerCost == b.PowerCost && a.WearCost == b.WearCost
+                    && a.Costs == b.Costs && a.Lost == b.Lost && a.Profit == b.Profit && a.ProfitPct == b.ProfitPct;
+            }
+            True("MonthSummaries = MonthSummary per month (exact, newest first)", same);
+            True("MonthSummaries null / empty", History.MonthSummaries(null).Count == 0 && History.MonthSummaries(new List<QuoteRecord>()).Count == 0);
             // only a failed print (not ticked Printed): lost 33,70, no income -> profit -33,70, % 0
             var f = HistRecord(t); History.MarkFailed(f, true, t);
             var fo = History.MonthSummary(new List<QuoteRecord> { f }, 2026, 11);
@@ -1467,6 +1511,55 @@ namespace PrintPrice.Tests
             if (text == null) return false;
             foreach (var p in parts) if (text.IndexOf(p, StringComparison.Ordinal) < 0) return false;
             return true;
+        }
+
+        // a small .3mf in a temp folder: entry name -> text
+        static string Make3mf(string dir, string name, Dictionary<string, string> entries)
+        {
+            string path = System.IO.Path.Combine(dir, name);
+            using (var zip = System.IO.Compression.ZipFile.Open(path, System.IO.Compression.ZipArchiveMode.Create))
+                foreach (var kv in entries)
+                    using (var w = new System.IO.StreamWriter(zip.CreateEntry(kv.Key).Open())) w.Write(kv.Value);
+            return path;
+        }
+
+        /// IsSlicedProject (light) gives the same true/false as ReadSliceInfo(path) != null; ReadSliceInfo reads the
+        /// project_settings once for the slot profiles and the printer (same results as the string parsers).
+        static void SlicedProjectTests()
+        {
+            L.Danish = false;
+            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pricing_sliced_test_" + Guid.NewGuid().ToString("N"));
+            System.IO.Directory.CreateDirectory(dir);
+            try
+            {
+                string xml = SliceInfo(PlateXml("3600", "10", "<filament id=\"1\" type=\"PLA\" color=\"#FF0000\" used_m=\"1\" used_g=\"6\"/>",
+                                                             "<filament id=\"2\" type=\"PLA\" color=\"#00FF00\" used_m=\"1\" used_g=\"4\"/>"));
+                string settings = "{\"filament_settings_id\":[\"Bambu PLA Basic @BBL A1\",\"Bambu PLA Matte @BBL A1\"]," +
+                                  "\"printer_model\":\"Bambu Lab A1 mini\",\"nozzle_diameter\":[\"0.4\"]}";
+                var good = Make3mf(dir, "good.gcode.3mf", new Dictionary<string, string> {
+                    { "Metadata/plate_1.gcode", "G1" }, { "Metadata/slice_info.config", xml }, { "Metadata/project_settings.config", settings } });
+                var noInfo = Make3mf(dir, "noinfo.gcode.3mf", new Dictionary<string, string> { { "Metadata/plate_1.gcode", "G1" } });
+                var badXml = Make3mf(dir, "bad.gcode.3mf", new Dictionary<string, string> {
+                    { "Metadata/plate_1.gcode", "G1" }, { "Metadata/slice_info.config", "<config><plate>" } });
+                var noPlate = Make3mf(dir, "noplate.gcode.3mf", new Dictionary<string, string> {
+                    { "Metadata/plate_1.gcode", "G1" }, { "Metadata/slice_info.config", SliceInfo(PlateXml("0", "0")) } });
+                var noGcode = Make3mf(dir, "model.3mf", new Dictionary<string, string> { { "Metadata/slice_info.config", xml } });
+                Func<string, bool> full = p => { try { return BambuSlicer.ReadSliceInfo(p) != null; } catch { return false; } };
+                foreach (var p in new[] { good, noInfo, badXml, noPlate })
+                    True("IsSlicedProject = ReadSliceInfo != null: " + System.IO.Path.GetFileName(p), BambuSlicer.IsSlicedProject(p) == full(p));
+                True("IsSlicedProject good / no gcode / missing", BambuSlicer.IsSlicedProject(good) && !BambuSlicer.IsSlicedProject(noGcode)
+                     && !BambuSlicer.IsSlicedProject(System.IO.Path.Combine(dir, "gone.gcode.3mf")) && !BambuSlicer.IsSlicedProject(noInfo));
+                var r = BambuSlicer.ReadSliceInfo(good);
+                var slots = BambuSlicer.ParseFilamentSlots(settings);
+                var pp = BambuSlicer.ParseProjectPrinter(settings, xml);
+                True("ReadSliceInfo slot profiles = ParseFilamentSlots", r.Filaments.Count == 2 && r.Filaments[0].Profile == slots[0] && r.Filaments[1].Profile == slots[1]);
+                True("ReadSliceInfo printer = ParseProjectPrinter", r.PrinterModel == pp.Key && pp.Key == "A1M" && r.PrinterName == pp.Name && r.PrinterNozzle == "0.4");
+                True("ParseProjectPrinter strips the nozzle from printer_settings_id", BambuSlicer.ParseProjectPrinter(
+                     "{\"printer_settings_id\":\"Bambu Lab P1S 0.4 nozzle\"}", null).Key == "P1S");
+                True("ParseSlotStrings bad / empty json -> empty", BambuSlicer.ParseSlotStrings("{bad", "x").Count == 0
+                     && BambuSlicer.ParseSlotStrings("", "x").Count == 0 && BambuSlicer.ParseSlotStrings("{\"x\":\"a\"}", "x")[0] == "a");
+            }
+            finally { try { System.IO.Directory.Delete(dir, true); } catch { } }
         }
 
         static void SlicerPrinterTests()
@@ -2265,6 +2358,7 @@ namespace PrintPrice.Tests
             InvoiceTests();
             PrinterTests();
             SlicerPrinterTests();
+            SlicedProjectTests();
             BackupTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");

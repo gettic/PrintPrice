@@ -8,64 +8,9 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
-using System.Xml;
 
 namespace PrintPrice
 {
-    public class SliceResult
-    {
-        public double Seconds;
-        public double Grams;
-        public int Plates;
-        public bool FromSlicedFile;   // values read from an already-sliced .gcode.3mf
-        public byte[] Picture;        // plate picture (PNG) from the sliced 3MF, null if none
-        public List<FilamentUse> Filaments = new List<FilamentUse>();   // per slot, summed over plates, sorted by slot
-        public double PurgeGrams = -1;          // flush/purge waste (already inside Grams); -1 = unknown
-        public double ColourChangeHours = -1;   // extra print time from colour changes (inside Seconds); -1 = unknown
-        // file to open in Bambu Studio: ReadSliceInfo sets the .3mf it read (our out.3mf in the work folder, or the user's
-        // .gcode.3mf); after a slice, KeepForStudio moves it out of the work folder. null = nothing to open
-        public string StudioFile;
-        // printer the file was sliced for (ReadSliceInfo, from project_settings / slice_info): PrinterModel = our key ("A1",
-        // "A1M", "P1S"), "" = a printer we don't support, null = the file doesn't say. PrinterName = the file's name for it
-        // ("Bambu Lab X1 Carbon"), PrinterNozzle = "0.4" etc. ("" unknown). UnsupportedPrinter = PrinterModel == "".
-        public string PrinterModel;
-        public string PrinterName = "";
-        public string PrinterNozzle = "";
-        public bool UnsupportedPrinter;
-    }
-
-    /// One Bambu Lab printer model the app can slice for (BambuSlicer.Printers).
-    public sealed class BambuPrinter
-    {
-        public string Key;              // "A1", "A1M", "P1S" (= AppSettings.PrinterModel)
-        public string MachineName;      // Bambu's printer_model, e.g. "Bambu Lab A1 mini"
-        public string ModelId;          // slice_info printer_model_id, e.g. "N1"
-        public string Thumb;            // resources\images\printer_thumbnail_<Thumb>_png.png
-        public string[] ProcessFamilies;    // "@BBL <family>" process names, best first
-        public string[] FilamentFamilies;   // "@BBL <family>" filament names, best first
-        public int BedX, BedY, BedZ;    // build volume in mm
-    }
-
-    /// The printer a (sliced) project file was made for (BambuSlicer.ParseProjectPrinter).
-    public sealed class ProjectPrinter
-    {
-        public string Key = "";      // our key, "" = not one we support
-        public string Name = "";     // the file's printer name, e.g. "Bambu Lab X1 Carbon"
-        public string Nozzle = "";   // "0.4" etc., "" unknown
-    }
-
-    /// One filament slot used by a sliced print (summed over all plates).
-    public class FilamentUse
-    {
-        public int Slot;              // 1-based filament slot in the project
-        public string Colour = "";    // "#RRGGBB", "" if unknown
-        public string Type = "";      // e.g. "PLA"
-        public string Profile = "";   // e.g. "Bambu PLA Basic @BBL A1", "" if unknown
-        public double Grams;          // incl. purge/flush
-        public double ModelGrams = -1;   // model only (no purge); -1 = unknown
-        public double Metres;
-    }
-
     /// Numbers from the Bambu CLI's result.json, summed over all sliced plates.
     public class SliceStats
     {
@@ -76,45 +21,10 @@ namespace PrintPrice
         public int ColourChanges;      // filament_change_times
     }
 
-    public class SliceException : Exception
-    {
-        public SliceException(string message) : base(message) { }
-    }
-
     /// Drives the Bambu Studio command line to slice models with Bambu Lab A1 / A1 mini / P1S profiles.
-    public static class BambuSlicer
+    public static partial class BambuSlicer
     {
         // ---------- printer models (several printers) ----------
-
-        /// The supported printers. The P1S has no process profiles of its own: Bambu uses the X1C ones for it.
-        public static readonly BambuPrinter[] Printers = {
-            new BambuPrinter { Key = "A1", MachineName = "Bambu Lab A1", ModelId = "N2S", Thumb = "n2s",
-                ProcessFamilies = new[] { "A1" }, FilamentFamilies = new[] { "A1" }, BedX = 256, BedY = 256, BedZ = 256 },
-            new BambuPrinter { Key = "A1M", MachineName = "Bambu Lab A1 mini", ModelId = "N1", Thumb = "n1",
-                ProcessFamilies = new[] { "A1M" }, FilamentFamilies = new[] { "A1M" }, BedX = 180, BedY = 180, BedZ = 180 },
-            new BambuPrinter { Key = "P1S", MachineName = "Bambu Lab P1S", ModelId = "C12", Thumb = "p1s",
-                ProcessFamilies = new[] { "X1C", "P1P" }, FilamentFamilies = new[] { "P1S", "X1C", "P1P" }, BedX = 256, BedY = 256, BedZ = 250 },
-        };
-
-        /// The printer with this key (ignores case); unknown / empty = the A1.
-        public static BambuPrinter FindPrinter(string key)
-        {
-            foreach (var p in Printers) if (string.Equals(p.Key, (key ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return p;
-            return Printers[0];
-        }
-
-        /// Our key for a Bambu printer name ("Bambu Lab A1 mini", also "Bambu Lab A1 mini 0.4 nozzle") or model id ("N1");
-        /// "" = a printer we don't support, null = empty input.
-        public static string ModelKeyFromName(string name)
-        {
-            string n = (name ?? "").Trim();
-            if (n.Length == 0) return null;
-            n = Regex.Replace(n, @"\s+\d+(\.\d+)?\s*nozzle$", "", RegexOptions.IgnoreCase).Trim();
-            foreach (var p in Printers)
-                if (string.Equals(p.MachineName, n, StringComparison.OrdinalIgnoreCase) || string.Equals(p.ModelId, n, StringComparison.OrdinalIgnoreCase))
-                    return p.Key;
-            return "";
-        }
 
         /// Bambu's machine preset, e.g. ("A1M", "0.4") -> "Bambu Lab A1 mini 0.4 nozzle". Unknown model = A1.
         public static string MachinePreset(string model, string nozzleSize)
@@ -230,14 +140,14 @@ namespace PrintPrice
             var clash = new List<string>();
             try
             {
-                var proc = Json().Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(workDir, "process.json")));
+                var proc = Serializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(workDir, "process.json")));
                 bedType = FirstString(proc, "curr_bed_type") ?? "";
                 string key = PlateTempKey(bedType);
                 var files = (filamentFiles ?? Path.Combine(workDir, "filament.json")).Split(';');
                 foreach (var f in files)
                 {
                     if (string.IsNullOrEmpty(f) || !File.Exists(f)) continue;
-                    var d = Json().Deserialize<Dictionary<string, object>>(File.ReadAllText(f));
+                    var d = Serializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(f));
                     string name = ShortName(FirstString(d, "name") ?? "").Trim();
                     if (name.Length == 0) continue;
                     all.Add(name);
@@ -248,60 +158,6 @@ namespace PrintPrice
             }
             catch { }
             return clash.Count > 0 ? clash : all;
-        }
-
-        public const string IssuesUrl ="https://github.com/gettic/PrintPrice/issues";
-
-        /// The text for a sliced file made for a printer we don't support (name "" = "another printer").
-        public static string UnsupportedPrinterText(string printerName)
-        {
-            string n = (printerName ?? "").Trim();
-            if (n.Length == 0) n = L.S("another printer", "en anden printer");
-            return L.F("This file was sliced for the {0}, which PrintPrice doesn't support yet. You can ask for it to be added: " +
-                       "open an issue on GitHub at {1}",
-                       "Filen er slicet til {0}, som PrintPrice ikke understøtter endnu. Du kan bede om at få den tilføjet: " +
-                       "opret et issue på GitHub på {1}", n, IssuesUrl);
-        }
-
-        /// Which printer a project was made for: project_settings.config ("printer_model", then "printer_settings_id",
-        /// nozzle from "nozzle_diameter"), then slice_info.config ("printer_model_id", "nozzle_diameters"; empty in CLI
-        /// output). Null when neither names a printer.
-        public static ProjectPrinter ParseProjectPrinter(string projectSettingsJson, string sliceInfoXml)
-        {
-            string name = "", nozzle = "";
-            var model = ParseSlotStrings(projectSettingsJson, "printer_model");
-            if (model.Count > 0) name = (model[0] ?? "").Trim();
-            if (name.Length == 0)
-            {
-                var id = ParseSlotStrings(projectSettingsJson, "printer_settings_id");
-                if (id.Count > 0) name = Regex.Replace((id[0] ?? "").Trim(), @"\s+\d+(\.\d+)?\s*nozzle$", "", RegexOptions.IgnoreCase).Trim();
-            }
-            var nz = ParseSlotStrings(projectSettingsJson, "nozzle_diameter");
-            if (nz.Count > 0) nozzle = (nz[0] ?? "").Trim();
-            if ((name.Length == 0 || nozzle.Length == 0) && !string.IsNullOrEmpty(sliceInfoXml))
-            {
-                try
-                {
-                    var doc = new XmlDocument();
-                    doc.LoadXml(sliceInfoXml);
-                    if (name.Length == 0)
-                    {
-                        var n = doc.SelectSingleNode("/config/plate/metadata[@key='printer_model_id']");
-                        if (n != null) name = AttrText(n, "value");
-                    }
-                    if (nozzle.Length == 0)
-                    {
-                        var n = doc.SelectSingleNode("/config/plate/metadata[@key='nozzle_diameters']");
-                        if (n != null) nozzle = AttrText(n, "value").Split(',')[0].Trim();
-                    }
-                }
-                catch { }
-            }
-            if (name.Length == 0) return null;
-            var res = new ProjectPrinter { Key = ModelKeyFromName(name) ?? "", Name = name, Nozzle = nozzle };
-            if (res.Key.Length > 0 && string.Equals(name, FindPrinter(res.Key).ModelId, StringComparison.OrdinalIgnoreCase))
-                res.Name = FindPrinter(res.Key).MachineName;   // a model id ("N1") -> the printer's name
-            return res;
         }
 
         // ---------- profile index: which process/filament profiles fit a machine preset ----------
@@ -543,7 +399,7 @@ namespace PrintPrice
             return Convert.ToString(v, CultureInfo.InvariantCulture);
         }
 
-        static JavaScriptSerializer Json()
+        static JavaScriptSerializer Serializer()
         {
             return new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 1000 };
         }
@@ -570,7 +426,7 @@ namespace PrintPrice
         static Dictionary<string, object> Flatten(List<string> roots, string kind, string name, int depth)
         {
             if (depth > 25) throw new SliceException(L.F("Profile inheritance too deep: {0}", "Profilen arver i for mange led: {0}", name));
-            var own = Json().Deserialize<Dictionary<string, object>>(File.ReadAllText(FindProfile(roots, kind, name)));
+            var own = Serializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(FindProfile(roots, kind, name)));
             var merged = new Dictionary<string, object>();
             object parent;
             if (own.TryGetValue("inherits", out parent) && parent is string && ((string)parent).Length > 0)
@@ -593,7 +449,7 @@ namespace PrintPrice
             if (roots.Count == 0) throw new SliceException(L.S("Could not find Bambu Studio's printer profiles.", "Kunne ikke finde Bambu Studios printerprofiler."));
             model = FindPrinter(model).Key;
             Directory.CreateDirectory(workDir);
-            var json = Json();
+            var json = Serializer();
             File.WriteAllText(Path.Combine(workDir, "machine.json"), json.Serialize(Flatten(roots, "machine", MachinePreset(model, nozzleSize), 0)));
             var proc = Flatten(roots, "process", Resolve(roots, "process", model, nozzleSize, process), 0);
             if (!string.IsNullOrEmpty(bedType)) proc["curr_bed_type"] = bedType;   // CLI default is Cool Plate
@@ -681,7 +537,7 @@ namespace PrintPrice
                 try
                 {
                     resultText = File.ReadAllText(resultJson);
-                    var r = Json().Deserialize<Dictionary<string, object>>(resultText);
+                    var r = Serializer().Deserialize<Dictionary<string, object>>(resultText);
                     object e;
                     if (r.TryGetValue("error_string", out e)) error = e as string;
                 }
@@ -713,8 +569,13 @@ namespace PrintPrice
                     bool hasGcode = zip.Entries.Any(e => e.FullName.StartsWith("Metadata/plate_", StringComparison.OrdinalIgnoreCase)
                                                       && e.FullName.EndsWith(".gcode", StringComparison.OrdinalIgnoreCase));
                     if (!hasGcode) return false;
+                    // = ReadSliceInfo(path) != null, without the picture and project_settings it would also read
+                    var entry = zip.GetEntry("Metadata/slice_info.config");
+                    if (entry == null) return false;
+                    string xml;
+                    using (var sr = new StreamReader(entry.Open())) xml = sr.ReadToEnd();
+                    return ParseSliceInfo(xml) != null;
                 }
-                return ReadSliceInfo(path) != null;
             }
             catch { return false; }
         }
@@ -735,10 +596,11 @@ namespace PrintPrice
             {
                 res.Picture = FromProject(path3mf);
                 res.StudioFile = path3mf;
-                var profiles = ParseFilamentSlots(settings);
+                var parsed = ParseSettings(settings);   // once for the slots and the printer
+                var profiles = SlotStrings(parsed, "filament_settings_id");   // = ParseFilamentSlots
                 foreach (var f in res.Filaments)
                     if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
-                var pp = ParseProjectPrinter(settings, xml);
+                var pp = ProjectPrinterFrom(parsed, xml);
                 if (pp != null)
                 {
                     res.PrinterModel = pp.Key;
@@ -748,32 +610,6 @@ namespace PrintPrice
                 }
             }
             return res;
-        }
-
-        /// Filament profile names per slot from Metadata/project_settings.config (JSON, "filament_settings_id").
-        /// Index 0 = slot 1. Empty list on missing or bad input, never null.
-        public static List<string> ParseFilamentSlots(string projectSettingsJson)
-        {
-            return ParseSlotStrings(projectSettingsJson, "filament_settings_id");
-        }
-
-        /// One string per slot from a project_settings.config array (e.g. "filament_colour"). Empty list on missing or bad input.
-        public static List<string> ParseSlotStrings(string projectSettingsJson, string key)
-        {
-            var list = new List<string>();
-            if (string.IsNullOrEmpty(projectSettingsJson)) return list;
-            try
-            {
-                var d = Json().Deserialize<Dictionary<string, object>>(projectSettingsJson);
-                object v;
-                if (d == null || !d.TryGetValue(key, out v) || v == null) return list;
-                if (v is string) { list.Add((string)v); return list; }
-                var items = v as System.Collections.IEnumerable;
-                if (items != null)
-                    foreach (var o in items) list.Add(Convert.ToString(o, CultureInfo.InvariantCulture) ?? "");
-            }
-            catch { list.Clear(); }
-            return list;
         }
 
         /// Metadata/project_settings.config of an open 3MF as text, null if missing, too big (64 MB) or unreadable.
@@ -786,28 +622,6 @@ namespace PrintPrice
         }
 
         // ---------- default filament per colour (idea 17) ----------
-
-        /// A filament name without its printer part (" @BBL X1C", " @System" …) and a " - Copy" / "(Copy)" ending, trimmed.
-        public static string FilamentBaseName(string profile)
-        {
-            string s = Regex.Replace(profile ?? "", @"\s*@.*$", "").Trim();
-            string before;
-            do
-            {
-                before = s;
-                s = Regex.Replace(s, @"\s*(-\s*copy|\(\s*copy\s*\))\s*$", "", RegexOptions.IgnoreCase).Trim();
-            } while (s != before);
-            return s;
-        }
-
-        /// True when a slot names no real filament: empty, or a generic PLA placeholder ("PLA", "Generic PLA",
-        /// "Creality Generic PLA", "PLA @BBL A1", "PLA - Copy"). Named filaments ("Bambu PLA Silk+", "PLA+",
-        /// "Generic PETG", "Generic PLA Silk") are stated.
-        public static bool IsUnstatedFilament(string profile)
-        {
-            string s = FilamentBaseName(profile);
-            return s.Length == 0 || Regex.IsMatch(s, @"^(?:.*\bgeneric\s+)?pla$", RegexOptions.IgnoreCase);
-        }
 
         /// Per slot, the A1 filament profile to load: unstated slots -> a1Name(default), named ones -> a1Name(their base
         /// name); null = no A1 profile, the slot keeps the file's own filament (empty --load-filaments entry).
@@ -836,13 +650,14 @@ namespace PrintPrice
             {
                 string settings;
                 using (var zip = ZipFile.OpenRead(model)) settings = ProjectSettings(zip);
-                var profiles = ParseFilamentSlots(settings);
+                var parsed = ParseSettings(settings);
+                var profiles = SlotStrings(parsed, "filament_settings_id");   // = ParseFilamentSlots
                 if (profiles.Count < 2) return null;
-                var colours = ParseSlotStrings(settings, "filament_colour");
+                var colours = SlotStrings(parsed, "filament_colour");
                 var roots = Roots(exe);
                 var plan = SlotPlan(profiles, ShortName(defaultFilament), n => ResolveOrNull(roots, "filament", printer, nozzleSize, n));
                 if (plan.All(p => p == null)) return null;
-                var json = Json();
+                var json = Serializer();
                 var flat = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
                 var parts = new List<string>();
                 for (int i = 0; i < plan.Count; i++)
@@ -873,20 +688,6 @@ namespace PrintPrice
             return res;
         }
 
-        /// 2+ filaments only: each one whose Profile is unstated (IsUnstatedFilament) and whose Type is empty or PLA gets
-        /// Profile = defaultFilament. One filament, null list or empty default: unchanged.
-        public static void ApplyDefaultFilament(List<FilamentUse> filaments, string defaultFilament)
-        {
-            if (filaments == null || string.IsNullOrEmpty(defaultFilament)) return;
-            if (filaments.Count(f => f != null) < 2) return;
-            foreach (var f in filaments)
-            {
-                if (f == null || !IsUnstatedFilament(f.Profile)) continue;
-                string type = (f.Type ?? "").Trim();
-                if (type.Length == 0 || string.Equals(type, "PLA", StringComparison.OrdinalIgnoreCase)) f.Profile = defaultFilament;
-            }
-        }
-
         /// Per-filament model/total grams and model/total time from the CLI's result.json, summed over plates.
         /// Null on missing or bad input.
         public static SliceStats ParseSliceResult(string resultJson)
@@ -894,7 +695,7 @@ namespace PrintPrice
             if (string.IsNullOrEmpty(resultJson)) return null;
             try
             {
-                var d = Json().Deserialize<Dictionary<string, object>>(resultJson);
+                var d = Serializer().Deserialize<Dictionary<string, object>>(resultJson);
                 object platesObj;
                 if (d == null || !d.TryGetValue("sliced_plates", out platesObj)) return null;
                 var plates = platesObj as System.Collections.IEnumerable;
@@ -991,92 +792,6 @@ namespace PrintPrice
                 }
             }
             catch { return null; }
-        }
-
-        /// Which zip entry holds the best model picture: Metadata/plate_1.png, then Metadata/thumbnail.png,
-        /// then any other Metadata/*.png (sorted; pick_/top_/no_light helper renders and _small last or skipped). Null if none.
-        public static string PickPictureEntry(IEnumerable<string> names)
-        {
-            var pngs = (names ?? Enumerable.Empty<string>())
-                .Where(n => n != null && n.StartsWith("Metadata/", StringComparison.OrdinalIgnoreCase)
-                         && n.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
-                         && n.IndexOf('/', 9) < 0)
-                .ToList();
-            foreach (var want in new[] { "Metadata/plate_1.png", "Metadata/thumbnail.png" })
-            {
-                var hit = pngs.FirstOrDefault(n => string.Equals(n, want, StringComparison.OrdinalIgnoreCase));
-                if (hit != null) return hit;
-            }
-            return pngs
-                .Where(n => !Regex.IsMatch(n, @"^Metadata/(pick_|top_|plate_no_light_)", RegexOptions.IgnoreCase))
-                .OrderBy(n => n.EndsWith("_small.png", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
-                .ThenBy(n => n, StringComparer.OrdinalIgnoreCase)
-                .FirstOrDefault();
-        }
-
-        public static SliceResult ParseSliceInfo(string xml)
-        {
-            var doc = new XmlDocument();
-            doc.LoadXml(xml);
-            var res = new SliceResult();
-            var slots = new SortedDictionary<int, FilamentUse>();
-            foreach (XmlNode plate in doc.SelectNodes("/config/plate"))
-            {
-                double seconds = Meta(plate, "prediction");
-                if (seconds <= 0) continue;
-                double grams = Meta(plate, "weight");
-                bool sumFilaments = grams <= 0;
-                foreach (XmlNode f in plate.SelectNodes("filament"))
-                {
-                    double g = Attr(f, "used_g");
-                    if (sumFilaments) grams += g;
-                    int slot = (int)Attr(f, "id");
-                    if (g <= 0 || slot <= 0) continue;
-                    FilamentUse u;
-                    if (!slots.TryGetValue(slot, out u))
-                    {
-                        u = new FilamentUse { Slot = slot, Colour = NormColour(AttrText(f, "color")), Type = AttrText(f, "type") };
-                        slots[slot] = u;
-                    }
-                    u.Grams += g;
-                    u.Metres += Attr(f, "used_m");
-                }
-                res.Seconds += seconds;
-                res.Grams += grams;
-                res.Plates++;
-            }
-            res.Filaments = slots.Values.ToList();
-            return res.Plates > 0 ? res : null;
-        }
-
-        static string AttrText(XmlNode n, string name)
-        {
-            var a = n.Attributes == null ? null : n.Attributes[name];
-            return a == null ? "" : (a.Value ?? "").Trim();
-        }
-
-        /// "#rrggbb" or "#RRGGBBAA" -> "#RRGGBB"; anything else -> "".
-        static string NormColour(string c)
-        {
-            if (c == null) return "";
-            c = c.Trim();
-            if (!c.StartsWith("#")) c = "#" + c;
-            if (c.Length < 7 || !Regex.IsMatch(c.Substring(1, 6), "^[0-9A-Fa-f]{6}$")) return "";
-            return c.Substring(0, 7).ToUpperInvariant();
-        }
-
-        static double Meta(XmlNode plate, string key)
-        {
-            var n = plate.SelectSingleNode("metadata[@key='" + key + "']");
-            return n == null ? 0 : Attr(n, "value");
-        }
-
-        static double Attr(XmlNode n, string name)
-        {
-            var a = n.Attributes == null ? null : n.Attributes[name];
-            double v;
-            if (a != null && double.TryParse(a.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && v > 0) return v;
-            return 0;
         }
 
         // ---- open in Bambu Studio (idea 13) ----

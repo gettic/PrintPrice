@@ -59,6 +59,15 @@ namespace PrintPrice
         /// isn't a valid code (wrong length, other characters, wrong check character).
         public static string Normalize(string typed)
         {
+            string s = Clean(typed);
+            if (s == null || s.Length != CodeLength) return null;
+            return CheckChar(s.Substring(0, CodeLength - 1)) == s[CodeLength - 1] ? s : null;
+        }
+
+        /// The typed characters as code characters (upper case, O -> 0, I/L -> 1, spaces and dashes dropped), any length;
+        /// null when one is never in a code (or typed is null). Normalize, and BackupForm's typo check.
+        public static string Clean(string typed)
+        {
             if (typed == null) return null;
             var sb = new StringBuilder(CodeLength);
             foreach (char ch in typed.ToUpperInvariant())
@@ -68,9 +77,7 @@ namespace PrintPrice
                 if (Alphabet.IndexOf(c) < 0) return null;
                 sb.Append(c);
             }
-            if (sb.Length != CodeLength) return null;
-            string s = sb.ToString();
-            return CheckChar(s.Substring(0, CodeLength - 1)) == s[CodeLength - 1] ? s : null;
+            return sb.ToString();
         }
 
         /// "K7QF29XMRTB3HDWP5ZNC" -> "K7QF2-9XMRT-B3HDW-P5ZNC" (a valid code; anything else is returned unchanged).
@@ -86,7 +93,7 @@ namespace PrintPrice
         static string Valid(string code)
         {
             string n = Normalize(code);
-            if (n == null) throw new ArgumentException(L.S("This is not a valid backup code.", "Det er ikke en gyldig sikkerhedskode."));
+            if (n == null) throw new ArgumentException(InvalidCodeText());
             return n;
         }
 
@@ -143,15 +150,9 @@ namespace PrintPrice
             if (iv == null || iv.Length != IvLength) throw new ArgumentException("iv");
             string n = Valid(code);
             byte[] ct;
-            using (var aes = Aes.Create())
-            {
-                aes.Mode = CipherMode.CBC;
-                aes.Padding = PaddingMode.PKCS7;
-                aes.Key = Derive(n, EncLabel);
-                aes.IV = iv;
-                using (var enc = aes.CreateEncryptor())
-                    ct = enc.TransformFinalBlock(plain ?? new byte[0], 0, plain == null ? 0 : plain.Length);
-            }
+            using (var aes = NewAes(n, iv))
+            using (var enc = aes.CreateEncryptor())
+                ct = enc.TransformFinalBlock(plain ?? new byte[0], 0, plain == null ? 0 : plain.Length);
             var blob = new byte[Magic.Length + IvLength + ct.Length + MacLength];
             Buffer.BlockCopy(Magic, 0, blob, 0, Magic.Length);
             Buffer.BlockCopy(iv, 0, blob, Magic.Length, IvLength);
@@ -170,12 +171,12 @@ namespace PrintPrice
             string n = Normalize(code);
             if (n == null)
             {
-                problem = L.S("This is not a valid backup code.", "Det er ikke en gyldig sikkerhedskode.");
+                problem = InvalidCodeText();
                 return null;
             }
             if (!IsBlob(blob))
             {
-                problem = L.S("This is not a PrintPrice backup.", "Det er ikke en PrintPrice-sikkerhedskopi.");
+                problem = History.NotBackupText();
                 return null;
             }
             int ctLen = blob.Length - Magic.Length - IvLength - MacLength;
@@ -190,15 +191,9 @@ namespace PrintPrice
             {
                 var iv = new byte[IvLength];
                 Buffer.BlockCopy(blob, Magic.Length, iv, 0, IvLength);
-                using (var aes = Aes.Create())
-                {
-                    aes.Mode = CipherMode.CBC;
-                    aes.Padding = PaddingMode.PKCS7;
-                    aes.Key = Derive(n, EncLabel);
-                    aes.IV = iv;
-                    using (var dec = aes.CreateDecryptor())
-                        return dec.TransformFinalBlock(blob, Magic.Length + IvLength, ctLen);
-                }
+                using (var aes = NewAes(n, iv))
+                using (var dec = aes.CreateDecryptor())
+                    return dec.TransformFinalBlock(blob, Magic.Length + IvLength, ctLen);
             }
             catch
             {
@@ -213,6 +208,22 @@ namespace PrintPrice
             if (blob == null || blob.Length < Magic.Length + IvLength + 16 + MacLength) return false;
             for (int i = 0; i < Magic.Length; i++) if (blob[i] != Magic[i]) return false;
             return true;
+        }
+
+        // AES-256-CBC, PKCS7, key = the code's enc key
+        static Aes NewAes(string normalized, byte[] iv)
+        {
+            var aes = Aes.Create();
+            aes.Mode = CipherMode.CBC;
+            aes.Padding = PaddingMode.PKCS7;
+            aes.Key = Derive(normalized, EncLabel);
+            aes.IV = iv;
+            return aes;
+        }
+
+        static string InvalidCodeText()
+        {
+            return L.S("This is not a valid backup code.", "Det er ikke en gyldig sikkerhedskode.");
         }
 
         static string Damaged()

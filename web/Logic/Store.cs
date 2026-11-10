@@ -46,6 +46,38 @@ namespace PrintPrice.Web
             catch (Exception) { return ""; }
         }
 
+        /// Starts listening for a chosen file (the hidden file input) and files dropped anywhere on the page;
+        /// the page's [JSInvokable] FileChosen(id, name, size, count) is called for each.
+        public async Task HookFiles<T>(DotNetObjectReference<T> page, Microsoft.AspNetCore.Components.ElementReference input) where T : class
+        {
+            try { await js.InvokeVoidAsync("printPrice.hookFiles", page, input); }
+            catch (Exception) { }
+        }
+
+        /// Opens the browser's file picker (the hidden file input).
+        public async Task PickFile()
+        {
+            try { await js.InvokeVoidAsync("printPrice.pick"); }
+            catch (Exception) { }
+        }
+
+        /// The chosen file, read by ranges (File.slice) - never read whole, never sent anywhere.
+        public IRangeSource File(int id, long length) { return new BrowserFile(js, id, length); }
+
+        sealed class BrowserFile : IRangeSource
+        {
+            readonly IJSRuntime js;
+            readonly int id;
+            readonly long length;
+            public BrowserFile(IJSRuntime js, int id, long length) { this.js = js; this.id = id; this.length = length; }
+            public long Length { get { return length; } }
+            public async Task<byte[]> Read(long offset, int count)
+            {
+                if (offset < 0 || offset >= length || count <= 0) return new byte[0];
+                return await js.InvokeAsync<byte[]>("printPrice.readRange", id, offset, (int)Math.Min(count, length - offset)) ?? new byte[0];
+            }
+        }
+
         public async Task SetPageLanguage(bool danish, string title)
         {
             try { await js.InvokeVoidAsync("printPrice.page", danish ? "da" : "en", title); }

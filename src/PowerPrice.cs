@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
 using System.Text;
-using System.Web.Script.Serialization;
 
 namespace PrintPrice
 {
@@ -55,7 +54,7 @@ namespace PrintPrice
         /// Picks the latest price slot that has started at or before nowUtc.
         public static PowerQuote PickCurrent(string json, string area, DateTime nowUtc)
         {
-            var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(json);
+            var d = Json.Deserialize<Dictionary<string, object>>(json);
             object recs;
             if (!d.TryGetValue("records", out recs) || !(recs is IEnumerable))
                 throw new SliceException(L.S("unexpected answer from Energi Data Service", "uventet svar fra Energi Data Service"));

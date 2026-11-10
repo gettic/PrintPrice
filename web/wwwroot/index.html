@@ -22,7 +22,36 @@
             remove: function (k) { try { localStorage.removeItem(k); } catch (e) { } },
             lang: function () { return navigator.language || ''; },
             hash: function () { return location.hash || ''; },
-            page: function (lang, title) { document.documentElement.lang = lang; if (title) document.title = title; }
+            page: function (lang, title) { document.documentElement.lang = lang; if (title) document.title = title; },
+            // ---- files (stage 2): the chosen / dropped file stays in the browser; C# reads only the byte ranges it needs ----
+            file: null, fileId: 0, dotnet: null,
+            hookFiles: function (dotnet, input) {
+                var pp = window.printPrice;
+                pp.dotnet = dotnet;
+                pp.input = input;
+                input.addEventListener('change', function () { if (input.files.length) pp.useFile(input.files[0], input.files.length); input.value = ''; });
+                var hasFiles = function (e) { return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types, 'Files') >= 0; };
+                document.addEventListener('dragover', function (e) { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; document.body.classList.add('dragging'); } });
+                document.addEventListener('dragleave', function (e) { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
+                document.addEventListener('drop', function (e) {
+                    document.body.classList.remove('dragging');
+                    if (!hasFiles(e)) return;
+                    e.preventDefault();
+                    if (e.dataTransfer.files.length) pp.useFile(e.dataTransfer.files[0], e.dataTransfer.files.length);
+                });
+                pp.ready = true;
+            },
+            useFile: function (f, count) {
+                var pp = window.printPrice;
+                pp.file = f; pp.fileId++;
+                return pp.dotnet.invokeMethodAsync('FileChosen', pp.fileId, f.name, f.size, count || 1);
+            },
+            readRange: async function (id, start, length) {
+                var pp = window.printPrice;
+                if (id !== pp.fileId || !pp.file) return new Uint8Array(0);
+                return new Uint8Array(await pp.file.slice(start, start + length).arrayBuffer());
+            },
+            pick: function () { if (window.printPrice.input) window.printPrice.input.click(); }
         };
     </script>
 </head>

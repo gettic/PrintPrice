@@ -81,6 +81,36 @@ input[type=checkbox] { accent-color: var(--accent); width: 16px; height: 16px; }
     margin-top: 10px; padding: 6px 10px; background: var(--info); border-left: 4px solid var(--accent); color: var(--error);
 }
 
+/* stage 2: file drop zone, model picture, colour rows */
+.drop { display: flex; gap: 12px; align-items: stretch; margin-bottom: 14px; }
+.pic {
+    width: 118px; min-height: 118px; flex: none; background: var(--info); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; text-align: center; padding: 4px;
+}
+.pic img { max-width: 100%; max-height: 108px; object-fit: contain; }
+.zone {
+    flex: 1; min-width: 0; border: 1px dashed var(--hot-border); background: var(--info);
+    display: flex; flex-direction: column; justify-content: center; gap: 6px; padding: 8px 12px;
+}
+body.dragging .zone { border: 2px solid var(--others); background: var(--hot-back); }
+.zone-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.zone .muted { color: var(--muted); font-size: 13px; }
+.hidden-file { display: none; }
+.file-msg { border-left: 4px solid var(--accent); padding-left: 8px; overflow-wrap: anywhere; }
+.file-msg.error { color: var(--error); }
+.file-warn { color: #f0b446; font-size: 13px; }   /* Theme.Warning */
+.file-warn a { color: #f0b446; }
+.colours {
+    display: grid; grid-template-columns: 14px minmax(0, 1fr) auto 12px 64px auto auto; gap: 6px 8px; align-items: center;
+    margin-bottom: 8px;
+}
+.colours .swatch { width: 14px; height: 14px; border: 1px solid #777; }
+.colours .cname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.colours .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.colours .x { color: var(--muted); text-align: center; }
+.colours input { width: 64px; height: 26px; }
+input[readonly] { color: var(--muted); }
+
 /* group boxes */
 fieldset {
     border: 1px solid var(--border); border-radius: 0; margin: 14px 0 0; padding: 6px 14px 10px;
@@ -147,6 +177,11 @@ details .rows { margin-top: 8px; font-size: 13px; }
     .field { min-width: 0; }
     input.mid { width: 110px; min-width: 0; }
     .top h1 { font-size: 15px; }
+    .pic { width: 84px; min-height: 84px; }
+    .pic img { max-height: 76px; }
+    .colours { grid-template-columns: 14px minmax(0, 1fr) auto 56px auto; }
+    .colours .x, .colours input + span { display: none; }
+    .colours input { width: 56px; }
     .printer-card { grid-row: auto; grid-column: 1 / span 2; justify-self: stretch; }
     .prices { grid-template-columns: 1fr; }
     .tab { grid-template-columns: 1fr; }

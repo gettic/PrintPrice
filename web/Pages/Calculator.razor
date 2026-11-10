@@ -1,6 +1,7 @@
-@* The calculator: print time, grams, kr/kg and electricity -> both prices + the cost breakdown.
+﻿@* The calculator: print time, grams, kr/kg and electricity -> both prices + the cost breakdown.
    Price code = the desktop app's Pricing (linked). Settings live in this browser's storage. *@
 @inject Store Store
+@implements IDisposable
 
 @if (!ready)
 {
@@ -15,6 +16,40 @@ else
             <div class="lang" role="group" aria-label="@L.S("Language", "Sprog")">
                 <button class="@(L.Danish ? "" : "on")" aria-pressed="@(!L.Danish)" @onclick='() => SetLanguage("en")'>EN</button>
                 <button class="@(L.Danish ? "on" : "")" aria-pressed="@L.Danish" @onclick='() => SetLanguage("da")'>DA</button>
+            </div>
+        </div>
+
+        <div class="drop">
+            <div class="pic">
+                @if (pictureUrl != null)
+                {
+                    <img src="@pictureUrl" alt="@L.S("Model picture", "Billede af modellen")" />
+                }
+                else
+                {
+                    <span>@L.S("No model yet", "Ingen model")</span>
+                }
+            </div>
+            <div class="zone">
+                <div class="zone-row">
+                    <button @onclick="ChooseFile" disabled="@reading">@L.S("Choose file…", "Vælg fil…")</button>
+                    <span class="muted">@L.S("or drop a sliced .gcode.3mf / G-code here", "eller slip en slicet .gcode.3mf / G-code her")</span>
+                </div>
+                <input type="file" @ref="fileInput" class="hidden-file" tabindex="-1" aria-hidden="true"
+                       accept=".3mf,.gcode,.gco,.stl,.obj,.step,.stp,.amf" />
+                @if (fileText != null)
+                {
+                    <div class="@(fileError ? "file-msg error" : "file-msg")" role="status">@fileText</div>
+                }
+                @if (printerWarning != null)
+                {
+                    <div class="file-warn">⚠ @printerWarning
+                        @if (switchPrinter != null)
+                        {
+                            @(" ")<a href="" @onclick="UseFilePrinter" @onclick:preventDefault="true">@L.F("Use \"{0}\" for this quote", "Brug \"{0}\" til dette tilbud", switchPrinter.Name)</a>
+                        }
+                    </div>
+                }
             </div>
         </div>
 
@@ -37,17 +72,21 @@ else
 
             <label for="grams">@L.S("Filament used", "Filamentforbrug")</label>
             <div class="field">
-                <input id="grams" type="text" inputmode="decimal" class="mid @Bad(gramsState)" value="@grams"
+                <input id="grams" type="text" inputmode="decimal" class="mid @Bad(gramsState)" value="@grams" readonly="@Multi"
+                       title="@(Multi ? L.S("The sum of the colours below", "Summen af farverne nedenfor") : null)"
                        @oninput='e => { grams = (string)e.Value; Changed(); }' />
                 <span class="unit">g</span>
             </div>
 
-            <label for="kg">@L.S("Filament price", "Filamentpris")</label>
-            <div class="field">
-                <input id="kg" type="text" inputmode="decimal" class="mid @Bad(kgState)" value="@perKg"
-                       @oninput='e => { perKg = (string)e.Value; Changed(); }' />
-                <span class="unit">kr/kg</span>
-            </div>
+            @if (!Multi)
+            {
+                <label for="kg">@L.S("Filament price", "Filamentpris")</label>
+                <div class="field">
+                    <input id="kg" type="text" inputmode="decimal" class="mid @Bad(kgState)" value="@perKg"
+                           @oninput='e => { perKg = (string)e.Value; Changed(); }' />
+                    <span class="unit">kr/kg</span>
+                </div>
+            }
 
             <label for="elec">@L.S("Electricity price", "Elpris")</label>
             <div class="field">
@@ -64,9 +103,30 @@ else
 
         <fieldset>
             <legend>@L.S("Cost breakdown", "Omkostninger")</legend>
+            @if (Multi)
+            {
+                <div class="colours">
+                    @for (int i = 0; i < rows.Count; i++)
+                    {
+                        int n = i;
+                        var r = rows[n];
+                        <span class="swatch" style="@Swatch(r.Use.Colour)" title="@r.Use.Colour"></span>
+                        <span class="cname" title="@r.Use.Profile">@r.Name</span>
+                        <span class="num">@Grams2(r.Use.Grams) g</span>
+                        <span class="x">×</span>
+                        <input type="text" inputmode="decimal" class="@Bad(r.State)" value="@r.PerKg" aria-label="@L.F("{0}, kr/kg", "{0}, kr/kg", r.Name)"
+                               @oninput='e => { rows[n].PerKg = (string)e.Value; RowPriceChanged(n); }' />
+                        <span>kr/kg</span>
+                        <span class="num">@(last != null && last.FilamentCosts != null && n < last.FilamentCosts.Length ? Num.Kr(last.FilamentCosts[n]) : "–")</span>
+                    }
+                </div>
+            }
             <div class="rows">
-                <div>@L.S("Material", "Materiale") <span class="detail">@(last == null ? "" : Num.Fmt(input.FilamentGrams) + " g × " + Num.Fmt(input.FilamentDkkPerKg) + " kr/kg")</span></div>
-                <div class="amount">@Kr(last?.MaterialCost)</div>
+                @if (!Multi)
+                {
+                    <div>@L.S("Material", "Materiale") <span class="detail">@(materialName != null ? materialName + " · " : "")@(last == null ? "" : Num.Fmt(input.FilamentGrams) + " g × " + Num.Fmt(input.FilamentDkkPerKg) + " kr/kg")</span></div>
+                    <div class="amount">@Kr(last?.MaterialCost)</div>
+                }
                 <div>@L.S("Power", "Strøm") <span class="detail">@(last == null ? "" : "(" + last.PowerKwh.ToString("N2", Num.Dk) + " kWh)")</span></div>
                 <div class="amount">@Kr(last?.PowerCost)</div>
                 @if (settings.FailedPrintPct > 0)
@@ -122,6 +182,26 @@ else
     QuoteResult last;
     string problem;
 
+    // ---------- stage 2: a sliced file ----------
+    sealed class ColourRow
+    {
+        public FilamentUse Use;
+        public string Name, PerKg;
+        public FieldState State;
+    }
+
+    ElementReference fileInput;
+    DotNetObjectReference<Calculator> self;
+    bool hooked, reading, fileError;
+    int fileId;                        // the newest chosen file; older reads are dropped
+    string fileText, printerWarning, pictureUrl;
+    string materialName;               // one colour from a file: its material (kr/kg remembered under it)
+    PrinterProfile switchPrinter;      // a printer in Settings with the file's model
+    SliceResult fileResult;            // the file's values (printer check again after Settings)
+    List<ColourRow> rows = new List<ColourRow>();   // 2+ colours from a file
+
+    bool Multi { get { return rows.Count >= 2; } }
+
     string Title { get { return L.S("Gettic's 3D Print Price Calculator", "Gettics 3D-print prisberegner"); } }
 
     protected override async Task OnInitializedAsync()
@@ -166,7 +246,11 @@ else
         // remember the job and the last prices (only valid values, like the desktop's SaveLastPrices)
         prefs.Hours = hours; prefs.Minutes = minutes; prefs.Grams = grams;
         double v;
-        if (WebCalc.Read(perKg, out v) == FieldState.Ok) settings.LastFilamentPrice = v;
+        if (!Multi && WebCalc.Read(perKg, out v) == FieldState.Ok)
+        {
+            settings.LastFilamentPrice = v;
+            if (materialName != null) settings.RememberPrice(materialName, v);   // as the desktop's RememberRowPrice
+        }
         if (WebCalc.Read(elec, out v) == FieldState.Ok) settings.LastElectricityPrice = v;
         await Store.Set(Store.PrefsKey, prefs.ToText());
         await SaveSettings();
@@ -177,28 +261,189 @@ else
     void Recalculate()
     {
         int h, m;
-        double g, kg, el;
+        double g, kg = 0, el;
         hoursState = WebCalc.ReadInt(hours, 999, out h);
         minutesState = WebCalc.ReadInt(minutes, 59, out m);
         gramsState = WebCalc.Read(grams, out g);
-        kgState = WebCalc.Read(perKg, out kg);
+        kgState = Multi ? FieldState.Ok : WebCalc.Read(perKg, out kg);
         elecState = WebCalc.Read(elec, out el);
+        bool rowsBad = false;
+        List<FilamentLine> lines = null;
+        if (Multi)
+        {
+            lines = new List<FilamentLine>();
+            foreach (var r in rows)
+            {
+                double p;
+                r.State = WebCalc.Read(r.PerKg, out p);
+                if (r.State != FieldState.Ok) rowsBad = true;
+                lines.Add(new FilamentLine { Grams = r.Use.Grams, PricePerKg = p });
+            }
+            kg = lines[0].PricePerKg;
+        }
         problem = null;
         last = null;
         if (hoursState == FieldState.Invalid || minutesState == FieldState.Invalid)
             problem = L.S("Print time: hours 0–999, minutes 0–59.", "Printtid: timer 0–999, minutter 0–59.");
-        else if (gramsState == FieldState.Invalid || kgState == FieldState.Invalid || elecState == FieldState.Invalid)
+        else if (gramsState == FieldState.Invalid || kgState == FieldState.Invalid || elecState == FieldState.Invalid || rowsBad)
             problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
         if (problem != null) return;
-        input = new QuoteInput { Hours = h, Minutes = m, FilamentGrams = g, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el };
+        input = new QuoteInput { Hours = h, Minutes = m, FilamentGrams = g, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el, Filaments = lines };
         last = Pricing.Calculate(input, settings);
     }
 
     void Clear()
     {
         hours = minutes = grams = "";
+        ClearJob();
         Changed();
     }
+
+    void ClearJob()
+    {
+        fileId++;   // a read still running is dropped
+        reading = false;
+        rows.Clear();
+        materialName = null;
+        fileResult = null;
+        fileText = printerWarning = pictureUrl = null;
+        switchPrinter = null;
+        fileError = false;
+    }
+
+    void RowPriceChanged(int i)
+    {
+        Recalculate();
+        double v;
+        if (WebCalc.Read(rows[i].PerKg, out v) == FieldState.Ok)
+        {
+            settings.RememberPrice(rows[i].Name, v);
+            settings.LastFilamentPrice = v;
+            _ = SaveSettings();
+        }
+    }
+
+    // ---------- stage 2: reading a sliced file ----------
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (ready && !hooked)
+        {
+            hooked = true;
+            self = DotNetObjectReference.Create(this);
+            await Store.HookFiles(self, fileInput);
+        }
+    }
+
+    Task ChooseFile() { return Store.PickFile(); }
+
+    [JSInvokable]
+    public async Task FileChosen(int id, string name, double size, int count)
+    {
+        ClearJob();
+        int mine = fileId = id;
+        reading = true;
+        fileText = L.F("Reading \"{0}\"…", "Læser \"{0}\"…", name);
+        StateHasChanged();
+        var job = await SlicedFile.Read(Store.File(id, (long)size), name, settings.FilamentPreset);
+        if (mine != fileId) return;   // another file was chosen meanwhile, or Clear
+        reading = false;
+        ShowJob(job, count);
+        await Store.Set(Store.PrefsKey, prefs.ToText());
+        await SaveSettings();
+        StateHasChanged();
+    }
+
+    void ShowJob(FileJob job, int count)
+    {
+        string more = count > 1 ? " " + L.S("(one file at a time: used the first)", "(én fil ad gangen: den første blev brugt)") : "";
+        if (job.Unsliced)
+        {
+            fileError = false;   // a hint, not an error (as in the approved mock-up)
+            fileText = L.F("\"{0}\" isn't sliced, and a website can't slice. In Bambu Studio: Slice plate, then File → Export → Export plate sliced file, and drop that file here. Or type the time and grams below.",
+                           "\"{0}\" er ikke slicet, og en hjemmeside kan ikke slice. I Bambu Studio: Slice plade, derefter Filer → Eksportér → Eksportér pladens slicede fil, og slip den fil her. Eller skriv tid og gram nedenfor.",
+                           job.FileName) + more;
+            return;
+        }
+        if (job.Result == null)
+        {
+            fileError = true;
+            fileText = job.Error + more;
+            return;
+        }
+        var res = job.Result;
+        // time and grams as the desktop fills them (MainForm.AnalyzeAsync)
+        int totalMinutes = (int)Math.Round(res.Seconds / 60.0);
+        if (totalMinutes == 0 && res.Seconds > 0) totalMinutes = 1;
+        hours = (totalMinutes / 60).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        minutes = (totalMinutes % 60).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var used = res.Filaments.FindAll(f => f != null && f.Grams > 0);
+        bool multi = used.Count >= 2;
+        grams = multi ? Math.Round(res.Grams, 2).ToString("0.##", Num.Dk) : Math.Round(res.Grams, 1).ToString("0.#", Num.Dk);
+        if (multi)
+        {
+            foreach (var f in used)
+            {
+                string n = MaterialName(f);
+                rows.Add(new ColourRow { Use = f, Name = n, PerKg = Num.Fmt(settings.PriceFor(n)) });
+            }
+        }
+        else
+        {
+            // one colour: its material (Settings' filament when the file names none), kr/kg remembered for it
+            materialName = used.Count == 1 && (used[0].Profile.Length > 0 || used[0].Type.Length > 0) ? MaterialName(used[0]) : settings.FilamentPreset;
+            perKg = Num.Fmt(settings.PriceFor(materialName));
+        }
+        prefs.Hours = hours; prefs.Minutes = minutes; prefs.Grams = grams;
+        if (res.Picture != null && job.PictureType != null)
+            pictureUrl = "data:" + job.PictureType + ";base64," + Convert.ToBase64String(res.Picture);
+        fileError = false;
+        fileText = L.F("✓ \"{0}\": {1} h {2} m, {3} g", "✓ \"{0}\": {1} t {2} m, {3} g", job.FileName, hours, minutes, grams)
+                   + " (" + L.S("read from the sliced file", "læst fra den slicede fil")
+                   + (multi ? " · " + L.F("{0} colours", "{0} farver", rows.Count) : "") + ")." + more;
+        fileResult = res;
+        CheckPrinter(res);
+        Recalculate();
+    }
+
+    // file sliced for another supported printer: warn, and offer a printer of that model from Settings
+    void CheckPrinter(SliceResult res)
+    {
+        printerWarning = null;
+        switchPrinter = null;
+        if (string.IsNullOrEmpty(res.PrinterModel) || res.PrinterModel == settings.PrinterModel) return;
+        printerWarning = L.F("The file was sliced for the {0}, not the {1}: its time and weight are for that printer.",
+                             "Filen er slicet til {0}, ikke {1}: dens tid og vægt gælder for den printer.",
+                             BambuSlicer.FindPrinter(res.PrinterModel).MachineName, Wear.FindModel(settings.PrinterModel).Label);
+        foreach (var p in settings.Printers)
+            if (p.Model == res.PrinterModel) { switchPrinter = p; break; }
+    }
+
+    async Task UseFilePrinter()
+    {
+        if (switchPrinter == null || !settings.SelectPrinter(switchPrinter.Id)) return;
+        WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
+        printerWarning = null;
+        switchPrinter = null;
+        Recalculate();
+        await SaveSettings();
+    }
+
+    static string MaterialName(FilamentUse f)
+    {
+        if (!string.IsNullOrEmpty(f.Profile)) return BambuSlicer.FilamentBaseName(f.Profile);
+        if (!string.IsNullOrEmpty(f.Type)) return f.Type;
+        return L.F("Colour {0}", "Farve {0}", f.Slot);
+    }
+
+    static string Swatch(string colour)
+    {
+        return "background:" + (string.IsNullOrEmpty(colour) ? "transparent" : colour);
+    }
+
+    static string Grams2(double g) { return Math.Round(g, 2).ToString("0.##", Num.Dk); }
+
+    public void Dispose() { if (self != null) self.Dispose(); }
 
     void OpenSettings(int tab) { settingsTab = tab; settingsOpen = true; }
 
@@ -214,6 +459,7 @@ else
         settings = r.Settings;
         prefs.FilamentType = r.FilamentType;
         WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
+        if (fileResult != null) CheckPrinter(fileResult);
         if (r.Reset) { perKg = Num.Fmt(settings.LastFilamentPrice); elec = Num.Fmt(settings.LastElectricityPrice); }
         ApplyLanguage();
         Recalculate();
@@ -276,7 +522,7 @@ else
     {
         switch (l.Key)
         {
-            case QuoteLine.Material: return L.S("Material", "Materiale");
+            case QuoteLine.Material: return Multi && l.Index >= 0 && l.Index < rows.Count ? rows[l.Index].Name : L.S("Material", "Materiale");
             case QuoteLine.Power: return L.S("Electricity", "Strøm");
             case QuoteLine.Wear: return L.S("Machine wear", "Maskinslid");
             case QuoteLine.Failed: return L.S("Failed-print allowance", "Tillæg for fejlprint");

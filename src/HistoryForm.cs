@@ -48,7 +48,7 @@ namespace PrintPrice
         readonly ContextMenuStrip rowMenu;
         ToolStripMenuItem miPrinted, miFailed;
         System.Windows.Forms.Timer deleteTimer;
-        bool deleteArmed, filling;
+        bool deleteArmed, filling, refillingMonths;
         string saveError;
 
         /// The quote to open again (set when the window closes with OK).
@@ -116,7 +116,7 @@ namespace PrintPrice
             cmbMonth.Items.Add(new MonthItem { Month = DateTime.MinValue, Text = L.S("All months", "Alle måneder") });
             foreach (var m in History.Months(list)) cmbMonth.Items.Add(new MonthItem { Month = m, Text = MonthText(m) });
             cmbMonth.SelectedIndex = cmbMonth.Items.Count > 1 ? 1 : 0;   // the newest month
-            cmbMonth.SelectedIndexChanged += delegate { Fill(); UpdateMonthButtons(); };
+            cmbMonth.SelectedIndexChanged += delegate { if (!refillingMonths) { Fill(); UpdateMonthButtons(); } };
             btnOlder = new Button { Text = "‹", Size = new Size(28, 25), Margin = new Padding(0, 3, 4, 3), Anchor = AnchorStyles.Left | AnchorStyles.Top,
                                     Padding = Padding.Empty, AccessibleName = L.S("Older month", "Ældre måned") };
             btnNewer = new Button { Text = "›", Size = new Size(28, 25), Margin = new Padding(0, 3, 24, 3), Anchor = AnchorStyles.Left | AnchorStyles.Top,
@@ -675,9 +675,8 @@ namespace PrintPrice
             else
             {
                 t = new MonthTotals();
-                foreach (var mo in History.Months(list))
+                foreach (var x in History.MonthSummaries(list))   // = MonthSummary of each month, one pass
                 {
-                    var x = History.MonthSummary(list, mo.Year, mo.Month);
                     t.Prints += x.Prints; t.FailedPrints += x.FailedPrints; t.PrintHours += x.PrintHours; t.Grams += x.Grams;
                     t.CustomerIncome += x.CustomerIncome; t.CustomerCount += x.CustomerCount;
                     t.FriendsIncome += x.FriendsIncome; t.FriendsCount += x.FriendsCount;
@@ -911,10 +910,15 @@ namespace PrintPrice
             if (!BackupRequested(this)) return;
             problem = null;
             saveError = null;
-            cmbMonth.Items.Clear();
-            cmbMonth.Items.Add(new MonthItem { Month = DateTime.MinValue, Text = L.S("All months", "Alle måneder") });
-            foreach (var m in History.Months(list)) cmbMonth.Items.Add(new MonthItem { Month = m, Text = MonthText(m) });
-            cmbMonth.SelectedIndex = cmbMonth.Items.Count > 1 ? 1 : 0;
+            refillingMonths = true;   // one Fill below, not one per change of the month list
+            try
+            {
+                cmbMonth.Items.Clear();
+                cmbMonth.Items.Add(new MonthItem { Month = DateTime.MinValue, Text = L.S("All months", "Alle måneder") });
+                foreach (var m in History.Months(list)) cmbMonth.Items.Add(new MonthItem { Month = m, Text = MonthText(m) });
+                cmbMonth.SelectedIndex = cmbMonth.Items.Count > 1 ? 1 : 0;
+            }
+            finally { refillingMonths = false; }
             SetupPrinters();
             FitLayout(); Fill(); ShowInfo(); UpdateMonthButtons();
         }

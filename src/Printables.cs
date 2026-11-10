@@ -6,7 +6,6 @@ using System.Linq;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Web.Script.Serialization;
 
 namespace PrintPrice
 {
@@ -49,8 +48,7 @@ namespace PrintPrice
 
         static Dictionary<string, object> Query(string query)
         {
-            var json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-            string body = json.Serialize(new Dictionary<string, object> { { "query", query } });
+            string body = Json.Serialize(new Dictionary<string, object> { { "query", query } });
             string resp;
             using (var wc = Client())
             {
@@ -58,7 +56,7 @@ namespace PrintPrice
                 try { resp = wc.UploadString(Endpoint, body); }
                 catch (WebException ex) { throw new SliceException(L.F("Could not reach Printables: {0}", "Kunne ikke nå Printables: {0}", ex.Message)); }
             }
-            var d = json.Deserialize<Dictionary<string, object>>(resp);
+            var d = Json.Deserialize<Dictionary<string, object>>(resp);
             object data;
             if (!d.TryGetValue("data", out data) || data == null)
                 throw new SliceException(L.S("Printables returned an error for this model.", "Printables svarede med en fejl for denne model."));
@@ -117,7 +115,7 @@ namespace PrintPrice
         {
             try
             {
-                var d = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.Deserialize<Dictionary<string, object>>(json);
+                var d = Json.Deserialize<Dictionary<string, object>>(json);
                 object data, print;
                 if (d == null || !d.TryGetValue("data", out data)) return null;
                 var dd = data as Dictionary<string, object>;
