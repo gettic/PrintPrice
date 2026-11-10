@@ -1,6 +1,8 @@
 using System.Globalization;
+#if !WEB
 using System.Windows.Forms;
 using System.Drawing;
+#endif
 
 namespace PrintPrice
 {
@@ -27,6 +29,8 @@ namespace PrintPrice
             return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && value >= 0;
         }
 
+#if !WEB
+        // desktop only (WinForms + Theme); the website version builds with WEB defined
         public static FieldState Read(TextBox box, out double value)
         {
             value = 0;
@@ -36,6 +40,7 @@ namespace PrintPrice
             box.BackColor = st == FieldState.Invalid ? Theme.InvalidBack : Theme.Input;
             return st;
         }
+#endif
 
         public static string Kr(double v) { return v.ToString("N2", Dk) + " kr."; }
         public static string Fmt(double v) { return v.ToString("0.##", Dk); }

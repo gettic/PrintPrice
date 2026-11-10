@@ -1,0 +1,309 @@
+@* The calculator: print time, grams, kr/kg and electricity -> both prices + the cost breakdown.
+   Price code = the desktop app's Pricing (linked). Settings live in this browser's storage. *@
+@inject Store Store
+
+@if (!ready)
+{
+    <div class="loading"><div class="loading-text">Loading… / Indlæser…</div></div>
+}
+else
+{
+    <div class="page">
+        <div class="top">
+            <img src="icon-192.png" alt="" />
+            <h1>@Title</h1>
+            <div class="lang" role="group" aria-label="@L.S("Language", "Sprog")">
+                <button class="@(L.Danish ? "" : "on")" aria-pressed="@(!L.Danish)" @onclick='() => SetLanguage("en")'>EN</button>
+                <button class="@(L.Danish ? "on" : "")" aria-pressed="@L.Danish" @onclick='() => SetLanguage("da")'>DA</button>
+            </div>
+        </div>
+
+        <div class="inputs">
+            <label for="hours">@L.S("Print time", "Printtid")</label>
+            <div class="field">
+                <input id="hours" type="text" inputmode="numeric" class="small @Bad(hoursState)" value="@hours"
+                       @oninput='e => { hours = (string)e.Value; Changed(); }' aria-label="@L.S("Hours", "Timer")" />
+                <span>@L.S("h", "t")</span>
+                <input type="text" inputmode="numeric" class="small @Bad(minutesState)" value="@minutes"
+                       @oninput='e => { minutes = (string)e.Value; Changed(); }' aria-label="@L.S("Minutes", "Minutter")" />
+                <span>m</span>
+            </div>
+            <div class="printer-card" tabindex="0" role="button" title="@L.S("Printer settings", "Printerindstillinger")"
+                 @onclick='() => OpenSettings(SettingsDialog.TabPrinter)' @onkeydown="CardKey">
+                <div class="name">@AppSettings.CleanPrinterName(settings.PrinterName)</div>
+                <div>@Wear.FindModel(settings.PrinterModel).Label.Replace("Bambu Lab ", "") · @Num.Fmt(settings.PrinterWatts) W</div>
+                <div>@L.F("{0} kr/h wear", "{0} kr/t slid", Num.Fmt(settings.MachineRatePerHour))</div>
+            </div>
+
+            <label for="grams">@L.S("Filament used", "Filamentforbrug")</label>
+            <div class="field">
+                <input id="grams" type="text" inputmode="decimal" class="mid @Bad(gramsState)" value="@grams"
+                       @oninput='e => { grams = (string)e.Value; Changed(); }' />
+                <span class="unit">g</span>
+            </div>
+
+            <label for="kg">@L.S("Filament price", "Filamentpris")</label>
+            <div class="field">
+                <input id="kg" type="text" inputmode="decimal" class="mid @Bad(kgState)" value="@perKg"
+                       @oninput='e => { perKg = (string)e.Value; Changed(); }' />
+                <span class="unit">kr/kg</span>
+            </div>
+
+            <label for="elec">@L.S("Electricity price", "Elpris")</label>
+            <div class="field">
+                <input id="elec" type="text" inputmode="decimal" class="mid @Bad(elecState)" value="@elec"
+                       @oninput='e => { elec = (string)e.Value; Changed(); }' />
+                <span class="unit">kr/kWh</span>
+            </div>
+        </div>
+
+        @if (problem != null)
+        {
+            <div class="problem" role="alert">@problem</div>
+        }
+
+        <fieldset>
+            <legend>@L.S("Cost breakdown", "Omkostninger")</legend>
+            <div class="rows">
+                <div>@L.S("Material", "Materiale") <span class="detail">@(last == null ? "" : Num.Fmt(input.FilamentGrams) + " g × " + Num.Fmt(input.FilamentDkkPerKg) + " kr/kg")</span></div>
+                <div class="amount">@Kr(last?.MaterialCost)</div>
+                <div>@L.S("Power", "Strøm") <span class="detail">@(last == null ? "" : "(" + last.PowerKwh.ToString("N2", Num.Dk) + " kWh)")</span></div>
+                <div class="amount">@Kr(last?.PowerCost)</div>
+                @if (settings.FailedPrintPct > 0)
+                {
+                    <div>@L.F("Failed prints (+{0} %)", "Fejlprint (+{0} %)", Num.Fmt(settings.FailedPrintPct))</div>
+                    <div class="amount">@Kr(last?.FailedPrintCost)</div>
+                }
+                <div class="line"></div>
+                <div class="bold">@L.S("Base cost", "Kostpris")</div>
+                <div class="amount bold">@Kr(last?.BaseCost)</div>
+            </div>
+        </fieldset>
+
+        <div class="prices">
+            <fieldset class="price friends">
+                <legend>@L.S("Friends & family", "Venner og familie")</legend>
+                <div class="big" aria-live="polite">@Kr(last?.FriendsPrice)</div>
+                <div class="info">@FriendsInfo</div>
+                @if (last != null) { @Lines(true) }
+            </fieldset>
+            <fieldset class="price others">
+                <legend>@L.S("Customers", "Kunder")</legend>
+                <div class="big" aria-live="polite">@Kr(last?.OthersPrice)</div>
+                <div class="info">@OthersInfo</div>
+                @if (last != null) { @Lines(false) }
+            </fieldset>
+        </div>
+
+        <div class="bottom">
+            <div class="made">@L.S("Made by Gettic", "Lavet af Gettic") · <a href="https://github.com/gettic/PrintPrice" target="_blank" rel="noopener">GitHub</a></div>
+            <button @onclick="Clear">@L.S("Clear", "Ryd")</button>
+            <button @onclick='() => OpenSettings(SettingsDialog.TabPrices)'>@L.S("Settings", "Indstillinger")</button>
+        </div>
+        <div class="note">@L.S("Your settings and numbers are kept in this browser only. Nothing is sent anywhere.",
+                               "Dine indstillinger og tal gemmes kun i denne browser. Intet sendes nogen steder hen.")</div>
+    </div>
+
+    @if (settingsOpen)
+    {
+        <SettingsDialog Settings="settings" FilamentType="prefs.FilamentType" StartTab="settingsTab"
+                        BrowserDanish="browserDanish" OnClose="SettingsClosed" />
+    }
+}
+
+@code {
+    bool ready, settingsOpen, browserDanish;
+    int settingsTab;
+    AppSettings settings;
+    WebCalc.Prefs prefs;
+    string hours = "", minutes = "", grams = "", perKg = "", elec = "";
+    FieldState hoursState, minutesState, gramsState, kgState, elecState;
+    QuoteInput input;
+    QuoteResult last;
+    string problem;
+
+    string Title { get { return L.S("Gettic's 3D Print Price Calculator", "Gettics 3D-print prisberegner"); } }
+
+    protected override async Task OnInitializedAsync()
+    {
+        bool upgraded;
+        settings = WebCalc.SettingsFromText(await Store.Get(Store.SettingsKey), out upgraded);
+        prefs = WebCalc.Prefs.FromText(await Store.Get(Store.PrefsKey));
+        if (upgraded) await SaveSettings();
+        string lang = (await Store.BrowserLanguage() ?? "").ToLowerInvariant();
+        browserDanish = lang.StartsWith("da") || lang.StartsWith("nb") || lang.StartsWith("no");
+        WebCalc.ApplyAutoWear(settings, prefs.FilamentType);   // as the desktop does at startup
+        ApplyLanguage();
+        hours = prefs.Hours; minutes = prefs.Minutes; grams = prefs.Grams;
+        perKg = Num.Fmt(settings.LastFilamentPrice);
+        elec = Num.Fmt(settings.LastElectricityPrice);
+        Recalculate();
+        string hash = await Store.Hash();   // a link to ...#settings / #printer / #language opens Settings there
+        if (hash == "#settings") OpenSettings(SettingsDialog.TabPrices);
+        else if (hash == "#printer") OpenSettings(SettingsDialog.TabPrinter);
+        else if (hash == "#language") OpenSettings(SettingsDialog.TabApp);
+        ready = true;
+        await Store.SetPageLanguage(L.Danish, Title);
+    }
+
+    void ApplyLanguage()
+    {
+        L.Danish = settings.Language == "da" || (settings.Language != "en" && browserDanish);
+    }
+
+    async Task SetLanguage(string lang)
+    {
+        settings.Language = lang;
+        ApplyLanguage();
+        Recalculate();   // the problem text is in the language
+        await SaveSettings();
+        await Store.SetPageLanguage(L.Danish, Title);
+    }
+
+    async void Changed()
+    {
+        Recalculate();
+        // remember the job and the last prices (only valid values, like the desktop's SaveLastPrices)
+        prefs.Hours = hours; prefs.Minutes = minutes; prefs.Grams = grams;
+        double v;
+        if (WebCalc.Read(perKg, out v) == FieldState.Ok) settings.LastFilamentPrice = v;
+        if (WebCalc.Read(elec, out v) == FieldState.Ok) settings.LastElectricityPrice = v;
+        await Store.Set(Store.PrefsKey, prefs.ToText());
+        await SaveSettings();
+    }
+
+    Task SaveSettings() { return Store.Set(Store.SettingsKey, WebCalc.SettingsToText(settings)); }
+
+    void Recalculate()
+    {
+        int h, m;
+        double g, kg, el;
+        hoursState = WebCalc.ReadInt(hours, 999, out h);
+        minutesState = WebCalc.ReadInt(minutes, 59, out m);
+        gramsState = WebCalc.Read(grams, out g);
+        kgState = WebCalc.Read(perKg, out kg);
+        elecState = WebCalc.Read(elec, out el);
+        problem = null;
+        last = null;
+        if (hoursState == FieldState.Invalid || minutesState == FieldState.Invalid)
+            problem = L.S("Print time: hours 0–999, minutes 0–59.", "Printtid: timer 0–999, minutter 0–59.");
+        else if (gramsState == FieldState.Invalid || kgState == FieldState.Invalid || elecState == FieldState.Invalid)
+            problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
+        if (problem != null) return;
+        input = new QuoteInput { Hours = h, Minutes = m, FilamentGrams = g, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el };
+        last = Pricing.Calculate(input, settings);
+    }
+
+    void Clear()
+    {
+        hours = minutes = grams = "";
+        Changed();
+    }
+
+    void OpenSettings(int tab) { settingsTab = tab; settingsOpen = true; }
+
+    void CardKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" || e.Key == " ") OpenSettings(SettingsDialog.TabPrinter);
+    }
+
+    async Task SettingsClosed(SettingsDialog.Result r)
+    {
+        settingsOpen = false;
+        if (r == null) return;   // cancelled
+        settings = r.Settings;
+        prefs.FilamentType = r.FilamentType;
+        WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
+        if (r.Reset) { perKg = Num.Fmt(settings.LastFilamentPrice); elec = Num.Fmt(settings.LastElectricityPrice); }
+        ApplyLanguage();
+        Recalculate();
+        await SaveSettings();
+        await Store.Set(Store.PrefsKey, prefs.ToText());
+        await Store.SetPageLanguage(L.Danish, Title);
+    }
+
+    static string Bad(FieldState s) { return s == FieldState.Invalid ? "invalid" : ""; }
+
+    static string Kr(double? v) { return v.HasValue ? Num.Kr(v.Value) : "–"; }
+
+    static string N2(double v) { return v.ToString("N2", Num.Dk); }
+
+    string Wear_ { get { return settings.MachineRatePerHour > 0 ? L.F(", {0} kr/h wear", ", {0} kr/t slid", Num.Fmt(settings.MachineRatePerHour)) : ""; } }
+
+    // the same lines as the desktop's price boxes (MainForm.RefreshSettingsLabels)
+    string FriendsInfo { get { return L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.FriendsMarkupPct)) + Wear_; } }
+
+    string OthersInfo
+    {
+        get
+        {
+            if (settings.MinimumPrice > 0)
+                return L.F("+{0} %", "+{0} %", Num.Fmt(settings.OthersMarkupPct)) + Wear_ + L.F(", min. {0} kr.", ", min. {0} kr.", Num.Fmt(settings.MinimumPrice));
+            return L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.OthersMarkupPct)) + Wear_;
+        }
+    }
+
+    // ---------- line-by-line breakdown of one price (Pricing.Breakdown; texts as on the desktop quote page) ----------
+
+    RenderFragment Lines(bool friends) => __builder =>
+    {
+        var wear = settings.AutoWearRate != 0 ? WebCalc.WearBreakdown(settings, prefs.FilamentType) : null;
+        var b = Pricing.Breakdown(input, settings, friends, wear);
+        <details>
+            <summary>@L.S("How the price is made", "Sådan er prisen regnet ud")</summary>
+            <div class="rows">
+                @foreach (var l in b.Lines)
+                {
+                    <div>@LineName(l) <span class="detail">@LineDetail(l)</span></div>
+                    <div class="amount">@Num.Kr(l.Amount)</div>
+                    @if (l.Parts != null)
+                    {
+                        foreach (var p in l.Parts)
+                        {
+                            <div class="sub">@LineName(p)</div>
+                            <div class="sub amount">@Num.Kr(p.Amount)</div>
+                        }
+                    }
+                }
+                <div class="line"></div>
+                <div class="bold">@L.S("Total", "I alt")</div>
+                <div class="amount bold">@Num.Kr(b.Total)</div>
+            </div>
+        </details>
+    };
+
+    string LineName(QuoteLine l)
+    {
+        switch (l.Key)
+        {
+            case QuoteLine.Material: return L.S("Material", "Materiale");
+            case QuoteLine.Power: return L.S("Electricity", "Strøm");
+            case QuoteLine.Wear: return L.S("Machine wear", "Maskinslid");
+            case QuoteLine.Failed: return L.S("Failed-print allowance", "Tillæg for fejlprint");
+            case QuoteLine.Payback: return L.S("Earlier failed prints", "Tidligere fejlprint");
+            case QuoteLine.Work: return L.S("Work & handling", "Arbejde & håndtering");
+            case QuoteLine.Minimum: return L.S("Minimum price top-up", "Tillæg op til minimumspris");
+            case QuoteLine.Rounding: return L.S("Rounding", "Afrunding");
+            case QuoteLine.WearPrinter: return L.S("Printer", "Printer");
+            case QuoteLine.WearParts: return L.S("Spare parts & upkeep", "Reservedele & vedligehold");
+            case QuoteLine.WearHotend: return L.S("Nozzle / hotend", "Dyse / hotend");
+            case QuoteLine.WearPlate: return L.S("Build plate", "Byggeplade");
+        }
+        return l.Key;
+    }
+
+    string LineDetail(QuoteLine l)
+    {
+        switch (l.Key)
+        {
+            case QuoteLine.Material: return Num.Fmt(l.Quantity) + " g × " + Num.Fmt(l.UnitPrice) + " kr/kg";
+            case QuoteLine.Power: return N2(l.Quantity) + " kWh × " + N2(l.UnitPrice) + " kr/kWh";
+            case QuoteLine.Wear: return input.Hours + L.S(" h ", " t ") + input.Minutes + " m × " + N2(l.UnitPrice) + L.S(" kr/h", " kr/t");
+            case QuoteLine.Failed: return L.F("{0} % of material + electricity", "{0} % af materiale + strøm", Num.Fmt(l.Quantity));
+            case QuoteLine.Work: return "+" + Num.Fmt(l.Quantity) + " %";
+            case QuoteLine.Minimum: return L.F("lowest price {0} kr.", "laveste pris {0} kr.", Num.Fmt(l.Quantity));
+            case QuoteLine.Rounding: return L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity));
+        }
+        return "";
+    }
+}

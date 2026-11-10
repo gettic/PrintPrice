@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#202020" />
+    <title>Gettic's 3D Print Price Calculator</title>
+    <!-- base = the folder this page is in, so it works at / (local test) and at /PrintPrice/ (GitHub Pages) -->
+    <base href="/" />
+    <script>document.querySelector('base').href = location.pathname.replace(/[^\/]*$/, '');</script>
+    <link rel="preload" id="webassembly" />
+    <link rel="icon" type="image/png" href="icon-192.png" />
+    <link rel="stylesheet" href="css/app.css" />
+    <script type="importmap"></script>
+    <script>
+        // small helpers for the C# side (Store.cs); this site's localStorage only, nothing leaves the browser
+        window.printPrice = {
+            get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+            set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) { } },
+            remove: function (k) { try { localStorage.removeItem(k); } catch (e) { } },
+            lang: function () { return navigator.language || ''; },
+            hash: function () { return location.hash || ''; },
+            page: function (lang, title) { document.documentElement.lang = lang; if (title) document.title = title; }
+        };
+    </script>
+</head>
+
+<body>
+    <div id="app">
+        <div class="loading">
+            <img src="icon-192.png" alt="" width="64" height="64" />
+            <div class="loading-text">Loading… / Indlæser…</div>
+            <noscript>This calculator needs JavaScript. / Lommeregneren kræver JavaScript.</noscript>
+        </div>
+    </div>
+
+    <div id="blazor-error-ui">
+        Something went wrong. / Noget gik galt.
+        <a href="." class="reload">Reload / Genindlæs</a>
+        <span class="dismiss">✕</span>
+    </div>
+    <script src="_framework/blazor.webassembly#[.{fingerprint}].js"></script>
+</body>
+
+</html>

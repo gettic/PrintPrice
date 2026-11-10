@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+#if !WEB
 using System.Web.Script.Serialization;
+#endif
 
 namespace PrintPrice
 {
@@ -366,7 +368,7 @@ namespace PrintPrice
         public const int InvoiceCodeLength = 4;
         public const int MaxUsedInvoiceNos = 2000;
 
-        static readonly System.Security.Cryptography.RNGCryptoServiceProvider crypto = new System.Security.Cryptography.RNGCryptoServiceProvider();
+        static readonly System.Security.Cryptography.RandomNumberGenerator crypto = System.Security.Cryptography.RandomNumberGenerator.Create();
 
         /// Crypto-random int in [0, max) without modulo bias.
         static int CryptoIndex(int max)
@@ -748,14 +750,9 @@ namespace PrintPrice
             r.FailedAt = failed ? Stamp(now) : "";
         }
 
-        static JavaScriptSerializer Json()
-        {
-            return new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-        }
-
         public static string ToJson(List<QuoteRecord> list)
         {
-            return Json().Serialize(new HistoryFile { Version = Version, Quotes = list ?? new List<QuoteRecord>() });
+            return Json.Serialize(new HistoryFile { Version = Version, Quotes = list ?? new List<QuoteRecord>() });
         }
 
         /// The quotes, or null if the text isn't a history file of this version (garbage, empty, newer version).
@@ -763,7 +760,7 @@ namespace PrintPrice
         {
             if (string.IsNullOrEmpty(json) || json.Trim().Length == 0) return null;
             HistoryFile f;
-            try { f = Json().Deserialize<HistoryFile>(json); }
+            try { f = Json.Deserialize<HistoryFile>(json); }
             catch { return null; }
             if (f == null || f.Version != Version || f.Quotes == null) return null;
             var list = new List<QuoteRecord>(f.Quotes.Count);
@@ -879,4 +876,22 @@ namespace PrintPrice
         /// Tests only.
         internal static void ResetBlock() { saveBlocked = false; }
     }
+
+#if !WEB
+    /// All JSON goes through here (History.ToJson / ParseJson). Desktop: JavaScriptSerializer (System.Web.Extensions).
+    /// The website builds with WEB defined and has its own Json class (System.Text.Json) with the same two methods;
+    /// it must read and write history.json exactly like this one (public fields and properties, same names).
+    public static class Json
+    {
+        static JavaScriptSerializer Make()
+        {
+            return new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+        }
+
+        public static string Serialize(object value) { return Make().Serialize(value); }
+
+        /// Throws on text that isn't valid JSON for T (callers catch).
+        public static T Deserialize<T>(string json) { return Make().Deserialize<T>(json); }
+    }
+#endif
 }

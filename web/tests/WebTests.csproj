@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Web tests: the linked price code + the web's Json / WebCalc on .NET 10, as the website runs them.
+       Run:  dotnet run - -project web\tests   (only a .dll is built, no .exe) -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <UseAppHost>false</UseAppHost>
+    <DefineConstants>$(DefineConstants);WEB</DefineConstants>
+    <NoWarn>$(NoWarn);CS0618;SYSLIB0023</NoWarn>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Pricing.cs" Link="Linked\Pricing.cs" />
+    <Compile Include="..\..\src\AppSettings.cs" Link="Linked\AppSettings.cs" />
+    <Compile Include="..\..\src\Num.cs" Link="Linked\Num.cs" />
+    <Compile Include="..\..\src\History.cs" Link="Linked\History.cs" />
+    <Compile Include="..\..\src\Lang.cs" Link="Linked\Lang.cs" />
+    <Compile Include="..\Logic\Json.cs" Link="Web\Json.cs" />
+    <Compile Include="..\Logic\WebCalc.cs" Link="Web\WebCalc.cs" />
+  </ItemGroup>
+
+</Project>

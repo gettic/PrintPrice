@@ -16,6 +16,13 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 
 **Optional:** install [Bambu Studio](https://bambulab.com/en/download/studio) to detect print time and filament use automatically.
 
+## Website
+There is also a calculator in the browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). Type the print time, grams, kr/kg and the electricity price, and you get both prices and the cost breakdown. It is in English and Danish. Settings are kept only in that browser.
+
+It does less than the Windows app: no slicing, no file upload, no History and no live electricity price (you type the price yourself).
+
+The site runs entirely in your browser. It stores your settings in the browser's own storage and sends nothing anywhere. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
+
 ## Features
 - **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with the profiles of the printer in use.
   - **Other sites** (MakerWorld, Thingiverse…) block automatic downloads. Download the STL/3MF yourself and drop it on the window instead.
@@ -171,7 +178,9 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/Lang.cs` | English and Danish texts |
 | `src/Screenshots.cs` | Hidden `--screenshots` picture mode |
 | `tests/PricingTests.cs` | Unit tests |
+| `web/` | The website version (reuses the pricing files) |
 | `.github/workflows/build.yml` | GitHub Actions: builds and tests the release exe |
+| `.github/workflows/pages.yml` | GitHub Actions: publishes the website |
 | `LICENSE` | GPL-3.0 |
 
 ## License

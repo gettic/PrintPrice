@@ -156,6 +156,19 @@ namespace PrintPrice.Tests
                 Eq("History round trip multi material 19,00",
                    19.00, Pricing.Calculate(History.ToInput(back[1]), History.SavedSettings(back[1], null)).MaterialCost);
             }
+            // Json helper (website swaps in its own): same text both ways, exact format, bad text throws
+            True("Json: History.ToJson(ParseJson(x)) == x (re-save is byte-identical)", back != null && History.ToJson(back) == json);
+            var hfj = Json.Deserialize<HistoryFile>(json);
+            True("Json round trip HistoryFile: same text", hfj != null && hfj.Version == 1 && hfj.Quotes.Count == 2 && Json.Serialize(hfj) == json);
+            string lineJson = Json.Serialize(new HistoryFilament { Grams = 12.5, PricePerKg = 200, Colour = "#FF0000", Type = "PLA", Name = "Rød \"PLA\"" });
+            True("Json exact format: field order, 12.5, escaped quote", lineJson ==
+                 "{\"Grams\":12.5,\"PricePerKg\":200,\"Colour\":\"#FF0000\",\"Type\":\"PLA\",\"Name\":\"Rød \\\"PLA\\\"\"}");
+            var lineBack = Json.Deserialize<HistoryFilament>(lineJson);
+            True("Json round trip HistoryFilament", lineBack.Grams == 12.5 && lineBack.PricePerKg == 200 && lineBack.Name == "Rød \"PLA\"");
+            bool threw = false;
+            try { Json.Deserialize<HistoryFile>("garbage{"); } catch { threw = true; }
+            True("Json.Deserialize throws on garbage", threw);
+
             rec.Note = ""; rec.For = History.ForCustomer; rec.ElectricityDkkPerKwh = 2.00;
             rec.Filaments[0].Name = ""; rec.Filaments[0].Colour = ""; rec.Filaments[0].Type = "";
 
@@ -1867,6 +1880,40 @@ namespace PrintPrice.Tests
                 var rv = AppSettings.Load();
                 True("round trip: version 2, 20 / off / 25 kept", rv.SettingsVersion == 2 && rv.MinimumPrice == 20 &&
                      rv.FailedPayback == 0 && rv.FailedPaybackPct == 25);
+                // 5a4. ToIni / FromIni (website): Save writes exactly ToIni, FromIni reads what Load reads
+                var ini1 = new AppSettings { FriendsMarkupPct = 37, MinimumPrice = 20, QuoteName = "Gettic 3D = Print", Language = "da" };
+                ini1.RememberPrice("Bambu PLA Matte", 200);
+                ini1.AddPrinter("Garage P1S", Wear.ModelP1S);
+                ini1.Save();
+                string[] iniLines = ini1.ToIni();
+                True("Save writes exactly ToIni()", string.Join("\n", System.IO.File.ReadAllLines(testFile)) == string.Join("\n", iniLines));
+                bool upg;
+                var fi = AppSettings.FromIni(iniLines, out upg);
+                True("FromIni(ToIni) round trip: same lines, not upgraded", !upg && string.Join("\n", fi.ToIni()) == string.Join("\n", iniLines));
+                True("FromIni = Load", string.Join("\n", AppSettings.Load().ToIni()) == string.Join("\n", iniLines));
+                True("FromIni values: 37 %, min 20, name, da, 2 printers, PLA Matte 200", fi.FriendsMarkupPct == 37 && fi.MinimumPrice == 20
+                     && fi.QuoteName == "Gettic 3D = Print" && fi.Language == "da" && fi.PrinterCount == 2 && fi.PriceFor("Bambu PLA Matte") == 200);
+                // text split on \n keeps \r at the line ends (browser storage): still read
+                var fr = AppSettings.FromIni(string.Join("\r\n", iniLines).Split('\n'));
+                True("FromIni with \\r line ends", string.Join("\n", fr.ToIni()) == string.Join("\n", iniLines));
+                var fnull = AppSettings.FromIni(null, out upg);
+                True("FromIni(null) = new install defaults, version 2, not upgraded", !upg && fnull.SettingsVersion == 2
+                     && string.Join("\n", fnull.ToIni()) == string.Join("\n", new AppSettings().ToIni()));
+                var fo = AppSettings.FromIni(new[] { "MinimumPrice=0", "FailedPayback=0", "FailedPaybackPct=25" }, out upg);
+                True("FromIni old file -> upgraded (min 50, payback on, 10 %)", upg && fo.SettingsVersion == 2 && fo.MinimumPrice == 50
+                     && fo.FailedPayback == 1 && fo.FailedPaybackPct == 10);
+                var f2 = AppSettings.FromIni(new[] { "SettingsVersion=2", "MinimumPrice=0" }, out upg);
+                True("FromIni version 2 file: not upgraded, min 0 kept", !upg && f2.MinimumPrice == 0);
+                var fz = AppSettings.FromIni(new[] { "FriendsMarkupPct=12", null, "MinimumPrice=33" });
+                True("FromIni with a null line: skipped, rest read", fz.FriendsMarkupPct == 12 && fz.MinimumPrice == 33 && fz.PrinterCount == 1);
+                // preset names: AppSettings' own copy of BambuSlicer.ShortName gives the same short names
+                foreach (var pn in new[] { "0.20mm Standard @BBL A1", "Bambu PLA Basic @BBL A1M 0.2 nozzle", "0.20mm Standard @BBL X1C",
+                                           "Bambu PLA Matte", "My @BBLx", "  Spaced  @BBL P1S" })
+                {
+                    var fp = AppSettings.FromIni(new[] { "ProcessPreset=" + pn, "FilamentPreset=" + pn });
+                    string want = BambuSlicer.ShortName(pn.Trim());
+                    True("preset short name same as BambuSlicer.ShortName: " + pn, fp.ProcessPreset == want && fp.FilamentPreset == want);
+                }
                 // 5b. remembered price per filament: round trip under da-DK, names with spaces, +, -, =, |
                 var s6 = new AppSettings();
                 s6.LastFilamentPrice = 189.5;

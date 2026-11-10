@@ -467,8 +467,8 @@ namespace PrintPrice
             {
                 case "SlicerPath": SlicerPath = v; break;
                 // older versions stored full names like "0.20mm Standard @BBL A1"
-                case "ProcessPreset": if (v.Length > 0) ProcessPreset = BambuSlicer.ShortName(v); break;
-                case "FilamentPreset": if (v.Length > 0) FilamentPreset = BambuSlicer.ShortName(v); break;
+                case "ProcessPreset": if (v.Length > 0) ProcessPreset = PresetShortName(v); break;
+                case "FilamentPreset": if (v.Length > 0) FilamentPreset = PresetShortName(v); break;
                 case "Nozzle": if (Wear.FindNozzle(v).Key == v) Nozzle = v; break;
                 case "BedType": if (v.Length > 0) BedType = v; break;
                 case "PriceArea": if (v == "DK1" || v == "DK2") PriceArea = v; break;
@@ -484,6 +484,13 @@ namespace PrintPrice
             }
         }
 
+        /// Same as BambuSlicer.ShortName (kept here so AppSettings doesn't need Slicer.cs; a test checks they agree):
+        /// "0.20mm Standard @BBL A1" -> "0.20mm Standard".
+        static string PresetShortName(string preset)
+        {
+            return System.Text.RegularExpressions.Regex.Replace(preset ?? "", @"\s*@BBL\b.*$", "");
+        }
+
         public static AppSettings Load()
         {
             var s = new AppSettings();
@@ -491,14 +498,64 @@ namespace PrintPrice
             try
             {
                 if (!File.Exists(FilePath)) return s;   // new install: version 2 defaults
-                s.SettingsVersion = 0;                  // a file without the key is from before version 2
-                s.ActivePrinterId = "";                 // not in the file = the first printer
+                s.StartRead();
+                s.ReadIni(File.ReadAllLines(FilePath));
+                read = true;
+            }
+            catch { /* fall back to defaults */ }
+            if (read && s.SettingsVersion < CurrentSettingsVersion)   // unreadable file: no step, nothing saved
+            {
+                s.UpgradeOldDefaults();
+                s.Save();   // writes SettingsVersion=2, so the step runs only once
+            }
+            return s;
+        }
+
+        /// Settings from the lines of a settings.ini (as Load reads the file; for the website, which keeps the text in
+        /// browser storage). null = no file yet (new install defaults). An old file's defaults are upgraded like Load
+        /// does; upgraded = true means the caller should save the result (ToIni) once.
+        public static AppSettings FromIni(IEnumerable<string> lines, out bool upgraded)
+        {
+            upgraded = false;
+            var s = new AppSettings();
+            if (lines == null) return s;
+            bool read = false;
+            try { s.ReadIni(lines); read = true; }
+            catch { /* fall back to what was read */ }
+            if (read && s.SettingsVersion < CurrentSettingsVersion)
+            {
+                s.UpgradeOldDefaults();
+                upgraded = true;
+            }
+            return s;
+        }
+
+        public static AppSettings FromIni(IEnumerable<string> lines)
+        {
+            bool upgraded;
+            return FromIni(lines, out upgraded);
+        }
+
+        // before reading a file: what a missing key means in an existing file
+        void StartRead()
+        {
+            SettingsVersion = 0;                  // a file without the key is from before version 2
+            ActivePrinterId = "";                 // not in the file = the first printer
+        }
+
+        // parses settings.ini lines into this (fresh) object; may throw (Load / FromIni catch)
+        void ReadIni(IEnumerable<string> lines)
+        {
+            var s = this;
+            {
+                s.StartRead();
                 string firstId = "1";
                 var stringKeys = s.Strings();
                 var extraIds = new List<string>();      // other printers, in file order
                 var extras = new Dictionary<string, AppSettings>(StringComparer.Ordinal);
-                foreach (var line in File.ReadAllLines(FilePath))
+                foreach (var line in lines)
                 {
+                    if (line == null) continue;
                     int eq = line.IndexOf('=');
                     if (eq <= 0) continue;
                     string key = line.Substring(0, eq).Trim(), val = line.Substring(eq + 1).Trim();
@@ -536,15 +593,7 @@ namespace PrintPrice
                 int active = s.PrinterIndex(s.ActivePrinterId);
                 if (active < 0) s.ActivePrinterId = firstId;
                 else if (active > 0) s.ToFields(s.printers[active]);
-                read = true;
             }
-            catch { /* fall back to defaults */ }
-            if (read && s.SettingsVersion < CurrentSettingsVersion)   // unreadable file: no step, nothing saved
-            {
-                s.UpgradeOldDefaults();
-                s.Save();   // writes SettingsVersion=2, so the step runs only once
-            }
-            return s;
         }
 
         public void Save()
@@ -552,6 +601,15 @@ namespace PrintPrice
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                File.WriteAllLines(FilePath, ToIni());
+            }
+            catch { /* non-fatal */ }
+        }
+
+        /// The settings.ini lines Save writes (also for the website's browser storage; read back with FromIni).
+        public string[] ToIni()
+        {
+            {
                 var lines = new List<string>();
                 SyncPrinters();
                 var nums = Numbers();
@@ -583,9 +641,8 @@ namespace PrintPrice
                         lines.Add(FilamentPriceKey + "=" + v.ToString("R", Inv) + "|" + clean);
                     }
                 }
-                File.WriteAllLines(FilePath, lines.ToArray());
+                return lines.ToArray();
             }
-            catch { /* non-fatal */ }
         }
 
         static string Line(string v) { return (v ?? "").Replace("\r", "").Replace("\n", ""); }

@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <!-- Website version of PrintPrice (Blazor WebAssembly, runs fully in the browser, no server).
+       The price code is the desktop app's own files, linked (never copied or edited), compiled with WEB defined. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>PrintPrice.Web</RootNamespace>
+    <AssemblyName>PrintPriceWeb</AssemblyName>
+    <DefineConstants>$(DefineConstants);WEB</DefineConstants>
+    <OverrideHtmlAssetPlaceholders>true</OverrideHtmlAssetPlaceholders>
+    <!-- Num.Dk = new CultureInfo("da-DK") must work in every browser language: load all culture data (~1 MB) -->
+    <BlazorWebAssemblyLoadAllGlobalizationData>true</BlazorWebAssemblyLoadAllGlobalizationData>
+    <!-- the linked desktop files are C# 5 style; don't drown the build in style warnings -->
+    <NoWarn>$(NoWarn);CS0618;SYSLIB0023</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.14" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.14" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- the desktop app's price code (owner: pricing) -->
+  <ItemGroup>
+    <Compile Include="..\src\Pricing.cs" Link="Linked\Pricing.cs" />
+    <Compile Include="..\src\AppSettings.cs" Link="Linked\AppSettings.cs" />
+    <Compile Include="..\src\Num.cs" Link="Linked\Num.cs" />
+    <Compile Include="..\src\History.cs" Link="Linked\History.cs" />
+    <Compile Include="..\src\Lang.cs" Link="Linked\Lang.cs" />
+  </ItemGroup>
+
+  <!-- Json (System.Text.Json, reflection) reads/writes the linked classes' public fields: keep them all when trimming -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="PrintPriceWeb" />
+  </ItemGroup>
+
+  <!-- the web tests are their own console project -->
+  <ItemGroup>
+    <Compile Remove="tests\**" />
+    <Content Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+</Project>

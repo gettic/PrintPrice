@@ -1,0 +1,220 @@
+@* Settings (web): Prices, Printer, Language. Works on a copy; Save hands it back, Cancel / Esc drops it. *@
+
+<div class="overlay" @onclick="Cancel">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" @onclick:stopPropagation="true" @onkeydown="Key">
+        <div class="title">
+            <span id="settings-title">@L.S("Settings", "Indstillinger")</span>
+            <button @onclick="Cancel" aria-label="@L.S("Close", "Luk")">✕</button>
+        </div>
+        <div class="tabs" role="tablist">
+            @for (int i = 0; i < TabNames.Length; i++)
+            {
+                int n = i;
+                <button role="tab" aria-selected="@(tab == n)" class="@(tab == n ? "on" : "")" @onclick="() => tab = n">@TabNames[n]</button>
+            }
+        </div>
+
+        @if (tab == TabPrices)
+        {
+            <div class="tab">
+                <h3>@L.S("Markup", "Avance")</h3>
+                <label>@L.S("Friends & family markup", "Avance, venner og familie")</label>
+                <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(friends)" @bind="friends" @bind:event="oninput" /><span class="unit">%</span></div>
+                <label>@L.S("Customer markup", "Avance, kunder")</label>
+                <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(others)" @bind="others" @bind:event="oninput" /><span class="unit">%</span></div>
+
+                <h3>@L.S("Price rules", "Prisregler")</h3>
+                <label>@L.S("Minimum price (customers)", "Minimumspris (kunder)")</label>
+                <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(minimum)" @bind="minimum" @bind:event="oninput" /><span>@L.S("kr. (0 = off)", "kr. (0 = fra)")</span></div>
+                <label>@L.S("Round up to nearest", "Rund op til nærmeste")</label>
+                <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(round)" @bind="round" @bind:event="oninput" /><span>@L.S("kr. (0 = off)", "kr. (0 = fra)")</span></div>
+
+                <h3>@L.S("Failed prints", "Fejlprint")</h3>
+                <label>@L.S("Allowance", "Tillæg")</label>
+                <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(failed)" @bind="failed" @bind:event="oninput" /><span>@L.S("% (0 = off)", "% (0 = fra)")</span></div>
+                <div class="help">@L.S("Added to material + power for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler.")</div>
+            </div>
+        }
+        else if (tab == TabPrinter)
+        {
+            <div class="tab">
+                <label>@L.S("Name", "Navn")</label>
+                <input type="text" maxlength="40" style="text-align:left" placeholder="@Model.Label" @bind="name" @bind:event="oninput" />
+                <label>@L.S("Model", "Model")</label>
+                <select value="@work.PrinterModel" @onchange="ModelChanged">
+                    @foreach (var m in Wear.Models) { <option value="@m.Key">@m.Label</option> }
+                </select>
+                <label>@L.S("Nozzle", "Dyse")</label>
+                <select @bind="work.Nozzle">
+                    @foreach (var n in Wear.Nozzles) { <option value="@n.Key">@NozzleLabel(n)</option> }
+                </select>
+                <label>@L.S("Build plate", "Byggeplade")</label>
+                <select @bind="work.BedType">
+                    @foreach (var p in Wear.Plates) { <option value="@p.Key">@(L.Danish && p.Label == "Smooth PEI / High Temp Plate" ? "Glat PEI / High Temp" : p.Label)</option> }
+                </select>
+                <label>@L.S("Filament type", "Filamenttype")</label>
+                <select @bind="type">
+                    @foreach (var t in WebCalc.FilamentTypes) { <option value="@t">@t</option> }
+                </select>
+                <label>@L.S("Power (avg.)", "Effekt (gns.)")</label>
+                <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(watts)" @bind="watts" @bind:event="oninput" /><span>W (@Model.Label.Replace("Bambu Lab ", ""): ~@Num.Fmt(Model.DefaultWatts))</span></div>
+
+                <h3>@L.S("Wear & tear  (both prices)", "Slid  (begge priser)")</h3>
+                <label>@L.S("Machine-time rate", "Maskintimepris")</label>
+                <div class="field">
+                    @if (auto)
+                    {
+                        <input type="text" class="mid" value="@Num.Fmt(Auto.Total)" disabled />
+                    }
+                    else
+                    {
+                        <input type="text" inputmode="decimal" class="mid @Bad(rate)" @bind="rate" @bind:event="oninput" />
+                    }
+                    <span>@L.S("kr/h", "kr/t")</span>
+                </div>
+                <label></label>
+                <label><input type="checkbox" @bind="auto" /> @L.S("Calculate from the printer above", "Beregn ud fra printeren ovenfor")</label>
+                @if (auto)
+                {
+                    var b = Auto;
+                    <div class="help wear">
+                        @L.S("Printer", "Printer") @Kr2(b.Printer) · @L.S("parts", "dele") @Kr2(b.Parts) · @L.S("hotend", "hotend") @Kr2(b.Hotend) · @L.S("plate", "plade") @Kr2(b.Plate) @L.S("per hour", "pr. time")
+                        @if (b.AbrasiveOnStainless) { <br />@L.S("Abrasive filament wears a stainless nozzle fast: use a hardened one.", "Slibende filament slider en rustfri dyse hurtigt: brug en hærdet.") }
+                        @if (b.PlateHalved) { <br />@L.S("PETG/TPU can tear smooth PEI: plate life halved.", "PETG/TPU kan rive glat PEI: pladens levetid halveret.") }
+                    </div>
+                }
+            </div>
+        }
+        else
+        {
+            <div class="tab">
+                <h3>Sprog / Language</h3>
+                <label>@L.S("Language", "Sprog")</label>
+                <select @bind="work.Language">
+                    <option value="">@L.S("Automatic (browser)", "Automatisk (browser)")</option>
+                    <option value="en">English</option>
+                    <option value="da">Dansk</option>
+                </select>
+                <div class="help">@L.S("The settings are kept in this browser. Another browser or device starts with the defaults.",
+                                       "Indstillingerne gemmes i denne browser. En anden browser eller enhed starter med standardværdierne.")</div>
+            </div>
+        }
+
+        @if (problem != null) { <div class="problem" style="margin:0 14px" role="alert">@problem</div> }
+
+        <div class="buttons">
+            <button class="left" @onclick="Defaults">@L.S("Defaults", "Standard")</button>
+            <button class="accent" @onclick="Save">@L.S("Save", "Gem")</button>
+            <button @onclick="Cancel">@L.S("Cancel", "Annullér")</button>
+        </div>
+    </div>
+</div>
+
+@code {
+    public const int TabPrices = 0, TabPrinter = 1, TabApp = 2;
+
+    public class Result
+    {
+        public AppSettings Settings;
+        public string FilamentType;
+        public bool Reset;   // defaults were chosen: the page shows the default kr/kg and electricity again
+    }
+
+    [Parameter] public AppSettings Settings { get; set; }
+    [Parameter] public string FilamentType { get; set; }
+    [Parameter] public int StartTab { get; set; }
+    [Parameter] public bool BrowserDanish { get; set; }
+    [Parameter] public EventCallback<Result> OnClose { get; set; }
+
+    AppSettings work;
+    int tab;
+    bool auto, reset;
+    string friends, others, minimum, round, failed, watts, rate, name, type, problem;
+
+    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Language", "Sprog") }; } }
+
+    Wear.Model Model { get { return Wear.FindModel(work.PrinterModel); } }
+
+    Wear.Breakdown Auto
+    {
+        get
+        {
+            var s = work.Clone();
+            return WebCalc.WearBreakdown(s, type);
+        }
+    }
+
+    protected override void OnInitialized()
+    {
+        tab = StartTab;
+        Fill(Settings.Clone(), FilamentType);
+    }
+
+    void Fill(AppSettings s, string filamentType)
+    {
+        work = s;
+        type = WebCalc.CleanType(filamentType);
+        friends = Num.Fmt(s.FriendsMarkupPct); others = Num.Fmt(s.OthersMarkupPct);
+        minimum = Num.Fmt(s.MinimumPrice); round = Num.Fmt(s.RoundTo); failed = Num.Fmt(s.FailedPrintPct);
+        watts = Num.Fmt(s.PrinterWatts); rate = Num.Fmt(s.MachineRatePerHour);
+        name = s.PrinterName == Wear.FindModel(s.PrinterModel).Label ? "" : s.PrinterName;
+        auto = s.AutoWearRate != 0;
+        problem = null;
+    }
+
+    void ModelChanged(ChangeEventArgs e)
+    {
+        var old = Model;
+        work.PrinterModel = Wear.FindModel((string)e.Value).Key;
+        double w;
+        // power still the old model's typical value -> the new model's
+        if (!Num.TryParse(watts, out w) || w == old.DefaultWatts) watts = Num.Fmt(Model.DefaultWatts);
+    }
+
+    static string NozzleLabel(Wear.Nozzle n)
+    {
+        if (!L.Danish) return n.Label;
+        return n.Label.Replace("stainless steel", "rustfrit stål").Replace("hardened steel", "hærdet stål");
+    }
+
+    static string Kr2(double v) { return v.ToString("N2", Num.Dk); }
+
+    static string Bad(string text)
+    {
+        double v;
+        return WebCalc.Read(text, out v) == FieldState.Invalid ? "invalid" : "";
+    }
+
+    void Defaults()
+    {
+        var d = new AppSettings();
+        d.Language = work.Language;   // keep the language
+        Fill(d, "PLA");
+        reset = true;
+    }
+
+    async Task Save()
+    {
+        double f, o, mi, ro, fa, wa, ra;
+        if (!Ok(friends, out f) || !Ok(others, out o) || !Ok(minimum, out mi) || !Ok(round, out ro) || !Ok(failed, out fa)
+            || !Ok(watts, out wa) || (!auto && !Ok(rate, out ra)))
+        {
+            problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
+            return;
+        }
+        if (auto) ra = work.MachineRatePerHour; else Ok(rate, out ra);
+        work.FriendsMarkupPct = f; work.OthersMarkupPct = o; work.MinimumPrice = mi; work.RoundTo = ro; work.FailedPrintPct = fa;
+        work.PrinterWatts = wa; work.MachineRatePerHour = ra; work.AutoWearRate = auto ? 1 : 0;
+        work.PrinterName = AppSettings.CleanPrinterName(name.Trim().Length == 0 ? Model.Label : name);
+        await OnClose.InvokeAsync(new Result { Settings = work, FilamentType = type, Reset = reset });
+    }
+
+    static bool Ok(string text, out double v) { return WebCalc.Read(text, out v) == FieldState.Ok; }
+
+    Task Cancel() { return OnClose.InvokeAsync(null); }
+
+    async Task Key(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") await Cancel();
+    }
+}
