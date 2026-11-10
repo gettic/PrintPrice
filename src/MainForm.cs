@@ -154,6 +154,10 @@ namespace PrintPrice
             txtUrl.HandleCreated += delegate { ApplyUrlCue(); };
             // typing/pasting brings the grey example text back
             // a new link = no model name yet, and the button slices again (no "Open in Studio" for the old file)
+            txtUrl.TextChanged += delegate
+            {
+                if (linkFile != null && !LinkShowsFile()) { linkFile = null; if (printerTip != null) printerTip.SetToolTip(txtUrl, null); }
+            };
             txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; fromExample = false; SetStudioFile(null); repeatOf = null; };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
@@ -703,26 +707,83 @@ namespace PrintPrice
             {
                 var paths = e.Data.GetData(DataFormats.FileDrop) as string[];
                 if (paths == null || paths.Length == 0) return;
-                var models = paths.Where(BambuSlicer.IsModelFile).ToList();
-                if (models.Count == 0) { SetAuto(L.S("That isn't a model file. Use STL, 3MF, OBJ or STEP.", "Det er ikke en modelfil. Brug STL, 3MF, OBJ eller STEP."), true); return; }
-                txtUrl.Text = models.Count == 1 ? models[0] : L.F("{0} files: ", "{0} filer: ", models.Count) + string.Join(", ", models.Select(Path.GetFileName));
+                var models = paths.Where(p => BambuSlicer.IsModelFile(p) || BambuSlicer.IsGcodeFile(p)).ToList();
+                if (models.Count == 0) { SetAuto(L.S("That isn't a model file. Use STL, 3MF, OBJ, STEP or G-code.", "Det er ikke en modelfil. Brug STL, 3MF, OBJ, STEP eller G-code."), true); return; }
+                if (!GcodeAlone(models)) return;
+                if (models.Count == 1) ShowLinkFile(models[0]);
+                else txtUrl.Text = L.F("{0} files: ", "{0} filer: ", models.Count) + string.Join(", ", models.Select(Path.GetFileName));
                 Analyze(null, models);
             };
             foreach (Control child in c.Controls) EnableDrop(child);
+        }
+
+        /// A sliced G-code is read, not sliced, so it can't be combined with other files; false = shown why.
+        bool GcodeAlone(List<string> files)
+        {
+            if (files.Count < 2 || !files.Any(BambuSlicer.IsGcodeFile)) return true;
+            SetAuto(L.S("Use one G-code file at a time.", "Brug én G-code-fil ad gangen."), true);
+            return false;
+        }
+
+        // a local file in the link box is shown by its name only (the centred box cut long paths before the name);
+        // linkFile keeps the full path, also in the box's dark tooltip. Links and typed text are shown as they are.
+        string linkFile;
+
+        void ShowLinkFile(string path)
+        {
+            linkFile = path;   // before Text: TextChanged keeps it while the box shows its name
+            txtUrl.Text = Path.GetFileName(path);
+            if (printerTip != null) printerTip.SetToolTip(txtUrl, path);
+        }
+
+        /// What the link box stands for: the full path of a file shown by its name, else the box's text (a link, a typed path).
+        string LinkSource()
+        {
+            return LinkShowsFile() ? linkFile : txtUrl.Text;
+        }
+
+        bool LinkShowsFile()
+        {
+            return linkFile != null && string.Equals(txtUrl.Text.Trim().Trim('"'), Path.GetFileName(linkFile), StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// A saved source: a local path (drive letter or \\server) by its file name, anything else (links) as it is.
+        void ShowLinkSource(string src)
+        {
+            src = src ?? "";
+            string t = src.Trim().Trim('"');
+            bool path = t.Length > 2 && ((char.IsLetter(t[0]) && t[1] == ':' && (t[2] == '\\' || t[2] == '/')) || t.StartsWith(@"\\"));
+            if (path && t.IndexOfAny(Path.GetInvalidPathChars()) < 0 && Path.GetFileName(t).Length > 0) ShowLinkFile(t);
+            else txtUrl.Text = src;
+        }
+
+        /// A failed read or slice: the previous job's time, grams and colour rows go, so its prices don't stay under the
+        /// error (the link box and the error message stay).
+        void ClearJobNumbers()
+        {
+            SetStudioFile(null);
+            SetColours(null);
+            txtGrams.Text = "";
+            txtHours.Text = "0";
+            txtMinutes.Text = "0";
+            SetJobLoaded(false);
         }
 
         void BrowseForModel()
         {
             using (var dlg = new OpenFileDialog
             {
-                Title = L.S("Choose model file(s)", "Vælg modelfil(er)"), Multiselect = true,
-                Filter = L.S("3D models", "3D-modeller") + " (*.stl;*.3mf;*.obj;*.step;*.stp)|*.stl;*.3mf;*.obj;*.step;*.stp;*.amf|" +
+                Title = L.S("Choose model or G-code file(s)", "Vælg model- eller G-code-fil(er)"), Multiselect = true,
+                Filter = L.S("3D models and G-code", "3D-modeller og G-code") + " (*.stl;*.3mf;*.obj;*.step;*.gcode…)|" +
+                         "*.stl;*.3mf;*.obj;*.step;*.stp;*.amf;*.gcode;*.gco;*.gc;*.bgcode|" +
                          L.S("All files", "Alle filer") + " (*.*)|*.*"
             })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 var files = dlg.FileNames.ToList();
-                txtUrl.Text = files.Count == 1 ? files[0] : L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
+                if (!GcodeAlone(files)) return;
+                if (files.Count == 1) ShowLinkFile(files[0]);
+                else txtUrl.Text = L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
                 Analyze(null, files);
             }
         }
@@ -731,7 +792,7 @@ namespace PrintPrice
         {
             if (cts != null) { cts.Cancel(); return; }
             if (studioFile != null) { OpenInStudio(); return; }
-            string src = txtUrl.Text.Trim().Trim('"');
+            string src = LinkSource().Trim().Trim('"');
             if (src.Length == 0) { txtUrl.Text = ""; SetUrlHint(true); txtUrl.Focus(); return; }
             if (File.Exists(src)) { Analyze(null, new List<string> { src }); return; }
 
@@ -975,54 +1036,18 @@ namespace PrintPrice
                     LoadModelPicture(() => render, true);
                 }
 
-                int totalMinutes = (int)Math.Round(result.Seconds / 60.0);
-                if (totalMinutes == 0 && result.Seconds > 0) totalMinutes = 1;
-                txtHours.Text = (totalMinutes / 60).ToString();
-                txtMinutes.Text = (totalMinutes % 60).ToString();
-                if (beforeFill != null) beforeFill(result);
-                SetColours(result);   // 2+ colours: one row per colour in the Cost breakdown, else today's layout
-                bool multi = filaments != null;
-                // several colours: grams with 2 decimals, like the colour rows
-                string gramsText = multi ? Math.Round(result.Grams, 2).ToString("0.##", Num.Dk) : Math.Round(result.Grams, 1).ToString("0.#", Num.Dk);
-                txtGrams.Text = gramsText;
-
-                string what = modelName != null ? "\"" + modelName + "\"" :
-                              localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : L.F("{0} files", "{0} filer", localFiles.Count);
-                string summary = (totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m, " + gramsText + " g";
-                string colourCount = multi ? L.F("{0} colours", "{0} farver", filaments.Count) : null;
-                string how = result.FromSlicedFile
-                    ? L.S("read from the sliced file", "læst fra den slicede fil") + (multi ? " · " + colourCount : "")
-                    : BambuSlicer.ShortName(process) + " · " + (multi ? colourCount : BambuSlicer.ShortName(filament));
                 int parts = chosen != null ? chosen.Count : localFiles.Count;
-                // name for the history (after the link box was filled, whose TextChanged clears it)
-                jobModel = modelName ?? (localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : string.Join(", ", localFiles.Select(Path.GetFileName)));
-                SetJobLoaded(true);
-                SetAuto("✓ " + what + ": " + summary + " (" + how +
-                        (parts > 1 ? L.F(", {0} files", ", {0} filer", parts) : "") +
-                        (result.Plates > parts ? L.F(", {0} plates", ", {0} plader", result.Plates) : "") + ").", false);
-                SetStudioFile(result.StudioFile);   // null (nothing kept) = stays "Get time & weight"
-                if (studioFile != null && parts > 1)
-                {
-                    // several files: Studio gets the first one only (muted second line; ClearJob takes it away again)
-                    lblAuto.SetText(lblAuto.Text, L.F("\"Open in Studio\" opens only the first file (1 of {0}).",
-                                                      "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", parts));
-                    SetAutoColor();
-                }
-                // a sliced file made for another of our printers: its time and weight are that printer's (warning stripe)
-                if (result.FromSlicedFile && !string.IsNullOrEmpty(result.PrinterModel) &&
-                    Wear.FindModel(result.PrinterModel).Key != Wear.FindModel(settings.PrinterModel).Key)
-                {
-                    lblAuto.SetText(lblAuto.Text, L.F("The file was sliced for the {0}, not the {1}: its time and weight are for that printer.",
-                                                      "Filen er slicet til {0}, ikke {1}: tid og vægt gælder den printer.",
-                                                      Wear.FindModel(result.PrinterModel).Label, Wear.FindModel(settings.PrinterModel).Label));
-                    autoWarning = true;
-                    SetAutoColor();
-                }
+                ShowJobResult(result, modelName, localFiles, parts, process, filament, beforeFill);
                 ok = true;
             }
             catch (OperationCanceledException) { SetAuto(L.S("Cancelled.", "Annulleret."), false); }
-            catch (SliceException ex) { SetAutoError(ex.Message); }
-            catch (Exception ex) { SetAuto(L.S("Something went wrong: ", "Noget gik galt: ") + ex.Message, true); }
+            // a failed job clears the last one's numbers (Repeat print keeps them: it shows the saved quote instead)
+            catch (SliceException ex) { if (beforeFill == null) ClearJobNumbers(); SetAutoError(ex.Message); }
+            catch (Exception ex)
+            {
+                if (beforeFill == null) ClearJobNumbers();
+                SetAuto(L.S("Something went wrong: ", "Noget gik galt: ") + ex.Message, true);
+            }
             finally
             {
                 cts.Dispose();
@@ -1031,6 +1056,107 @@ namespace PrintPrice
                 SetBusy(false);
             }
             return ok;
+        }
+
+        /// Fills time, grams and the material rows from a finished job and writes the "✓ …" line, with the muted notes under
+        /// it: another slicer's file (idea 14), Studio opening only the first file, a file sliced for another printer.
+        void ShowJobResult(SliceResult result, string modelName, List<string> localFiles, int parts, string process, string filament,
+                           Action<SliceResult> beforeFill)
+        {
+            int totalMinutes = (int)Math.Round(result.Seconds / 60.0);
+            if (totalMinutes == 0 && result.Seconds > 0) totalMinutes = 1;
+            // a G-code with only one of the two (idea 14): the missing box stays empty (not 0), gets the focus and a warning note
+            bool noTime = result.MissingTime && !result.MissingGrams, noGrams = result.MissingGrams && !result.MissingTime;
+            txtHours.Text = noTime ? "" : (totalMinutes / 60).ToString();
+            txtMinutes.Text = noTime ? "" : (totalMinutes % 60).ToString();
+            if (beforeFill != null) beforeFill(result);
+            SetColours(result);   // 2+ colours: one row per colour in the Cost breakdown, else today's layout
+            bool multi = filaments != null;
+            // several colours: grams with 2 decimals, like the colour rows
+            string gramsText = multi ? Math.Round(result.Grams, 2).ToString("0.##", Num.Dk) : Math.Round(result.Grams, 1).ToString("0.#", Num.Dk);
+            txtGrams.Text = noGrams ? "" : gramsText;
+
+            string what = modelName != null ? "\"" + modelName + "\"" :
+                          localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : L.F("{0} files", "{0} filer", localFiles.Count);
+            // grams worked out from the filament length (e.g. Cura): shown as an estimate; a missing value is left out
+            var said = new List<string>();
+            if (!noTime) said.Add((totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m");
+            if (!noGrams) said.Add((result.GramsEstimated ? "≈ " : "") + gramsText + " g");
+            string summary = string.Join(", ", said);
+            string colourCount = multi ? L.F("{0} colours", "{0} farver", filaments.Count) : null;
+            // another slicer's file: its muted note (or the printer warning) already says where the numbers come from,
+            // so the first line keeps short (the window must stay <= ~760 px with 4 colours and every note)
+            string slicerNote = BambuSlicer.OtherSlicerNote(result);   // null for Bambu Studio's own files
+            string printerWarning = BambuSlicer.OtherPrinterWarning(result, settings.PrinterModel);   // non-Bambu printer
+            string how = slicerNote != null || printerWarning != null ? colourCount
+                : result.FromSlicedFile
+                ? L.S("from the sliced file", "fra den slicede fil") + (multi ? " · " + colourCount : "")
+                : BambuSlicer.ShortName(process) + " · " + (multi ? colourCount : BambuSlicer.ShortName(filament));
+            string extra = (parts > 1 ? L.F(", {0} files", ", {0} filer", parts) : "") +
+                           (result.Plates > parts ? L.F(", {0} plates", ", {0} plader", result.Plates) : "");
+            if (string.IsNullOrEmpty(how) && extra.Length > 0) extra = extra.Substring(2);
+            string tail = (how ?? "") + extra;
+            // name for the history (after the link box was filled, whose TextChanged clears it)
+            jobModel = modelName ?? (localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : string.Join(", ", localFiles.Select(Path.GetFileName)));
+            SetJobLoaded(true);
+            SetAuto("✓ " + what + ": " + summary + (tail.Length > 0 ? " (" + tail + ")" : "") + ".", false);
+            SetStudioFile(result.StudioFile);   // null (nothing kept) = stays "Get time & weight"
+
+            // muted lines under the result (ClearJob takes them away again), one per note
+            var notes = new List<string>();
+            string missing = BambuSlicer.MissingValueText(result);   // "Couldn't find the weight in the file: type it in."
+            if (missing != null)
+            {
+                notes.Add(missing);
+                autoWarning = true;
+            }
+            if (printerWarning != null)
+            {
+                // a printer that isn't a Bambu Lab one (warning stripe): the warning already says the time is that
+                // printer's, so the slicer note is left out (keeps the box at 3 lines; "≈" still marks estimated grams)
+                notes.Add(printerWarning);
+                autoWarning = true;
+            }
+            else if (slicerNote != null) notes.Add(slicerNote);
+            if (studioFile != null && parts > 1)   // several files: Studio gets the first one only
+                notes.Add(L.F("\"Open in Studio\" opens only the first file (1 of {0}).",
+                              "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", parts));
+            // a sliced file made for another of our printers: its time and weight are that printer's (warning stripe)
+            if (result.FromSlicedFile && !string.IsNullOrEmpty(result.PrinterModel) &&
+                Wear.FindModel(result.PrinterModel).Key != Wear.FindModel(settings.PrinterModel).Key)
+            {
+                notes.Add(L.F("The file was sliced for the {0}, not the {1}: its time and weight are for that printer.",
+                              "Filen er slicet til {0}, ikke {1}: tid og vægt gælder den printer.",
+                              Wear.FindModel(result.PrinterModel).Label, Wear.FindModel(settings.PrinterModel).Label));
+                autoWarning = true;
+            }
+            if (notes.Count > 0) lblAuto.SetText(lblAuto.Text, string.Join("\n", notes));
+            SetAutoColor();
+            if (noTime) txtHours.Focus();
+            else if (noGrams && !txtGrams.ReadOnly) txtGrams.Focus();
+        }
+
+        /// Picture mode: reads a sliced file (e.g. a sample .gcode) as a dropped one would be, without slicing or saving.
+        internal void SampleSlicedFile(string path)
+        {
+            if (!offline) return;
+            var r = BambuSlicer.ReadSliceInfo(path, settings.FilamentPreset);
+            r.FromSlicedFile = true;
+            ShowLinkFile(path);
+            ResetModelPicture();
+            if (r.Picture != null) try { SetModelPicture(PrepareModelPicture(r.Picture)); } catch { }
+            ShowJobResult(r, null, new List<string> { path }, 1, settings.ProcessPreset, settings.FilamentPreset, null);
+            Recalculate();
+        }
+
+        /// Picture mode: shows a reading error as AnalyzeAsync would.
+        internal void SampleError(string text)
+        {
+            if (!offline) return;
+            ClearJobNumbers();
+            ResetModelPicture();
+            SetAutoError(text);
+            Recalculate();
         }
 
         static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
@@ -2023,7 +2149,8 @@ namespace PrintPrice
                 problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
             else if (sh == FieldState.Invalid || sm == FieldState.Invalid)
                 problem = L.S("Print time: hours 0–999, minutes 0–59.", "Printtid: timer 0–999, minutter 0–59.");
-            else if (s1 == FieldState.Empty || s2 == FieldState.Empty || s3 == FieldState.Empty)
+            else if (s1 == FieldState.Empty || s2 == FieldState.Empty || s3 == FieldState.Empty ||
+                     (sh == FieldState.Empty && sm == FieldState.Empty))   // both time boxes empty (e.g. a G-code without time)
                 problem = "";   // incomplete, no error
 
             if (problem != null)
@@ -2421,7 +2548,7 @@ namespace PrintPrice
         /// The quote as plain text (Copy text): model, time and grams, both prices; "For: <name>" when a customer is given.
         string QuoteText(string customer)
         {
-            return QuoteRows.JobText(customer, txtUrl.Text, lastHours, lastMinutes, txtGrams.Text,
+            return QuoteRows.JobText(customer, LinkSource(),lastHours, lastMinutes, txtGrams.Text,
                                      filaments != null ? filaments.Count : 0, last.FriendsPrice, last.OthersPrice);
         }
 
@@ -2626,7 +2753,7 @@ namespace PrintPrice
                 Name = (settings.QuoteName ?? "").Trim(),
                 Customer = (customer ?? "").Trim(),
                 Model = QuoteModelName(),
-                Link = ShortLink(txtUrl.Text),
+                Link = ShortLink(LinkSource()),
                 Picture = modelImage,
                 Logo = Logo,
                 Hours = lastInput.Hours, Minutes = lastInput.Minutes,
@@ -2718,7 +2845,7 @@ namespace PrintPrice
         {
             owned = false;
             string src = (r.Source ?? "").Trim();
-            if (src.Length > 0 && jobLoaded && modelImage != null && string.Equals(src, txtUrl.Text.Trim(), StringComparison.OrdinalIgnoreCase))
+            if (src.Length > 0 && jobLoaded && modelImage != null && string.Equals(src, LinkSource().Trim(), StringComparison.OrdinalIgnoreCase))
                 return modelImage;
             string file = src.Trim('"');
             if (offline || !file.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase)) return null;
@@ -2968,7 +3095,7 @@ namespace PrintPrice
             saved = null;
             if (last == null || lastInput == null) return L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu.");
             EnsureHistory();
-            var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", txtUrl.Text, DateTime.Now);
+            var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", LinkSource(), DateTime.Now);
             // colour, type and material of each row, so "Open again" can rebuild the material rows without slicing
             var used = filaments ?? (single != null ? new List<FilamentUse> { single } : null);
             if (r.Filaments != null && used != null && r.Filaments.Count == used.Count)
@@ -3088,7 +3215,7 @@ namespace PrintPrice
             repeatOf = r;
             string src = (r.Source ?? "").Trim().Trim('"');
             string id = src.Length > 0 ? Printables.ParseId(src) : null;
-            bool local = id == null && src.Length > 0 && File.Exists(src) && BambuSlicer.IsModelFile(src);
+            bool local = id == null && src.Length > 0 && File.Exists(src) && (BambuSlicer.IsModelFile(src) || BambuSlicer.IsGcodeFile(src));
             if (offline) { ShowRepeatLine(r, null); return; }   // picture mode never slices
             if (id == null && !local)
             {
@@ -3137,7 +3264,7 @@ namespace PrintPrice
             savedId = null;    // saving it again is a new sale: it pays back again
             SetUrlHint(false);
             UseRecordPrinter(r);   // the quote's printer (if it still exists): its wear and power, and Repeat print slices for it
-            txtUrl.Text = r.Source ?? "";
+            ShowLinkSource(r.Source);
             SetStudioFile(null);   // no slice from this session (also when the link was the same, so TextChanged didn't fire)
             jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)
             ResetModelPicture();
@@ -3145,6 +3272,8 @@ namespace PrintPrice
             string src = (r.Source ?? "").Trim().Trim('"');
             if (!offline && src.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase) && File.Exists(src))
                 LoadModelPicture(() => BambuSlicer.FromProject(src), true);   // a local project still has its own picture
+            else if (!offline && BambuSlicer.IsGcodeFile(src) && File.Exists(src))
+                LoadModelPicture(() => BambuSlicer.ReadGcodeFile(src).Picture, true);   // a G-code's thumbnail (errors = none)
 
             SliceResult slice = null;
             var one = History.SingleLine(r);   // one colour saved with its material (null: old record or 2+ colours)

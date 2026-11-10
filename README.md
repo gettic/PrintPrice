@@ -19,9 +19,14 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 ## Website
 There is also a calculator in the browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). Type the print time, grams, kr/kg and the electricity price, and you get both prices and the cost breakdown. It is in English and Danish. Settings are kept only in that browser.
 
-**Sliced files:** drop a sliced Bambu `.gcode.3mf` or Bambu G-code file on the page, or choose one. It fills in the print time, the grams, one row per colour (the kr/kg of each filament is remembered) and the plate picture.
+**Sliced files:** drop a sliced `.gcode.3mf` or a G-code file on the page, or choose one. G-code from Bambu Studio, OrcaSlicer, PrusaSlicer (and SuperSlicer) and Cura can be read. It fills in the print time, the grams, one row per colour (the kr/kg of each filament is remembered) and the plate picture.
 - The file is read in your browser only and is never uploaded. Big files are read in parts.
-- An unsliced STL or 3MF gets a message to slice it in Bambu Studio first and export the sliced plate.
+- An unsliced STL or 3MF gets a message to slice it first and export the sliced plate.
+- A file from another slicer than Bambu Studio shows a muted note that the time is that slicer's estimate. Grams worked out from the filament length are marked with "≈". Cura files give no colours.
+- PrusaSlicer's binary `.bgcode` can't be read. The message says to export plain `.gcode`.
+- G-code made for a printer that isn't a Bambu Lab one is accepted, with a warning that the time is for that printer.
+- A file with only the time or only the weight fills in what it has. The other box stays empty, with "Couldn't find the … in the file: type it in.", and there is no price until it's typed.
+- A file with impossible numbers (over 30 days or 20 kg) is refused.
 - A file sliced for another of your printers shows a warning and a button to switch printer. Unsupported printers are refused, like in the app.
 
 **Live electricity price:** under **Electricity price**, the **Update** button fetches the current Danish price, with a line that shows what it is made of. **Settings → Electricity** has the price area (DK1 or DK2), tariffs and fees, 25 % VAT, and **Fetch the live price when the page opens**. If the price service is busy or can't be reached, the page keeps the price you typed.
@@ -49,12 +54,18 @@ The site runs in your browser. It stores your settings and price history in the 
 The one outside service the site calls is PrintPrice's small Cloudflare relay (`printprice.gtd-relay.workers.dev`). It is used for the live electricity price, where it is sent the price area (DK1 or DK2) and nothing else, and for online backup, and only when you use it. For online backup it gets only the locked copy and a storage id made from the code, never the code. Cloudflare sees your IP address, like any website does, and the relay keeps only a salted hash of it, as described under Privacy. Turn the live price off in **Settings → Electricity**: then the page only asks when you click **Update**.
 
 ## Linux and Steam Deck
-The Windows app isn't tested under Wine or Proton. Use the website instead, in any browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). To fill in time and grams from a model, slice it in Bambu Studio for Linux (Flathub `com.bambulab.BambuStudio`, or the AppImage), export the sliced plate, and drop the `.gcode.3mf` or `.gcode` file on the site.
+The Windows app isn't tested under Wine or Proton. Use the website instead, in any browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). To fill in time and grams from a model, slice it in Bambu Studio for Linux (Flathub `com.bambulab.BambuStudio`, or the AppImage) or in OrcaSlicer, PrusaSlicer or Cura, export the sliced plate, and drop the `.gcode.3mf` or `.gcode` file on the site.
 
 ## Features
 - **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with the profiles of the printer in use.
   - **Other sites** (MakerWorld, Thingiverse…) block automatic downloads. Download the STL/3MF yourself and drop it on the window instead.
   - **Already-sliced `.gcode.3mf` files** are read instantly, without slicing again. A file sliced for another of the supported printers is priced, with a warning.
+  - **G-code from other slicers:** drop a `.gcode` on the window, or pick it with **Load file…** (one G-code at a time). Files from Bambu Studio, OrcaSlicer, PrusaSlicer (and SuperSlicer) and Cura are read for print time, grams, and colours and filament types where the file has them. Cura gives no colours.
+    - A file from another slicer than Bambu Studio shows a grey note that the time is that slicer's estimate. Grams worked out from the filament length show as an estimate, for example "≈ 11,7 g".
+    - A G-code made for a printer that isn't a Bambu Lab one is priced, with a warning that its time is for that printer.
+    - PrusaSlicer's binary `.bgcode` isn't read. The message says to export plain `.gcode`.
+    - A file with only the time or only the weight fills in what it has. The other box stays empty, with "Couldn't find the … in the file: type it in.", and there is no price until it's typed. A file with impossible numbers (over 30 days or 20 kg) is refused.
+    - A dropped or loaded file shows its name in the **Model link** box. The full path is in the tooltip.
   - **Printers PrintPrice doesn't support yet:** a sliced file made for another printer (for example X1 Carbon or H2D) is not priced. You can ask for your printer to be added by opening an issue at [github.com/gettic/PrintPrice/issues](https://github.com/gettic/PrintPrice/issues). The message has the link.
   - **Model too big:** if the model doesn't fit the printer (or a plate in the file is empty), the message says so and shows the build volume: A1 256 × 256 × 256 mm, A1 mini 180 × 180 × 180 mm, P1S 256 × 256 × 250 mm.
   - **Plate and filament:** if Bambu Studio won't print a filament on the chosen build plate, the message names the filament and the plate. Pick another plate in Settings > Printer, or another filament.

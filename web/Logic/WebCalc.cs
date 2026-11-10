@@ -44,6 +44,13 @@ namespace PrintPrice.Web
             return Num.TryParse(text, out value) && !double.IsInfinity(value) ? FieldState.Ok : FieldState.Invalid;
         }
 
+        /// No price yet (as the desktop's MainForm): the grams box is empty, or both time boxes are empty.
+        /// Save to history and Show quote are off then.
+        public static bool Incomplete(FieldState hours, FieldState minutes, FieldState grams)
+        {
+            return grams == FieldState.Empty || (hours == FieldState.Empty && minutes == FieldState.Empty);
+        }
+
         /// A whole-number box (hours 0-999, minutes 0-59); empty = 0.
         public static FieldState ReadInt(string text, int max, out int value)
         {

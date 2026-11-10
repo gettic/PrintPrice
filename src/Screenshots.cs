@@ -60,6 +60,14 @@ namespace PrintPrice
                             Snap(qf, folder, "quote_window.png");
                             qf.Hide();
                         }
+                    // sliced G-code files put in the folder (idea 14): main_gcode_<name>.png each, read as a dropped file would be
+                    foreach (string g in Directory.GetFiles(folder, "*.gcode"))
+                    {
+                        string shot = "main_gcode_" + Path.GetFileNameWithoutExtension(g) + ".png";
+                        try { main.SampleSlicedFile(g); }
+                        catch (Exception ex) { main.SampleError(ex.Message); }   // e.g. no time and weight: the error box
+                        Snap(main, folder, shot);
+                    }
                     // price history: made-up quotes in memory (history.json is never read or written here)
                     var quotes = HistoryForm.SampleQuotes();
                     main.SetSampleJob();

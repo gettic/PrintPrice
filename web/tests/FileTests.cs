@@ -21,6 +21,7 @@ static class FileTests
         True = t; Eq = eq;
         JsonShapes();
         Synthetic();
+        OtherSlicers();
         string dir = Samples();
         if (dir == null) { Console.WriteLine("NOTE sample files not found: sample tests skipped"); return; }
         Sample3mf(Path.Combine(dir, "test-cubes-3colour.gcode.3mf"));
@@ -33,6 +34,8 @@ static class FileTests
         for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null; d = d.Parent)
         {
             string p = Path.Combine(d.FullName, "plans", "website", "stage2", "samples");
+            if (Directory.Exists(p)) return p;
+            p = Path.Combine(d.FullName, "plans", "_old", "website", "stage2", "samples");
             if (Directory.Exists(p)) return p;
         }
         return null;
@@ -59,14 +62,18 @@ static class FileTests
 
     static void Synthetic()
     {
-        Eq("Duration 1d 2h 3m 4s", 93784, SlicedFile.Duration("1d 2h 3m 4s"));
-        Eq("Duration 12m 18s", 738, SlicedFile.Duration("12m 18s"));
+        Eq("Duration 1d 2h 3m 4s", 93784, BambuSlicer.Duration("1d 2h 3m 4s"));
+        Eq("Duration 12m 18s", 738, BambuSlicer.Duration("12m 18s"));
         BytesSource s;
         // unsliced and wrong files
         var stl = Read(new byte[] { 1, 2, 3 }, "Benchy.stl", out s);
         True("STL -> unsliced, nothing read", stl.Unsliced && stl.Result == null && s.Reads == 0);
         var txt = Read(new byte[] { 1, 2, 3 }, "notes.txt", out s);
         True("txt -> error", txt.Error != null && !txt.Unsliced);
+        var E = FieldState.Empty; var O = FieldState.Ok;
+        True("Incomplete: grams empty", WebCalc.Incomplete(O, O, E));
+        True("Incomplete: both time boxes empty", WebCalc.Incomplete(E, E, O));
+        True("Complete: one time box empty is fine (empty = 0)", !WebCalc.Incomplete(E, O, O) && !WebCalc.Incomplete(O, E, O) && !WebCalc.Incomplete(O, O, O));
         var plain3mf = Read(MakeZip(new Dictionary<string, byte[]> { { "3D/3dmodel.model", Encoding.UTF8.GetBytes("<model/>") } }, 0), "Benchy.3mf", out s);
         True("unsliced 3mf -> unsliced", plain3mf.Unsliced);
         var broken = Read(Encoding.UTF8.GetBytes("not a zip at all, just text"), "x.gcode.3mf", out s);
@@ -106,6 +113,94 @@ static class FileTests
         var endJob = Read(Encoding.UTF8.GetBytes(endOnly.ToString()), "end.gcode", out s);
         True("G-code numbers at the end: found, read " + s.BytesRead, endJob.Result != null && endJob.Result.Seconds == 3723
              && s.BytesRead <= SlicedFile.GcodeHeadBytes + SlicedFile.GcodeTailBytes);
+    }
+
+    // ---------- G-code from other slicers (idea 14): small made-up samples in web\tests\gcode-samples ----------
+
+    static bool Near(double a, double b) { return Math.Abs(a - b) < 0.015; }
+
+    static void OtherSlicers()
+    {
+        string dir = null;
+        for (var d = new DirectoryInfo(AppContext.BaseDirectory); d != null && dir == null; d = d.Parent)
+            if (Directory.Exists(Path.Combine(d.FullName, "gcode-samples"))) dir = Path.Combine(d.FullName, "gcode-samples");
+        if (dir == null) { Console.WriteLine("NOTE web\\tests\\gcode-samples not found: other-slicer tests skipped"); return; }
+        Func<string, FileJob> sample = f =>
+        {
+            BytesSource s;
+            return Read(File.ReadAllBytes(Path.Combine(dir, f)), f, out s);
+        };
+
+        var j = sample("bambu_a1_2colour.gcode");
+        True("bambu sample: 47m32s, 11,86 g, slots 1+3, A1, no note", j.Result != null && j.Result.Seconds == 2852 && Near(j.Result.Grams, 11.86)
+             && j.Result.Filaments.Count == 2 && j.Result.Filaments[1].Slot == 3 && j.Result.PrinterModel == "A1"
+             && BambuSlicer.OtherSlicerNote(j.Result) == null);
+
+        j = sample("orca_a1.gcode");
+        True("orca sample: 39m40s, 11,67 g, A1, note names OrcaSlicer", j.Result != null && j.Result.Seconds == 2380 && Near(j.Result.Grams, 11.67)
+             && j.Result.PrinterModel == "A1" && !j.Result.GramsEstimated && BambuSlicer.OtherSlicerNote(j.Result).Contains("OrcaSlicer"));
+
+        j = sample("orca_voron.gcode");
+        True("orca Voron: name only, not refused", j.Result != null && j.Error == null && j.Result.PrinterModel == null && j.Result.PrinterName == "Voron 2.4 350");
+
+        j = sample("prusa_mmu_2colour.gcode");
+        True("prusa sample: 2 colours, purge, name only, PNG picture", j.Result != null && j.Result.Seconds == 3723 && j.Result.Filaments.Count == 2
+             && Near(j.Result.PurgeGrams, 1.84) && j.Result.PrinterModel == null && j.PictureType == "image/png");
+
+        var vor = sample("orca_voron.gcode").Result;
+        True("voron: OtherPrinter + warning names it and the selected printer", vor.OtherPrinter
+             && BambuSlicer.OtherPrinterWarning(vor, "A1").Contains("Voron 2.4 350") && BambuSlicer.OtherPrinterWarning(vor, "A1").Contains("sliced for"));
+        True("no other-printer warning for an A1 file", BambuSlicer.OtherPrinterWarning(sample("orca_a1.gcode").Result, "A1") == null);
+
+        j = sample("prusa_no_density.gcode");
+        True("prusa without density: estimated grams + note", j.Result != null && j.Result.GramsEstimated && Near(j.Result.Grams, 11.67)
+             && BambuSlicer.OtherSlicerNote(j.Result).Contains("estimated"));
+
+        j = sample("cura_marlin.gcode");
+        True("cura Marlin: 2269 s, estimated grams", j.Result != null && j.Result.Seconds == 2269 && j.Result.GramsEstimated && j.Result.SlicerName == BambuSlicer.SlicerCura);
+        j = sample("cura_griffin.gcode");
+        True("cura Griffin: 3725 s, estimated grams", j.Result != null && j.Result.Seconds == 3725 && j.Result.GramsEstimated);
+        j = sample("cura_weight_placeholders.gcode");
+        True("cura weight placeholder: 6,1 g, not estimated", j.Result != null && Near(j.Result.Grams, 6.1) && !j.Result.GramsEstimated);
+
+        j = sample("odd_bom_prusa.gcode");
+        True("BOM + PrusaSlicer: still detected as Prusa, 3723 s, 10,93 g", j.Result != null && j.Result.SlicerName == BambuSlicer.SlicerPrusa && j.Result.Seconds == 3723 && Near(j.Result.Grams, 10.93));
+        j = sample("odd_decimal_comma.gcode");
+        True("decimal comma (Prusa): 2 slots, 10,93 g, not 103", j.Result != null && j.Result.Filaments.Count == 2 && Near(j.Result.Grams, 10.93));
+        j = sample("odd_cura_decimal_comma.gcode");
+        True("decimal comma (Cura metres): about 11,7 g, estimated", j.Result != null && Near(j.Result.Grams, 11.67) && j.Result.GramsEstimated);
+        j = sample("odd_impossible.gcode");
+        True("impossible numbers -> error, no values, no price", j.Result == null && j.Error != null && j.Error.Contains("don't look right"));
+        j = sample("partial_time_only.gcode");
+        True("time only: 2400 s, grams flagged missing + text", j.Result != null && j.Result.Seconds == 2400 && j.Result.MissingGrams && !j.Result.MissingTime
+             && BambuSlicer.MissingValueText(j.Result).Contains("weight"));
+        j = sample("partial_grams_only.gcode");
+        True("grams only: 11,67 g, time flagged missing + text", j.Result != null && Near(j.Result.Grams, 11.67) && j.Result.MissingTime && !j.Result.MissingGrams
+             && BambuSlicer.MissingValueText(j.Result).Contains("print time"));
+        True("complete file has no missing text", BambuSlicer.MissingValueText(sample("orca_a1.gcode").Result) == null);
+        j = sample("bambu_x1c.gcode");
+        True("X1C G-code still refused", j.Result == null && j.Error != null && j.Error.Contains("X1 Carbon"));
+
+        j = sample("binary.bgcode");
+        True("bgcode -> binary text", j.Result == null && j.Error == BambuSlicer.BinaryGcodeText());
+        BytesSource s2;
+        j = Read(Encoding.ASCII.GetBytes("GCDE\x01\x00\x00\x00"), "renamed.gcode", out s2);
+        True("GCDE bytes in a .gcode -> binary text", j.Result == null && j.Error == BambuSlicer.BinaryGcodeText());
+        j = Read(Encoding.UTF8.GetBytes("G28\nG1 X1\n"), "empty.gco", out s2);
+        True(".gco without numbers -> missing text", j.Result == null && j.Error == BambuSlicer.GcodeMissingText());
+
+        // Prusa numbers in the last 256 KB of a big file: head + tail only
+        string prusa = File.ReadAllText(Path.Combine(dir, "prusa_mmu_2colour.gcode"));
+        var sb = new StringBuilder(prusa.Split(new[] { "G28" }, StringSplitOptions.None)[0]);
+        sb.Append("G28\n");
+        while (sb.Length < 3 * 1024 * 1024) sb.Append("G1 X10.000 Y10.000 E0.01234\n");
+        sb.Append(prusa.Split(new[] { "G1 X10 Y10 F3000" }, StringSplitOptions.None)[1]);
+        j = Read(Encoding.UTF8.GetBytes(sb.ToString()), "big-prusa.gcode", out s2);
+        True("big Prusa file: found, read " + s2.BytesRead, j.Result != null && j.Result.Seconds == 3723 && s2.BytesRead <= SlicedFile.GcodeHeadBytes + SlicedFile.GcodeTailBytes);
+
+        L.Danish = true;
+        True("Danish note", BambuSlicer.OtherSlicerNote(new SliceResult { SlicerName = "Cura", GramsEstimated = true }).Contains("anslået"));
+        L.Danish = false;
     }
 
     // ---------- samples ----------
@@ -236,3 +331,4 @@ static class FileTests
         return Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==");
     }
 }
+

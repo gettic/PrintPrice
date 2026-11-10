@@ -368,10 +368,10 @@ namespace PrintPrice
         }
 
         /// A preset name without its printer part: "0.20mm Standard @BBL X1C" / "Bambu PLA Basic @BBL A1M 0.2 nozzle" -> the
-        /// part before " @BBL".
+        /// part before " @BBL"; OrcaSlicer's library names "Generic PLA @System" -> "Generic PLA" (only a final " @System").
         public static string ShortName(string preset)
         {
-            return Regex.Replace(preset ?? "", @"\s*@BBL\b.*$", "");
+            return Regex.Replace(preset ?? "", @"\s*(@BBL\b.*|@System\s*)$", "");
         }
 
         /// Reads filament type and whether Bambu marks it abrasive (required nozzle hardness ≥ 40 HRC).
@@ -558,9 +558,11 @@ namespace PrintPrice
             return res;
         }
 
-        /// True for a .3mf that already contains sliced plates (e.g. exported "*.gcode.3mf").
+        /// True for a .3mf that already contains sliced plates (e.g. exported "*.gcode.3mf"), and for any G-code file
+        /// (IsGcodeFile: read by ReadSliceInfo, which says so when it can't find the numbers).
         public static bool IsSlicedProject(string path)
         {
+            if (IsGcodeFile(path)) return true;
             if (!path.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase)) return false;
             try
             {
@@ -580,9 +582,49 @@ namespace PrintPrice
             catch { return false; }
         }
 
-        /// Sums print time and filament weight over all sliced plates in a Bambu .3mf.
+        /// Reads a sliced G-code file (Bambu Studio, OrcaSlicer, PrusaSlicer, Cura): the first 1 MB, plus the last 256 KB
+        /// when something is still missing (ParseGcode). SliceException for binary G-code or when time/grams aren't found.
+        public static SliceResult ReadGcodeFile(string path)
+        {
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                long len = fs.Length;
+                byte[] head = ReadRange(fs, 0, (int)Math.Min(len, GcodeHeadBytes));
+                if (IsBinaryGcode(path, head)) throw new SliceException(BinaryGcodeText());
+                string text = System.Text.Encoding.UTF8.GetString(head);
+                var info = ParseGcode(text);
+                if (!info.Complete && len > head.Length)
+                {
+                    long start = Math.Max(head.Length, len - GcodeTailBytes);
+                    byte[] tail = ReadRange(fs, start, (int)(len - start));
+                    info = ParseGcode(text + "\n" + System.Text.Encoding.UTF8.GetString(tail));
+                }
+                if (!info.HasValues) throw new SliceException(GcodeMissingText());
+                var res = info.ToResult();
+                res.FromSlicedFile = true;
+                return res;
+            }
+        }
+
+        static byte[] ReadRange(Stream s, long offset, int count)
+        {
+            var buf = new byte[count];
+            s.Position = offset;
+            int done = 0;
+            while (done < count)
+            {
+                int n = s.Read(buf, done, count - done);
+                if (n <= 0) break;
+                done += n;
+            }
+            if (done < count) Array.Resize(ref buf, done);
+            return buf;
+        }
+
+        /// Sums print time and filament weight over all sliced plates in a Bambu .3mf (a G-code file: ReadGcodeFile).
         public static SliceResult ReadSliceInfo(string path3mf)
         {
+            if (IsGcodeFile(path3mf)) return ReadGcodeFile(path3mf);
             string xml, settings;
             using (var zip = ZipFile.OpenRead(path3mf))
             {

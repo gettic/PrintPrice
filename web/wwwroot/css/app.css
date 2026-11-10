@@ -98,6 +98,7 @@ body.dragging .zone { border: 2px solid var(--others); background: var(--hot-bac
 .hidden-file { display: none; }
 .file-msg { border-left: 4px solid var(--accent); padding-left: 8px; overflow-wrap: anywhere; }
 .file-msg.error { color: var(--error); }
+.file-msg.muted { color: var(--muted); font-size: 13px; border-left: 0; padding-left: 0; }
 .file-warn { color: #f0b446; font-size: 13px; }   /* Theme.Warning */
 .file-warn a { color: #f0b446; }
 .colours {

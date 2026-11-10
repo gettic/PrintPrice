@@ -47,14 +47,22 @@ else
             <div class="zone">
                 <div class="zone-row">
                     <button @onclick="ChooseFile" disabled="@reading">@L.S("Choose file…", "Vælg fil…")</button>
-                    <span class="muted">@L.S("or drop a sliced .gcode.3mf / G-code here", "eller slip en slicet .gcode.3mf / G-code her")</span>
+                    <span class="muted">@L.S("or drop a sliced .gcode.3mf / G-code (Bambu Studio, Orca, Prusa, Cura) here", "eller slip en slicet .gcode.3mf / G-code (Bambu Studio, Orca, Prusa, Cura) her")</span>
                 </div>
                 <input type="file" @ref="fileInput" class="hidden-file" tabindex="-1" aria-hidden="true"
-                       accept=".3mf,.gcode,.gco,.stl,.obj,.step,.stp,.amf" />
+                       accept=".3mf,.gcode,.gco,.gc,.bgcode,.stl,.obj,.step,.stp,.amf" />
                 <input type="file" id="backupFile" class="hidden-file" tabindex="-1" aria-hidden="true" accept=".printprice-backup,.json" />
                 @if (fileText != null)
                 {
                     <div class="@(fileError ? "file-msg error" : "file-msg")" role="status">@fileText</div>
+                }
+                @if (fileNote != null)
+                {
+                    <div class="file-msg muted" role="status">@fileNote</div>
+                }
+                @if (missingText != null)
+                {
+                    <div class="file-warn">⚠ @missingText</div>
                 }
                 @if (printerWarning != null)
                 {
@@ -253,7 +261,7 @@ else
     DotNetObjectReference<Calculator> self;
     bool hooked, reading, fileError;
     int fileId;                        // the newest chosen file; older reads are dropped
-    string fileText, printerWarning, pictureUrl;
+    string fileText, fileNote, missingText, printerWarning, pictureUrl;
     string materialName;               // one colour from a file: its material (kr/kg remembered under it)
     PrinterProfile switchPrinter;      // a printer in Settings with the file's model
     SliceResult fileResult;            // the file's values (printer check again after Settings)
@@ -393,6 +401,7 @@ else
         else if (gramsState == FieldState.Invalid || kgState == FieldState.Invalid || elecState == FieldState.Invalid || rowsBad)
             problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
         if (problem != null) return;
+        if (WebCalc.Incomplete(hoursState, minutesState, gramsState)) return;   // no price until the time and grams are there
         input = new QuoteInput { Hours = h, Minutes = m, FilamentGrams = g, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el, Filaments = lines };
         // failed prints payback (MainForm.PaybackDebt): the history's unpaid failed prints, without the quote Save made
         input.PaybackDebt = settings.FailedPayback != 0 ? History.FailedDebt(history, savedId) : 0;
@@ -413,7 +422,7 @@ else
         rows.Clear();
         materialName = null;
         fileResult = null;
-        fileText = printerWarning = pictureUrl = null;
+        fileText = fileNote = missingText = printerWarning = pictureUrl = null;
         switchPrinter = null;
         fileError = false;
         single = null;
@@ -533,12 +542,14 @@ else
             fileText = L.F("\"{0}\" isn't sliced, and a website can't slice. In Bambu Studio: Slice plate, then File → Export → Export plate sliced file, and drop that file here. Or type the time and grams below.",
                            "\"{0}\" er ikke slicet, og en hjemmeside kan ikke slice. I Bambu Studio: Slice plade, derefter Filer → Eksportér → Eksportér pladens slicede fil, og slip den fil her. Eller skriv tid og gram nedenfor.",
                            job.FileName) + more;
+            ClearNumbers();
             return;
         }
         if (job.Result == null)
         {
             fileError = true;
             fileText = job.Error + more;
+            ClearNumbers();   // no old time / grams / price under an error (as the desktop)
             return;
         }
         var res = job.Result;
@@ -565,6 +576,10 @@ else
             perKg = Num.Fmt(settings.PriceFor(materialName));
             single = used.Count == 1 ? used[0] : null;
         }
+        // a G-code that gave only one of the two: leave the missing box empty (not 0) and say so
+        missingText = BambuSlicer.MissingValueText(res);
+        if (res.MissingTime) hours = minutes = "";
+        if (res.MissingGrams) grams = "";
         jobModel = job.FileName;
         jobSource = job.FileName;
         jobPurge = multi ? res.PurgeGrams : -1;
@@ -572,11 +587,21 @@ else
         if (res.Picture != null && job.PictureType != null)
             pictureUrl = "data:" + job.PictureType + ";base64," + Convert.ToBase64String(res.Picture);
         fileError = false;
-        fileText = L.F("✓ \"{0}\": {1} h {2} m, {3} g", "✓ \"{0}\": {1} t {2} m, {3} g", job.FileName, hours, minutes, grams)
+        fileText = missingText != null
+                   ? L.F("\"{0}\" was read, but not all of it", "\"{0}\" blev læst, men ikke det hele", job.FileName)
+                   : L.F("✓ \"{0}\": {1} h {2} m, {3} g", "✓ \"{0}\": {1} t {2} m, {3} g", job.FileName, hours, minutes, (res.GramsEstimated ? "≈ " : "") + grams)
                    + " (" + L.S("read from the sliced file", "læst fra den slicede fil")
                    + (multi ? " · " + L.F("{0} colours", "{0} farver", rows.Count) : "") + ")." + more;
         fileResult = res;
+        fileNote = BambuSlicer.OtherSlicerNote(res);
         CheckPrinter(res);
+        Recalculate();
+    }
+
+    void ClearNumbers()
+    {
+        hours = minutes = grams = "";
+        prefs.Hours = prefs.Minutes = prefs.Grams = "";
         Recalculate();
     }
 
@@ -585,6 +610,8 @@ else
     {
         printerWarning = null;
         switchPrinter = null;
+        string other = BambuSlicer.OtherPrinterWarning(res, settings.PrinterModel);
+        if (other != null) { printerWarning = other; return; }
         if (string.IsNullOrEmpty(res.PrinterModel) || res.PrinterModel == settings.PrinterModel) return;
         printerWarning = L.F("The file was sliced for the {0}, not the {1}: its time and weight are for that printer.",
                              "Filen er slicet til {0}, ikke {1}: dens tid og vægt gælder for den printer.",
