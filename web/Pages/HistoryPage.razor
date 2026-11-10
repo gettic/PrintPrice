@@ -1,0 +1,313 @@
+@* Price history (desktop HistoryForm on the web): search, month, Show and Printer filters, six month cards, the list
+   (a table on wide screens, cards on a phone) with For / Note / Printed / Failed changed in place, Delete, Open again and
+   Repeat print. The list is the Calculator's; every change is saved at once by its Changed callback. *@
+
+@{
+    var names = WebHistory.PrinterNames(Quotes, Settings, out var allPrinters);
+    bool printerMode = allPrinters.Count >= 2;
+    var shownNames = printerMode ? names : null;
+    if (!printerMode) filter.PrinterId = null;
+    var months = History.Months(Quotes);
+    var rows = WebHistory.Apply(Quotes, filter, shownNames);
+    var totals = WebHistory.Totals(Quotes, filter.Month, filter.PrinterId);
+    var cards = WebHistory.Cards(totals);
+    cards[5].Tip = WebHistory.ProfitTip(Quotes, Settings, filter.Month, printerMode, filter.PrinterId);
+    int monthIndex = filter.Month == DateTime.MinValue ? -1 : months.IndexOf(filter.Month);
+    if (selected != null && !rows.Contains(selected)) selected = null;
+    if (selected == null && rows.Count > 0) selected = rows[0];
+}
+
+<div class="filters">
+    <input type="search" class="search" placeholder="@L.S("Model, link, note or name", "Model, link, note eller navn")"
+           aria-label="@L.S("Search", "Søg")" value="@filter.Query" @oninput='e => { filter.Query = (string)e.Value; shown = WebHistory.ShowStep; }' />
+    <label class="cap" for="hmonth">@L.S("Month", "Måned")</label>
+    <span class="month">
+        <select id="hmonth" @onchange="MonthChosen">
+            <option value="" selected="@(filter.Month == DateTime.MinValue)">@L.S("All months", "Alle måneder")</option>
+            @foreach (var m in months)
+            {
+                <option value="@m.ToString("yyyy-MM", System.Globalization.CultureInfo.InvariantCulture)" selected="@(m == filter.Month)">@WebHistory.MonthText(m)</option>
+            }
+        </select>
+        <button class="small" title="@L.S("Older month", "Ældre måned")" aria-label="@L.S("Older month", "Ældre måned")"
+                disabled="@(monthIndex >= months.Count - 1 || months.Count == 0)" @onclick="() => StepMonth(months, monthIndex, +1)">‹</button>
+        <button class="small" title="@L.S("Newer month", "Nyere måned")" aria-label="@L.S("Newer month", "Nyere måned")"
+                disabled="@(monthIndex < 0 && filter.Month == DateTime.MinValue)" @onclick="() => StepMonth(months, monthIndex, -1)">›</button>
+    </span>
+    <label class="cap" for="hshow">@L.S("Show", "Vis")</label>
+    <select id="hshow" @onchange='e => { filter.Show = int.Parse((string)e.Value); shown = WebHistory.ShowStep; }'>
+        <option value="0" selected="@(filter.Show == 0)">@L.S("All quotes", "Alle tilbud")</option>
+        <option value="1" selected="@(filter.Show == 1)">@L.S("Friends & family", "Venner og familie")</option>
+        <option value="2" selected="@(filter.Show == 2)">@L.S("Customers", "Kunder")</option>
+        <option value="3" selected="@(filter.Show == 3)">@L.S("Failed", "Fejlede")</option>
+        <option value="4" selected="@(filter.Show == 4)">@L.S("Not printed", "Ikke printet")</option>
+    </select>
+    @if (printerMode)
+    {
+        <label class="cap" for="hprinter">@L.S("Printer", "Printer")</label>
+        <select id="hprinter" @onchange='e => { string v = (string)e.Value; filter.PrinterId = v.Length == 0 ? null : v; shown = WebHistory.ShowStep; }'>
+            <option value="" selected="@(filter.PrinterId == null)">@L.S("All printers", "Alle printere")</option>
+            @foreach (var t in allPrinters)
+            {
+                <option value="@t.Id" selected="@(t.Id == filter.PrinterId)">@WebHistory.PrinterChoiceText(t)</option>
+            }
+        </select>
+    }
+    <span class="count" role="status">@WebHistory.CountText(rows.Count, Quotes.Count)</span>
+</div>
+
+<div class="cards">
+    @for (int i = 0; i < cards.Count; i++)
+    {
+        var c = cards[i];
+        <div class="@(i == 5 ? "card profit" : "card")" title="@c.Tip">
+            <div class="cap"><span class="long">@c.Caption</span><span class="short">@(c.ShortCaption.Length > 0 ? c.ShortCaption : c.Caption)</span></div>
+            <div class="val @c.Css"><span class="long">@c.Value</span><span class="short">@(c.ShortValue.Length > 0 ? c.ShortValue : c.Value)</span></div>
+            <div class="sub"><span class="long">@c.Sub</span><span class="short">@(c.ShortSub.Length > 0 ? c.ShortSub : c.Sub)</span></div>
+        </div>
+    }
+</div>
+
+@if (Quotes.Count == 0)
+{
+    <div class="empty">@L.S("No saved quotes yet. On the Calculator page, Save to history keeps the quote on screen here; Backup… below restores a backup.",
+                            "Ingen gemte tilbud endnu. På Beregner-siden gemmer Gem i historik tilbuddet på skærmen her; Sikkerhedskopi… nedenfor gendanner en kopi.")</div>
+}
+else
+{
+    <table class="hist">
+        <thead>
+            <tr>
+                <th>@L.S("Date", "Dato")</th><th>@L.S("Model", "Model")</th><th class="n">@L.S("Time", "Tid")</th>
+                <th class="n">@L.S("Grams", "Gram")</th><th class="n">@L.S("Price", "Pris")</th><th>@L.S("For", "Til")</th>
+                @if (printerMode) { <th>@L.S("Printer", "Printer")</th> }
+                <th>@L.S("Note", "Note")</th><th class="c">@L.S("Printed", "Printet")</th><th class="c">@L.S("Failed", "Fejlet")</th>
+                <th>@L.S("Invoice", "Faktura")</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var r in Shown(rows))
+            {
+                var rec = r;
+                bool friends = WebHistory.IsFriends(rec);
+                <tr class="@(rec == selected ? "picked" : "")" tabindex="0" @key="rec"
+                    @onclick="() => Select(rec)" @ondblclick="() => OpenAgain.InvokeAsync(rec)" @onkeydown="e => RowKey(e, rec)">
+                    <td>@WebHistory.DateText(rec)</td>
+                    <td class="model" title="@WebHistory.ModelText(rec)">@WebHistory.ModelText(rec)</td>
+                    <td class="n">@WebHistory.TimeText(rec)</td>
+                    <td class="n">@WebHistory.GramsText(rec)</td>
+                    <td class="n"><b class="@(friends ? "green" : "red")">@WebHistory.PriceText(rec)</b></td>
+                    <td><select class="for @(friends ? "green" : "red")" aria-label="@L.S("For", "Til")" @onchange="e => ForChosen(rec, e)">
+                            <option value="1" selected="@friends">@WebHistory.ForText(History.ForFriends)</option>
+                            <option value="2" selected="@(!friends)">@WebHistory.ForText(History.ForCustomer)</option>
+                        </select></td>
+                    @if (printerMode) { <td class="printer" title="@WebHistory.PrinterText(rec, names)">@WebHistory.PrinterText(rec, names)</td> }
+                    <td class="notecell"><input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" aria-label="@L.S("Note", "Note")"
+                                                title="@rec.Note" @onchange="e => NoteChanged(rec, e)" @onkeydown:stopPropagation="true" /></td>
+                    <td class="c"><button class="@(rec.Printed ? "tick on" : "tick")" aria-pressed="@rec.Printed" aria-label="@L.S("Printed", "Printet")"
+                                          @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@(rec.Printed ? "✓" : "")</button></td>
+                    <td class="c"><button class="@(rec.Failed ? "tick x" : "tick")" aria-pressed="@rec.Failed" aria-label="@L.S("Failed", "Fejlet")"
+                                          @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true">@(rec.Failed ? "✗" : "")</button></td>
+                    <td class="muted">@rec.InvoiceNo</td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    @* phone: one card per quote; a tap opens its actions *@
+    <div class="cardlist">
+        @foreach (var r in Shown(rows))
+        {
+            var rec = r;
+            bool friends = WebHistory.IsFriends(rec);
+            bool open = rec == opened;
+            string extra = (printerMode ? WebHistory.PrinterText(rec, names) : "") + (printerMode && rec.Note.Length > 0 ? " · " : "") + rec.Note;
+            <div class="@(open ? "qrow open" : "qrow")" @key="rec" @onclick="() => ToggleOpen(rec)">
+                <div class="m">@WebHistory.ModelText(rec)</div>
+                <div class="p @(friends ? "green" : "red")">@Num.Kr(History.PriceFor(rec))</div>
+                <div class="d">@WebHistory.ShortDate(rec) · @WebHistory.TimeText(rec) · @WebHistory.GramsText(rec) g</div>
+                <div class="d r @(friends ? "green" : "red")">@WebHistory.ForText(rec.For)</div>
+                @if (extra.Length > 0) { <div class="d wide">@extra</div> }
+                <div class="chips">
+                    <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
+                    <button class="@(rec.Failed ? "chip bad" : "chip")" aria-pressed="@rec.Failed" @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true">@(rec.Failed ? "✗ " : "")@L.S("Failed", "Fejlet")</button>
+                    @if (rec.InvoiceNo.Length > 0) { <span class="chip">@rec.InvoiceNo</span> }
+                </div>
+                @if (open)
+                {
+                    <div class="sheet" @onclick:stopPropagation="true">
+                        <label>@L.S("For", "Til")
+                            <select class="@(friends ? "green" : "red")" @onchange="e => ForChosen(rec, e)">
+                                <option value="1" selected="@friends">@WebHistory.ForText(History.ForFriends)</option>
+                                <option value="2" selected="@(!friends)">@WebHistory.ForText(History.ForCustomer)</option>
+                            </select></label>
+                        <label>@L.S("Note", "Note")
+                            <input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" @onchange="e => NoteChanged(rec, e)" /></label>
+                        <button class="accent" @onclick="() => OpenAgain.InvokeAsync(rec)">@L.S("Open again", "Åbn igen")</button>
+                        <button @onclick="() => Repeat.InvokeAsync(rec)">@L.S("Repeat print", "Print igen")</button>
+                        <button class="@(armed == rec ? "accent" : "")" @onclick="() => DeleteClicked(rec, rows)">@(armed == rec ? ConfirmText : L.S("Delete", "Slet"))</button>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    @if (rows.Count > shown)
+    {
+        <div class="more"><button @onclick="() => shown += WebHistory.ShowStep">@L.F("Show {0} more", "Vis {0} mere", Math.Min(WebHistory.ShowStep, rows.Count - shown))</button></div>
+    }
+
+    <div class="actions">
+        <button class="@(armed != null && armed == selected ? "accent" : "")" disabled="@(selected == null)"
+                @onclick="() => DeleteClicked(selected, rows)">@(armed != null && armed == selected ? ConfirmText : L.S("Delete", "Slet"))</button>
+        <span class="grow"></span>
+        <button disabled="@(selected == null)" @onclick="() => Repeat.InvokeAsync(selected)">@L.S("Repeat print", "Print igen")</button>
+        <button class="accent" disabled="@(selected == null)" @onclick="() => OpenAgain.InvokeAsync(selected)">@L.S("Open again", "Åbn igen")</button>
+    </div>
+}
+
+@{
+    bool warnBackup;
+    string lastText = WebBackup.LastBackupText(LastBackup, DateTime.Now, Quotes.Count, out warnBackup);
+}
+<div class="@(warnBackup ? "lastbackup warn" : "lastbackup")">
+    <span>@lastText@(warnBackup ? L.S(" – this browser may delete its storage (Safari after 7 days without a visit), so back up now and then.",
+                                       " – denne browser kan slette sit lager (Safari efter 7 dage uden besøg), så tag en kopi en gang imellem.") : "")</span>
+    <button @onclick="() => OpenBackup.InvokeAsync()">@L.S("Backup…", "Sikkerhedskopi…")</button>
+</div>
+@if (Problem != null)
+{
+    <div class="hinfo warn" role="alert">@Problem</div>
+}
+<div class="hinfo">@L.S("Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them).",
+                       "Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem).")</div>
+<div class="note">@L.S("Your history is kept in this browser only (about 1 KB per quote). Clearing the browser's site data deletes it.",
+                       "Din historik gemmes kun i denne browser (ca. 1 KB pr. tilbud). Sletter du browserens webstedsdata, slettes den.")</div>
+
+@code {
+    [Parameter] public List<QuoteRecord> Quotes { get; set; }
+    [Parameter] public AppSettings Settings { get; set; }
+    [Parameter] public string Problem { get; set; }
+    /// After any change to a record or the list (the Calculator saves it and recalculates).
+    [Parameter] public EventCallback Changed { get; set; }
+    [Parameter] public EventCallback<QuoteRecord> OpenAgain { get; set; }
+    [Parameter] public EventCallback<QuoteRecord> Repeat { get; set; }
+    /// WebBackup.LastBackupValue of the newest backup ("" = never) and Backup… (the Backup dialog).
+    [Parameter] public string LastBackup { get; set; }
+    [Parameter] public EventCallback OpenBackup { get; set; }
+
+    readonly WebHistory.Filter filter = new WebHistory.Filter();
+    QuoteRecord selected, opened, armed;
+    int shown = WebHistory.ShowStep;
+    int armCount;
+
+    static string ConfirmText { get { return L.S("Really delete?", "Slet virkelig?"); } }
+
+    protected override void OnInitialized()
+    {
+        filter.Month = WebHistory.StartMonth(Quotes);   // newest month with quotes, as HistoryForm
+    }
+
+    IEnumerable<QuoteRecord> Shown(List<QuoteRecord> rows)
+    {
+        for (int i = 0; i < rows.Count && i < shown; i++) yield return rows[i];
+    }
+
+    void MonthChosen(ChangeEventArgs e)
+    {
+        string v = (string)e.Value ?? "";
+        DateTime m;
+        filter.Month = DateTime.TryParseExact(v, "yyyy-MM", System.Globalization.CultureInfo.InvariantCulture,
+                                              System.Globalization.DateTimeStyles.None, out m) ? m : DateTime.MinValue;
+        shown = WebHistory.ShowStep;
+    }
+
+    // ‹ = older (+1 in the newest-first list), › = newer; from "All months" › does nothing, ‹ goes to the newest month
+    void StepMonth(List<DateTime> months, int index, int step)
+    {
+        if (months.Count == 0) return;
+        int i = index < 0 ? (step > 0 ? 0 : -1) : index + step;
+        filter.Month = i < 0 ? DateTime.MinValue : months[Math.Min(i, months.Count - 1)];
+        shown = WebHistory.ShowStep;
+    }
+
+    void Select(QuoteRecord r)
+    {
+        if (selected != r) Disarm();
+        selected = r;
+    }
+
+    void ToggleOpen(QuoteRecord r)
+    {
+        if (opened != r) Disarm();
+        opened = opened == r ? null : r;
+        selected = r;
+    }
+
+    async Task RowKey(KeyboardEventArgs e, QuoteRecord r)
+    {
+        if (e.Key == "Enter") await OpenAgain.InvokeAsync(r);
+        else if (e.Key == " " ) Select(r);
+    }
+
+    async Task ForChosen(QuoteRecord r, ChangeEventArgs e)
+    {
+        int f = (string)e.Value == "1" ? History.ForFriends : History.ForCustomer;
+        if (f == r.For) return;
+        r.For = f;   // the price shown follows For
+        await Changed.InvokeAsync();
+    }
+
+    async Task NoteChanged(QuoteRecord r, ChangeEventArgs e)
+    {
+        string note = ((string)e.Value ?? "").Trim();
+        if (note.Length > WebHistory.MaxNote) note = note.Substring(0, WebHistory.MaxNote);
+        if (note == (r.Note ?? "")) return;
+        r.Note = note;
+        await Changed.InvokeAsync();
+    }
+
+    async Task TogglePrinted(QuoteRecord r)
+    {
+        selected = r;
+        r.Printed = !r.Printed;
+        await Changed.InvokeAsync();
+    }
+
+    async Task ToggleFailed(QuoteRecord r)
+    {
+        selected = r;
+        History.MarkFailed(r, !r.Failed, DateTime.Now);
+        await Changed.InvokeAsync();
+    }
+
+    /// Two clicks, as on the desktop: the first turns the button into a red "Really delete?" for 4 seconds.
+    async Task DeleteClicked(QuoteRecord r, List<QuoteRecord> rows)
+    {
+        if (r == null) return;
+        if (armed != r)
+        {
+            armed = r;
+            int mine = ++armCount;
+            _ = DisarmLater(mine);
+            return;
+        }
+        Disarm();
+        int index = rows.IndexOf(r);
+        WebHistory.Delete(Quotes, r.Id);
+        rows.Remove(r);
+        selected = rows.Count == 0 ? null : rows[Math.Max(0, Math.Min(index, rows.Count - 1))];
+        if (opened == r) opened = null;
+        await Changed.InvokeAsync();
+    }
+
+    async Task DisarmLater(int mine)
+    {
+        await Task.Delay(4000);
+        if (mine != armCount || armed == null) return;
+        armed = null;
+        StateHasChanged();
+    }
+
+    void Disarm() { armed = null; armCount++; }
+}

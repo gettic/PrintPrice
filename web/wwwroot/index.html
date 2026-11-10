@@ -64,7 +64,126 @@
                     return { status: 0, text: '', stale: null, timedOut: timedOut };
                 } finally { clearTimeout(timer); }
             },
-            pick: function () { if (window.printPrice.input) window.printPrice.input.click(); }
+            pick: function () { if (window.printPrice.input) window.printPrice.input.click(); },
+            // ---- stage 3: price history in this browser's IndexedDB (database "PrintPrice", store "kv"); nothing leaves the browser ----
+            dbp: null,
+            db: function () {
+                var pp = window.printPrice;
+                if (!pp.dbp) {
+                    pp.dbp = new Promise(function (ok, fail) {
+                        if (!window.indexedDB) { fail(new Error('no IndexedDB')); return; }
+                        var rq = indexedDB.open('PrintPrice', 1);
+                        rq.onupgradeneeded = function () { rq.result.createObjectStore('kv'); };
+                        rq.onsuccess = function () { ok(rq.result); };
+                        rq.onerror = function () { fail(rq.error); };
+                        rq.onblocked = function () { fail(new Error('blocked')); };
+                    });
+                    pp.dbp.catch(function () { pp.dbp = null; });
+                }
+                return pp.dbp;
+            },
+            req: function (mode, act) {
+                return window.printPrice.db().then(function (db) {
+                    return new Promise(function (ok, fail) {
+                        var tx = db.transaction('kv', mode), rq = act(tx.objectStore('kv')), res = null;
+                        rq.onsuccess = function () { res = rq.result; };
+                        tx.oncomplete = function () { ok(res === undefined ? null : res); };
+                        tx.onerror = tx.onabort = function () { fail(tx.error || rq.error || new Error('failed')); };
+                    });
+                });
+            },
+            // every call answers { ok, value, error } (never throws into C#)
+            wrap: function (p) {
+                return p.then(function (v) { return { ok: true, value: v == null ? null : String(v), error: null }; },
+                              function (e) { return { ok: false, value: null, error: (e && (e.name || e.message)) || 'error' }; });
+            },
+            idbGet: function (k) { var pp = window.printPrice; return pp.wrap(pp.req('readonly', function (s) { return s.get(k); })); },
+            idbPut: function (k, v) { var pp = window.printPrice; return pp.wrap(pp.req('readwrite', function (s) { return s.put(v, k); }).then(function () { return null; })); },
+            idbDelete: function (k) { var pp = window.printPrice; return pp.wrap(pp.req('readwrite', function (s) { return s.delete(k); }).then(function () { return null; })); },
+            idbKeys: function (prefix) {
+                var pp = window.printPrice;
+                return pp.wrap(pp.req('readonly', function (s) { return s.getAllKeys(IDBKeyRange.bound(prefix, prefix + '￿')); })
+                    .then(function (keys) { return (keys || []).join('\n'); }));
+            },
+            persist: function () {
+                try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () { }); } catch (e) { }
+            },
+            // the model picture made small for the history (webp where the browser can, else png); null = no picture
+            smallPicture: function (url, max) {
+                return new Promise(function (ok) {
+                    if (!url) { ok(null); return; }
+                    var img = new Image();
+                    img.onload = function () {
+                        var k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight, 1));
+                        var c = document.createElement('canvas');
+                        c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+                        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+                        var small = c.toDataURL('image/webp', 0.85);
+                        if (small.indexOf('data:image/webp') !== 0) small = c.toDataURL('image/png');
+                        ok(small.length < url.length ? small : url);
+                    };
+                    img.onerror = function () { ok(null); };
+                    img.src = url;
+                });
+            },
+            // other open tabs of this site reload the history after a change; Back/Forward and #history links switch the page
+            channel: null,
+            hookPage: function (dotnet) {
+                var pp = window.printPrice;
+                pp.page_ = dotnet;
+                try {
+                    pp.channel = new BroadcastChannel('PrintPrice');
+                    pp.channel.onmessage = function (e) { if (e.data === 'history') dotnet.invokeMethodAsync('HistoryChangedElsewhere'); };
+                } catch (e) { }
+                window.addEventListener('hashchange', function () { dotnet.invokeMethodAsync('HashChanged', location.hash || ''); });
+            },
+            told: function () { try { if (window.printPrice.channel) window.printPrice.channel.postMessage('history'); } catch (e) { } },
+            go: function (hash) { if ((location.hash || '') !== hash) location.hash = hash; },
+            toTop: function () { window.scrollTo(0, 0); },
+            // ---- stage 3b: backup ----
+            // a backup / safety copy as a download (made here, saved by the browser; nothing is sent)
+            download: function (name, text) {
+                var a = document.createElement('a');
+                a.href = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' }));
+                a.download = name;
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(function () { URL.revokeObjectURL(a.href); }, 30000);
+            },
+            // the backup file input (Restore > Choose file…); its file goes to C# like a dropped one
+            pickBackup: function () { var i = document.getElementById('backupFile'); if (i) { i.value = ''; i.click(); } },
+            hookBackupInput: function () {
+                var i = document.getElementById('backupFile'), pp = window.printPrice;
+                if (!i || i.hooked) return;
+                i.hooked = true;
+                i.addEventListener('change', function () { if (i.files.length) pp.useFile(i.files[0], 1); });
+            },
+            // AES-256-CBC (PKCS7, = .NET's Aes) for the online backup; .NET in the browser has no AES. Key and data stay here.
+            aes: async function (key, iv, data, encrypt) {
+                var k = await crypto.subtle.importKey('raw', key, { name: 'AES-CBC' }, false, [encrypt ? 'encrypt' : 'decrypt']);
+                var out = encrypt ? await crypto.subtle.encrypt({ name: 'AES-CBC', iv: iv }, k, data)
+                                  : await crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv }, k, data);
+                return new Uint8Array(out);
+            },
+            // one online backup call: only the storage id (in the address) and the encrypted blob go out; no cookies
+            backupFetch: async function (method, url, body64, ms) {
+                var ctl = new AbortController();
+                var timer = setTimeout(function () { ctl.abort(); }, ms);
+                try {
+                    var init = { method: method, signal: ctl.signal, credentials: 'omit', cache: 'no-store' };
+                    if (body64) {
+                        var bin = atob(body64), b = new Uint8Array(bin.length);
+                        for (var i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+                        init.body = b; init.headers = { 'Content-Type': 'application/octet-stream' };
+                    }
+                    var r = await fetch(url, init);
+                    var buf = new Uint8Array(await r.arrayBuffer()), s = '';
+                    for (var j = 0; j < buf.length; j += 32768) s += String.fromCharCode.apply(null, buf.subarray(j, j + 32768));
+                    return { status: r.status, body: btoa(s), left: r.headers.get('X-Uploads-Left'),
+                             reset: r.headers.get('X-Uploads-Reset'), retryAfter: r.headers.get('Retry-After') };
+                } catch (e) {
+                    return { status: 0, body: '', left: null, reset: null, retryAfter: null };
+                } finally { clearTimeout(timer); }
+            }
         };
     </script>
 </head>

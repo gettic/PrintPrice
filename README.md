@@ -26,11 +26,21 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 
 **Live electricity price:** under **Electricity price**, the **Update** button fetches the current Danish price, with a line that shows what it is made of. **Settings → Electricity** has the price area (DK1 or DK2), tariffs and fees, 25 % VAT, and **Fetch the live price when the page opens**. If the price service is busy or can't be reached, the page keeps the price you typed.
 
-It does less than the Windows app: no slicing and no History.
+**History:** the **History** tab is the price history of the Windows app in the browser.
+- **Save to history** on the calculator saves the quote. The tab has the search, the **Month**, **Show** and **Printer** filters and the month cards. In the list you can change **For**, **Note**, **Printed** and **Failed**, **Delete**, **Open again** and **Repeat print**. Failed prints pay themselves back, like in the app.
+- On the site there is no slicing, so **Repeat print** uses the saved time and grams with today's prices. Drop the sliced file again to update them.
+- The history is kept in this browser only, in the same `history.json` format as the desktop app. Clearing the browser's site data deletes it. Safari can delete a site's storage after 7 days without a visit.
 
-The site runs in your browser. It stores your settings in the browser's own storage. Files you drop on it are read on your PC and never leave it. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
+**Backup and restore:** **Backup…** on the History tab opens the Backup window, like the app's.
+- **Back up** saves a `.printprice-backup` file that the Windows app can restore too. It is not locked with a code and holds customer names and payment details, so keep it private. Or back up **online** with the same 20-character code as in the app. The code is typed each time and the site never remembers it. The backup is locked in your browser before it is sent.
+- **Restore** takes a `.printprice-backup` (from the site or the app), the app's `history.json`, or an online code. Choose **Merge** or **Replace**, and optionally **Also restore the settings**. A safety copy of what was there is kept first, and you can download it afterwards.
+- A **Last backup** line under the list reminds you to back up. It turns into a warning if you never backed up or the last backup is over 30 days old.
 
-The one outside service the site calls is PrintPrice's small Cloudflare relay (`printprice.gtd-relay.workers.dev`), and only for the live electricity price. It is sent the price area (DK1 or DK2) and nothing else. Cloudflare sees your IP address, like any website does. Turn it off in **Settings → Electricity**: then the page only asks when you click **Update**.
+It does less than the Windows app: no slicing and no invoices or quote pages.
+
+The site runs in your browser. It stores your settings and price history in the browser's own storage. Files you drop on it are read on your PC and never leave it. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
+
+The one outside service the site calls is PrintPrice's small Cloudflare relay (`printprice.gtd-relay.workers.dev`). It is used for the live electricity price, where it is sent the price area (DK1 or DK2) and nothing else, and for online backup, and only when you use it. For online backup it gets only the locked copy and a storage id made from the code, never the code. Cloudflare sees your IP address, like any website does, and the relay keeps only a salted hash of it, as described under Privacy. Turn the live price off in **Settings → Electricity**: then the page only asks when you click **Update**.
 
 ## Linux and Steam Deck
 The Windows app isn't tested under Wine or Proton. Use the website instead, in any browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). To fill in time and grams from a model, slice it in Bambu Studio for Linux (Flathub `com.bambulab.BambuStudio`, or the AppImage), export the sliced plate, and drop the `.gcode.3mf` or `.gcode` file on the site.
@@ -159,11 +169,13 @@ The app sends no personal information anywhere. It has no account, cookies or tr
 |---|---|---|
 | GitHub | At startup, every 10 minutes while the program is open, and when you open Settings, to look for a new version (all of it can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version. Unchanged answers are not downloaded again (ETag), and if GitHub says "too many requests" the app quietly waits longer |
 | Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
-| PrintPrice's backup service (Cloudflare relay) | Only when you use **Online, with a code** in the Backup window: back up, get a backup, new code or delete | The encrypted backup and a storage id made from the code. The backup is locked on your PC first, and the code itself is never sent |
+| PrintPrice's backup service (Cloudflare relay) | Only when you use **Online, with a code** in the Backup window (in the app or on the website): back up, get a backup, new code or delete | The encrypted backup and a storage id made from the code. The backup is locked on your PC (or in your browser) first, and the code itself is never sent |
 | Your browser | Only when you click **GitHub** in "Made by Gettic · GitHub" at the bottom of the main window, or the issues link in the message about an unsupported printer | Opens this project's page (github.com/gettic/PrintPrice) or its issues page. Nothing is sent before the click |
 | Printables | Only when you paste a Printables link | The model's ID, then the file and a small model picture (~10 KB, from media.printables.com) download |
 
 To enforce the 5-a-day online backup limit, the relay keeps only a salted hash of your IP address (not the address itself) for 2 days.
+
+The website sends nothing about you either. Your settings, price history and files stay in your browser. Online backup sends only a locked copy, and only when you use it. The live electricity price is asked from the same relay and only the price area is sent.
 
 Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer, and reads its printer and filament profiles (for slicing and the material drop-down) and the printer pictures from its install folder. This stays on your PC and is never sent anywhere.
 

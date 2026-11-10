@@ -111,30 +111,7 @@ namespace PrintPrice
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
         }
 
-        // ---------- breakdown rows ----------
-        enum Kind { Head, Sub, Note, Rule }
-
-        sealed class Row
-        {
-            public Kind Kind;
-            public string Label = "", Detail = "", Amount = "";
-            public Color Dot = Color.Empty;
-            public bool Alone;   // a head line without sub-lines: a little more room under it
-        }
-
-        static Row Head(string label, string detail, long ore, bool alone)
-        {
-            return new Row { Kind = Kind.Head, Label = label, Detail = detail ?? "", Amount = Num.Kr(ore / 100.0), Alone = alone };
-        }
-
-        static Row Sub(string label, string detail, long ore, Color dot)
-        {
-            return new Row { Kind = Kind.Sub, Label = label, Detail = detail ?? "", Amount = (ore / 100.0).ToString("N2", Num.Dk), Dot = dot };
-        }
-
-        static string N2(double v) { return v.ToString("N2", Num.Dk); }
-        static string PerHour { get { return L.S(" kr/h", " kr/t"); } }   // units as in the windows: kr/kg, kr/kWh, kr/h
-        static string Time(int h, int m) { return L.F("{0} h {1} m", "{0} t {1} m", h, m); }
+        // breakdown rows, dates and other texts: QuoteRows (src\QuoteRows.cs, no drawing, shared with the website)
 
         /// text cut to fit width (whole characters + "…"), measured as DrawString draws it; never stretched.
         static string FitText(Graphics g, string text, Font font, float width)
@@ -151,87 +128,6 @@ namespace PrintPrice
                 }
                 return text.Substring(0, lo).TrimEnd() + "…";
             }
-        }
-
-        static List<Row> Rows(QuoteData d)
-        {
-            var rows = new List<Row>();
-            var lines = d.Breakdown.Lines;
-            var mats = lines.FindAll(l => l.Key == QuoteLine.Material);
-            long matOre = 0;
-            foreach (var m in mats) matOre += m.Ore;
-            string material = L.S("Material", "Materiale");
-            Func<QuoteLine, string> matDetail = m => Num.Fmt(m.Quantity) + " g  ×  " + Num.Fmt(m.UnitPrice) + " kr/kg";
-            if (mats.Count == 1)
-                rows.Add(Head(material, matDetail(mats[0]), matOre, true));
-            else
-            {
-                rows.Add(Head(material, "", matOre, false));
-                foreach (var m in mats)
-                {
-                    string name = m.Index >= 0 && m.Index < d.MaterialNames.Count ? d.MaterialNames[m.Index] : "";
-                    if (name.Length == 0) name = L.F("Colour {0}", "Farve {0}", m.Index + 1);
-                    Color dot = m.Index >= 0 && m.Index < d.MaterialColours.Count ? d.MaterialColours[m.Index] : Color.Empty;
-                    rows.Add(Sub(name, matDetail(m), m.Ore, dot));
-                }
-                if (d.PurgeGrams > 0)
-                    rows.Add(new Row { Kind = Kind.Note, Label = L.F("incl. {0} g filament used for colour changes",
-                        "inkl. {0} g filament brugt til farveskift", Num.Fmt(Math.Round(d.PurgeGrams))) });
-            }
-            foreach (var l in lines)
-            {
-                if (l.Key == QuoteLine.Material) continue;
-                rows.Add(new Row { Kind = Kind.Rule });
-                switch (l.Key)
-                {
-                    case QuoteLine.Power:
-                        rows.Add(Head(L.S("Electricity", "Strøm"), N2(l.Quantity) + " kWh  ×  " + N2(l.UnitPrice) + " kr/kWh", l.Ore, true));
-                        break;
-                    case QuoteLine.Wear:
-                        bool parts = l.Parts != null && l.Parts.Count > 0;
-                        rows.Add(Head(L.S("Machine wear", "Maskinslid"), Time(d.Hours, d.Minutes) + "  ×  " + N2(l.UnitPrice) + PerHour.TrimEnd(), l.Ore, !parts));
-                        if (parts)
-                            foreach (var part in l.Parts)
-                                rows.Add(Sub(PartName(part.Key, d.PlateName), N2(part.UnitPrice) + PerHour, part.Ore, Color.Empty));
-                        break;
-                    case QuoteLine.Failed:
-                        rows.Add(Head(L.S("Failed-print allowance", "Tillæg for fejlprint"),
-                            L.F("{0} % of material + electricity", "{0} % af materiale + strøm", Num.Fmt(l.Quantity)), l.Ore, true));
-                        break;
-                    case QuoteLine.Payback:
-                        rows.Add(Head(L.S("Earlier failed prints", "Tidligere fejlprint"), "", l.Ore, true));
-                        break;
-                    case QuoteLine.Work:
-                        rows.Add(Head(L.S("Work & handling", "Arbejde & håndtering"), "", l.Ore, true));
-                        break;
-                    case QuoteLine.Minimum:
-                        rows.Add(Head(L.S("Minimum price top-up", "Tillæg op til minimumspris"),
-                            L.F("lowest price {0} kr.", "laveste pris {0} kr.", Num.Fmt(l.Quantity)), l.Ore, true));
-                        break;
-                    case QuoteLine.Rounding:
-                        rows.Add(Head(L.S("Rounding", "Afrunding"),
-                            L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity)), l.Ore, true));
-                        break;
-                    default:
-                        rows.Add(Head(l.Key, "", l.Ore, true));
-                        break;
-                }
-            }
-            return rows;
-        }
-
-        static string PartName(string key, string plate)
-        {
-            switch (key)
-            {
-                case QuoteLine.WearPrinter: return L.S("Printer", "Printer");
-                case QuoteLine.WearParts: return L.S("Spare parts & upkeep", "Reservedele & vedligehold");
-                case QuoteLine.WearHotend: return L.S("Nozzle / hotend", "Dyse / hotend");
-                case QuoteLine.WearPlate:
-                    return string.IsNullOrEmpty(plate) ? L.S("Build plate", "Byggeplade")
-                         : L.F("Build plate ({0})", "Byggeplade ({0})", plate);
-            }
-            return key;
         }
 
         // ---------- drawing ----------
@@ -351,7 +247,7 @@ namespace PrintPrice
                 y = Math.Max(y + 10, y0 + 110);
                 var details = new[]
                 {
-                    new[] { L.S("Print time", "Printtid"), Time(d.Hours, d.Minutes) },
+                    new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
                     new[] { L.S("Weight", "Vægt"), d.Weight },
                     d.Invoice ? new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" } : new[] { L.S("Printer", "Printer"), d.Printer },
                     new[] { L.S("Material", "Materiale"), d.Material },
@@ -372,29 +268,30 @@ namespace PrintPrice
                 y += 44;
                 HLine(L0, R0, y, p.Line, 2);
                 y += 14;
-                Kind prev = Kind.Rule;
-                foreach (var r in Rows(d))
+                QuoteRowKind prev = QuoteRowKind.Rule;
+                foreach (var r in QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName))
                 {
                     switch (r.Kind)
                     {
-                        case Kind.Rule:
-                            if (prev == Kind.Sub) y += 10;
+                        case QuoteRowKind.Rule:
+                            if (prev == QuoteRowKind.Sub) y += 10;
                             HLine(L0, R0, y, p.Line, 1);
                             y += 14;
                             break;
-                        case Kind.Head:
+                        case QuoteRowKind.Head:
                             T(r.Label, F(19, true), p.Ink, L0 + 3, y, 420, near);
                             T(r.Detail, F(16, false), p.Muted, 470, y + 2, 240, near);
                             T(r.Amount, F(19, true), p.Ink, 700, y, R0 - 700, far);
                             y += r.Alone ? 44 : 36;
                             break;
-                        case Kind.Sub:
+                        case QuoteRowKind.Sub:
                             float lx = 70;
-                            if (r.Dot != Color.Empty)
+                            Color dot = r.ColourIndex >= 0 && r.ColourIndex < d.MaterialColours.Count ? d.MaterialColours[r.ColourIndex] : Color.Empty;
+                            if (dot != Color.Empty)
                             {
                                 if (draw)
                                 {
-                                    using (var br = new SolidBrush(r.Dot)) g.FillEllipse(br, 70, y + 5, 15, 15);
+                                    using (var br = new SolidBrush(dot)) g.FillEllipse(br, 70, y + 5, 15, 15);
                                     using (var pen = new Pen(p.DotRing, 1.5f)) g.DrawEllipse(pen, 70, y + 5, 15, 15);
                                 }
                                 lx = 94;
@@ -411,7 +308,7 @@ namespace PrintPrice
                     }
                     prev = r.Kind;
                 }
-                if (prev == Kind.Sub) y += 10;
+                if (prev == QuoteRowKind.Sub) y += 10;
                 y += 4;
                 HLine(L0, R0, y, p.Line, 2);
                 y += 22;
@@ -472,11 +369,7 @@ namespace PrintPrice
             }
         }
 
-        /// "4 November 2026" / "4. november 2026".
-        public static string LongDate(DateTime t)
-        {
-            return L.Danish ? t.ToString("d. MMMM yyyy", Num.Dk) : t.ToString("d MMMM yyyy", CultureInfo.GetCultureInfo("en-GB"));
-        }
+        static string LongDate(DateTime t) { return QuoteRows.LongDate(t); }
 
         static GraphicsPath RoundRect(float x, float y, float w, float h, float r)
         {

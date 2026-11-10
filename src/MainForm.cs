@@ -2421,16 +2421,8 @@ namespace PrintPrice
         /// The quote as plain text (Copy text): model, time and grams, both prices; "For: <name>" when a customer is given.
         string QuoteText(string customer)
         {
-            string nl = Environment.NewLine;
-            string text = L.S("3D print quote", "Tilbud på 3D-print") + nl;
-            if (!string.IsNullOrEmpty(customer)) text += L.S("For: ", "Til: ") + customer + nl;
-            if (txtUrl.Text.Trim().Length > 0) text += "Model: " + txtUrl.Text.Trim() + nl;
-            text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g",
-                        lastHours, lastMinutes, txtGrams.Text.Trim()) +
-                    (filaments != null ? L.F(" ({0} colours)", " ({0} farver)", filaments.Count) : "") + nl;
-            text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(last.FriendsPrice) + nl;
-            text += L.S("Customer: ", "Kunde: ") + Num.Kr(last.OthersPrice);
-            return text;
+            return QuoteRows.JobText(customer, txtUrl.Text, lastHours, lastMinutes, txtGrams.Text,
+                                     filaments != null ? filaments.Count : 0, last.FriendsPrice, last.OthersPrice);
         }
 
         // ---------- quote export (idea 5 + 21): "Show quote… ▾" → QuoteForm, or quick exports from the ▾ menu ----------
@@ -2609,39 +2601,19 @@ namespace PrintPrice
         /// Default file name of a quote: "2026-11-04 3D Benchy" (+ " - Mette Hansen" with a customer).
         string QuoteFileName(DateTime date, string customer)
         {
-            return ShortFileName(date.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), QuoteModelName(), customer);
-        }
-
-        /// "<lead> <model> - <customer>": model cut to 40 characters, customer to 30, no characters Windows forbids.
-        static string ShortFileName(string lead, string model, string customer)
-        {
-            Func<string, int, string> cut = (s, max) => { s = (s ?? "").Trim(); return s.Length > max ? s.Substring(0, max).TrimEnd() : s; };
-            string name = lead;
-            string m = cut(model, 40), c = cut(customer, 30);
-            if (m.Length > 0) name += " " + m;
-            if (c.Length > 0) name += " - " + c;
-            return Printables.SafeFileName(name).Trim();
+            return QuoteRows.FileName(date, QuoteModelName(), customer);
         }
 
         /// The model's name for the quote: the job's model name, else "3D print".
         string QuoteModelName()
         {
-            string m = (jobModel ?? "").Trim();
-            return m.Length > 0 ? m : L.S("3D print", "3D-print");
+            return QuoteRows.ModelName(jobModel);
         }
 
-        /// Short link for the quote: "printables.com/model/1648230"; other web links without "https://www."; local
-        /// files (paths) are never shown.
+        /// Short link for the quote (QuoteRows.ShortLink with Printables' link parser).
         static string ShortLink(string url)
         {
-            string u = (url ?? "").Trim();
-            if (!u.StartsWith("http://", StringComparison.OrdinalIgnoreCase) && !u.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                return "";
-            string id = Printables.ParseId(u);
-            if (id != null) return "printables.com/model/" + id;
-            u = u.Substring(u.IndexOf("//", StringComparison.Ordinal) + 2);
-            if (u.StartsWith("www.", StringComparison.OrdinalIgnoreCase)) u = u.Substring(4);
-            return u.Length > 60 ? u.Substring(0, 60) + "…" : u;
+            return QuoteRows.ShortLink(url, Printables.ParseId);
         }
 
         /// Everything the quote page shows, from the quote on screen (lastInput / last) and the settings.
@@ -2673,13 +2645,8 @@ namespace PrintPrice
                     d.MaterialColours.Add(ParseColour(f.Colour));
                 }
             else d.MaterialNames.Add(BambuSlicer.ShortName(settings.FilamentPreset).Trim());
-            if (filaments != null && filaments.Count >= 2)
-            {
-                var types = filaments.Select(f => (f.Type ?? "").Trim()).Where(t => t.Length > 0).Distinct().ToList();
-                string n = L.F("{0} colours", "{0} farver", filaments.Count);
-                d.Material = types.Count > 0 ? string.Join(" + ", types) + ", " + n : n;
-            }
-            else d.Material = d.MaterialNames[0];
+            d.Material = QuoteRows.MaterialLine(filaments != null ? filaments.Select(f => f.Type) : null,
+                                                filaments != null ? filaments.Count : 0, d.MaterialNames[0]);
             return d;
         }
 
@@ -2768,8 +2735,7 @@ namespace PrintPrice
 
         static string RecordModelName(QuoteRecord r)
         {
-            string m = (r.Model ?? "").Trim();
-            return m.Length > 0 ? m : L.S("3D print", "3D-print");
+            return QuoteRows.ModelName(r.Model);
         }
 
         /// The page of a saved record: its saved inputs and prices (History.ToInput + SavedSettings), quote number and
@@ -2796,24 +2762,17 @@ namespace PrintPrice
                 Breakdown = Pricing.Breakdown(History.ToInput(r), History.SavedSettings(r, settings), friends, null)
             };
             // N4: the page shows the saved price (as Copy text and the History list do), even if the inputs no longer give it
-            MatchSavedTotal(d.Breakdown, friends ? r.FriendsPrice : r.OthersPrice);
-            var types = new List<string>();
+            Pricing.MatchSavedTotal(d.Breakdown, friends ? r.FriendsPrice : r.OthersPrice);
             if (r.Filaments != null)
                 for (int k = 0; k < r.Filaments.Count; k++)
                 {
                     var f = r.Filaments[k];
                     d.MaterialNames.Add(MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
                     d.MaterialColours.Add(ParseColour(f.Colour));
-                    string t = (f.Type ?? "").Trim();
-                    if (t.Length > 0 && !types.Contains(t)) types.Add(t);
                 }
             else d.MaterialNames.Add(BambuSlicer.ShortName(settings.FilamentPreset).Trim());
-            if (r.Filaments != null && r.Filaments.Count >= 2)
-            {
-                string n = L.F("{0} colours", "{0} farver", r.Filaments.Count);
-                d.Material = types.Count > 0 ? string.Join(" + ", types) + ", " + n : n;
-            }
-            else d.Material = d.MaterialNames[0];
+            d.Material = QuoteRows.MaterialLine(r.Filaments != null ? r.Filaments.Select(f => f.Type) : null,
+                                                r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
             if (invoice)
             {
                 DateTime billed = DateTime.MinValue;
@@ -2830,29 +2789,6 @@ namespace PrintPrice
                 d.Name = (inv.FromName ?? "").Trim();
             }
             return d;
-        }
-
-        /// Scales a recomputed breakdown to a record's saved price (when they differ: hand-edited file, older formula), so
-        /// the page's lines and total agree with the saved price. Nothing changes when they already match.
-        static void MatchSavedTotal(QuoteBreakdown b, double saved)
-        {
-            if (b == null || b.Lines == null || saved <= 0) return;
-            long want = Pricing.ShownOre(saved);
-            if (want == b.TotalOre) return;
-            double sum = 0;
-            foreach (var l in b.Lines) sum += Math.Max(0, l.Exact);
-            if (sum <= 0) return;
-            double k = want / 100.0 / sum;
-            foreach (var l in b.Lines) l.Exact = Math.Max(0, l.Exact) * k;
-            b.Price = saved;
-            b.TotalOre = want;
-            Pricing.SplitOre(b.Lines, want);
-            foreach (var l in b.Lines)
-                if (l.Parts != null)
-                {
-                    foreach (var part in l.Parts) part.Exact *= k;
-                    Pricing.SplitOre(l.Parts, l.Ore);
-                }
         }
 
         /// One export of a record's quote / invoice: file dialog first (null = cancelled), then the record gets the name
@@ -2887,7 +2823,7 @@ namespace PrintPrice
                 DateTime qd;
                 if (invoice) { if (string.IsNullOrEmpty(r.InvoiceNo) || !History.TryTime(r.BilledAt, out qd)) qd = now; }
                 else if (!History.TryTime(r.SavedAt, out qd)) qd = DateTime.Now;
-                string name = ShortFileName(qd.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), RecordModelName(r), customer);
+                string name = QuoteRows.FileName(qd, RecordModelName(r), customer);
                 using (var dlg = new SaveFileDialog
                 {
                     Title = title,
@@ -2943,28 +2879,7 @@ namespace PrintPrice
         /// A record as plain text: title, name, model, time and grams, the chosen price; invoice: number, dates, payment.
         string RecordText(QuoteRecord r, bool friends, bool invoice)
         {
-            string nl = Environment.NewLine;
-            string text = (invoice ? L.S("Invoice", "Faktura") + " " + r.InvoiceNo : L.S("3D print quote", "Tilbud på 3D-print") + " " + History.QuoteNumber(r)) + nl;
-            if (!string.IsNullOrEmpty(r.Customer)) text += (invoice ? L.S("Bill to: ", "Kunde: ") : L.S("For: ", "Til: ")) + r.Customer + nl;
-            text += "Model: " + RecordModelName(r) + nl;
-            string link = ShortLink(r.Source);
-            if (link.Length > 0) text += link + nl;
-            text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g", r.Hours, r.Minutes, Num.Fmt(r.Grams)) + nl;
-            text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(friends ? r.FriendsPrice : r.OthersPrice);
-            if (invoice)
-            {
-                DateTime billed;
-                if (!History.TryTime(r.BilledAt, out billed)) billed = DateTime.Now;
-                var inv = History.InvoiceInfo(r, settings, billed);   // N3: the invoice's own snapshot when it has one
-                text += nl + L.F("Invoice date {0}, please pay by {1}", "Fakturadato {0}, betales senest {1}",
-                                 QuotePage.LongDate(billed), QuotePage.LongDate(inv.Due));
-                string mp = (inv.MobilePay ?? "").Trim(), bank = (inv.Bank ?? "").Trim();
-                if (mp.Length > 0) text += nl + "MobilePay: " + mp;
-                if (bank.Length > 0) text += nl + L.S("Bank: ", "Bank: ") + bank;
-                if (mp.Length > 0 || bank.Length > 0)
-                    text += nl + L.F("Please write invoice no. {0} with the payment.", "Skriv fakturanr. {0} ved betalingen.", r.InvoiceNo);
-            }
-            return text;
+            return QuoteRows.RecordText(r, friends, invoice, settings, ShortLink(r.Source));
         }
 
         /// Picture mode: the invoice page of the job on screen (sample number, date, customer and payment ways; nothing saved).

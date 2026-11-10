@@ -1,7 +1,9 @@
 using System;
 using System.Globalization;
 using System.IO;
+#if !WEB
 using System.Net;
+#endif
 
 namespace PrintPrice
 {
@@ -40,6 +42,7 @@ namespace PrintPrice
         public const int DailyUploads = 5;           // the Worker's cap per IP per UTC day
         const int TimeoutMs = 20000, ReadWriteTimeoutMs = 30000;
 
+#if !WEB
         /// Uploads (or replaces) the backup for this code. backupJson = History.ToBackup(...).
         /// Returns the uploads left today and when the count resets.
         public static UploadResult Upload(string code, string backupJson) { return Upload(Server, code, backupJson); }
@@ -76,6 +79,7 @@ namespace PrintPrice
             try { Send("DELETE", Url(server, code), null, false); }
             catch (OnlineBackupException ex) { if (ex.Status != 404) throw; }
         }
+#endif
 
         /// server + "/b/" + the code's storage id. Throws OnlineBackupException (-1) on an invalid code.
         public static string Url(string server, string code)
@@ -157,6 +161,7 @@ namespace PrintPrice
             return L.F("{0} h {1} min", "{0} t. {1} min.", h, m);
         }
 
+#if !WEB
         class Reply
         {
             public byte[] Body;
@@ -236,5 +241,6 @@ namespace PrintPrice
             }
             return new OnlineBackupException(ErrorText(code, isGet), code);
         }
+#endif
     }
 }

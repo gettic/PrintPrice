@@ -11,6 +11,7 @@ namespace PrintPrice.Web
             var builder = WebAssemblyHostBuilder.CreateDefault(args);
             builder.RootComponents.Add<App>("#app");
             builder.Services.AddScoped<Store>();
+            builder.Services.AddScoped<HistoryStore>();
             await builder.Build().RunAsync();
         }
     }

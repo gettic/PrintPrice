@@ -4,7 +4,7 @@ using Microsoft.JSInterop;
 
 namespace PrintPrice.Web
 {
-    /// Browser storage (localStorage of this site only). Nothing is sent anywhere.
+    /// Browser storage (localStorage of this site only) and the browser calls (files, downloads, AES, the Worker fetches).
     public class Store
     {
         public const string SettingsKey = "PrintPrice.settings";   // the desktop settings.ini text
@@ -88,6 +88,72 @@ namespace PrintPrice.Web
                 if (offset < 0 || offset >= length || count <= 0) return new byte[0];
                 return await js.InvokeAsync<byte[]>("printPrice.readRange", id, offset, (int)Math.Min(count, length - offset)) ?? new byte[0];
             }
+        }
+
+        /// Listens for Back / Forward (hashchange -> HashChanged(hash)) and for other open tabs of the site saving the
+        /// history (BroadcastChannel -> HistoryChangedElsewhere()).
+        public async Task HookPage<T>(DotNetObjectReference<T> page) where T : class
+        {
+            try { await js.InvokeVoidAsync("printPrice.hookPage", page); }
+            catch (Exception) { }
+        }
+
+        /// Sets the address's #part ("" = the calculator, "#history"), so Back works.
+        public async Task Go(string hash)
+        {
+            try { await js.InvokeVoidAsync("printPrice.go", hash); }
+            catch (Exception) { }
+        }
+
+        // ---------- stage 3b: backup ----------
+
+        /// Offers text as a download (a backup file, a safety copy). false = the browser refused.
+        public async Task<bool> Download(string name, string text)
+        {
+            try { await js.InvokeVoidAsync("printPrice.download", name, text); return true; }
+            catch (Exception) { return false; }
+        }
+
+        /// Restore > Choose file…: the backup file input; its file comes back through FileChosen like a dropped one.
+        public async Task PickBackup()
+        {
+            try { await js.InvokeVoidAsync("printPrice.hookBackupInput"); await js.InvokeVoidAsync("printPrice.pickBackup"); }
+            catch (Exception) { }
+        }
+
+        public async Task HookBackupInput()
+        {
+            try { await js.InvokeVoidAsync("printPrice.hookBackupInput"); }
+            catch (Exception) { }
+        }
+
+        /// The browser's AES-256-CBC (crypto.subtle) for BackupCrypto.
+        public async Task<byte[]> Aes(byte[] key, byte[] iv, byte[] data, bool encrypt)
+        {
+            return await js.InvokeAsync<byte[]>("printPrice.aes", key, iv, data, encrypt);
+        }
+
+        /// One call to the online backup service (or the local test server's fake). Never throws; Status 0 = no answer.
+        public async Task<WebBackup.Reply> BackupFetch(string method, string url, byte[] body)
+        {
+            try
+            {
+                return await js.InvokeAsync<WebBackup.Reply>("printPrice.backupFetch", method, url,
+                    body == null ? null : Convert.ToBase64String(body), WebBackup.TimeoutMs) ?? new WebBackup.Reply();
+            }
+            catch (Exception) { return new WebBackup.Reply(); }
+        }
+
+        public async Task<string> Host()
+        {
+            try { return await js.InvokeAsync<string>("printPrice.host"); }
+            catch (Exception) { return ""; }
+        }
+
+        public async Task ToTop()
+        {
+            try { await js.InvokeVoidAsync("printPrice.toTop"); }
+            catch (Exception) { }
         }
 
         public async Task SetPageLanguage(bool danish, string title)

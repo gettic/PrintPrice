@@ -392,5 +392,29 @@ namespace PrintPrice
                 if (!took) break;
             }
         }
+
+        /// Scales a recomputed breakdown to a record's saved price (when they differ: hand-edited file, older formula), so
+        /// the page's lines and total agree with the saved price. Nothing changes when they already match (or b is null,
+        /// has no lines, saved <= 0, or the lines sum to 0). Used by the desktop quote page and the website.
+        public static void MatchSavedTotal(QuoteBreakdown b, double saved)
+        {
+            if (b == null || b.Lines == null || saved <= 0) return;
+            long want = ShownOre(saved);
+            if (want == b.TotalOre) return;
+            double sum = 0;
+            foreach (var l in b.Lines) sum += Math.Max(0, l.Exact);
+            if (sum <= 0) return;
+            double k = want / 100.0 / sum;
+            foreach (var l in b.Lines) l.Exact = Math.Max(0, l.Exact) * k;
+            b.Price = saved;
+            b.TotalOre = want;
+            SplitOre(b.Lines, want);
+            foreach (var l in b.Lines)
+                if (l.Parts != null)
+                {
+                    foreach (var part in l.Parts) part.Exact *= k;
+                    SplitOre(l.Parts, l.Ore);
+                }
+        }
     }
 }

@@ -1,6 +1,7 @@
 ﻿@* The calculator: print time, grams, kr/kg and electricity -> both prices + the cost breakdown.
    Price code = the desktop app's Pricing (linked). Settings live in this browser's storage. *@
 @inject Store Store
+@inject HistoryStore Histories
 @implements IDisposable
 
 @if (!ready)
@@ -9,16 +10,28 @@
 }
 else
 {
-    <div class="page">
+    <div class="@(InHistory ? "page wide" : "page")">
         <div class="top">
             <img src="icon-192.png" alt="" />
             <h1>@Title</h1>
+            <nav class="nav" aria-label="@L.S("Pages", "Sider")">
+                <a href="#" class="@(InHistory ? "" : "on")" aria-current="@(InHistory ? null : "page")" @onclick="ShowCalculator" @onclick:preventDefault="true">@L.S("Calculator", "Beregner")</a>
+                <a href="#history" class="@(InHistory ? "on" : "")" aria-current="@(InHistory ? "page" : null)" @onclick="ShowHistory" @onclick:preventDefault="true">@L.F("History ({0})", "Historik ({0})", history.Count)</a>
+            </nav>
             <div class="lang" role="group" aria-label="@L.S("Language", "Sprog")">
                 <button class="@(L.Danish ? "" : "on")" aria-pressed="@(!L.Danish)" @onclick='() => SetLanguage("en")'>EN</button>
                 <button class="@(L.Danish ? "on" : "")" aria-pressed="@L.Danish" @onclick='() => SetLanguage("da")'>DA</button>
             </div>
         </div>
 
+        @if (InHistory)
+        {
+            <HistoryPage Quotes="history" Settings="settings" Problem="@historyProblem" Changed="HistoryChanged"
+                         OpenAgain="r => FromHistory(r, false)" Repeat="r => FromHistory(r, true)"
+                         LastBackup="@lastBackup" OpenBackup="() => OpenBackup(history.Count == 0 ? BackupDialog.TabRestore : BackupDialog.TabBackup)" />
+        }
+
+        <div class="calc" hidden="@InHistory">
         <div class="drop">
             <div class="pic">
                 @if (pictureUrl != null)
@@ -37,6 +50,7 @@ else
                 </div>
                 <input type="file" @ref="fileInput" class="hidden-file" tabindex="-1" aria-hidden="true"
                        accept=".3mf,.gcode,.gco,.stl,.obj,.step,.stp,.amf" />
+                <input type="file" id="backupFile" class="hidden-file" tabindex="-1" aria-hidden="true" accept=".printprice-backup,.json" />
                 @if (fileText != null)
                 {
                     <div class="@(fileError ? "file-msg error" : "file-msg")" role="status">@fileText</div>
@@ -48,6 +62,15 @@ else
                         {
                             @(" ")<a href="" @onclick="UseFilePrinter" @onclick:preventDefault="true">@L.F("Use \"{0}\" for this quote", "Brug \"{0}\" til dette tilbud", switchPrinter.Name)</a>
                         }
+                    </div>
+                }
+                @if (reopened != null || repeatOf != null)
+                {
+                    string main, muted;
+                    if (repeatOf != null) WebHistory.RepeatLines(repeatOf, last, out main, out muted);
+                    else WebHistory.ReopenLines(reopened, last, out main, out muted);
+                    <div class="file-msg" role="status">@main<div class="muted-line">@muted</div>
+                        @if (repeatOf != null && repeatHint) { <div class="muted-line">@WebHistory.RepeatHint</div> }
                     </div>
                 }
             </div>
@@ -143,6 +166,11 @@ else
                 <div class="line"></div>
                 <div class="bold">@L.S("Base cost", "Kostpris")</div>
                 <div class="amount bold">@Kr(last?.BaseCost)</div>
+                @if (WebHistory.PaybackCaption(last) != null)
+                {
+                    <div>@WebHistory.PaybackCaption(last)</div>
+                    <div class="amount">@WebHistory.PaybackAmount(last)</div>
+                }
             </div>
         </fieldset>
 
@@ -165,10 +193,22 @@ else
             <div class="made">@L.S("Made by Gettic", "Lavet af Gettic") · <a href="https://github.com/gettic/PrintPrice" target="_blank" rel="noopener">GitHub</a></div>
             <button @onclick="Clear">@L.S("Clear", "Ryd")</button>
             <button @onclick='() => OpenSettings(SettingsDialog.TabPrices)'>@L.S("Settings", "Indstillinger")</button>
+            <button @onclick="SaveClicked" disabled="@(last == null)">@L.S("Save to history", "Gem i historik")</button>
         </div>
-        <div class="note">@L.S("Your settings and numbers are kept in this browser only. Nothing is sent anywhere.",
-                               "Dine indstillinger og tal gemmes kun i denne browser. Intet sendes nogen steder hen.")</div>
+        @if (status != null)
+        {
+            <div class="@(statusError ? "status error" : "status")" role="status">@status</div>
+        }
+        <div class="note">@L.S("Your settings, price history and files stay in this browser. Online backup sends only a locked copy, and only when you use it. The live electricity price is asked from PrintPrice's relay.",
+                               "Dine indstillinger, prishistorik og filer bliver i denne browser. Online-kopi sender kun en låst kopi, og kun når du bruger den. Den aktuelle elpris hentes via PrintPrices relæ.")</div>
+        </div>
     </div>
+
+    @if (backupOpen)
+    {
+        <BackupDialog Quotes="history" Settings="settings" StartTab="backupTab" PendingId="pendingId" PendingName="@pendingName"
+                      PendingBytes="pendingBytes" OnClose="() => backupOpen = false" Apply="ApplyRestore" BackedUp="BackedUp" />
+    }
 
     @if (settingsOpen)
     {
@@ -212,6 +252,32 @@ else
     bool fetchingPower, powerError, powerStarted;
     string powerLine;
 
+    // ---------- stage 3: price history ----------
+    List<QuoteRecord> history = new List<QuoteRecord>();   // newest first; the History page edits this same list
+    string historyProblem;             // storage / load / save problem shown on the History page
+    string view = "calc";              // "calc" or "history" (#history in the address)
+    bool pageHooked;
+    DotNetObjectReference<Calculator> pageRef;
+    string jobModel;                   // the record's model name: the dropped file's name, or the reopened record's
+    FilamentUse single;                // one colour from a file / a reopened record: its material (saved with the quote)
+    double jobPurge = -1;              // 2+ colours: purge grams of the file
+    QuoteRecord reopened, repeatOf;    // Open again / Repeat print (their lines in the file box)
+    bool repeatHint;                   // "drop the sliced file again" until a file is dropped
+    string savedId;                    // the record Save made (left out of the payback debt)
+    string elecToday;                  // today's electricity box value while a reopened quote shows its saved price
+    string status;                     // "✓ Saved to history." / an error, under the buttons
+    bool statusError;
+    int statusCount;
+
+    // ---------- stage 3b: backup ----------
+    bool backupOpen;
+    int backupTab, pendingId;
+    string pendingName;
+    byte[] pendingBytes;               // a backup file chosen / dropped (Restore)
+    string lastBackup;                 // WebBackup.LastBackupValue, "" = never
+
+    bool InHistory { get { return view == "history"; } }
+
     string Title { get { return L.S("Gettic's 3D Print Price Calculator", "Gettics 3D-print prisberegner"); } }
 
     protected override async Task OnInitializedAsync()
@@ -227,9 +293,14 @@ else
         hours = prefs.Hours; minutes = prefs.Minutes; grams = prefs.Grams;
         perKg = Num.Fmt(settings.LastFilamentPrice);
         elec = Num.Fmt(settings.LastElectricityPrice);
+        history = await Histories.Load(p => historyProblem = p);
+        if (History.ReservePrinterIds(history, settings)) await SaveSettings();   // a new printer never reuses an id from the history
         Recalculate();
         string hash = await Store.Hash();   // a link to ...#settings / #printer / #language opens Settings there
-        if (hash == "#settings") OpenSettings(SettingsDialog.TabPrices);
+        lastBackup = await Store.Get(WebBackup.LastBackupKey) ?? "";
+        if (hash == "#history") view = "history";
+        else if (hash == "#backup" || hash == "#restore") { view = "history"; OpenBackup(hash == "#restore" ? BackupDialog.TabRestore : BackupDialog.TabBackup); }
+        else if (hash == "#settings") OpenSettings(SettingsDialog.TabPrices);
         else if (hash == "#printer") OpenSettings(SettingsDialog.TabPrinter);
         else if (hash == "#electricity") OpenSettings(SettingsDialog.TabElectricity);
         else if (hash == "#language") OpenSettings(SettingsDialog.TabApp);
@@ -300,6 +371,8 @@ else
             problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
         if (problem != null) return;
         input = new QuoteInput { Hours = h, Minutes = m, FilamentGrams = g, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el, Filaments = lines };
+        // failed prints payback (MainForm.PaybackDebt): the history's unpaid failed prints, without the quote Save made
+        input.PaybackDebt = settings.FailedPayback != 0 ? History.FailedDebt(history, savedId) : 0;
         last = Pricing.Calculate(input, settings);
     }
 
@@ -320,6 +393,13 @@ else
         fileText = printerWarning = pictureUrl = null;
         switchPrinter = null;
         fileError = false;
+        single = null;
+        jobPurge = -1;
+        jobModel = null;
+        reopened = repeatOf = null;   // the "Opened from history" lines go with the job
+        repeatHint = false;
+        savedId = null;
+        if (elecToday != null) { elec = elecToday; elecToday = null; }   // the saved electricity price was only for that quote
     }
 
     void RowPriceChanged(int i)
@@ -343,6 +423,14 @@ else
             hooked = true;
             self = DotNetObjectReference.Create(this);
             await Store.HookFiles(self, fileInput);
+        }
+        if (ready && !pageHooked)
+        {
+            pageHooked = true;
+            pageRef = DotNetObjectReference.Create(this);
+            await Store.HookPage(pageRef);
+            await Store.HookBackupInput();
+            _ = Histories.CleanPictures(history);
         }
         if (ready && !powerStarted)
         {
@@ -394,6 +482,8 @@ else
     [JSInvokable]
     public async Task FileChosen(int id, string name, double size, int count)
     {
+        if (WebBackup.IsBackupName(name)) { await BackupFileChosen(id, name, (long)size); return; }   // Restore, not a sliced file
+        var repeat = repeatOf;   // a repeat print stays one when its sliced file is dropped again (the hint asks for it)
         ClearJob();
         int mine = fileId = id;
         reading = true;
@@ -402,7 +492,9 @@ else
         var job = await SlicedFile.Read(Store.File(id, (long)size), name, settings.FilamentPreset);
         if (mine != fileId) return;   // another file was chosen meanwhile, or Clear
         reading = false;
+        if (repeat != null && job.Result != null) WebHistory.KeepSavedMaterials(job.Result, repeat);
         ShowJob(job, count);
+        if (repeat != null && job.Result != null) { repeatOf = repeat; Recalculate(); }
         await Store.Set(Store.PrefsKey, prefs.ToText());
         await SaveSettings();
         StateHasChanged();
@@ -447,7 +539,10 @@ else
             // one colour: its material (Settings' filament when the file names none), kr/kg remembered for it
             materialName = used.Count == 1 && (used[0].Profile.Length > 0 || used[0].Type.Length > 0) ? MaterialName(used[0]) : settings.FilamentPreset;
             perKg = Num.Fmt(settings.PriceFor(materialName));
+            single = used.Count == 1 ? used[0] : null;
         }
+        jobModel = job.FileName;
+        jobPurge = multi ? res.PurgeGrams : -1;
         prefs.Hours = hours; prefs.Minutes = minutes; prefs.Grams = grams;
         if (res.Picture != null && job.PictureType != null)
             pictureUrl = "data:" + job.PictureType + ";base64," + Convert.ToBase64String(res.Picture);
@@ -483,12 +578,7 @@ else
         await SaveSettings();
     }
 
-    static string MaterialName(FilamentUse f)
-    {
-        if (!string.IsNullOrEmpty(f.Profile)) return BambuSlicer.FilamentBaseName(f.Profile);
-        if (!string.IsNullOrEmpty(f.Type)) return f.Type;
-        return L.F("Colour {0}", "Farve {0}", f.Slot);
-    }
+    static string MaterialName(FilamentUse f) { return WebHistory.MaterialName(f); }
 
     static string Swatch(string colour)
     {
@@ -497,7 +587,215 @@ else
 
     static string Grams2(double g) { return Math.Round(g, 2).ToString("0.##", Num.Dk); }
 
-    public void Dispose() { if (self != null) self.Dispose(); }
+    public void Dispose()
+    {
+        if (self != null) self.Dispose();
+        if (pageRef != null) pageRef.Dispose();
+    }
+
+    // ---------- stage 3: price history ----------
+
+    void ShowCalculator() { view = "calc"; _ = Store.Go(""); }
+
+    void ShowHistory()
+    {
+        view = "history";
+        _ = Store.Go("#history");
+    }
+
+    /// Back / Forward and #history links (window hashchange).
+    [JSInvokable]
+    public void HashChanged(string hash)
+    {
+        string v = hash == "#history" ? "history" : "calc";
+        if (v == view) return;
+        view = v;
+        StateHasChanged();
+    }
+
+    /// Another open tab of the site saved the history: read it again (no edits get lost between two tabs).
+    [JSInvokable]
+    public async Task HistoryChangedElsewhere()
+    {
+        var fresh = await Histories.Load(p => historyProblem = p);
+        history.Clear();   // the same list object: the History page keeps its reference
+        history.AddRange(fresh);
+        if (reopened != null && !history.Exists(r => r.Id == reopened.Id)) reopened = null;
+        Recalculate();
+        StateHasChanged();
+    }
+
+    /// The History page changed a record or deleted one: save at once; the payback debt may have changed.
+    async Task HistoryChanged()
+    {
+        string err = await Histories.Save(history);
+        historyProblem = err ?? (Histories.Available ? null : historyProblem);
+        Recalculate();
+    }
+
+    async Task SaveClicked()
+    {
+        if (last == null || input == null)
+        {
+            ShowStatus(L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu."), true);
+            return;
+        }
+        List<HistoryFilament> materials;
+        if (Multi)
+        {
+            materials = new List<HistoryFilament>();
+            foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "" });
+        }
+        else materials = new List<HistoryFilament> { WebHistory.SingleMaterial(single, materialName, prefs.FilamentType) };
+        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf);
+        var saved = WebHistory.Save(history, rec);
+        savedId = saved.Id;   // left out of the payback debt from now on (same price when saved again)
+        string err = await Histories.Save(history);
+        if (err == null) await Histories.SavePicture(saved.Id, pictureUrl);
+        Recalculate();
+        if (err != null) { historyProblem = err; ShowStatus(err, true); }
+        else if (!Histories.Available) ShowStatus(L.S("✓ Saved to history (until this page is closed: this browser keeps no storage).",
+                                                      "✓ Gemt i historikken (til siden lukkes: denne browser gemmer ikke)."), false);
+        else ShowStatus(L.S("✓ Saved to history.", "✓ Gemt i historikken."), false);
+    }
+
+    void ShowStatus(string text, bool error)
+    {
+        status = text;
+        statusError = error;
+        int mine = ++statusCount;
+        _ = HideStatusLater(mine, error ? 8000 : 4000);
+    }
+
+    async Task HideStatusLater(int mine, int ms)
+    {
+        await Task.Delay(ms);
+        if (mine != statusCount) return;
+        status = null;
+        StateHasChanged();
+    }
+
+    /// Open again (repeat false) or Repeat print from the History page (MainForm.Reopen / Repeat + FillFromRecord):
+    /// back to the calculator with the record's time, grams and colours; Open again = its saved kr/kg and electricity,
+    /// Repeat print = today's kr/kg per material and today's electricity (live price when on). No slicing on the web.
+    async Task FromHistory(QuoteRecord r, bool repeat)
+    {
+        if (r == null) return;
+        ClearJob();   // also gives back today's electricity after an earlier Open again
+        UseRecordPrinter(r);
+        var f = WebHistory.FillFrom(r, repeat, settings);
+        hours = f.Hours; minutes = f.Minutes; grams = f.Grams;
+        foreach (var row in f.Rows) rows.Add(new ColourRow { Use = row.Use, Name = row.Name, PerKg = row.PerKg });
+        if (rows.Count == 0) perKg = f.PerKg;
+        single = f.Single;
+        materialName = f.MaterialName;
+        jobPurge = f.PurgeGrams;
+        jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;
+        if (!repeat)
+        {
+            elecToday = elec;   // today's value comes back with Clear / a new file
+            elec = f.Elec;
+            reopened = r;
+        }
+        else
+        {
+            repeatOf = r;
+            repeatHint = true;
+        }
+        powerError = false;
+        powerLine = WebHistory.ElecLine(r, repeat);
+        prefs.Hours = hours; prefs.Minutes = minutes; prefs.Grams = grams;
+        Recalculate();
+        view = "calc";
+        await Store.Go("");
+        await Store.ToTop();
+        pictureUrl = await Histories.Picture(r.Id);
+        await Store.Set(Store.PrefsKey, prefs.ToText());
+        StateHasChanged();
+        if (repeat && settings.AutoPowerPrice != 0) await FetchPower();
+    }
+
+    // ---------- stage 3b: backup ----------
+
+    void OpenBackup(int tab)
+    {
+        backupTab = tab;
+        backupOpen = true;
+    }
+
+    /// A .printprice-backup / .json chosen in Restore or dropped anywhere: read whole (in 4 MB pieces) and shown in Restore.
+    async Task BackupFileChosen(int id, string name, long size)
+    {
+        byte[] bytes = null;
+        if (size <= WebBackup.MaxFileBytes)
+        {
+            var src = Store.File(id, size);
+            bytes = new byte[size];
+            long at = 0;
+            while (at < size)
+            {
+                var part = await src.Read(at, (int)Math.Min(4 * 1024 * 1024, size - at));
+                if (part.Length == 0) break;
+                Buffer.BlockCopy(part, 0, bytes, (int)at, part.Length);
+                at += part.Length;
+            }
+            if (at < size) bytes = new byte[0];
+        }
+        else bytes = new byte[WebBackup.MaxFileBytes + 1];   // ReadFile says it's too big
+        pendingName = name;
+        pendingBytes = bytes;
+        pendingId++;
+        backupTab = BackupDialog.TabRestore;
+        backupOpen = true;
+        StateHasChanged();
+    }
+
+    async Task BackedUp(bool online)
+    {
+        lastBackup = WebBackup.LastBackupValue(DateTime.Now, online);
+        await Store.Set(WebBackup.LastBackupKey, lastBackup);
+    }
+
+    /// A restore made real (desktop History.Restore + MainForm.AdoptRestore): safety copy of what is here, then the
+    /// history list (same object) and the settings become the restored ones, both saved.
+    async Task<WebBackup.Applied> ApplyRestore(RestoreResult res, string safetyKey)
+    {
+        var a = new WebBackup.Applied();
+        if (Histories.Available)
+        {
+            string err = await Histories.SaveSafety(safetyKey, WebBackup.FileText(history, settings, DateTime.Now));
+            if (err != null) { a.Problem = err; return a; }
+            a.SafetyKept = true;
+        }
+        history.Clear();
+        history.AddRange(res.Quotes);
+        if (res.Settings != null) settings = res.Settings;
+        History.ReservePrinterIds(history, settings);
+        WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
+        if (fileResult != null) CheckPrinter(fileResult);
+        if (reopened != null && !history.Exists(r => r.Id == reopened.Id)) reopened = null;
+        if (repeatOf != null && !history.Exists(r => r.Id == repeatOf.Id)) repeatOf = null;
+        ApplyLanguage();
+        Recalculate();
+        a.Done = true;
+        a.Problem = await Histories.Save(history);
+        historyProblem = a.Problem;
+        await SaveSettings();
+        await Store.SetPageLanguage(L.Danish, Title);
+        _ = Histories.CleanPictures(history);
+        StateHasChanged();   // the History page behind the dialog shows the restored list at once
+        return a;
+    }
+
+    /// The quote's printer, if it still exists in Settings (MainForm.UseRecordPrinter).
+    void UseRecordPrinter(QuoteRecord r)
+    {
+        string id = History.PrinterOf(r);
+        if (id == settings.ActivePrinterId || settings.FindPrinter(id) == null) return;
+        if (!settings.SelectPrinter(id)) return;
+        WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
+        _ = SaveSettings();
+    }
 
     void OpenSettings(int tab) { settingsTab = tab; settingsOpen = true; }
 

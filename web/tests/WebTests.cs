@@ -92,6 +92,12 @@ static class WebTests
         // 8. live electricity price
         PowerTests.Run(True, Eq);
 
+        // 9. stage 3a: price history
+        HistoryTests.Run(True, Eq);
+
+        // 10. stage 3b: backup and restore
+        BackupTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

@@ -745,6 +745,79 @@ namespace PrintPrice.Tests
             True(name + ": each line within 1 øre of exact", near);
         }
 
+        // ---------- Pricing.MatchSavedTotal (quote page shows the saved price) ----------
+        static QuoteLine ML(string key, double exact)
+        {
+            return new QuoteLine { Key = key, Exact = exact, Ore = (long)Math.Round(exact * 100) };
+        }
+
+        static QuoteBreakdown MB(long totalOre, params QuoteLine[] lines)
+        {
+            return new QuoteBreakdown { Lines = new List<QuoteLine>(lines), TotalOre = totalOre, Price = totalOre / 100.0 };
+        }
+
+        static void MatchSavedTotalTests()
+        {
+            // 10 + 2 + 8 = 20 kr., saved 30 -> k = 30 / 20 = 1,5: 15 / 3 / 12 kr.
+            var b = MB(2000, ML("material", 10), ML("power", 2), ML("work", 8));
+            Pricing.MatchSavedTotal(b, 30);
+            True("MatchSavedTotal 20 -> 30: 1500/300/1200 øre, total 3000, Price 30",
+                 b.Lines[0].Ore == 1500 && b.Lines[1].Ore == 300 && b.Lines[2].Ore == 1200 && b.TotalOre == 3000 && b.Price == 30);
+            Eq("MatchSavedTotal 20 -> 30: material Exact 10 × 1,5", 15, b.Lines[0].Exact);
+
+            // wear parts scale too: 6 + 4 (3 + 1) = 10 kr., saved 12,50 -> k = 1,25: 7,50 / 5,00 (3,75 + 1,25)
+            var wl = ML("wear", 4);
+            wl.Parts = new List<QuoteLine> { ML("wear.printer", 3), ML("wear.plate", 1) };
+            b = MB(1000, ML("material", 6), wl);
+            Pricing.MatchSavedTotal(b, 12.5);
+            True("MatchSavedTotal wear parts: 750/500, parts 375/125",
+                 b.Lines[0].Ore == 750 && wl.Ore == 500 && wl.Parts[0].Ore == 375 && wl.Parts[1].Ore == 125 && b.TotalOre == 1250);
+
+            // 1 + 1 + 1 = 3 kr., saved 10 -> 3,3333 each: 333 × 3 = 999, the extra øre goes to the first line (tie)
+            b = MB(300, ML("material", 1), ML("power", 1), ML("work", 1));
+            Pricing.MatchSavedTotal(b, 10);
+            True("MatchSavedTotal 3 -> 10: 334/333/333", b.Lines[0].Ore == 334 && b.Lines[1].Ore == 333 && b.Lines[2].Ore == 333 && b.TotalOre == 1000);
+
+            // a negative line counts as 0: 4 + (-1) -> sum 4, saved 8 -> k = 2: 8 / 0
+            b = MB(400, ML("material", 4), ML("rounding", -1));
+            Pricing.MatchSavedTotal(b, 8);
+            True("MatchSavedTotal negative line -> 0: 800/0", b.Lines[0].Ore == 800 && b.Lines[1].Ore == 0 && b.Lines[1].Exact == 0 && b.TotalOre == 800);
+
+            // nothing changes: same shown price (20,004 -> 2000 øre), saved 0 / -5, lines summing to 0, null breakdown / lines
+            b = MB(2000, ML("material", 10), ML("power", 2), ML("work", 8));
+            Pricing.MatchSavedTotal(b, 20.004);
+            Pricing.MatchSavedTotal(b, 0);
+            Pricing.MatchSavedTotal(b, -5);
+            True("MatchSavedTotal same price / 0 / negative: unchanged",
+                 b.TotalOre == 2000 && b.Price == 20 && b.Lines[0].Ore == 1000 && b.Lines[0].Exact == 10 && b.Lines[2].Ore == 800);
+            b = MB(0, ML("material", 0), ML("power", 0));
+            Pricing.MatchSavedTotal(b, 50);
+            True("MatchSavedTotal lines sum 0: unchanged", b.TotalOre == 0 && b.Lines[0].Ore == 0);
+            bool threw = false;
+            try { Pricing.MatchSavedTotal(null, 10); Pricing.MatchSavedTotal(new QuoteBreakdown(), 10); }
+            catch (Exception) { threw = true; }
+            True("MatchSavedTotal null breakdown / null lines: no error", !threw);
+
+            // a real breakdown (Example(), default settings, customer, with the wear split) moved to its price + 7,77
+            var s = new AppSettings();
+            var real = Pricing.Breakdown(Example(), s, false, Wear.Calculate(Wear.Nozzles[0], false, "PLA", Wear.Plates[0]));
+            True("MatchSavedTotal real breakdown has a wear split", Find(real, "wear") != null && Find(real, "wear").Parts != null);
+            long before = real.TotalOre;
+            Pricing.MatchSavedTotal(real, real.Price);
+            True("MatchSavedTotal real breakdown, own price: unchanged", real.TotalOre == before);
+            double saved = before / 100.0 + 7.77;
+            Pricing.MatchSavedTotal(real, saved);
+            long sum = 0;
+            bool parts = true;
+            foreach (var l in real.Lines)
+            {
+                sum += l.Ore;
+                if (l.Parts != null) { long ps = 0; foreach (var p in l.Parts) ps += p.Ore; if (ps != l.Ore) parts = false; }
+            }
+            True("MatchSavedTotal real breakdown + 7,77: total = " + Num.Kr(saved) + ", lines and wear parts add up",
+                 real.TotalOre == before + 777 && sum == real.TotalOre && parts && real.Price == saved);
+        }
+
         static void QuoteTests()
         {
             var defWear = Wear.Calculate(Wear.Nozzles[0], false, "PLA", Wear.Plates[0]);
@@ -879,6 +952,7 @@ namespace PrintPrice.Tests
             True("zero job: total 0, material/power/work lines", bz.TotalOre == 0 && Find(bz, "material") != null && Find(bz, "power") != null
                  && Find(bz, "work") != null && Find(bz, "wear") == null);
             True("ShownOre 57,175 -> 5718 (like N2)", Pricing.ShownOre(57.175) == 5718 && Pricing.ShownOre(0.004) == 0 && Pricing.ShownOre(72.71827) == 7272);
+            MatchSavedTotalTests();
 
             // settings defaults, Clone, valid-until
             var d = new AppSettings();

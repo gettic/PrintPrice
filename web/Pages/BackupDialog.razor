@@ -1,0 +1,347 @@
+@* Backup (desktop BackupForm on the web): Back up = a .printprice-backup file (download) or online with a code; Restore =
+   a file (choose / drop; also a desktop backup or history.json) or an online code, then Merge / Replace and "Also
+   restore the settings". The code is typed each time; this site never keeps it. *@
+@inject Store Store
+
+<div class="overlay" @onclick="Close" @onkeydown="Key">
+    <div class="dialog backup" role="dialog" aria-modal="true" aria-labelledby="bk-title" @onclick:stopPropagation="true">
+        <div class="title">
+            <span id="bk-title">@L.S("Backup", "Sikkerhedskopi")</span>
+            <button @onclick="Close" aria-label="@L.S("Close", "Luk")">✕</button>
+        </div>
+        <div class="tabs" role="tablist">
+            <button role="tab" class="@(tab == 0 ? "on" : "")" aria-selected="@(tab == 0)" @onclick="() => ShowTab(0)">@L.S("Back up", "Tag kopi")</button>
+            <button role="tab" class="@(tab == 1 ? "on" : "")" aria-selected="@(tab == 1)" @onclick="() => ShowTab(1)">@L.S("Restore", "Gendan")</button>
+        </div>
+
+        @if (tab == 0)
+        {
+            <div class="tab bk">
+                <h3>@L.S("Back up the price history to", "Tag kopi af prishistorikken til")</h3>
+                <label class="radio"><input type="radio" name="bkmode" checked="@(!online)" @onchange="() => SetOnline(false)" />
+                    <span>@L.S("A file (.printprice-backup)", "En fil (.printprice-backup)")
+                        <span class="muted">@L.S("The desktop app can restore it too. A backup file is not locked with a code: keep it somewhere private.",
+                                                 "Desktop-programmet kan også gendanne den. En kopi-fil er ikke låst med en kode: gem den et privat sted.")</span></span></label>
+                <label class="radio"><input type="radio" name="bkmode" checked="@online" @onchange="() => SetOnline(true)" />
+                    <span>@L.S("Online, with a code", "Online, med en kode")
+                        <span class="muted">@L.F("Locked in this browser with a 20-character code before it is sent: only the code opens it. Kept {0} days after the last upload. The same code as in the desktop app works here; the site never remembers it.",
+                                                 "Låst i denne browser med en kode på 20 tegn, før den sendes: kun koden åbner den. Gemmes {0} dage efter seneste kopi. Den samme kode som i desktop-programmet virker her; siden husker den aldrig.", OnlineBackup.KeptDays)</span></span></label>
+                @if (online)
+                {
+                    <div class="coderow">
+                        <input type="text" id="bkcode" class="code" maxlength="29" autocomplete="off" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX"
+                               aria-label="@L.S("Backup code", "Kode til kopien")" value="@backupCode" @oninput='e => { backupCode = ((string)e.Value ?? "").ToUpperInvariant(); newCode = false; armedDelete = false; }' />
+                        <button @onclick="MakeCode" disabled="@busy">@L.S("New code", "Ny kode")</button>
+                    </div>
+                    <div class="@(CodeHint(backupCode) == null ? "muted small" : "muted small warn")">@(CodeHint(backupCode) ?? L.S("Code OK.", "Koden er i orden."))</div>
+                    @if (newCode)
+                    {
+                        <div class="hinfo warn">@L.S("Keep this code safe, for example in a password manager or written on paper. It is the only way to get the backup back: it can't be reset or sent to you. Anyone who has the code can read the backup, so don't share it.",
+                                                     "Gem koden et sikkert sted, fx i en adgangskode-manager eller skrevet på papir. Den er den eneste vej til at få kopien tilbage: den kan ikke nulstilles eller sendes til dig. Alle med koden kan læse kopien, så del den ikke.")</div>
+                    }
+                }
+                <div class="hinfo">@(Quotes.Count == 0
+                    ? L.S("The backup holds your settings (prices, printers, invoice details; no quotes yet), so it includes payment details.",
+                          "Kopien indeholder dine indstillinger (priser, printere, fakturaoplysninger; ingen tilbud endnu), så den indeholder betalingsoplysninger.")
+                    : L.F("The backup holds all {0} and your settings (prices, printers, invoice details), so it includes customer names and payment details.",
+                          "Kopien indeholder alle {0} og dine indstillinger (priser, printere, fakturaoplysninger), så den indeholder kundenavne og betalingsoplysninger.", WebBackup.Quotes(Quotes.Count)))</div>
+                @if (status != null)
+                {
+                    <div class="@StatusClass" role="status">@status</div>
+                }
+            </div>
+            <div class="buttons">
+                @if (online)
+                {
+                    <button class="left @(armedDelete ? "accent" : "")" disabled="@(busy || CodeHint(backupCode) != null)" @onclick="DeleteOnline">@(armedDelete ? L.S("Really delete?", "Slet virkelig?") : L.S("Delete online backup", "Slet online-kopi"))</button>
+                    <button class="accent" disabled="@(busy || CodeHint(backupCode) != null)" @onclick="BackUpOnline">@(busy ? L.S("Backing up…", "Tager kopi…") : L.S("Back up online", "Tag kopi online"))</button>
+                }
+                else
+                {
+                    <button class="accent" @onclick="SaveFile">@L.S("Save file…", "Gem fil…")</button>
+                }
+                <button @onclick="Close">@L.S("Close", "Luk")</button>
+            </div>
+        }
+        else if (done == null)
+        {
+            <div class="tab bk">
+                <h3>@L.S("Restore from", "Gendan fra")</h3>
+                <label class="radio"><input type="radio" name="bksrc" checked="@(!fromCode)" @onchange="() => SetFromCode(false)" />
+                    <span>@L.S("A file", "En fil")</span></label>
+                @if (!fromCode)
+                {
+                    <div class="coderow">
+                        <span class="filename">@(fileName ?? L.S("No file chosen", "Ingen fil valgt"))</span>
+                        <button @onclick="ChooseFile">@L.S("Choose file…", "Vælg fil…")</button>
+                    </div>
+                    <div class="muted small">@L.S("A .printprice-backup from this site or the desktop app, or the desktop's history.json. You can also drop the file here.",
+                                                 "En .printprice-backup fra siden eller desktop-programmet, eller desktoppens history.json. Du kan også slippe filen her.")</div>
+                }
+                <label class="radio"><input type="radio" name="bksrc" checked="@fromCode" @onchange="() => SetFromCode(true)" />
+                    <span>@L.S("An online code", "En online-kode")</span></label>
+                @if (fromCode)
+                {
+                    <div class="coderow">
+                        <input type="text" id="rscode" class="code" maxlength="29" autocomplete="off" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX"
+                               aria-label="@L.S("Backup code", "Kode til kopien")" value="@restoreCode"
+                               @oninput='e => { restoreCode = ((string)e.Value ?? "").ToUpperInvariant(); }' @onkeydown="CodeKey" />
+                        <button disabled="@(busy || CodeHint(restoreCode) != null)" @onclick="GetBackup">@(busy ? L.S("Getting…", "Henter…") : L.S("Get backup", "Hent kopi"))</button>
+                    </div>
+                    @if (CodeHint(restoreCode) != null) { <div class="muted small warn">@CodeHint(restoreCode)</div> }
+                }
+
+                @if (Data != null)
+                {
+                    <div class="hinfo ok">@WebBackup.Summary(Data)</div>
+                    <h3>@L.S("How", "Sådan")</h3>
+                    <label class="radio"><input type="radio" name="bkhow" checked="@(!replace)" @onchange="() => { replace = false; armedReplace = false; }" />
+                        <span>@WebBackup.MergeText(Quotes.Count)<span class="muted">@L.S("Nothing here is deleted; quotes already here get missing details from the backup.",
+                                                                                      "Intet her slettes; tilbud, der allerede er her, får manglende oplysninger fra kopien.")</span></span></label>
+                    <label class="radio"><input type="radio" name="bkhow" checked="@replace" @onchange="() => { replace = true; armedReplace = false; }" />
+                        <span>@L.S("Replace this browser's history with the backup", "Erstat denne browsers historik med kopien")</span></label>
+                    <label class="check"><input type="checkbox" checked="@(withSettings && Data.Settings != null)" disabled="@(Data.Settings == null)"
+                                                @onchange="e => withSettings = (bool)e.Value" />
+                        <span>@L.S("Also restore the settings", "Gendan også indstillingerne")
+                            <span class="muted">@(Data.Settings == null ? L.S("This backup has no settings (a history.json).", "Kopien har ingen indstillinger (en history.json).")
+                                                                         : L.S("Prices, printers and invoice details.", "Priser, printere og fakturaoplysninger."))</span></span></label>
+                    <div class="@(replace && Quotes.Count > 0 ? "hinfo warn" : "hinfo")">@(replace && Quotes.Count > 0 ? WebBackup.ReplaceNote(Quotes.Count)
+                        : L.S("A safety copy of this browser's history and settings is kept first; you can download it afterwards.",
+                              "En sikkerhedskopi af denne browsers historik og indstillinger gemmes først; du kan hente den bagefter."))</div>
+                }
+                @if (status != null)
+                {
+                    <div class="@StatusClass" role="status">@status</div>
+                }
+            </div>
+            <div class="buttons">
+                <button class="accent" disabled="@(Data == null || busy)" @onclick="DoRestore">@(armedReplace ? L.F("Replace {0}?", "Erstat {0}?", WebBackup.Quotes(Quotes.Count)) : L.S("Restore", "Gendan"))</button>
+                <button @onclick="Close">@L.S("Close", "Luk")</button>
+            </div>
+        }
+        else
+        {
+            <div class="tab bk">
+                <div class="@(doneProblem != null ? "hinfo warn" : "hinfo ok")">@WebBackup.DoneText(done)@(doneProblem != null ? " " + doneProblem : "")
+                    <div class="muted-line">@WebBackup.NowText(done)</div></div>
+                @if (WebBackup.ClashText(done) != null) { <div class="hinfo warn">@WebBackup.ClashText(done)</div> }
+                @if (WebBackup.MovedText(done) != null) { <div class="hinfo warn">@WebBackup.MovedText(done)</div> }
+                @if (safetyKey != null)
+                {
+                    <div class="hinfo">@L.S("Safety copy of the old history and settings:", "Sikkerhedskopi af den gamle historik og indstillinger:")
+                        <div class="muted-line">@WebBackup.SafetyFileName(safetyKey) · <a href="" @onclick="DownloadSafety" @onclick:preventDefault="true">@L.S("Download", "Hent")</a></div></div>
+                }
+            </div>
+            <div class="buttons">
+                <button class="accent" @onclick="Close">@L.S("Close", "Luk")</button>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    public const int TabBackup = 0, TabRestore = 1;
+
+    [Parameter] public List<QuoteRecord> Quotes { get; set; }
+    [Parameter] public AppSettings Settings { get; set; }
+    [Parameter] public int StartTab { get; set; }
+    /// A file chosen / dropped while the dialog is open (or that opened it): name + bytes, PendingId changes each time.
+    [Parameter] public int PendingId { get; set; }
+    [Parameter] public string PendingName { get; set; }
+    [Parameter] public byte[] PendingBytes { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+    /// Makes the restore real: safety copy, saves the history and settings, takes them over. null = OK, else the problem.
+    [Parameter] public Func<RestoreResult, string, Task<WebBackup.Applied>> Apply { get; set; }
+    /// A backup was made (true = online): the "Last backup" line.
+    [Parameter] public EventCallback<bool> BackedUp { get; set; }
+
+    int tab, seenPending;
+    bool online, busy, newCode, armedDelete;
+    string backupCode = "", restoreCode = "";
+    string status;
+    int statusKind;   // 0 info, 1 ok, 2 error
+    bool fromCode, replace, withSettings, armedReplace;
+    string fileName;
+    BackupData fileData, codeData;
+    RestoreResult done;
+    string doneProblem, safetyKey;
+
+    BackupData Data { get { return fromCode ? codeData : fileData; } }
+
+    string StatusClass { get { return statusKind == 2 ? "hinfo error" : statusKind == 1 ? "hinfo ok" : "hinfo"; } }
+
+    protected override void OnInitialized()
+    {
+        tab = StartTab;
+        replace = Quotes.Count == 0;
+        withSettings = WebBackup.SettingsTickedAtStart(Quotes.Count);
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (PendingId != seenPending && PendingBytes != null)
+        {
+            seenPending = PendingId;
+            tab = TabRestore;
+            done = null;
+            fromCode = false;
+            fileName = PendingName;
+            BackupData d;
+            string problem = WebBackup.ReadFile(PendingBytes, out d);
+            fileData = d;
+            armedReplace = false;
+            SetStatus(problem, 2);
+        }
+    }
+
+    static string CodeHint(string typed) { return WebBackup.CodeProblem(typed); }
+
+    void SetStatus(string text, int kind) { status = text; statusKind = kind; }
+
+    void ShowTab(int t) { tab = t; status = null; armedDelete = armedReplace = false; }
+
+    void SetOnline(bool on) { online = on; status = null; }
+
+    void SetFromCode(bool on) { fromCode = on; status = null; armedReplace = false; }
+
+    Task Close() { return OnClose.InvokeAsync(); }
+
+    async Task Key(KeyboardEventArgs e) { if (e.Key == "Escape") await Close(); }
+
+    void MakeCode()
+    {
+        backupCode = Backup.NewCode();
+        newCode = true;
+        armedDelete = false;
+        status = null;
+    }
+
+    async Task SaveFile()
+    {
+        var now = DateTime.Now;
+        bool ok = await Store.Download(History.BackupFileName(now), WebBackup.FileText(Quotes, Settings, now));
+        if (!ok) { SetStatus(L.S("The browser didn't save the file.", "Browseren gemte ikke filen."), 2); return; }
+        SetStatus(L.F("✓ Saved: {0} (in the browser's downloads).", "✓ Gemt: {0} (i browserens overførsler).", History.BackupFileName(now)), 1);
+        await BackedUp.InvokeAsync(false);
+    }
+
+    async Task<string> Url(string c)
+    {
+        try { return WebBackup.Url(await Store.Host(), c); }
+        catch (ArgumentException ex) { SetStatus(ex.Message, 2); return null; }
+    }
+
+    async Task BackUpOnline()
+    {
+        if (busy) return;
+        string c = Backup.Normalize(backupCode);
+        if (c == null) { SetStatus(Backup.InvalidCodeText(), 2); return; }
+        busy = true;
+        armedDelete = false;
+        SetStatus(L.S("Backing up…", "Tager kopi…"), 0);
+        try
+        {
+            var now = DateTime.Now;
+            string url = await Url(c);
+            if (url == null) return;
+            byte[] blob;
+            try { blob = await BackupCrypto.Pack(WebBackup.FileText(Quotes, Settings, now), c, Store.Aes); }
+            catch (Exception) { SetStatus(L.S("This browser couldn't lock the backup (no encryption available).", "Denne browser kunne ikke låse kopien (ingen kryptering)."), 2); return; }
+            string tooBig = OnlineBackup.SizeProblem(blob.Length);
+            if (tooBig != null) { SetStatus(tooBig, 2); return; }
+            var r = await Store.BackupFetch("PUT", url, blob);
+            if (r.Status < 200 || r.Status > 299) { SetStatus(WebBackup.FailureText(r, false, DateTime.UtcNow), 2); return; }
+            var info = OnlineBackup.ParseLimitHeaders(r.Left, r.Reset, r.RetryAfter, DateTime.UtcNow);
+            SetStatus(WebBackup.UploadedText(Quotes.Count, now, info, DateTime.UtcNow), 1);
+            await BackedUp.InvokeAsync(true);
+        }
+        finally { busy = false; }
+    }
+
+    async Task DeleteOnline()
+    {
+        if (busy) return;
+        if (!armedDelete) { armedDelete = true; return; }
+        armedDelete = false;
+        string c = Backup.Normalize(backupCode);
+        if (c == null) return;
+        busy = true;
+        try
+        {
+            string url = await Url(c);
+            if (url == null) return;
+            var r = await Store.BackupFetch("DELETE", url, null);
+            if ((r.Status < 200 || r.Status > 299) && r.Status != 404) { SetStatus(WebBackup.FailureText(r, false, DateTime.UtcNow), 2); return; }
+            SetStatus(L.S("✓ The online backup for this code is deleted.", "✓ Online-kopien med denne kode er slettet."), 1);
+        }
+        finally { busy = false; }
+    }
+
+    Task ChooseFile() { return Store.PickBackup(); }
+
+    async Task CodeKey(KeyboardEventArgs e) { if (e.Key == "Enter" && CodeHint(restoreCode) == null) await GetBackup(); }
+
+    async Task GetBackup()
+    {
+        if (busy) return;
+        string c = Backup.Normalize(restoreCode);
+        if (c == null) return;
+        busy = true;
+        codeData = null;
+        armedReplace = false;
+        SetStatus(L.S("Getting…", "Henter…"), 0);
+        try
+        {
+            string url = await Url(c);
+            if (url == null) return;
+            var r = await Store.BackupFetch("GET", url, null);
+            if (r.Status < 200 || r.Status > 299) { SetStatus(WebBackup.FailureText(r, true, DateTime.UtcNow), 2); return; }
+            byte[] blob;
+            try { blob = Convert.FromBase64String(r.Body ?? ""); }
+            catch (FormatException) { SetStatus(WebBackup.ErrorText(502, true), 2); return; }
+            BackupCrypto.Opened o;
+            try { o = await BackupCrypto.Unpack(blob, c, Store.Aes); }
+            catch (Exception) { o = new BackupCrypto.Opened { Problem = Backup.Damaged() }; }
+            if (o.Text == null) { SetStatus(o.Problem, 2); return; }
+            BackupData d;
+            string problem = WebBackup.ReadText(o.Text, out d);
+            if (problem != null) { SetStatus(problem, 2); return; }
+            codeData = d;
+            status = null;
+        }
+        finally { busy = false; }
+    }
+
+    async Task DoRestore()
+    {
+        var data = Data;
+        if (data == null || busy) return;
+        if (replace && Quotes.Count > 0 && !armedReplace) { armedReplace = true; return; }
+        armedReplace = false;
+        busy = true;
+        try
+        {
+            string problem;
+            var res = WebBackup.Combine(Quotes, Settings, data, replace, withSettings, out problem);
+            if (res == null) { SetStatus(problem, 2); return; }
+            var now = DateTime.Now;
+            string key = WebBackup.SafetyKey(now);
+            var a = await Apply(res, key);
+            if (!a.Done) { SetStatus(a.Problem, 2); return; }
+            done = res;
+            doneProblem = a.Problem;
+            safetyKey = a.SafetyKept ? key : null;
+            status = null;
+        }
+        finally { busy = false; }
+    }
+
+    async Task DownloadSafety()
+    {
+        if (safetyKey == null) return;
+        var text = await Histories.Safety(safetyKey);
+        if (text != null) await Store.Download(WebBackup.SafetyFileName(safetyKey), text);
+    }
+
+    [Inject] HistoryStore Histories { get; set; }
+}

@@ -221,17 +221,17 @@ namespace PrintPrice
             return aes;
         }
 
-        static string InvalidCodeText()
+        public static string InvalidCodeText()
         {
             return L.S("This is not a valid backup code.", "Det er ikke en gyldig sikkerhedskode.");
         }
 
-        static string Damaged()
+        public static string Damaged()
         {
             return L.S("Wrong code, or the backup is damaged.", "Forkert kode, eller sikkerhedskopien er beskadiget.");
         }
 
-        static byte[] Gzip(byte[] data)
+        public static byte[] Gzip(byte[] data)
         {
             using (var ms = new MemoryStream())
             {
@@ -241,7 +241,7 @@ namespace PrintPrice
             }
         }
 
-        static byte[] Gunzip(byte[] data)
+        public static byte[] Gunzip(byte[] data)
         {
             using (var input = new MemoryStream(data))
             using (var gz = new GZipStream(input, CompressionMode.Decompress))
