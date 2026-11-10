@@ -19,6 +19,8 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 ## Website
 There is also a calculator in the browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). Type the print time, grams, kr/kg and the electricity price, and you get both prices and the cost breakdown. It is in English and Danish. Settings are kept only in that browser.
 
+**Size:** the first visit downloads about 3.2 MB (gzip) or 2.6 MB (brotli, used when the browser allows). The browser unpacks the brotli files with Google's small Brotli decoder, included with the site. The decoder runs in your browser and sends nothing.
+
 **Sliced files:** drop a sliced `.gcode.3mf` or a G-code file on the page, or choose one. G-code from Bambu Studio, OrcaSlicer, PrusaSlicer (and SuperSlicer) and Cura can be read. It fills in the print time, the grams, one row per colour (the kr/kg of each filament is remembered) and the plate picture.
 - The file is read in your browser only and is never uploaded. Big files are read in parts.
 - An unsliced STL or 3MF gets a message to slice it first and export the sliced plate.
@@ -245,3 +247,5 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 
 ## License
 [GPL-3.0](LICENSE). Copyright (C) 2026 Gettic.
+
+**Third-party code:** the website includes Google's Brotli decoder (`web/wwwroot/brotli-decode.min.js`, from [google/brotli](https://github.com/google/brotli) v1.2.1, MIT licence, kept in the file).

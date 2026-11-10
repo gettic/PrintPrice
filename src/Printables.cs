@@ -3,9 +3,13 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+#if !WEB
 using System.Net;
+#endif
 using System.Text;
 using System.Text.RegularExpressions;
+
+// The website (WEB defined) links this file for ParseId only; the network part is desktop-only.
 
 namespace PrintPrice
 {
@@ -41,6 +45,7 @@ namespace PrintPrice
             return m.Success ? m.Groups[1].Value : null;
         }
 
+#if !WEB
         static WebClient Client()
         {
             return Net.Client(Net.DefaultUserAgent);
@@ -183,5 +188,6 @@ namespace PrintPrice
             foreach (char c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
             return name;
         }
+#endif
     }
 }

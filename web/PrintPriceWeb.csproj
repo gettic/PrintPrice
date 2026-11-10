@@ -10,8 +10,9 @@
     <AssemblyName>PrintPriceWeb</AssemblyName>
     <DefineConstants>$(DefineConstants);WEB</DefineConstants>
     <OverrideHtmlAssetPlaceholders>true</OverrideHtmlAssetPlaceholders>
-    <!-- Num.Dk = new CultureInfo("da-DK") must work in every browser language: load all culture data (~1 MB) -->
-    <BlazorWebAssemblyLoadAllGlobalizationData>true</BlazorWebAssemblyLoadAllGlobalizationData>
+    <!-- Num.Dk = new CultureInfo("da-DK") must work in every browser language: always load the same culture data,
+         the shard with every language except Chinese/Japanese/Korean (has da-DK and en-GB; ~110 KB smaller than all) -->
+    <BlazorIcuDataFileName>icudt_no_CJK.dat</BlazorIcuDataFileName>
     <!-- the linked desktop files are C# 5 style; don't drown the build in style warnings -->
     <!-- CA1416: Backup.cs's Seal/Open/Pack use Aes (not in the browser); the web never calls them (BackupCrypto uses crypto.subtle) -->
     <NoWarn>$(NoWarn);CS0618;SYSLIB0023;CA1416</NoWarn>
@@ -34,6 +35,7 @@
     <Compile Include="..\src\QuoteRows.cs" Link="Linked\QuoteRows.cs" />
     <Compile Include="..\src\Backup.cs" Link="Linked\Backup.cs" />
     <Compile Include="..\src\OnlineBackup.cs" Link="Linked\OnlineBackup.cs" />
+    <Compile Include="..\src\Printables.cs" Link="Linked\Printables.cs" />
   </ItemGroup>
 
   <!-- Json (System.Text.Json, reflection) reads/writes the linked classes' public fields: keep them all when trimming -->

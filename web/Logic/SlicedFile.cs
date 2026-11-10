@@ -20,7 +20,7 @@ namespace PrintPrice.Web
     }
 
     /// Reads a sliced .gcode.3mf or G-code (Bambu Studio, OrcaSlicer, PrusaSlicer, Cura) in the browser, by ranges only. The parsing itself is the desktop's
-    /// (src\SliceInfo.cs: ParseSliceInfo, ParseFilamentSlots, ParseProjectPrinter, PickPictureEntry, ApplyDefaultFilament).
+    /// (src\SliceInfo.cs: ParseSliceInfo, ParseSettings + SlotStrings + ProjectPrinterFrom, PickPictureEntry, ApplyDefaultFilament).
     public static class SlicedFile
     {
         public const long MaxSettingsBytes = 64L * 1048576;   // as Slicer.ProjectSettings
@@ -73,14 +73,15 @@ namespace PrintPrice.Web
             SliceResult res = null;
             if (xml != null && hasGcode)
             {
-                try { res = BambuSlicer.ParseSliceInfo(xml); } catch (System.Xml.XmlException) { res = null; }
+                try { res = BambuSlicer.ParseSliceInfo(xml); } catch (SliceXmlException) { res = null; }
             }
             if (res == null) { job.Unsliced = true; return; }
             string settings = await zip.ReadText("Metadata/project_settings.config", MaxSettingsBytes);
-            var profiles = BambuSlicer.ParseFilamentSlots(settings);
+            var parsed = BambuSlicer.ParseSettings(settings);   // once for the slots and the printer (as ReadSliceInfo)
+            var profiles = BambuSlicer.SlotStrings(parsed, "filament_settings_id");   // = ParseFilamentSlots
             foreach (var f in res.Filaments)
                 if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
-            SetPrinter(res, BambuSlicer.ParseProjectPrinter(settings, xml));
+            SetPrinter(res, BambuSlicer.ProjectPrinterFrom(parsed, xml));
             string pic = BambuSlicer.PickPictureEntry(zip.Names);
             if (pic != null)
             {

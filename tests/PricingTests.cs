@@ -1730,7 +1730,7 @@ namespace PrintPrice.Tests
             True("MachinePreset P1S 0.2", BambuSlicer.MachinePreset("P1S", "0.2") == "Bambu Lab P1S 0.2 nozzle");
             True("MachinePreset \"\" 0.6 -> A1", BambuSlicer.MachinePreset("", "0.6") == "Bambu Lab A1 0.6 nozzle");
             True("MachinePreset X9 -> A1", BambuSlicer.MachinePreset("X9", "0.4") == "Bambu Lab A1 0.4 nozzle");
-            True("MachinePreset old (nozzle only)", BambuSlicer.MachinePreset("0.4") == "Bambu Lab A1 0.4 nozzle");
+            True("MachinePreset A1 0.4", BambuSlicer.MachinePreset("A1", "0.4") == "Bambu Lab A1 0.4 nozzle");
             True("FindPrinter a1m / null", BambuSlicer.FindPrinter("a1m").Key == "A1M" && BambuSlicer.FindPrinter(null).Key == "A1");
             True("FindPrinter A1M bed 180 x 180", BambuSlicer.FindPrinter("A1M").BedX == 180 && BambuSlicer.FindPrinter("A1M").BedZ == 180);
             True("FindPrinter P1S bed Z 250", BambuSlicer.FindPrinter("P1S").BedZ == 250);
@@ -1921,6 +1921,187 @@ namespace PrintPrice.Tests
                 if (Pricing.ShownOre(v) != old) { oreDiffs++; if (firstOre == null) firstOre = v.ToString("R") + ": " + Pricing.ShownOre(v) + " vs " + old; }
             }
             True("ShownOre = old F2 formula for the same values" + (firstOre != null ? " (first diff " + firstOre + ")" : ""), oreDiffs == 0);
+        }
+
+        // ---------- slice_info.config reader (SliceXml, no System.Xml) against the old XmlDocument + XPath code ----------
+
+        // the old ParseSliceInfo (v1.16.0), kept here as the reference
+        static SliceResult OldParseSliceInfo(string xml)
+        {
+            var doc = new System.Xml.XmlDocument();
+            doc.LoadXml(xml);
+            var res = new SliceResult();
+            var slots = new SortedDictionary<int, FilamentUse>();
+            foreach (System.Xml.XmlNode plate in doc.SelectNodes("/config/plate"))
+            {
+                double seconds = OldMeta(plate, "prediction");
+                if (seconds <= 0) continue;
+                double grams = OldMeta(plate, "weight");
+                bool sumFilaments = grams <= 0;
+                foreach (System.Xml.XmlNode f in plate.SelectNodes("filament"))
+                {
+                    double g = OldAttr(f, "used_g");
+                    if (sumFilaments) grams += g;
+                    int slot = (int)OldAttr(f, "id");
+                    if (g <= 0 || slot <= 0) continue;
+                    FilamentUse u;
+                    if (!slots.TryGetValue(slot, out u))
+                    {
+                        u = new FilamentUse { Slot = slot, Colour = OldNormColour(OldAttrText(f, "color")), Type = OldAttrText(f, "type") };
+                        slots[slot] = u;
+                    }
+                    u.Grams += g;
+                    u.Metres += OldAttr(f, "used_m");
+                }
+                res.Seconds += seconds;
+                res.Grams += grams;
+                res.Plates++;
+            }
+            res.Filaments = new List<FilamentUse>(slots.Values);
+            return res.Plates > 0 ? res : null;
+        }
+
+        // the old XML part of ParseProjectPrinter (no project_settings), then the same naming rules
+        static ProjectPrinter OldPrinterFromXml(string xml)
+        {
+            string name = "", nozzle = "";
+            try
+            {
+                var doc = new System.Xml.XmlDocument();
+                doc.LoadXml(xml);
+                var n = doc.SelectSingleNode("/config/plate/metadata[@key='printer_model_id']");
+                if (n != null) name = OldAttrText(n, "value");
+                n = doc.SelectSingleNode("/config/plate/metadata[@key='nozzle_diameters']");
+                if (n != null) nozzle = OldAttrText(n, "value").Split(',')[0].Trim();
+            }
+            catch { }
+            if (name.Length == 0) return null;
+            var res = new ProjectPrinter { Key = BambuSlicer.ModelKeyFromName(name) ?? "", Name = name, Nozzle = nozzle };
+            if (res.Key.Length > 0 && string.Equals(name, BambuSlicer.FindPrinter(res.Key).ModelId, StringComparison.OrdinalIgnoreCase))
+                res.Name = BambuSlicer.FindPrinter(res.Key).MachineName;
+            return res;
+        }
+
+        static string OldAttrText(System.Xml.XmlNode n, string name)
+        {
+            var a = n.Attributes == null ? null : n.Attributes[name];
+            return a == null ? "" : (a.Value ?? "").Trim();
+        }
+
+        static double OldMeta(System.Xml.XmlNode plate, string key)
+        {
+            var n = plate.SelectSingleNode("metadata[@key='" + key + "']");
+            return n == null ? 0 : OldAttr(n, "value");
+        }
+
+        static double OldAttr(System.Xml.XmlNode n, string name)
+        {
+            var a = n.Attributes == null ? null : n.Attributes[name];
+            double v;
+            if (a != null && double.TryParse(a.Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v) && v > 0) return v;
+            return 0;
+        }
+
+        static string OldNormColour(string c)
+        {
+            if (c == null) return "";
+            c = c.Trim();
+            if (!c.StartsWith("#")) c = "#" + c;
+            if (c.Length < 7 || !System.Text.RegularExpressions.Regex.IsMatch(c.Substring(1, 6), "^[0-9A-Fa-f]{6}$")) return "";
+            return c.Substring(0, 7).ToUpperInvariant();
+        }
+
+        static string DescribeSlice(SliceResult r)
+        {
+            if (r == null) return "null";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var sb = new System.Text.StringBuilder();
+            sb.Append(r.Seconds.ToString("R", inv)).Append('|').Append(r.Grams.ToString("R", inv)).Append('|').Append(r.Plates);
+            foreach (var f in r.Filaments)
+                sb.Append(";").Append(f.Slot).Append(',').Append(f.Colour).Append(',').Append(f.Type).Append(',')
+                  .Append(f.Grams.ToString("R", inv)).Append(',').Append(f.Metres.ToString("R", inv));
+            return sb.ToString();
+        }
+
+        static string DescribePrinter(ProjectPrinter p) { return p == null ? "null" : p.Key + "|" + p.Name + "|" + p.Nozzle; }
+
+        // the real Bambu Studio slice_info.config files we have (plans\ isn't in the repo: none found = skipped)
+        static List<KeyValuePair<string, string>> RealSliceInfos()
+        {
+            var list = new List<KeyValuePair<string, string>>();
+            var d = new System.IO.DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
+            while (d != null && !System.IO.Directory.Exists(System.IO.Path.Combine(d.FullName, "plans"))) d = d.Parent;
+            if (d == null) return list;
+            foreach (var f in System.IO.Directory.GetFiles(System.IO.Path.Combine(d.FullName, "plans"), "*.3mf", System.IO.SearchOption.AllDirectories))
+            {
+                try
+                {
+                    using (var zip = System.IO.Compression.ZipFile.OpenRead(f))
+                    {
+                        var e = zip.GetEntry("Metadata/slice_info.config");
+                        if (e == null) continue;
+                        using (var sr = new System.IO.StreamReader(e.Open())) list.Add(new KeyValuePair<string, string>(System.IO.Path.GetFileName(f), sr.ReadToEnd()));
+                    }
+                }
+                catch (Exception) { }
+            }
+            return list;
+        }
+
+        static void SliceXmlTests()
+        {
+            string fil1 = Fil(1, "#FF0000", "1.5", "4.50"), fil2 = Fil(3, "00ae42ff", "2.25", "6.75");
+            string plate = PlateXml("3600", "11.25", fil1, fil2);
+            var cases = new List<KeyValuePair<string, string>>();
+            Action<string, string> add = (n, x) => cases.Add(new KeyValuePair<string, string>(n, x));
+            foreach (var real in RealSliceInfos()) add("real " + real.Key, real.Value);
+            if (cases.Count == 0) Console.WriteLine("NOTE no real .gcode.3mf under plans\\: real-file parity skipped");
+            True("SliceXml: real samples found (" + cases.Count + ")", cases.Count >= 0);
+            add("builder", SliceInfo(plate));
+            add("two plates, one unsliced", SliceInfo(plate, "<plate><metadata key=\"index\" value=\"2\"/></plate>", PlateXml("60", "0", Fil(3, "#00FF00", "1", "2"))));
+            add("CRLF, indent, comment, PI", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!-- made by hand -->\r\n<config>\r\n  <?pi data?>\r\n  <plate>\r\n    <metadata key=\"prediction\" value=\"100\" />\r\n    <metadata key=\"weight\" value=\"2.5\"/>\r\n    " + fil1 + "\r\n  </plate>\r\n</config>\r\n<!-- end -->\r\n");
+            add("single quotes", "<config><plate><metadata key='prediction' value='77'/><metadata key='weight' value='1'/><filament id='2' color='#123456' type='PETG' used_g='1' used_m='0.3'/></plate></config>");
+            add("entities", "<config><plate><metadata key=\"prediction\" value=\"&#49;&#x30;0\"/><filament id=\"1\" type=\"P&amp;LA &lt;x&gt; &quot;q&quot; &apos;\" color=\"&#x23;aBcDeF\" used_g=\"3\"/></plate></config>");
+            add("white space in values", "<config><plate><metadata key=\"prediction\" value=\" 120 \"/><metadata key=\"weight\" value=\"1\n2\"/><filament id=\"1\" type=\"\tPLA\r\nBasic \" color=\"#00FF00\" used_g=\"2\"/><filament id=\"2\" type=\"A&#10;B\" used_g=\"1\"/></plate></config>");
+            add("default namespace", "<config xmlns=\"urn:x\">" + plate + "</config>");
+            add("namespace reset on plate", "<config xmlns=\"urn:x\"><plate xmlns=\"\"><metadata key=\"prediction\" value=\"5\"/></plate></config>");
+            add("namespace reset on config", "<config xmlns=\"\">" + plate + "</config>");
+            add("prefixed root", "<b:config xmlns:b=\"u\">" + plate + "</b:config>");
+            add("prefixed attribute", "<config xmlns:b=\"u\"><plate><metadata b:key=\"prediction\" value=\"9\"/><metadata key=\"prediction\" b:value=\"9\"/></plate></config>");
+            add("duplicate metadata (first wins)", "<config><plate><metadata key=\"prediction\" value=\"0\"/><metadata key=\"prediction\" value=\"50\"/><metadata key=\"weight\" value=\"7\"/><metadata key=\"weight\" value=\"8\"/></plate></config>");
+            add("nested filament ignored", "<config><plate><metadata key=\"prediction\" value=\"10\"/><x>" + fil1 + "</x>" + fil2 + "</plate><plate2>" + plate + "</plate2></config>");
+            add("other root", "<cfg>" + plate + "</cfg>");
+            add("DOCTYPE with an entity", "<?xml version=\"1.0\"?><!DOCTYPE config [<!ENTITY t \"PETG\">]><config><plate><metadata key=\"prediction\" value=\"8\"/><filament id=\"1\" type=\"&t;\" used_g=\"1\"/></plate></config>");
+            add("CDATA and text", "<config>text<plate>more <![CDATA[ <not> & markup ]]><metadata key=\"prediction\" value=\"4\"/></plate></config>");
+            add("printer in plate 2", "<config><plate><metadata key=\"prediction\" value=\"1\"/></plate><plate><metadata key=\"printer_model_id\" value=\" N1 \"/><metadata key=\"nozzle_diameters\" value=\"0.4,0.6\"/></plate></config>");
+            add("other printer", "<config><plate><metadata key=\"printer_model_id\" value=\"BL-P001\"/><metadata key=\"nozzle_diameters\" value=\"\"/></plate></config>");
+            add("empty elements, spaces in tags", "<config ><plate ><metadata key = \"prediction\"   value=\"30\" ></metadata ><filament id=\"4\" used_g=\"0.5\" ></filament></plate ></config >");
+            // odd or not well-formed: both must refuse (or both accept: LoadXml takes any &#n; reference)
+            foreach (var bad in new[] { "\uFEFF<config/>", "  <?xml version=\"1.0\"?><config/>", "<config/>x", "<config a=\"1\" a=\"2\"/>",
+                                        "<config a=\"&foo;\"/>", "<a:config/>", "<config a=\"x<y\"/>", "<config>&#xZZ;</config>", "<1config/>",
+                                        "<config/ >", "<config a=\"1\"b=\"2\"/>", "", "   ", "<config><plate></config>", "<config></Config>",
+                                        "<config>]]></config>", "<!-- a -- b --><config/>", "<config>\u0001</config>", "<config a='&#0;'/>",
+                                        "<config/><config/>", "<?xml version=\"1.0\"?><?xml version=\"1.0\"?><config/>", "<config>&amp</config>",
+                                        "<config a=1/>", "<config", "<config><!DOCTYPE x></config>", "<config b:a=\"1\"/>", "<?xml?><config/>",
+                                        "<?xml version=\"2\"?><config/>", "<config>&#xD800;</config>", "<config xmlns:b=\"\"/>", "<:config/>",
+                                        "<config>&#x110000;</config>", "<config>&#;</config>", "<config a=\"&#x41;&#65;&#x1F600;\"/>",
+                                        "<config\r\n a=\"1\"\t/>", "<config>æøå &#230;</config>" })
+                add("odd " + bad.Replace("\uFEFF", "BOM").Replace("\u0001", "^A"), bad);
+            foreach (var r in new[] { "&#x110000;", "&#xFFFFFF;", "&#x7FFFFFC9;", "&#x7FFFFFCA;", "&#x7fffffc9;", "&#2147483599;", "&#2147483600;",
+                                      "&#x10FFFF;", "&#x0000041;", "&#0;", "&#xD800;&#xDC00;" })
+                add("reference " + r, "<config><plate><metadata key=\"prediction\" value=\"1\"/><filament id=\"1\" used_g=\"1\" type=\"" + r + "\"/></plate></config>");
+
+            foreach (var c in cases)
+            {
+                string oldR, newR, oldP = DescribePrinter(OldPrinterFromXml(c.Value)), newP = DescribePrinter(BambuSlicer.ParseProjectPrinter(null, c.Value));
+                try { oldR = DescribeSlice(OldParseSliceInfo(c.Value)); } catch (System.Xml.XmlException) { oldR = "refused"; }
+                try { SliceXml.Parse(c.Value); newR = DescribeSlice(BambuSlicer.ParseSliceInfo(c.Value)); } catch (SliceXmlException) { newR = "refused"; }
+                bool desktopSame = true;
+                if (oldR == "refused")   // the desktop's ParseSliceInfo still throws XmlDocument's XmlException
+                    try { BambuSlicer.ParseSliceInfo(c.Value); desktopSame = false; } catch (System.Xml.XmlException) { } catch (Exception) { desktopSame = false; }
+                True("SliceXml = XmlDocument: " + c.Key + (oldR == newR ? "" : " (old " + oldR + ", new " + newR + ")"), oldR == newR && desktopSame);
+                True("SliceXml printer = XmlDocument: " + c.Key + (oldP == newP ? "" : " (old " + oldP + ", new " + newP + ")"), oldP == newP);
+            }
         }
 
         // ---------- G-code from other slicers (idea 14, SliceInfo.cs): samples in tests\gcode-samples ----------
@@ -2128,7 +2309,7 @@ namespace PrintPrice.Tests
             // + 139/100 = 1.39 + 0.3333 -> 2.823
             Eq("wear CF on stainless (100 h hotend)", 2.82, cfSS.Total);
             True("short preset name", BambuSlicer.ShortName("Bambu PLA Basic @BBL A1 0.2 nozzle") == "Bambu PLA Basic");
-            True("suffix 0.6", BambuSlicer.Suffix("0.6") == " @BBL A1 0.6 nozzle" && BambuSlicer.Suffix("0.4") == " @BBL A1");
+            True("suffix 0.6", BambuSlicer.FamilySuffix("A1", "0.6") == " @BBL A1 0.6 nozzle" && BambuSlicer.FamilySuffix("A1", "0.4") == " @BBL A1");
             Eq("AutoUpdateCheck default is 1", 1, new AppSettings().AutoUpdateCheck);
             var orig0 = new AppSettings { AutoUpdateCheck = 0 };
             Eq("Clone keeps AutoUpdateCheck 0", 0, orig0.Clone().AutoUpdateCheck);
@@ -2758,6 +2939,7 @@ namespace PrintPrice.Tests
             OnlineBackupTests();
             MoneyRoundingTests();
             GcodeTests();
+            SliceXmlTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;

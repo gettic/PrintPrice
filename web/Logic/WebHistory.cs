@@ -16,7 +16,8 @@ namespace PrintPrice.Web
         public const int ShowStep = 200;                 // rows shown at once ("Show more" adds as many again)
         public const int MaxNote = 200;                  // as HistoryForm's Note column
 
-        public const int ShowAll = 0, ShowFriends = 1, ShowCustomers = 2, ShowFailed = 3, ShowNotPrinted = 4;
+        public const int ShowAll = History.ShowAll, ShowFriends = History.ShowFriends, ShowCustomers = History.ShowCustomers,
+                         ShowFailed = History.ShowFailed, ShowNotPrinted = History.ShowNotPrinted;
 
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
         static readonly CultureInfo En = CultureInfo.GetCultureInfo("en-GB");
@@ -71,18 +72,7 @@ namespace PrintPrice.Web
         // ---------- the list's texts (HistoryForm) ----------
 
         /// The model's name, else the file name of the link/file, else "(no name)".
-        public static string ModelText(QuoteRecord r)
-        {
-            if (!string.IsNullOrEmpty(r.Model)) return r.Model;
-            string s = (r.Source ?? "").Trim().Trim('"');
-            if (s.Length == 0) return L.S("(no name)", "(uden navn)");
-            if (s.IndexOf('\\') >= 0 || s.IndexOf('/') < 0)
-            {
-                int cut = Math.Max(s.LastIndexOf('\\'), s.LastIndexOf('/'));
-                return cut >= 0 ? s.Substring(cut + 1) : s;
-            }
-            return s;
-        }
+        public static string ModelText(QuoteRecord r) { return History.ModelText(r); }
 
         /// "30-10-2026 10:05".
         public static string DateText(QuoteRecord r)
@@ -172,24 +162,8 @@ namespace PrintPrice.Web
         /// printerNames: null with one printer (the printer's name isn't searched then).
         public static bool Matches(QuoteRecord r, Filter f, Dictionary<string, string> printerNames)
         {
-            if (f.Month != DateTime.MinValue)
-            {
-                DateTime t;
-                if (!History.TryTime(r.SavedAt, out t) || t.Year != f.Month.Year || t.Month != f.Month.Month) return false;
-            }
-            if (f.PrinterId != null && History.PrinterOf(r) != f.PrinterId) return false;
-            switch (f.Show)
-            {
-                case ShowFriends: if (r.For != History.ForFriends) return false; break;
-                case ShowCustomers: if (r.For == History.ForFriends) return false; break;
-                case ShowFailed: if (!r.Failed) return false; break;
-                case ShowNotPrinted: if (r.Printed) return false; break;
-            }
-            string q = (f.Query ?? "").Trim();
-            if (q.Length == 0) return true;
-            foreach (var s in new[] { r.Model, r.Source, r.Note, ModelText(r), r.Customer, r.InvoiceNo, printerNames != null ? PrinterText(r, printerNames) : null })
-                if (!string.IsNullOrEmpty(s) && s.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0) return true;
-            return false;
+            return History.Matches(r, f.Month, f.PrinterId, f.Show, f.Query,
+                                   printerNames != null ? (Func<QuoteRecord, string>)(x => PrinterText(x, printerNames)) : null);
         }
 
         public static List<QuoteRecord> Apply(List<QuoteRecord> list, Filter f, Dictionary<string, string> printerNames)
@@ -219,16 +193,7 @@ namespace PrintPrice.Web
         {
             if (month != DateTime.MinValue) return History.MonthSummary(list, month.Year, month.Month, printerId);
             if (printerId != null) return History.MonthSummary(list, 0, 0, printerId);
-            var t = new MonthTotals();
-            foreach (var x in History.MonthSummaries(list))
-            {
-                t.Prints += x.Prints; t.FailedPrints += x.FailedPrints; t.PrintHours += x.PrintHours; t.Grams += x.Grams;
-                t.CustomerIncome += x.CustomerIncome; t.CustomerCount += x.CustomerCount;
-                t.FriendsIncome += x.FriendsIncome; t.FriendsCount += x.FriendsCount;
-                t.Income += x.Income; t.Costs += x.Costs; t.Lost += x.Lost; t.Profit += x.Profit;
-            }
-            t.ProfitPct = Math.Abs(t.Income) < 1e-9 ? 0 : t.Profit / t.Income * 100;
-            return t;
+            return History.AllMonthsTotals(list);
         }
 
         /// The six cards: Prints, Print time, Customers, Friends & family, Costs, Profit (texts as HistoryForm).

@@ -2804,7 +2804,6 @@ namespace PrintPrice
         }
 
         // ---------- quote / invoice of a saved record (History's Quote… / Invoice…) ----------
-        DateTime? invoiceWhen;   // picture mode: fixed invoice date; null = now
 
         /// The quote window for a history record, with its saved prices. Exports put the typed name and the chosen
         /// price (For) on the record and save the history; Invoice also makes the invoice (History.MakeInvoice: number,
@@ -2904,7 +2903,7 @@ namespace PrintPrice
             {
                 DateTime billed = DateTime.MinValue;
                 bool made = !string.IsNullOrEmpty(r.InvoiceNo) && History.TryTime(r.BilledAt, out billed);
-                if (!made) billed = invoiceWhen ?? DateTime.Now;
+                if (!made) billed = DateTime.Now;
                 d.Invoice = true;
                 d.InvoiceNo = made ? r.InvoiceNo : L.S("(new)", "(ny)");   // the random code is drawn when the invoice is made
                 d.Date = billed;
@@ -2939,7 +2938,7 @@ namespace PrintPrice
                 failed = true;
                 return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
             }
-            DateTime now = invoiceWhen ?? DateTime.Now;
+            DateTime now = DateTime.Now;
             string path = null;
             if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
             {

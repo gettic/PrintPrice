@@ -160,14 +160,8 @@ namespace PrintPrice.Web
             return "#" + h.Substring(0, 6).ToLowerInvariant();
         }
 
-        // Printables.ParseId's pattern (src\Printables.cs uses WebClient, so it isn't linked; tests check the same answers)
-        static readonly Regex PrintablesId = new Regex(@"printables\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?model/(\d+)", RegexOptions.IgnoreCase);
-
-        public static string ParsePrintablesId(string url)
-        {
-            var m = PrintablesId.Match(url ?? "");
-            return m.Success ? m.Groups[1].Value : null;
-        }
+        /// = Printables.ParseId (src\Printables.cs is linked for it; its network part is desktop-only).
+        public static string ParsePrintablesId(string url) { return Printables.ParseId(url); }
 
         /// Short link for the page (QuoteRows.ShortLink): "printables.com/model/1648230"; file names are never shown.
         public static string ShortLink(string url) { return QuoteRows.ShortLink(url, ParsePrintablesId); }

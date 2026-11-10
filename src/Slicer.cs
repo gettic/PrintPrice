@@ -32,18 +32,8 @@ namespace PrintPrice
             return FindPrinter(model).MachineName + " " + nozzleSize + " nozzle";
         }
 
-        public static string MachinePreset(string nozzleSize)
-        {
-            return MachinePreset("A1", nozzleSize);
-        }
-
-        /// Process/filament preset suffix for a nozzle on the A1: 0.4 is "@BBL A1", others "@BBL A1 0.6 nozzle".
-        public static string Suffix(string nozzleSize)
-        {
-            return FamilySuffix("A1", nozzleSize);
-        }
-
-        static string FamilySuffix(string family, string nozzleSize)
+        /// Process/filament preset suffix for a family and nozzle: 0.4 is " @BBL A1", others " @BBL A1 0.6 nozzle".
+        internal static string FamilySuffix(string family, string nozzleSize)
         {
             return nozzleSize == "0.4" ? " @BBL " + family : " @BBL " + family + " " + nozzleSize + " nozzle";
         }
@@ -351,20 +341,10 @@ namespace PrintPrice
             return ListShort(exe, "process", model, nozzleSize);
         }
 
-        public static List<string> ListProcesses(string exe, string nozzleSize)
-        {
-            return ListProcesses(exe, "A1", nozzleSize);
-        }
-
         /// Filaments Bambu lists as compatible with the printer + nozzle (0.6/0.8 include the standard ones, 0.2 not).
         public static List<string> ListFilaments(string exe, string model, string nozzleSize)
         {
             return ListShort(exe, "filament", model, nozzleSize);
-        }
-
-        public static List<string> ListFilaments(string exe, string nozzleSize)
-        {
-            return ListFilaments(exe, "A1", nozzleSize);
         }
 
         /// A preset name without its printer part: "0.20mm Standard @BBL X1C" / "Bambu PLA Basic @BBL A1M 0.2 nozzle" -> the
@@ -375,11 +355,6 @@ namespace PrintPrice
         }
 
         /// Reads filament type and whether Bambu marks it abrasive (required nozzle hardness ≥ 40 HRC).
-        public static void FilamentInfo(string exe, string shortName, string nozzleSize, out string type, out bool abrasive)
-        {
-            FilamentInfo(exe, "A1", shortName, nozzleSize, out type, out abrasive);
-        }
-
         public static void FilamentInfo(string exe, string model, string shortName, string nozzleSize, out string type, out bool abrasive)
         {
             var roots = Roots(exe);
@@ -435,14 +410,9 @@ namespace PrintPrice
             return merged;
         }
 
-        /// Writes fully merged machine/process/filament profiles for the chosen nozzle into workDir.
-        public static void PrepareProfiles(string exe, string nozzleSize, string process, string filament, string bedType, string workDir)
-        {
-            PrepareProfiles(exe, "A1", nozzleSize, process, filament, bedType, workDir);
-        }
-
-        /// As above for a printer model ("A1", "A1M", "P1S"; unknown = A1). Also writes printer.txt (the model key) so
-        /// SliceFile knows the printer for per-slot filaments and the bed-size error.
+        /// Writes fully merged machine/process/filament profiles for the printer model ("A1", "A1M", "P1S"; unknown = A1)
+        /// and nozzle into workDir. Also writes printer.txt (the model key) so SliceFile knows the printer for per-slot
+        /// filaments and the bed-size error.
         public static void PrepareProfiles(string exe, string model, string nozzleSize, string process, string filament, string bedType, string workDir)
         {
             var roots = Roots(exe);
@@ -478,21 +448,10 @@ namespace PrintPrice
             return "\"" + a.Replace("\"", "\\\"") + "\"";
         }
 
-        /// Slices one model file (all plates) with the profiles written by PrepareProfiles (one filament, slot 1).
-        public static SliceResult SliceFile(string exe, string model, string workDir, CancellationToken ct)
-        {
-            return SliceFile(exe, model, workDir, null, null, ct);
-        }
-
-        /// As above; a project .3mf with 2+ filament slots gets one filament profile per slot (SlotFilaments):
-        /// slots naming nothing (IsUnstatedFilament) get `defaultFilament` (Settings' filament), named ones keep theirs.
-        /// nozzleSize / defaultFilament null = one filament as before.
-        public static SliceResult SliceFile(string exe, string model, string workDir, string nozzleSize, string defaultFilament, CancellationToken ct)
-        {
-            return SliceFile(exe, model, workDir, null, nozzleSize, defaultFilament, ct);
-        }
-
-        /// As above for a printer model ("A1", "A1M", "P1S"); null = the one PrepareProfiles used for workDir.
+        /// Slices one model file (all plates) with the profiles written by PrepareProfiles. A project .3mf with 2+ filament
+        /// slots gets one filament profile per slot (SlotFilaments): slots naming nothing (IsUnstatedFilament) get
+        /// `defaultFilament` (Settings' filament), named ones keep theirs; nozzleSize / defaultFilament null = one filament
+        /// (slot 1). printer = "A1", "A1M", "P1S"; null = the one PrepareProfiles used for workDir.
         /// A model too big for the printer (CLI -50) throws BedErrorText.
         public static SliceResult SliceFile(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament, CancellationToken ct)
         {

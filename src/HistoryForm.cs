@@ -558,14 +558,7 @@ namespace PrintPrice
         }
 
         // ---------- list ----------
-        static string ModelText(QuoteRecord r)
-        {
-            if (!string.IsNullOrEmpty(r.Model)) return r.Model;
-            string s = (r.Source ?? "").Trim().Trim('"');
-            if (s.Length == 0) return L.S("(no name)", "(uden navn)");
-            try { if (s.IndexOf('\\') >= 0 || s.IndexOf('/') < 0) return Path.GetFileName(s); } catch { }
-            return s;
-        }
+        static string ModelText(QuoteRecord r) { return History.ModelText(r); }
 
         static string DateText(QuoteRecord r)
         {
@@ -586,14 +579,6 @@ namespace PrintPrice
             get { var m = cmbMonth.SelectedItem as MonthItem; return m == null ? DateTime.MinValue : m.Month; }
         }
 
-        bool InMonth(QuoteRecord r)
-        {
-            var m = SelectedMonth;
-            if (m == DateTime.MinValue) return true;
-            DateTime t;
-            return History.TryTime(r.SavedAt, out t) && t.Year == m.Year && t.Month == m.Month;
-        }
-
         /// Picture mode: shows that month (if it has quotes).
         internal void SelectMonth(DateTime month)
         {
@@ -609,21 +594,8 @@ namespace PrintPrice
 
         bool Matches(QuoteRecord r)
         {
-            if (!InMonth(r)) return false;
-            string printer = SelectedPrinter;
-            if (printer != null && History.PrinterOf(r) != printer) return false;
-            switch (cmbShow.SelectedIndex)
-            {
-                case 1: if (r.For != History.ForFriends) return false; break;
-                case 2: if (r.For == History.ForFriends) return false; break;
-                case 3: if (!r.Failed) return false; break;
-                case 4: if (r.Printed) return false; break;
-            }
-            string q = txtSearch.Text.Trim();
-            if (q.Length == 0) return true;
-            foreach (var s in new[] { r.Model, r.Source, r.Note, ModelText(r), r.Customer, r.InvoiceNo, printerMode ? PrinterText(r) : null })
-                if (!string.IsNullOrEmpty(s) && s.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0) return true;
-            return false;
+            return History.Matches(r, SelectedMonth, SelectedPrinter, cmbShow.SelectedIndex, txtSearch.Text,
+                                   printerMode ? (Func<QuoteRecord, string>)PrinterText : null);
         }
 
         /// Rebuilds the rows from the list (search + filter), keeping the selected quote if it is still shown.
@@ -672,18 +644,7 @@ namespace PrintPrice
             UpdateProfitTip(m);
             if (m != DateTime.MinValue) t = History.MonthSummary(list, m.Year, m.Month, printer);
             else if (printer != null) t = History.MonthSummary(list, 0, 0, printer);   // one printer, all time
-            else
-            {
-                t = new MonthTotals();
-                foreach (var x in History.MonthSummaries(list))   // = MonthSummary of each month, one pass
-                {
-                    t.Prints += x.Prints; t.FailedPrints += x.FailedPrints; t.PrintHours += x.PrintHours; t.Grams += x.Grams;
-                    t.CustomerIncome += x.CustomerIncome; t.CustomerCount += x.CustomerCount;
-                    t.FriendsIncome += x.FriendsIncome; t.FriendsCount += x.FriendsCount;
-                    t.Income += x.Income; t.Costs += x.Costs; t.Lost += x.Lost; t.Profit += x.Profit;
-                }
-                t.ProfitPct = Math.Abs(t.Income) < 1e-9 ? 0 : t.Profit / t.Income * 100;
-            }
+            else t = History.AllMonthsTotals(list);   // = MonthSummary of each month, one pass
             Func<int, string> prints = n => n == 1 ? L.S("1 print", "1 print") : L.F("{0} prints", "{0} print", n);
             cardPrints.Set(t.Prints.ToString(Num.Dk),
                 t.FailedPrints > 0 ? L.F("+ {0} failed", "+ {0} fejlede", t.FailedPrints) : L.S("no failed prints", "ingen fejlprint"), Theme.Text);

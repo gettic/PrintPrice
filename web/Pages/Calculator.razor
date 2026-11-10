@@ -165,7 +165,7 @@ else
                     <div>@L.S("Material", "Materiale") <span class="detail">@(materialName != null ? materialName + " · " : "")@(last == null ? "" : Num.Fmt(input.FilamentGrams) + " g × " + Num.Fmt(input.FilamentDkkPerKg) + " kr/kg")</span></div>
                     <div class="amount">@Kr(last?.MaterialCost)</div>
                 }
-                <div>@L.S("Power", "Strøm") <span class="detail">@(last == null ? "" : "(" + last.PowerKwh.ToString("N2", Num.Dk) + " kWh)")</span></div>
+                <div>@L.S("Power", "Strøm") <span class="detail">@(last == null ? "" : "(" + N2(last.PowerKwh) + " kWh)")</span></div>
                 <div class="amount">@Kr(last?.PowerCost)</div>
                 @if (settings.FailedPrintPct > 0)
                 {
@@ -1033,7 +1033,7 @@ else
 
     static string Kr(double? v) { return v.HasValue ? Num.Kr(v.Value) : "–"; }
 
-    static string N2(double v) { return v.ToString("N2", Num.Dk); }
+    static string N2(double v) { return Num.N2(v); }   // rounds as the desktop does
 
     string Wear_ { get { return settings.MachineRatePerHour > 0 ? L.F(", {0} kr/h wear", ", {0} kr/t slid", Num.Fmt(settings.MachineRatePerHour)) : ""; } }
 

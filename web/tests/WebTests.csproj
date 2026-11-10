@@ -33,6 +33,7 @@
     <Compile Include="..\Logic\BackupCrypto.cs" Link="Web\BackupCrypto.cs" />
     <Compile Include="..\Logic\WebQuote.cs" Link="Web\WebQuote.cs" />
     <Compile Include="..\..\src\OnlineBackup.cs" Link="Linked\OnlineBackup.cs" />
+    <Compile Include="..\..\src\Printables.cs" Link="Linked\Printables.cs" />
   </ItemGroup>
 
 </Project>

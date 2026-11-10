@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
-using System.Xml;
 
 // Text-only parsing of sliced Bambu files (slice_info.config, project_settings.config) and the printer table.
 // No WinForms, Process, files or network here: the website (WEB defined) compiles this file as it is.
@@ -194,16 +193,15 @@ namespace PrintPrice
             {
                 try
                 {
-                    var doc = new XmlDocument();
-                    doc.LoadXml(sliceInfoXml);
+                    var root = SliceXml.Parse(sliceInfoXml);
                     if (name.Length == 0)
                     {
-                        var n = doc.SelectSingleNode("/config/plate/metadata[@key='printer_model_id']");
+                        var n = FirstPlateMeta(root, "printer_model_id");
                         if (n != null) name = AttrText(n, "value");
                     }
                     if (nozzle.Length == 0)
                     {
-                        var n = doc.SelectSingleNode("/config/plate/metadata[@key='nozzle_diameters']");
+                        var n = FirstPlateMeta(root, "nozzle_diameters");
                         if (n != null) nozzle = AttrText(n, "value").Split(',')[0].Trim();
                     }
                 }
@@ -317,19 +315,29 @@ namespace PrintPrice
                 .FirstOrDefault();
         }
 
+        /// slice_info.config -> time, grams and filaments summed over the sliced plates; null when no plate has a time.
+        /// Throws on text that isn't well-formed XML (desktop: the same XmlException as XmlDocument.LoadXml; website:
+        /// SliceXmlException).
         public static SliceResult ParseSliceInfo(string xml)
         {
-            var doc = new XmlDocument();
-            doc.LoadXml(xml);
+            SliceXml.Element root;
+            try { root = SliceXml.Parse(xml); }
+            catch (SliceXmlException)
+            {
+#if !WEB
+                new System.Xml.XmlDocument().LoadXml(xml);   // the desktop's old error text (throws XmlException)
+#endif
+                throw;
+            }
             var res = new SliceResult();
             var slots = new SortedDictionary<int, FilamentUse>();
-            foreach (XmlNode plate in doc.SelectNodes("/config/plate"))
+            foreach (var plate in Plates(root))
             {
                 double seconds = Meta(plate, "prediction");
                 if (seconds <= 0) continue;
                 double grams = Meta(plate, "weight");
                 bool sumFilaments = grams <= 0;
-                foreach (XmlNode f in plate.SelectNodes("filament"))
+                foreach (var f in plate.Children("filament"))
                 {
                     double g = Attr(f, "used_g");
                     if (sumFilaments) grams += g;
@@ -352,10 +360,32 @@ namespace PrintPrice
             return res.Plates > 0 ? res : null;
         }
 
-        static string AttrText(XmlNode n, string name)
+        // XPath "/config/plate" (root config, its plate children)
+        static IEnumerable<SliceXml.Element> Plates(SliceXml.Element root)
         {
-            var a = n.Attributes == null ? null : n.Attributes[name];
-            return a == null ? "" : (a.Value ?? "").Trim();
+            return root.Is("config") ? root.Children("plate") : Enumerable.Empty<SliceXml.Element>();
+        }
+
+        // XPath "/config/plate/metadata[@key='…']": the first one in document order, or null
+        static SliceXml.Element FirstPlateMeta(SliceXml.Element root, string key)
+        {
+            foreach (var plate in Plates(root))
+            {
+                var n = PlateMeta(plate, key);
+                if (n != null) return n;
+            }
+            return null;
+        }
+
+        // XPath "metadata[@key='…']" under a plate: the first one, or null
+        static SliceXml.Element PlateMeta(SliceXml.Element plate, string key)
+        {
+            return plate.Children("metadata").FirstOrDefault(m => m.Attr("key") == key);
+        }
+
+        static string AttrText(SliceXml.Element n, string name)
+        {
+            return (n.Attr(name) ?? "").Trim();
         }
 
         /// "#rrggbb" or "#RRGGBBAA" -> "#RRGGBB"; anything else -> "".
@@ -368,17 +398,17 @@ namespace PrintPrice
             return c.Substring(0, 7).ToUpperInvariant();
         }
 
-        static double Meta(XmlNode plate, string key)
+        static double Meta(SliceXml.Element plate, string key)
         {
-            var n = plate.SelectSingleNode("metadata[@key='" + key + "']");
+            var n = PlateMeta(plate, key);
             return n == null ? 0 : Attr(n, "value");
         }
 
-        static double Attr(XmlNode n, string name)
+        static double Attr(SliceXml.Element n, string name)
         {
-            var a = n.Attributes == null ? null : n.Attributes[name];
+            string a = n.Attr(name);
             double v;
-            if (a != null && double.TryParse(a.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && v > 0) return v;
+            if (a != null && double.TryParse(a, NumberStyles.Float, CultureInfo.InvariantCulture, out v) && v > 0) return v;
             return 0;
         }
 
@@ -809,6 +839,333 @@ namespace PrintPrice
             if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "image/png";
             if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpeg";
             return null;
+        }
+    }
+
+    /// slice_info.config text that isn't well-formed XML (SliceXml.Parse).
+    public class SliceXmlException : FormatException
+    {
+        public SliceXmlException(string message) : base(message) { }
+    }
+
+    /// A small, strict XML reader for slice_info.config (elements and attributes only), so the website needs no
+    /// System.Xml (~160 KB smaller download). Follows XmlDocument.LoadXml: the same documents are refused (BOM character,
+    /// late XML declaration, bad names / entities / characters, duplicate attributes, undeclared prefixes, mismatched or
+    /// missing tags, text outside the root), attribute values decoded the same way (entities; white space kept as written), and
+    /// Element.Is / Children match like XPath (no prefix, no default namespace). DOCTYPE: skipped, its internal text
+    /// entities are expanded (attribute defaults from a DTD are not added; Bambu files have no DTD).
+    /// Checked against XmlDocument by tests\PricingTests.cs SliceXmlTests.
+    public static class SliceXml
+    {
+        public sealed class Element
+        {
+            public string Name;
+            internal bool NoNamespace;   // no prefix and no default namespace in scope
+            internal readonly List<KeyValuePair<string, string>> Attrs = new List<KeyValuePair<string, string>>();
+            internal readonly List<Element> Kids = new List<Element>();
+
+            /// The attribute's value by its full name, null when missing (= XmlElement.Attributes[name]).
+            public string Attr(string name)
+            {
+                foreach (var a in Attrs) if (a.Key == name) return a.Value;
+                return null;
+            }
+
+            /// XPath name test: an element with this name and no namespace.
+            public bool Is(string name) { return NoNamespace && Name == name; }
+
+            /// The child elements matching XPath "name", in document order.
+            public IEnumerable<Element> Children(string name) { return Kids.Where(k => k.Is(name)); }
+        }
+
+        /// The root element; SliceXmlException when the text isn't well-formed.
+        public static Element Parse(string xml)
+        {
+            return new Reader(xml ?? "").Document();
+        }
+
+        sealed class Reader
+        {
+            readonly string s;
+            int p;
+            readonly Dictionary<string, string> entities = new Dictionary<string, string>();
+            readonly List<Dictionary<string, string>> scopes = new List<Dictionary<string, string>>();   // prefix -> uri ("" = default)
+
+            static readonly Regex XmlDecl = new Regex(
+                "\\A<\\?xml[ \\t\\r\\n]+version[ \\t\\r\\n]*=[ \\t\\r\\n]*([\"'])1\\.[0-9]+\\1" +
+                "(?:[ \\t\\r\\n]+encoding[ \\t\\r\\n]*=[ \\t\\r\\n]*([\"'])[A-Za-z][A-Za-z0-9._\\-]*\\2)?" +
+                "(?:[ \\t\\r\\n]+standalone[ \\t\\r\\n]*=[ \\t\\r\\n]*([\"'])(?:yes|no)\\3)?[ \\t\\r\\n]*\\?>");
+            static readonly Regex EntityDecl = new Regex("<!ENTITY[ \\t\\r\\n]+([A-Za-z_][A-Za-z0-9._\\-]*)[ \\t\\r\\n]+([\"'])([^\"'<&%]*)\\2[ \\t\\r\\n]*>");
+
+            public Reader(string text) { s = text; }
+
+            static SliceXmlException Bad(string what) { return new SliceXmlException("Not valid XML: " + what + "."); }
+
+            bool At(string t) { return string.CompareOrdinal(s, p, t, 0, t.Length) == 0; }
+            static bool Space(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+            void SkipSpace() { while (p < s.Length && Space(s[p])) p++; }
+
+            static bool NameStart(char c) { return char.IsLetter(c) || c == '_' || c == ':'; }
+            static bool NameChar(char c)
+            {
+                return NameStart(c) || char.IsDigit(c) || c == '-' || c == '.' || c == '·'
+                    || CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.NonSpacingMark
+                    || CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.SpacingCombiningMark
+                    || CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.LetterNumber;
+            }
+
+            static bool XmlChar(char c)
+            {
+                if (c < 0x20) return c == '\t' || c == '\n' || c == '\r';
+                return c != '￾' && c != '￿';
+            }
+
+            string Name()
+            {
+                if (p >= s.Length || !NameStart(s[p])) throw Bad("a name is expected at " + p);
+                int start = p;
+                while (p < s.Length && NameChar(s[p])) p++;
+                string n = s.Substring(start, p - start);
+                int colon = n.IndexOf(':');
+                if (colon == 0 || colon == n.Length - 1 || (colon > 0 && n.IndexOf(':', colon + 1) >= 0)) throw Bad("bad name " + n);
+                return n;
+            }
+
+            public Element Document()
+            {
+                if (s.Length > 0 && s[0] == '﻿') throw Bad("data at the root level");
+                if (At("<?xml") && s.Length > 5 && (Space(s[5]) || s[5] == '?'))
+                {
+                    var m = XmlDecl.Match(s);
+                    if (!m.Success) throw Bad("XML declaration");
+                    p = m.Length;
+                }
+                Element root = null;
+                bool doctype = false;
+                while (true)
+                {
+                    SkipSpace();
+                    if (p >= s.Length) break;
+                    if (At("<!--")) Comment();
+                    else if (At("<?")) Pi();
+                    else if (At("<!DOCTYPE"))
+                    {
+                        if (doctype || root != null) throw Bad("DOCTYPE");
+                        doctype = true;
+                        Doctype();
+                    }
+                    else if (s[p] == '<' && root == null) root = ElementAt();
+                    else throw Bad("data at the root level at " + p);
+                }
+                if (root == null) throw Bad("root element is missing");
+                return root;
+            }
+
+            void Comment()
+            {
+                p += 4;
+                int end = s.IndexOf("--", p, StringComparison.Ordinal);
+                if (end < 0) throw Bad("unclosed comment");
+                if (end + 2 >= s.Length || s[end + 2] != '>') throw Bad("'--' in a comment");
+                for (int i = p; i < end; i++) if (!XmlChar(s[i])) throw Bad("invalid character");
+                p = end + 3;
+            }
+
+            void Pi()
+            {
+                p += 2;
+                string target = Name();
+                if (string.Equals(target, "xml", StringComparison.OrdinalIgnoreCase)) throw Bad("unexpected XML declaration");
+                if (target.IndexOf(':') >= 0) throw Bad("colon in a processing instruction");
+                int end = s.IndexOf("?>", p, StringComparison.Ordinal);
+                if (end < 0) throw Bad("unclosed processing instruction");
+                if (end > p && !Space(s[p])) throw Bad("processing instruction");
+                p = end + 2;
+            }
+
+            void Doctype()
+            {
+                p += 9;
+                if (p >= s.Length || !Space(s[p])) throw Bad("DOCTYPE");
+                char quote = '\0';
+                while (p < s.Length)
+                {
+                    char c = s[p];
+                    if (quote != '\0') { if (c == quote) quote = '\0'; p++; continue; }
+                    if (c == '"' || c == '\'') { quote = c; p++; continue; }
+                    if (c == '[')
+                    {
+                        int end = s.IndexOf("]", p, StringComparison.Ordinal);
+                        if (end < 0) throw Bad("unclosed DOCTYPE");
+                        foreach (Match m in EntityDecl.Matches(s.Substring(p + 1, end - p - 1)))
+                            if (!entities.ContainsKey(m.Groups[1].Value)) entities[m.Groups[1].Value] = m.Groups[3].Value;
+                        p = end + 1;
+                        continue;
+                    }
+                    if (c == '>') { p++; return; }
+                    p++;
+                }
+                throw Bad("unclosed DOCTYPE");
+            }
+
+            string Lookup(string prefix)
+            {
+                if (prefix == "xml") return "http://www.w3.org/XML/1998/namespace";
+                if (prefix == "xmlns") return "http://www.w3.org/2000/xmlns/";
+                for (int i = scopes.Count - 1; i >= 0; i--)
+                {
+                    string uri;
+                    if (scopes[i].TryGetValue(prefix, out uri)) return uri;
+                }
+                return null;
+            }
+
+            Element ElementAt()
+            {
+                p++;   // '<'
+                var e = new Element { Name = Name() };
+                var scope = new Dictionary<string, string>();
+                while (true)
+                {
+                    int before = p;
+                    SkipSpace();
+                    if (p >= s.Length) throw Bad("unexpected end of file");
+                    if (s[p] == '/' || s[p] == '>') break;
+                    if (p == before) throw Bad("white space expected at " + p);
+                    string an = Name();
+                    SkipSpace();
+                    if (p >= s.Length || s[p] != '=') throw Bad("'=' expected at " + p);
+                    p++;
+                    SkipSpace();
+                    string v = AttrValue();
+                    if (e.Attr(an) != null) throw Bad("duplicate attribute " + an);
+                    e.Attrs.Add(new KeyValuePair<string, string>(an, v));
+                    if (an == "xmlns") scope[""] = v;
+                    else if (an.StartsWith("xmlns:", StringComparison.Ordinal))
+                    {
+                        if (v.Length == 0) throw Bad("empty namespace for a prefix");
+                        scope[an.Substring(6)] = v;
+                    }
+                }
+                scopes.Add(scope);
+                int colon = e.Name.IndexOf(':');
+                if (colon > 0 && Lookup(e.Name.Substring(0, colon)) == null) throw Bad("undeclared prefix in " + e.Name);
+                foreach (var a in e.Attrs)
+                {
+                    int c = a.Key.IndexOf(':');
+                    if (c > 0 && a.Key.Substring(0, c) != "xmlns" && Lookup(a.Key.Substring(0, c)) == null) throw Bad("undeclared prefix in " + a.Key);
+                }
+                e.NoNamespace = colon < 0 && string.IsNullOrEmpty(Lookup(""));
+                if (s[p] == '/')
+                {
+                    p++;
+                    if (p >= s.Length || s[p] != '>') throw Bad("'>' expected at " + p);
+                    p++;
+                    scopes.RemoveAt(scopes.Count - 1);
+                    return e;
+                }
+                p++;   // '>'
+                Content(e);
+                scopes.RemoveAt(scopes.Count - 1);
+                return e;
+            }
+
+            void Content(Element e)
+            {
+                while (true)
+                {
+                    if (p >= s.Length) throw Bad("unexpected end of file, " + e.Name + " not closed");
+                    char c = s[p];
+                    if (c == '<')
+                    {
+                        if (At("</"))
+                        {
+                            p += 2;
+                            string n = Name();
+                            SkipSpace();
+                            if (n != e.Name) throw Bad("end tag " + n + " doesn't match " + e.Name);
+                            if (p >= s.Length || s[p] != '>') throw Bad("'>' expected at " + p);
+                            p++;
+                            return;
+                        }
+                        if (At("<!--")) { Comment(); continue; }
+                        if (At("<![CDATA["))
+                        {
+                            int end = s.IndexOf("]]>", p + 9, StringComparison.Ordinal);
+                            if (end < 0) throw Bad("unclosed CDATA");
+                            for (int i = p + 9; i < end; i++) if (!XmlChar(s[i])) throw Bad("invalid character");
+                            p = end + 3;
+                            continue;
+                        }
+                        if (At("<?")) { Pi(); continue; }
+                        if (At("<!")) throw Bad("unexpected markup at " + p);
+                        e.Kids.Add(ElementAt());
+                        continue;
+                    }
+                    if (c == '&') { Entity(); continue; }
+                    if (c == ']' && At("]]>")) throw Bad("']]>' in text");
+                    if (!XmlChar(c)) throw Bad("invalid character at " + p);
+                    p++;
+                }
+            }
+
+            string AttrValue()
+            {
+                if (p >= s.Length || (s[p] != '"' && s[p] != '\'')) throw Bad("quoted value expected at " + p);
+                char q = s[p++];
+                var sb = new System.Text.StringBuilder();
+                while (true)
+                {
+                    if (p >= s.Length) throw Bad("unclosed attribute value");
+                    char c = s[p];
+                    if (c == q) { p++; return sb.ToString(); }
+                    if (c == '<') throw Bad("'<' in an attribute value");
+                    if (c == '&') { sb.Append(Entity()); continue; }
+                    if (!XmlChar(c)) throw Bad("invalid character at " + p);
+                    sb.Append(c);   // as written: LoadXml doesn't normalize white space or line ends here
+                    p++;
+                }
+            }
+
+            // &name; or &#n; / &#xh; -> its text
+            string Entity()
+            {
+                int end = s.IndexOf(';', p);
+                if (end < 0) throw Bad("unclosed entity reference");
+                string body = s.Substring(p + 1, end - p - 1);
+                p = end + 1;
+                if (body.StartsWith("#", StringComparison.Ordinal))
+                {
+                    bool hex = body.StartsWith("#x", StringComparison.Ordinal);
+                    string digits = body.Substring(hex ? 2 : 1);
+                    long code = 0;
+                    if (digits.Length == 0) throw Bad("bad character reference");
+                    foreach (char d in digits)
+                    {
+                        int offset = d >= '0' && d <= '9' ? '0' : hex && d >= 'a' && d <= 'f' ? 'a' - 10 : hex && d >= 'A' && d <= 'F' ? 'A' - 10 : -1;
+                        if (offset < 0) throw Bad("bad character reference");
+                        long t = code * (hex ? 16 : 10) + d;   // LoadXml's own overflow check, character code included
+                        if (t > int.MaxValue) throw Bad("invalid character reference");
+                        code = t - offset;
+                    }
+                    // like LoadXml, a reference may name any number (&#0;, a lone surrogate, above U+10FFFF): only literal
+                    // characters are checked; above U+FFFF it becomes the two halves LoadXml makes
+                    if (code <= 0xFFFF) return ((char)code).ToString();
+                    long v = code - 0x10000;
+                    return new string(new[] { unchecked((char)(0xD800 + (v >> 10))), unchecked((char)(0xDC00 + (v & 0x3FF))) });
+                }
+                switch (body)
+                {
+                    case "lt": return "<";
+                    case "gt": return ">";
+                    case "amp": return "&";
+                    case "quot": return "\"";
+                    case "apos": return "'";
+                }
+                string text;
+                if (body.Length > 0 && entities.TryGetValue(body, out text)) return text;
+                throw Bad("undeclared entity " + body);
+            }
         }
     }
 }

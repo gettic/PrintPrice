@@ -2,16 +2,17 @@
    (a table on wide screens, cards on a phone) with For / Note / Printed / Failed changed in place, Delete, Open again and
    Repeat print. The list is the Calculator's; every change is saved at once by its Changed callback. *@
 
+@inject IJSRuntime JS
+@implements IAsyncDisposable
+
 @{
-    var names = WebHistory.PrinterNames(Quotes, Settings, out var allPrinters);
+    Work();   // the sums and the filtered list, worked out again only when something they use changed
+    var names = cNames;
+    var allPrinters = cAllPrinters;
     bool printerMode = allPrinters.Count >= 2;
-    var shownNames = printerMode ? names : null;
-    if (!printerMode) filter.PrinterId = null;
-    var months = History.Months(Quotes);
-    var rows = WebHistory.Apply(Quotes, filter, shownNames);
-    var totals = WebHistory.Totals(Quotes, filter.Month, filter.PrinterId);
-    var cards = WebHistory.Cards(totals);
-    cards[5].Tip = WebHistory.ProfitTip(Quotes, Settings, filter.Month, printerMode, filter.PrinterId);
+    var months = cMonths;
+    var rows = cRows;
+    var cards = cCards;
     int monthIndex = filter.Month == DateTime.MinValue ? -1 : months.IndexOf(filter.Month);
     if (selected != null && !rows.Contains(selected)) selected = null;
     if (selected == null && rows.Count > 0) selected = rows[0];
@@ -75,6 +76,10 @@
 }
 else
 {
+    @* app.css shows the table on wide screens and the cards on a phone: only the shown one is built (both until the
+       page knows which, and while printing) *@
+    @if (narrow != true || printing)
+    {
     <table class="hist">
         <thead>
             <tr>
@@ -113,8 +118,11 @@ else
             }
         </tbody>
     </table>
+    }
 
     @* phone: one card per quote; a tap opens its actions *@
+    @if (narrow != false || printing)
+    {
     <div class="cardlist">
         @foreach (var r in Shown(rows))
         {
@@ -153,6 +161,7 @@ else
             </div>
         }
     </div>
+    }
 
     @if (rows.Count > shown)
     {
@@ -209,6 +218,158 @@ else
     int armCount;
 
     static string ConfirmText { get { return L.S("Really delete?", "Slet virkelig?"); } }
+
+    // ---------- worked-out values kept between redraws (a click that changes nothing doesn't redo the sums) ----------
+
+    Dictionary<string, string> cNames;
+    List<PrinterTotals> cAllPrinters;
+    List<DateTime> cMonths;
+    List<QuoteRecord> cRows;
+    List<WebHistory.Card> cCards;
+
+    // what they were worked out from: the records' fields that can change in place, the list, settings' printers,
+    // language and the filter
+    struct Seen
+    {
+        public QuoteRecord R;
+        public int For, Hours, Minutes;
+        public bool Printed, Failed;
+        public double PaidBack, Grams, FriendsPrice, OthersPrice;
+        public string SavedAt, Note, Customer, InvoiceNo, FailedAt, PrinterId, PrinterName, PrinterModel;
+
+        public Seen(QuoteRecord r)
+        {
+            R = r; For = r.For; Hours = r.Hours; Minutes = r.Minutes; Printed = r.Printed; Failed = r.Failed;
+            PaidBack = r.PaidBack; Grams = r.Grams; FriendsPrice = r.FriendsPrice; OthersPrice = r.OthersPrice;
+            SavedAt = r.SavedAt; Note = r.Note; Customer = r.Customer; InvoiceNo = r.InvoiceNo; FailedAt = r.FailedAt;
+            PrinterId = r.PrinterId; PrinterName = r.PrinterName; PrinterModel = r.PrinterModel;
+        }
+
+        // strings by reference: a changed field is a new string (an equal new one only means one extra recount)
+        public bool Same(QuoteRecord r)
+        {
+            return ReferenceEquals(R, r) && For == r.For && Hours == r.Hours && Minutes == r.Minutes && Printed == r.Printed
+                && Failed == r.Failed && PaidBack.Equals(r.PaidBack) && Grams.Equals(r.Grams) && FriendsPrice.Equals(r.FriendsPrice)
+                && OthersPrice.Equals(r.OthersPrice) && ReferenceEquals(SavedAt, r.SavedAt) && ReferenceEquals(Note, r.Note)
+                && ReferenceEquals(Customer, r.Customer) && ReferenceEquals(InvoiceNo, r.InvoiceNo) && ReferenceEquals(FailedAt, r.FailedAt)
+                && ReferenceEquals(PrinterId, r.PrinterId) && ReferenceEquals(PrinterName, r.PrinterName) && ReferenceEquals(PrinterModel, r.PrinterModel);
+        }
+    }
+
+    Seen[] seen;
+    List<QuoteRecord> seenList;
+    AppSettings seenSettings;
+    string seenPrinters;
+    bool seenDanish;
+    DateTime seenMonth, cardsMonth;
+    int seenShow;
+    string seenPrinterId, seenQuery, cardsPrinterId;
+
+    static string PrintersKey(AppSettings s)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append(s.ActivePrinterId).Append('\n').Append(s.PrinterName).Append('\n').Append(s.PrinterModel);
+        foreach (var p in s.Printers) sb.Append('\n').Append(p.Id).Append('\t').Append(p.Name).Append('\t').Append(p.Model);
+        return sb.ToString();
+    }
+
+    bool DataChanged()
+    {
+        string printers = PrintersKey(Settings);
+        bool same = seen != null && ReferenceEquals(seenList, Quotes) && seen.Length == Quotes.Count && ReferenceEquals(seenSettings, Settings)
+                    && seenPrinters == printers && seenDanish == L.Danish;
+        for (int i = 0; same && i < seen.Length; i++) same = seen[i].Same(Quotes[i]);
+        if (same) return false;
+        seen = new Seen[Quotes.Count];
+        for (int i = 0; i < seen.Length; i++) seen[i] = new Seen(Quotes[i]);
+        seenList = Quotes;
+        seenSettings = Settings;
+        seenPrinters = printers;
+        seenDanish = L.Danish;
+        return true;
+    }
+
+    /// The values the page shows, as before worked out on every redraw, now only when what they use changed.
+    void Work()
+    {
+        bool data = DataChanged();
+        if (data)
+        {
+            cNames = WebHistory.PrinterNames(Quotes, Settings, out cAllPrinters);
+            cMonths = History.Months(Quotes);
+        }
+        bool printerMode = cAllPrinters.Count >= 2;
+        if (!printerMode) filter.PrinterId = null;
+        if (data || cRows == null || filter.Month != seenMonth || filter.Show != seenShow || filter.PrinterId != seenPrinterId || filter.Query != seenQuery)
+            cRows = WebHistory.Apply(Quotes, filter, printerMode ? cNames : null);
+        if (data || cCards == null || filter.Month != cardsMonth || filter.PrinterId != cardsPrinterId)
+        {
+            cCards = WebHistory.Cards(WebHistory.Totals(Quotes, filter.Month, filter.PrinterId));
+            cCards[5].Tip = WebHistory.ProfitTip(Quotes, Settings, filter.Month, printerMode, filter.PrinterId);
+            cardsMonth = filter.Month;
+            cardsPrinterId = filter.PrinterId;
+        }
+        seenMonth = filter.Month;
+        seenShow = filter.Show;
+        seenPrinterId = filter.PrinterId;
+        seenQuery = filter.Query;
+    }
+
+    // ---------- which list app.css shows (HistoryPage.razor.js): build only that one ----------
+
+    bool? narrow;    // true = phone cards (max-width 720px), false = table, null = not known yet (both)
+    bool printing;   // both while printing (the paper's width decides there)
+    IJSObjectReference module;
+    DotNetObjectReference<HistoryPage> self;
+    static int lastWatchKey;
+    readonly int watchKey = ++lastWatchKey;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            self = DotNetObjectReference.Create(this);
+            module = await JS.InvokeAsync<IJSObjectReference>("import", "./Pages/HistoryPage.razor.js");
+            narrow = await module.InvokeAsync<bool>("watchNarrow", self, watchKey);
+            if (disposed) { await module.InvokeVoidAsync("stopNarrow", watchKey); return; }   // the page closed meanwhile
+            StateHasChanged();
+        }
+        catch (Exception) { narrow = null; }   // no module: both lists, as always
+    }
+
+    [JSInvokable]
+    public void NarrowChanged(bool isNarrow)
+    {
+        if (narrow == isNarrow) return;
+        narrow = isNarrow;
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public void PrintMode(bool on)
+    {
+        if (printing == on) return;
+        printing = on;
+        StateHasChanged();
+    }
+
+    bool disposed;
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        try
+        {
+            if (module != null)
+            {
+                await module.InvokeVoidAsync("stopNarrow", watchKey);
+                await module.DisposeAsync();
+            }
+        }
+        catch (Exception) { }
+        if (self != null) self.Dispose();
+    }
 
     protected override void OnInitialized()
     {

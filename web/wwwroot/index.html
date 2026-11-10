@@ -234,7 +234,43 @@
         <a href="." class="reload">Reload / Genindlæs</a>
         <span class="dismiss">✕</span>
     </div>
-    <script src="_framework/blazor.webassembly#[.{fingerprint}].js"></script>
+    <script src="_framework/blazor.webassembly#[.{fingerprint}].js" autostart="false"></script>
+    <script>
+        // Smaller download for visitors: GitHub Pages only serves gzip, so the big files are fetched as their published .br
+        // copy and unpacked here with Google's brotli decoder (brotli-decode.min.js, MIT), then checked against the file's
+        // integrity hash. Anything wrong (no .br, decoder or check fails) -> the normal file, as before.
+        // Off on localhost (dotnet run, tests): the normal files.
+        (function () {
+            var useBr = location.hostname !== 'localhost' && !!(window.WebAssembly && window.crypto && crypto.subtle && window.Response);
+            var types = { assembly: 1, dotnetwasm: 1, globalization: 1, icu: 1 };
+            var decoder = useBr ? import('./brotli-decode.min.js').then(function (m) { return m.BrotliDecode; }) : null;
+            if (decoder) decoder.catch(function () { });
+            var hashOk = async function (bytes, integrity) {
+                var m = /^sha(256|384|512)-(.+)$/.exec(integrity || '');
+                if (!m) return !integrity;
+                var h = new Uint8Array(await crypto.subtle.digest('SHA-' + m[1], bytes)), s = '';
+                for (var i = 0; i < h.length; i++) s += String.fromCharCode(h[i]);
+                return btoa(s) === m[2];
+            };
+            Blazor.start({
+                loadBootResource: function (type, name, defaultUri, integrity) {
+                    if (!useBr || !types[type]) return undefined;
+                    return (async function () {
+                        try {
+                            var decode = await decoder;
+                            var r = await fetch(defaultUri + '.br', { cache: 'no-cache' });
+                            if (!r.ok) throw new Error('no .br');
+                            var bytes = decode(new Int8Array(await r.arrayBuffer()));
+                            if (!(await hashOk(bytes, integrity))) throw new Error('hash');
+                            return new Response(bytes, { headers: { 'content-type': type === 'dotnetwasm' ? 'application/wasm' : 'application/octet-stream' } });
+                        } catch (e) {
+                            return fetch(defaultUri, integrity ? { cache: 'no-cache', integrity: integrity } : { cache: 'no-cache' });
+                        }
+                    })();
+                }
+            });
+        })();
+    </script>
 </body>
 
 </html>

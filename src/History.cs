@@ -625,6 +625,66 @@ namespace PrintPrice
             return res;
         }
 
+        /// The "All months" cards (HistoryForm, website): the sum of every month's MonthSummaries, Profit % from the sums.
+        public static MonthTotals AllMonthsTotals(List<QuoteRecord> list)
+        {
+            var t = new MonthTotals();
+            foreach (var x in MonthSummaries(list))
+            {
+                t.Prints += x.Prints; t.FailedPrints += x.FailedPrints; t.PrintHours += x.PrintHours; t.Grams += x.Grams;
+                t.CustomerIncome += x.CustomerIncome; t.CustomerCount += x.CustomerCount;
+                t.FriendsIncome += x.FriendsIncome; t.FriendsCount += x.FriendsCount;
+                t.Income += x.Income; t.Costs += x.Costs; t.Lost += x.Lost; t.Profit += x.Profit;
+            }
+            t.ProfitPct = Math.Abs(t.Income) < 1e-9 ? 0 : t.Profit / t.Income * 100;
+            return t;
+        }
+
+        // ---------- the History list's name and filter (HistoryForm and the website's History page) ----------
+
+        /// "Show" choices: all quotes, friends & family, customers, failed, not printed.
+        public const int ShowAll = 0, ShowFriends = 1, ShowCustomers = 2, ShowFailed = 3, ShowNotPrinted = 4;
+
+        /// The model's name, else the file name of the link/file (after the last \ or / for a file path, the whole link
+        /// for a web address), else "(no name)".
+        public static string ModelText(QuoteRecord r)
+        {
+            if (!string.IsNullOrEmpty(r.Model)) return r.Model;
+            string s = (r.Source ?? "").Trim().Trim('"');
+            if (s.Length == 0) return L.S("(no name)", "(uden navn)");
+            if (s.IndexOf('\\') >= 0 || s.IndexOf('/') < 0)
+            {
+                int cut = Math.Max(s.LastIndexOf('\\'), s.LastIndexOf('/'));
+                return cut >= 0 ? s.Substring(cut + 1) : s;
+            }
+            return s;
+        }
+
+        /// True when the record passes the list's filters: month (1st of it; MinValue = all months), printer id (null =
+        /// all), Show (ShowAll…ShowNotPrinted) and the search text (model, link, note, name, customer, invoice number and,
+        /// with printerText not null, the printer's name; case-insensitive).
+        public static bool Matches(QuoteRecord r, DateTime month, string printerId, int show, string query, Func<QuoteRecord, string> printerText)
+        {
+            if (month != DateTime.MinValue)
+            {
+                DateTime t;
+                if (!TryTime(r.SavedAt, out t) || t.Year != month.Year || t.Month != month.Month) return false;
+            }
+            if (printerId != null && PrinterOf(r) != printerId) return false;
+            switch (show)
+            {
+                case ShowFriends: if (r.For != ForFriends) return false; break;
+                case ShowCustomers: if (r.For == ForFriends) return false; break;
+                case ShowFailed: if (!r.Failed) return false; break;
+                case ShowNotPrinted: if (r.Printed) return false; break;
+            }
+            string q = (query ?? "").Trim();
+            if (q.Length == 0) return true;
+            foreach (var s in new[] { r.Model, r.Source, r.Note, ModelText(r), r.Customer, r.InvoiceNo, printerText != null ? printerText(r) : null })
+                if (!string.IsNullOrEmpty(s) && s.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0) return true;
+            return false;
+        }
+
         static void Sum(MonthTotals m, List<QuoteRecord> list, int year, int month, string printerId)
         {
             if (list != null)
