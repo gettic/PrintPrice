@@ -13,6 +13,7 @@
     <link rel="preload" id="webassembly" />
     <link rel="icon" type="image/png" href="icon-192.png" />
     <link rel="stylesheet" href="css/app.css" />
+    <link rel="stylesheet" href="css/quote.css" />
     <script type="importmap"></script>
     <script>
         // small helpers for the C# side (Store.cs); this site's localStorage only, nothing leaves the browser
@@ -183,6 +184,37 @@
                 } catch (e) {
                     return { status: 0, body: '', left: null, reset: null, retryAfter: null };
                 } finally { clearTimeout(timer); }
+            },
+            // ---- stage 4: the quote page (1000 units wide): fit to its box on screen; the print scale fits it on one A4 ----
+            fitSheet: function () {
+                var boxes = document.querySelectorAll('.qs-box');
+                for (var i = 0; i < boxes.length; i++) {
+                    var b = boxes[i], s = b.querySelector('.qs');
+                    if (!s) continue;
+                    b.style.setProperty('--qz', String(Math.max(0.1, b.clientWidth / 1000)));
+                    var h = parseFloat(s.style.height) || 1414;
+                    // 210 mm = 793.7 px; a page taller than A4 is made smaller to fit (as the desktop's PDF)
+                    b.style.setProperty('--pz', String(0.7935 * Math.min(1, 1414 / h)));
+                }
+                var pp = window.printPrice;
+                if (!pp.fitHooked) { pp.fitHooked = true; window.addEventListener('resize', pp.fitSheet); window.addEventListener('beforeprint', pp.fitSheet); }
+            },
+            printSheet: function (title) {
+                var old = document.title;
+                window.printPrice.fitSheet();
+                if (title) document.title = title;   // "Save as PDF" suggests this name
+                var back = function () { document.title = old; window.removeEventListener('afterprint', back); };
+                window.addEventListener('afterprint', back);
+                setTimeout(function () { window.print(); setTimeout(back, 1000); }, 50);
+            },
+            copyText: async function (text) {
+                try { await navigator.clipboard.writeText(text); return true; } catch (e) { }
+                try {
+                    var t = document.createElement('textarea');
+                    t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
+                    document.body.appendChild(t); t.select();
+                    var ok = document.execCommand('copy'); t.remove(); return ok;
+                } catch (e) { return false; }
             }
         };
     </script>

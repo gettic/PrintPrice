@@ -156,6 +156,29 @@ namespace PrintPrice.Web
             catch (Exception) { }
         }
 
+        // ---------- stage 4: quote / invoice page ----------
+
+        /// Scales the quote page to its box on screen and works out the A4 print scale (printPrice.fitSheet).
+        public async Task FitSheet()
+        {
+            try { await js.InvokeVoidAsync("printPrice.fitSheet"); }
+            catch (Exception) { }
+        }
+
+        /// The browser's print window for the quote page; title = the suggested PDF name while it is open.
+        public async Task PrintSheet(string title)
+        {
+            try { await js.InvokeVoidAsync("printPrice.printSheet", title); }
+            catch (Exception) { }
+        }
+
+        /// Copies text to the clipboard. false = the browser refused.
+        public async Task<bool> CopyText(string text)
+        {
+            try { return await js.InvokeAsync<bool>("printPrice.copyText", text); }
+            catch (Exception) { return false; }
+        }
+
         public async Task SetPageLanguage(bool danish, string title)
         {
             try { await js.InvokeVoidAsync("printPrice.page", danish ? "da" : "en", title); }

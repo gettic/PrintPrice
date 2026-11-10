@@ -809,7 +809,9 @@ namespace PrintPrice
             rbMerge.Enabled = rbReplace.Enabled = loaded;
             chkSettings.Enabled = loaded && data.Settings != null;
             lblSettingsNote.Text = loaded && data.Settings == null
-                ? L.S("This backup has no settings (a history.json).", "Kopien har ingen indstillinger (en history.json).")
+                ? (string.IsNullOrEmpty(data.CreatedAt) && string.IsNullOrEmpty(data.App)
+                    ? L.S("This file has no settings (a history.json).", "Filen har ingen indstillinger (en history.json).")
+                    : L.S("This backup was made without the settings.", "Kopien blev lavet uden indstillingerne."))
                 : L.S("Prices, printers and invoice details. The Bambu Studio path stays as it is.",
                       "Priser, printere og fakturaoplysninger. Stien til Bambu Studio bliver, som den er.");
             if (rbReplace.Checked && list.Count > 0)

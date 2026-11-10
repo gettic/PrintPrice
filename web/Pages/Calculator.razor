@@ -1,4 +1,4 @@
-﻿@* The calculator: print time, grams, kr/kg and electricity -> both prices + the cost breakdown.
+@* The calculator: print time, grams, kr/kg and electricity -> both prices + the cost breakdown.
    Price code = the desktop app's Pricing (linked). Settings live in this browser's storage. *@
 @inject Store Store
 @inject HistoryStore Histories
@@ -28,6 +28,7 @@ else
         {
             <HistoryPage Quotes="history" Settings="settings" Problem="@historyProblem" Changed="HistoryChanged"
                          OpenAgain="r => FromHistory(r, false)" Repeat="r => FromHistory(r, true)"
+                         Quote="r => OpenRecordQuote(r, false)" Invoice="r => OpenRecordQuote(r, true)"
                          LastBackup="@lastBackup" OpenBackup="() => OpenBackup(history.Count == 0 ? BackupDialog.TabRestore : BackupDialog.TabBackup)" />
         }
 
@@ -194,6 +195,7 @@ else
             <button @onclick="Clear">@L.S("Clear", "Ryd")</button>
             <button @onclick='() => OpenSettings(SettingsDialog.TabPrices)'>@L.S("Settings", "Indstillinger")</button>
             <button @onclick="SaveClicked" disabled="@(last == null)">@L.S("Save to history", "Gem i historik")</button>
+            <button class="accent" @onclick="OpenJobQuote" disabled="@(last == null)">@L.S("Show quote…", "Vis tilbud…")</button>
         </div>
         @if (status != null)
         {
@@ -214,6 +216,17 @@ else
     {
         <SettingsDialog Settings="settings" FilamentType="prefs.FilamentType" StartTab="settingsTab"
                         BrowserDanish="browserDanish" OnClose="SettingsClosed" />
+    }
+
+    @if (quoteOpen)
+    {
+        <QuoteView @key="quoteKey" Model="@QuoteModelName" Invoice="quoteInvoice" IsRecord="quoteRecord != null"
+                   Recent="History.RecentCustomers(history, 10)"
+                   CustomerPrice="@(quoteRecord != null ? quoteRecord.OthersPrice : last?.OthersPrice ?? 0)"
+                   FriendsPrice="@(quoteRecord != null ? quoteRecord.FriendsPrice : last?.FriendsPrice ?? 0)"
+                   StartFriends="@(quoteRecord != null ? quoteRecord.For == History.ForFriends : settings.QuoteFriends)"
+                   StartDark="@(settings.QuoteDark != 0)" StartCustomer="@(quoteRecord != null ? quoteRecord.Customer ?? "" : "")"
+                   Build="BuildQuoteSheet" Export="ExportQuote" Remember="RememberQuoteLook" OnClose="CloseQuote" />
     }
 }
 
@@ -276,6 +289,15 @@ else
     byte[] pendingBytes;               // a backup file chosen / dropped (Restore)
     string lastBackup;                 // WebBackup.LastBackupValue, "" = never
 
+    // ---------- stage 4: quote / invoice ----------
+    bool quoteOpen, quoteInvoice;
+    int quoteKey;
+    QuoteRecord quoteRecord;           // a saved quote's page (History's Quote… / Invoice…); null = the job on screen
+    DateTime quoteWhen;                // the job's page: number and date until an export saves it (then the record's)
+    string quotePicture;               // a saved quote's small picture
+    string quoteBackHash = "";         // the address to go back to when the page closes
+    string jobSource;                  // the job's link (a record opened again) or file name
+
     bool InHistory { get { return view == "history"; } }
 
     string Title { get { return L.S("Gettic's 3D Print Price Calculator", "Gettics 3D-print prisberegner"); } }
@@ -304,6 +326,7 @@ else
         else if (hash == "#printer") OpenSettings(SettingsDialog.TabPrinter);
         else if (hash == "#electricity") OpenSettings(SettingsDialog.TabElectricity);
         else if (hash == "#language") OpenSettings(SettingsDialog.TabApp);
+        else if (WebQuote.AddressId(hash, out _) != null) await OpenFromAddress(hash);
         ready = true;
         await Store.SetPageLanguage(L.Danish, Title);
     }
@@ -396,6 +419,7 @@ else
         single = null;
         jobPurge = -1;
         jobModel = null;
+        jobSource = null;
         reopened = repeatOf = null;   // the "Opened from history" lines go with the job
         repeatHint = false;
         savedId = null;
@@ -542,6 +566,7 @@ else
             single = used.Count == 1 ? used[0] : null;
         }
         jobModel = job.FileName;
+        jobSource = job.FileName;
         jobPurge = multi ? res.PurgeGrams : -1;
         prefs.Hours = hours; prefs.Minutes = minutes; prefs.Grams = grams;
         if (res.Picture != null && job.PictureType != null)
@@ -605,8 +630,15 @@ else
 
     /// Back / Forward and #history links (window hashchange).
     [JSInvokable]
-    public void HashChanged(string hash)
+    public async Task HashChanged(string hash)
     {
+        if (hash.StartsWith("#quote") || hash.StartsWith("#invoice"))
+        {
+            // the quote page's own address; one typed or pasted while the page is closed opens it
+            if (!quoteOpen && WebQuote.AddressId(hash, out _) != null) { await OpenFromAddress(hash); StateHasChanged(); }
+            return;
+        }
+        if (quoteOpen) { quoteOpen = false; StateHasChanged(); }                // Back closes the quote page
         string v = hash == "#history" ? "history" : "calc";
         if (v == view) return;
         view = v;
@@ -640,15 +672,7 @@ else
             ShowStatus(L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu."), true);
             return;
         }
-        List<HistoryFilament> materials;
-        if (Multi)
-        {
-            materials = new List<HistoryFilament>();
-            foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "" });
-        }
-        else materials = new List<HistoryFilament> { WebHistory.SingleMaterial(single, materialName, prefs.FilamentType) };
-        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf);
-        var saved = WebHistory.Save(history, rec);
+        var saved = WebHistory.Save(history, NewRecord());
         savedId = saved.Id;   // left out of the payback debt from now on (same price when saved again)
         string err = await Histories.Save(history);
         if (err == null) await Histories.SavePicture(saved.Id, pictureUrl);
@@ -657,6 +681,155 @@ else
         else if (!Histories.Available) ShowStatus(L.S("✓ Saved to history (until this page is closed: this browser keeps no storage).",
                                                       "✓ Gemt i historikken (til siden lukkes: denne browser gemmer ikke)."), false);
         else ShowStatus(L.S("✓ Saved to history.", "✓ Gemt i historikken."), false);
+    }
+
+    /// The record for the job on screen (colours, materials, purge; a reopened / repeated quote keeps For and its link).
+    QuoteRecord NewRecord()
+    {
+        List<HistoryFilament> materials;
+        if (Multi)
+        {
+            materials = new List<HistoryFilament>();
+            foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "" });
+        }
+        else materials = new List<HistoryFilament> { WebHistory.JobMaterial(single, materialName, settings, prefs.FilamentType) };
+        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf);
+        if (jobSource != null && jobSource.StartsWith("http", StringComparison.OrdinalIgnoreCase)) rec.Source = jobSource;
+        return rec;
+    }
+
+    // ---------- stage 4: quote / invoice (MainForm's quote export and saved-record sections) ----------
+
+    string QuoteModelName { get { return QuoteRows.ModelName(quoteRecord != null ? quoteRecord.Model : jobModel); } }
+
+    WebQuote.Job CurrentJob()
+    {
+        var j = new WebQuote.Job { Input = input, Model = jobModel, Source = jobSource, Picture = pictureUrl, Single = single,
+                                   SingleName = materialName, PurgeGrams = jobPurge, FilamentType = prefs.FilamentType };
+        if (Multi) { j.Colours = new List<FilamentUse>(); foreach (var r in rows) j.Colours.Add(r.Use); }
+        return j;
+    }
+
+    /// "Show quote…": the page of the job on screen. Nothing is saved by opening it.
+    async Task OpenJobQuote()
+    {
+        if (last == null || input == null) return;
+        quoteRecord = null;
+        quoteInvoice = false;
+        quoteWhen = DateTime.Now;
+        await ShowQuote("#quote");
+    }
+
+    /// History's Quote… / Invoice…: the page of a saved quote, with its saved prices and small picture.
+    async Task OpenRecordQuote(QuoteRecord r, bool invoice)
+    {
+        if (r == null) return;
+        quoteRecord = r;
+        quoteInvoice = invoice;
+        quotePicture = await Histories.Picture(r.Id);
+        await ShowQuote((invoice ? "#invoice/" : "#quote/") + r.Id);
+    }
+
+    /// A #quote/<id> or #invoice/<id> address (a link, a reload): that saved quote's page over the History page; an id
+    /// that isn't here says so on the History page and the address becomes #history.
+    async Task OpenFromAddress(string hash)
+    {
+        bool invoice;
+        string id = WebQuote.AddressId(hash, out invoice);
+        var r = history.Find(q => q.Id == id);
+        view = "history";
+        if (r != null) { await OpenRecordQuote(r, invoice); return; }
+        historyProblem = WebQuote.NotFound;
+        await Store.Go("#history");
+    }
+
+    async Task ShowQuote(string hash)
+    {
+        quoteBackHash = InHistory ? "#history" : "";
+        quoteKey++;
+        quoteOpen = true;
+        StateHasChanged();
+        await Store.Go(hash);
+    }
+
+    async Task CloseQuote()
+    {
+        quoteOpen = false;
+        await Store.Go(quoteBackHash);
+    }
+
+    WebQuote.Sheet BuildQuoteSheet(bool friends, string customer)
+    {
+        if (quoteRecord != null)
+            return WebQuote.FromRecord(quoteRecord, settings, friends, customer, quoteInvoice, DateTime.Now, quotePicture);
+        if (input == null) return null;
+        return WebQuote.FromJob(CurrentJob(), settings, friends, quoteWhen, History.QuoteNumber(quoteWhen), customer);
+    }
+
+    async Task RememberQuoteLook(bool friends, bool dark)
+    {
+        settings.QuoteDark = dark ? 1 : 0;
+        // the job's quote remembers the price too; a saved quote's price is its own (For), not a setting
+        if (quoteRecord == null) settings.QuotePrice = friends ? AppSettings.QuotePriceFriends : AppSettings.QuotePriceCustomer;
+        await SaveSettings();
+    }
+
+    /// One export (MainForm.ExportQuote / ExportRecord): the quote goes into the history with this price and name (a
+    /// saved quote gets them; an invoice also its number), then the page says what to print or copy.
+    async Task<WebQuote.Done> ExportQuote(string kind, bool friends, string customer)
+    {
+        var d = new WebQuote.Done();
+        customer = (customer ?? "").Trim();
+        string err;
+        string invoiceNo = null;
+        if (quoteRecord != null)
+        {
+            var r = quoteRecord;
+            if (kind == "history")
+            {
+                r.Customer = customer;
+                r.For = friends ? History.ForFriends : History.ForCustomer;
+            }
+            else
+            {
+                if (quoteInvoice && customer.Length == 0) { d.Problem = WebQuote.NeedName; return d; }
+                WebQuote.ApplyRecordExport(history, r, friends, customer, quoteInvoice, DateTime.Now, settings);
+                if (quoteInvoice) { invoiceNo = r.InvoiceNo; await SaveSettings(); }
+            }
+            err = await Histories.Save(history);
+        }
+        else
+        {
+            if (last == null || input == null) { d.Problem = L.S("Nothing to send yet.", "Der er ikke noget at sende endnu."); return d; }
+            var saved = WebQuote.SaveExport(history, NewRecord(), friends, customer);
+            savedId = saved.Id;   // left out of the payback debt from now on
+            err = await Histories.Save(history);
+            if (err == null) await Histories.SavePicture(saved.Id, pictureUrl);
+            DateTime when;
+            quoteWhen = History.TryTime(saved.SavedAt, out when) ? when : DateTime.Now;
+            Recalculate();
+        }
+        if (err != null) historyProblem = err;
+        bool ok = err == null;
+        if (kind == "history")
+        {
+            if (!ok) d.Problem = err;
+            else d.Status = L.S("✓ Saved to history.", "✓ Gemt i historikken.");
+        }
+        else if (kind == "text")
+        {
+            d.Text = quoteRecord != null
+                ? QuoteRows.RecordText(quoteRecord, friends, quoteInvoice, settings, WebQuote.ShortLink(quoteRecord.Source))
+                : QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, grams, Multi ? rows.Count : 0, last.FriendsPrice, last.OthersPrice);
+            d.Status = WebQuote.CopiedText(quoteInvoice, invoiceNo, ok) + (ok ? "" : " " + err);
+        }
+        else
+        {
+            d.FileName = WebQuote.FileName(BuildQuoteSheet(friends, customer));
+            d.Status = WebQuote.PrintedText(quoteInvoice, invoiceNo, ok) + (ok ? "" : " " + err);
+        }
+        StateHasChanged();   // the History page and the tab count behind the window
+        return d;
     }
 
     void ShowStatus(string text, bool error)
@@ -691,6 +864,7 @@ else
         materialName = f.MaterialName;
         jobPurge = f.PurgeGrams;
         jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;
+        jobSource = string.IsNullOrEmpty(r.Source) ? null : r.Source;
         if (!repeat)
         {
             elecToday = elec;   // today's value comes back with Clear / a new file

@@ -1,0 +1,147 @@
+@* The quote / invoice window (desktop QuoteForm) on the web: the A4 page on the left (scaled to fit), on the right the
+   customer's name (recent names offered), which price goes on it, Light / Dark, and Print / PDF…, Copy text and Save to
+   history. What an export saves is the Calculator's job (Export); the page only shows and prints. *@
+@inject Store Store
+
+<div class="qv" role="dialog" aria-modal="true" aria-labelledby="qv-title" @onkeydown="Key">
+    <div class="qv-bar">
+        <img src="icon-192.png" alt="" />
+        <span id="qv-title">@WebQuote.WindowTitle(Invoice, Model)</span>
+        <button @onclick="Close" aria-label="@L.S("Close", "Luk")">✕ @L.S("Close", "Luk")</button>
+    </div>
+    <div class="qv-body">
+        <div class="@(zoomed ? "qv-preview zoomed" : "qv-preview")" title="@L.S("Click to zoom in or out", "Klik for at zoome ind eller ud")" @onclick="() => zoomed = !zoomed">
+            <QuoteSheet Data="sheet" Dark="dark" />
+        </div>
+        <div class="qv-side">
+            <label class="qv-head" for="qv-name">@(Invoice ? L.S("Customer (required)", "Kunde (skal udfyldes)") : L.S("Customer (optional)", "Kunde (valgfrit)"))</label>
+            <input id="qv-name" type="text" class="left" list="qv-recent" maxlength="80" value="@customer" autocomplete="off"
+                   @oninput="NameTyped" />
+            <datalist id="qv-recent">
+                @foreach (var n in Recent) { <option value="@n"></option> }
+            </datalist>
+            @if (Recent.Count > 0)
+            {
+                <div class="qv-recent muted">@L.S("Recent: ", "Seneste: ")@string.Join(", ", Recent.Count > 3 ? Recent.GetRange(0, 3) : Recent)</div>
+            }
+
+            <div class="qv-head">@L.S("Price on the quote", "Pris på tilbuddet")</div>
+            <div class="qv-choices" role="radiogroup">
+                <button class="@(friends ? "qv-choice" : "qv-choice on")" role="radio" aria-checked="@(!friends)" @onclick="() => SetFriends(false)">
+                    <span>@L.S("Customers", "Kunder")</span><b class="red">@Num.Kr(CustomerPrice)</b></button>
+                <button class="@(friends ? "qv-choice on" : "qv-choice")" role="radio" aria-checked="@friends" @onclick="() => SetFriends(true)">
+                    <span>@L.S("Friends & family", "Venner og familie")</span><b class="green">@Num.Kr(FriendsPrice)</b></button>
+            </div>
+
+            <div class="qv-head">@L.S("Look", "Udseende")</div>
+            <div class="qv-look" role="radiogroup">
+                <button class="@(dark ? "on" : "")" role="radio" aria-checked="@dark" @onclick="() => SetDark(true)">@L.S("Dark", "Mørk")</button>
+                <button class="@(dark ? "" : "on")" role="radio" aria-checked="@(!dark)" @onclick="() => SetDark(false)">@L.S("Light", "Lys")</button>
+            </div>
+            <div class="muted small">@L.S("The PDF is always light (for printing).", "PDF'en er altid lys (til print).")</div>
+
+            <div class="qv-actions">
+                <button class="accent" disabled="@(busy || NeedsName)" @onclick='() => Run("print")'>@L.S("Print / PDF…", "Print / PDF…")</button>
+                <button disabled="@(busy || NeedsName)" @onclick='() => Run("text")'>@L.S("Copy text", "Kopiér tekst")</button>
+                <button class="wide" disabled="@busy" @onclick='() => Run("history")'>@L.S("Save to history", "Gem i historik")</button>
+            </div>
+            @if (status != null)
+            {
+                <div class="@(statusError ? "hinfo error" : "hinfo ok")" style="white-space:pre-wrap" role="status">@status</div>
+            }
+            <div class="hinfo">@WebQuote.HelpText(IsRecord, Invoice)</div>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Model { get; set; }
+    [Parameter] public bool Invoice { get; set; }
+    [Parameter] public bool IsRecord { get; set; }
+    [Parameter] public List<string> Recent { get; set; }
+    [Parameter] public double CustomerPrice { get; set; }
+    [Parameter] public double FriendsPrice { get; set; }
+    [Parameter] public bool StartFriends { get; set; }
+    [Parameter] public bool StartDark { get; set; }
+    [Parameter] public string StartCustomer { get; set; }
+    /// The page for (friends, customer).
+    [Parameter] public Func<bool, string, WebQuote.Sheet> Build { get; set; }
+    /// One export ("print", "text", "history") with (friends, customer): saves what it should and says what to print / copy.
+    [Parameter] public Func<string, bool, string, Task<WebQuote.Done>> Export { get; set; }
+    /// The price and look chosen (the job's quote remembers both in Settings, a saved quote only the look).
+    [Parameter] public Func<bool, bool, Task> Remember { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    WebQuote.Sheet sheet;
+    string customer = "", status, printTitle;
+    bool friends, dark, busy, statusError, zoomed;
+
+    bool NeedsName { get { return Invoice && customer.Trim().Length == 0; } }
+
+    protected override void OnInitialized()
+    {
+        friends = StartFriends;
+        dark = StartDark;
+        customer = StartCustomer ?? "";
+        Rebuild();
+    }
+
+    void Rebuild() { sheet = Build(friends, customer); }
+
+    void NameTyped(ChangeEventArgs e)
+    {
+        customer = (string)e.Value ?? "";
+        Rebuild();
+    }
+
+    async Task SetFriends(bool f) { friends = f; Rebuild(); await Remember(friends, dark); }
+
+    async Task SetDark(bool d)
+    {
+        dark = d;
+        await Remember(friends, dark);
+    }
+
+    async Task Run(string kind)
+    {
+        if (busy) return;
+        if (kind != "history" && NeedsName) { status = WebQuote.NeedName; statusError = true; return; }
+        busy = true;
+        try
+        {
+            var done = await Export(kind, friends, customer);
+            Rebuild();   // a saved quote's number and date, an invoice's number
+            statusError = done.Problem != null;
+            status = done.Problem ?? done.Status;
+            if (done.Problem == null)
+            {
+                if (kind == "text" && !await Store.CopyText(done.Text))
+                {
+                    statusError = true;
+                    status = L.S("The browser didn't allow copying. Select the text below and copy it yourself.",
+                                 "Browseren tillod ikke kopiering. Markér teksten og kopiér den selv.") + "\n\n" + done.Text;
+                }
+                if (kind == "print") printTitle = done.FileName;   // printed after this render (the new number on the page)
+            }
+        }
+        finally { busy = false; }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await Store.FitSheet();
+        if (printTitle != null)
+        {
+            string t = printTitle;
+            printTitle = null;
+            await Store.PrintSheet(t);
+        }
+    }
+
+    Task Close() { return OnClose.InvokeAsync(); }
+
+    async Task Key(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") await Close();
+    }
+}

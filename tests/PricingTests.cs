@@ -1860,6 +1860,69 @@ namespace PrintPrice.Tests
             True("Printers: distinct keys, FindPrinter finds each", tableOk);
         }
 
+        // Num.Kr / Num.N2 / Num.Round2: half-øre values round like .NET Framework's "N2" on every runtime.
+        // Part 1 (fixed strings) holds on .NET Framework and .NET 10 alike; part 2 compares with this runtime's
+        // own "N2", so it proves "desktop unchanged" only here on .NET Framework (on .NET 10 it would differ).
+        static void MoneyRoundingTests()
+        {
+            var dk = Num.Dk;
+            // 25.005 is stored as 25.00499999999999900524...; 15 digits give 25.0050000000000 -> half up -> 25,01
+            True("Kr 25.005 = 25,01 kr.", Num.Kr(25.005) == "25,01 kr.");
+            True("Kr 0.005 = 0,01 kr.", Num.Kr(0.005) == "0,01 kr.");          // 0.005000000000000000104 anyway
+            True("Kr 1.115 = 1,12 kr.", Num.Kr(1.115) == "1,12 kr.");          // stored 1.11499999999999999112
+            True("Kr 2.675 = 2,68 kr.", Num.Kr(2.675) == "2,68 kr.");          // stored 2.67499999999999982236
+            True("Kr 1.005 = 1,01 kr.", Num.Kr(1.005) == "1,01 kr.");          // stored 1.00499999999999989342
+            True("Kr -25.005 = -25,01 kr.", Num.Kr(-25.005) == "-25,01 kr.");  // away from zero
+            True("Kr -2.675 = -2,68 kr.", Num.Kr(-2.675) == "-2,68 kr.");
+            True("Kr -0.001 = 0,00 kr. (no minus zero)", Num.Kr(-0.001) == "0,00 kr.");
+            True("Kr 0 = 0,00 kr.", Num.Kr(0) == "0,00 kr.");
+            True("Kr 1234567.895 = 1.234.567,90 kr.", Num.Kr(1234567.895) == "1.234.567,90 kr.");
+            True("Kr 1000000000.125 = 1.000.000.000,13 kr.", Num.Kr(1000000000.125) == "1.000.000.000,13 kr.");   // exact .125, half up
+            True("Kr 31.2125 = 31,21 kr.", Num.Kr(31.2125) == "31,21 kr.");   // normal values unchanged
+            True("Kr 54.6975 = 54,70 kr.", Num.Kr(54.6975) == "54,70 kr.");
+            True("Kr 50 = 50,00 kr.", Num.Kr(50) == "50,00 kr.");
+            True("Kr 0.004 = 0,00 kr.", Num.Kr(0.004) == "0,00 kr.");
+            True("Kr 0.1 + 0.2 = 0,30 kr.", Num.Kr(0.1 + 0.2) == "0,30 kr.");
+            // 25.0049 x: a real non-midpoint below half stays down
+            True("Kr 25.0049 = 25,00 kr.", Num.Kr(25.0049) == "25,00 kr.");
+            True("Round2 25.005 = 25.01m", Num.Round2(25.005) == 25.01m);
+            True("Round2 -1.115 = -1.12m", Num.Round2(-1.115) == -1.12m);
+            True("N2 NaN falls back", Num.N2(double.NaN) == double.NaN.ToString("N2", dk));
+
+            // part 2 (desktop only): same text as .NET Framework's own "N2" for many values
+            int diffs = 0; string first = null;
+            var rnd = new Random(12345);
+            var vals = new List<double>();
+            for (int c = -200000; c <= 200000; c++) vals.Add(c / 1000.0);          // every 0,001 kr. in ±200 kr.
+            for (int c = 0; c < 20000; c++) vals.Add(c + 0.005);                   // half-øre values up to 20.000 kr.
+            for (int c = 0; c < 20000; c++) vals.Add(-(c * 7 + 0.005));
+            for (int c = 0; c < 50000; c++) vals.Add((rnd.NextDouble() - 0.5) * Math.Pow(10, rnd.Next(-4, 16)));
+            vals.Add(1e20); vals.Add(-123456789012.345); vals.Add(1e-7); vals.Add(-1e-7); vals.Add(0.0049999999999);
+            foreach (double v in vals)
+            {
+                string want = v.ToString("N2", dk) + " kr.";
+                if (Num.Kr(v) != want) { diffs++; if (first == null) first = v.ToString("R") + ": " + Num.Kr(v) + " vs " + want; }
+            }
+            True("Kr = .NET Framework N2 for " + vals.Count + " values" + (first != null ? " (first diff " + first + ")" : ""), diffs == 0);
+
+            // ShownOre: fixed values (both runtimes), then the old F2 formula on this runtime (desktop: unchanged)
+            True("ShownOre 25.005 = 2501", Pricing.ShownOre(25.005) == 2501);
+            True("ShownOre 2.675 = 268", Pricing.ShownOre(2.675) == 268);
+            True("ShownOre 1.115 = 112", Pricing.ShownOre(1.115) == 112);
+            True("ShownOre -25.005 = -2501", Pricing.ShownOre(-25.005) == -2501);
+            True("ShownOre 54.6975 = 5470", Pricing.ShownOre(54.6975) == 5470);
+            True("ShownOre 0 = 0", Pricing.ShownOre(0) == 0);
+            int oreDiffs = 0; string firstOre = null;
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            foreach (double v in vals)
+            {
+                if (Math.Abs(v) >= 1e16) continue;   // beyond long øre
+                long old = (long)decimal.Round(decimal.Parse(v.ToString("F2", inv), inv) * 100m);
+                if (Pricing.ShownOre(v) != old) { oreDiffs++; if (firstOre == null) firstOre = v.ToString("R") + ": " + Pricing.ShownOre(v) + " vs " + old; }
+            }
+            True("ShownOre = old F2 formula for the same values" + (firstOre != null ? " (first diff " + firstOre + ")" : ""), oreDiffs == 0);
+        }
+
         static int Main()
         {
             // Wear: printer 2099/3000 = 0.6997 + parts 600/1500 = 0.40 + hotend + plate
@@ -2508,6 +2571,7 @@ namespace PrintPrice.Tests
             SlicedProjectTests();
             BackupTests();
             OnlineBackupTests();
+            MoneyRoundingTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;

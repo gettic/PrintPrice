@@ -1,4 +1,4 @@
-﻿@* Settings (web): Prices, Printer, Language. Works on a copy; Save hands it back, Cancel / Esc drops it. *@
+@* Settings (web): Prices, Printer, Language. Works on a copy; Save hands it back, Cancel / Esc drops it. *@
 
 <div class="overlay" @onclick="Cancel">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" @onclick:stopPropagation="true" @onkeydown="Key">
@@ -106,7 +106,24 @@
                                        "Live-prisen kommer fra Energi Data Service gennem PrintPrices egen lille relæ-tjeneste (Cloudflare). Kun prisområdet sendes: ingen af dine tal eller indstillinger. Fra = siden spørger kun, når du klikker Opdatér.")</div>
             </div>
         }
-        else
+        else if (tab == TabQuote)
+        {
+            <div class="tab">
+                <h3>@L.S("Quote", "Tilbud")</h3>
+                <label>@L.S("Name on the quote", "Navn på tilbuddet")</label>
+                <input type="text" class="left" maxlength="40" @bind="work.QuoteName" @bind:event="oninput" />
+                <label>@L.S("Valid for", "Gyldigt i")</label>
+                <div class="field"><input type="text" inputmode="numeric" class="mid @BadDays(validDays, 3650)" @bind="validDays" @bind:event="oninput" /><span>@L.S("days", "dage")</span></div>
+                <h3>@L.S("Invoice", "Faktura")</h3>
+                <label>@L.S("Pay within", "Betalingsfrist")</label>
+                <div class="field"><input type="text" inputmode="numeric" class="mid @BadDays(dueDays, 365)" @bind="dueDays" @bind:event="oninput" /><span>@L.S("days", "dage")</span></div>
+                <label>@L.S("MobilePay number", "MobilePay-nummer")</label>
+                <input type="text" class="left" maxlength="40" placeholder="@L.S("optional", "valgfrit")" @bind="work.PayMobilePay" @bind:event="oninput" />
+                <label>@L.S("Bank account", "Bankkonto")</label>
+                <input type="text" class="left" maxlength="60" placeholder="@L.S("optional (reg. no. + account no.)", "valgfrit (reg.nr. + kontonr.)")" @bind="work.PayBank" @bind:event="oninput" />
+                <div class="help">@L.S("MobilePay and bank account are shown on invoices only when filled in.", "MobilePay og bankkonto vises kun på fakturaer, når de er udfyldt.")</div>
+            </div>
+        }        else
         {
             <div class="tab">
                 <h3>Sprog / Language</h3>
@@ -132,7 +149,7 @@
 </div>
 
 @code {
-    public const int TabPrices = 0, TabPrinter = 1, TabElectricity = 2, TabApp = 3;
+    public const int TabPrices = 0, TabPrinter = 1, TabElectricity = 2, TabQuote = 3, TabApp = 4;
 
     public class Result
     {
@@ -150,9 +167,9 @@
     AppSettings work;
     int tab;
     bool auto, reset, vat, autoPower;
-    string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem;
+    string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays;
 
-    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Language", "Sprog") }; } }
+    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), L.S("Language", "Sprog") }; } }
 
     Wear.Model Model { get { return Wear.FindModel(work.PrinterModel); } }
 
@@ -181,6 +198,7 @@
         name = s.PrinterName == Wear.FindModel(s.PrinterModel).Label ? "" : s.PrinterName;
         auto = s.AutoWearRate != 0;
         addOn = Num.Fmt(s.PowerAddOn); vat = s.PowerIncludeVat != 0; autoPower = s.AutoPowerPrice != 0;
+        validDays = Num.Fmt(s.QuoteValidDays); dueDays = Num.Fmt(s.InvoiceDueDays);
         problem = null;
     }
 
@@ -199,7 +217,7 @@
         return n.Label.Replace("stainless steel", "rustfrit stål").Replace("hardened steel", "hærdet stål");
     }
 
-    static string Kr2(double v) { return v.ToString("N2", Num.Dk); }
+    static string Kr2(double v) { return WebHistory.Amount(v); }
 
     static string Bad(string text)
     {
@@ -217,9 +235,9 @@
 
     async Task Save()
     {
-        double f, o, mi, ro, fa, wa, ra, ad;
+        double f, o, mi, ro, fa, wa, ra, ad, vd, dd;
         if (!Ok(friends, out f) || !Ok(others, out o) || !Ok(minimum, out mi) || !Ok(round, out ro) || !Ok(failed, out fa)
-            || !Ok(watts, out wa) || (!auto && !Ok(rate, out ra)) || !Ok(addOn, out ad))
+            || !Ok(watts, out wa) || (!auto && !Ok(rate, out ra)) || !Ok(addOn, out ad) || !Days(validDays, 3650, out vd) || !Days(dueDays, 365, out dd))
         {
             problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
             return;
@@ -228,11 +246,18 @@
         work.FriendsMarkupPct = f; work.OthersMarkupPct = o; work.MinimumPrice = mi; work.RoundTo = ro; work.FailedPrintPct = fa;
         work.PrinterWatts = wa; work.MachineRatePerHour = ra; work.AutoWearRate = auto ? 1 : 0;
         work.PowerAddOn = ad; work.PowerIncludeVat = vat ? 1 : 0; work.AutoPowerPrice = autoPower ? 1 : 0;
+        work.QuoteValidDays = vd; work.InvoiceDueDays = dd;
+        work.QuoteName = (work.QuoteName ?? "").Trim(); work.PayMobilePay = (work.PayMobilePay ?? "").Trim(); work.PayBank = (work.PayBank ?? "").Trim();
         work.PrinterName = AppSettings.CleanPrinterName(name.Trim().Length == 0 ? Model.Label : name);
         await OnClose.InvokeAsync(new Result { Settings = work, FilamentType = type, Reset = reset });
     }
 
     static bool Ok(string text, out double v) { return WebCalc.Read(text, out v) == FieldState.Ok; }
+
+    // quote validity / payment time: whole days, 1 to max (SettingsForm.ReadDays)
+    static bool Days(string text, double max, out double v) { return Ok(text, out v) && v >= 1 && v <= max && v == Math.Floor(v); }
+
+    static string BadDays(string text, double max) { double v; return Days(text, max, out v) ? "" : "invalid"; }
 
     Task Cancel() { return OnClose.InvokeAsync(null); }
 

@@ -145,6 +145,8 @@ else
                             <input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" @onchange="e => NoteChanged(rec, e)" /></label>
                         <button class="accent" @onclick="() => OpenAgain.InvokeAsync(rec)">@L.S("Open again", "Åbn igen")</button>
                         <button @onclick="() => Repeat.InvokeAsync(rec)">@L.S("Repeat print", "Print igen")</button>
+                        <button @onclick="() => Quote.InvokeAsync(rec)">@L.S("Quote…", "Tilbud…")</button>
+                        <button @onclick="() => Invoice.InvokeAsync(rec)">@L.S("Invoice…", "Faktura…")</button>
                         <button class="@(armed == rec ? "accent" : "")" @onclick="() => DeleteClicked(rec, rows)">@(armed == rec ? ConfirmText : L.S("Delete", "Slet"))</button>
                     </div>
                 }
@@ -161,6 +163,8 @@ else
         <button class="@(armed != null && armed == selected ? "accent" : "")" disabled="@(selected == null)"
                 @onclick="() => DeleteClicked(selected, rows)">@(armed != null && armed == selected ? ConfirmText : L.S("Delete", "Slet"))</button>
         <span class="grow"></span>
+        <button disabled="@(selected == null)" @onclick="() => Quote.InvokeAsync(selected)">@L.S("Quote…", "Tilbud…")</button>
+        <button disabled="@(selected == null)" @onclick="() => Invoice.InvokeAsync(selected)">@L.S("Invoice…", "Faktura…")</button>
         <button disabled="@(selected == null)" @onclick="() => Repeat.InvokeAsync(selected)">@L.S("Repeat print", "Print igen")</button>
         <button class="accent" disabled="@(selected == null)" @onclick="() => OpenAgain.InvokeAsync(selected)">@L.S("Open again", "Åbn igen")</button>
     </div>
@@ -179,8 +183,8 @@ else
 {
     <div class="hinfo warn" role="alert">@Problem</div>
 }
-<div class="hinfo">@L.S("Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them).",
-                       "Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem).")</div>
+<div class="hinfo">@L.S("Quote… makes a quote page for the selected print, Invoice… a bill (it ticks Printed). Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them).",
+                       "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (den sætter Printet). Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem).")</div>
 <div class="note">@L.S("Your history is kept in this browser only (about 1 KB per quote). Clearing the browser's site data deletes it.",
                        "Din historik gemmes kun i denne browser (ca. 1 KB pr. tilbud). Sletter du browserens webstedsdata, slettes den.")</div>
 
@@ -192,6 +196,9 @@ else
     [Parameter] public EventCallback Changed { get; set; }
     [Parameter] public EventCallback<QuoteRecord> OpenAgain { get; set; }
     [Parameter] public EventCallback<QuoteRecord> Repeat { get; set; }
+    /// Quote… / Invoice…: the saved quote's page (the Calculator opens it).
+    [Parameter] public EventCallback<QuoteRecord> Quote { get; set; }
+    [Parameter] public EventCallback<QuoteRecord> Invoice { get; set; }
     /// WebBackup.LastBackupValue of the newest backup ("" = never) and Backup… (the Backup dialog).
     [Parameter] public string LastBackup { get; set; }
     [Parameter] public EventCallback OpenBackup { get; set; }

@@ -36,9 +36,15 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 - **Restore** takes a `.printprice-backup` (from the site or the app), the app's `history.json`, or an online code. Choose **Merge** or **Replace**, and optionally **Also restore the settings**. A safety copy of what was there is kept first, and you can download it afterwards.
 - A **Last backup** line under the list reminds you to back up. It turns into a warning if you never backed up or the last backup is over 30 days old.
 
-It does less than the Windows app: no slicing and no invoices or quote pages.
+**Quote and invoice:** **Show quote…** on the calculator, and **Quote…** and **Invoice…** on the History tab, open the A4 page, like the app's.
+- Type the customer's name, choose the **Customers** or **Friends & family** price, and choose a **Dark** or **Light** look.
+- **Print / PDF…** opens the browser's print window. Choose "Save as PDF" there. It is always one light A4 page. **Copy text** copies the quote as text. **Save to history** saves it.
+- An invoice needs the customer's name. It gets its random invoice number when it is made, and ticks **Printed**.
+- **Settings → Quote & invoice** has the name on the quote, **Valid for**, **Pay within**, MobilePay and bank account. MobilePay and bank account show on invoices only when filled in.
 
-The site runs in your browser. It stores your settings and price history in the browser's own storage. Files you drop on it are read on your PC and never leave it. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
+It does less than the Windows app: no slicing.
+
+The site runs in your browser. It stores your settings and price history in the browser's own storage. Files you drop on it are read on your PC and never leave it. The only link you click is **GitHub** at the bottom, and nothing is sent before you click it.
 
 The one outside service the site calls is PrintPrice's small Cloudflare relay (`printprice.gtd-relay.workers.dev`). It is used for the live electricity price, where it is sent the price area (DK1 or DK2) and nothing else, and for online backup, and only when you use it. For online backup it gets only the locked copy and a storage id made from the code, never the code. Cloudflare sees your IP address, like any website does, and the relay keeps only a salted hash of it, as described under Privacy. Turn the live price off in **Settings → Electricity**: then the page only asks when you click **Update**.
 

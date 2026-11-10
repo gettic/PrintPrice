@@ -89,6 +89,14 @@ static class BackupTests
         WebBackup.ReadFile(Encoding.UTF8.GetBytes(json), out data);
         True("summary: " + WebBackup.Summary(data), WebBackup.Summary(data) == "Backup from 10-11-2026 15:00 (website): 8 quotes, with settings.");
 
+        // ---- the "no settings" note says what the file is ----
+        BackupData plain, noSet;
+        WebBackup.ReadFile(Encoding.UTF8.GetBytes(History.ToJson(list)), out plain);
+        WebBackup.ReadFile(Encoding.UTF8.GetBytes("{\"Format\":\"PrintPriceBackup\",\"Version\":1,\"CreatedAt\":\"2026-11-09 21:40:00\",\"App\":\"1.13.0\",\"History\":{\"Version\":1,\"Quotes\":[]},\"Settings\":null}"), out noSet);
+        True("history.json labelled as one", WebBackup.IsPlainHistory(plain) && WebBackup.NoSettingsText(plain).Contains("history.json"));
+        True("history-only backup labelled as a backup: " + WebBackup.NoSettingsText(noSet), noSet != null && noSet.Settings == null
+             && !WebBackup.IsPlainHistory(noSet) && !WebBackup.NoSettingsText(noSet).Contains("history.json") && !WebBackup.IsPlainHistory(data));
+
         // ---- restore = History.Combine ----
         string problem;
         var mine = HistoryTests.Samples();

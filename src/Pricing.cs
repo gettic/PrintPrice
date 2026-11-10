@@ -287,8 +287,7 @@ namespace PrintPrice
         /// The price shown in the app in øre: the same 2-decimal rounding as Num.Kr ("N2").
         public static long ShownOre(double price)
         {
-            return (long)decimal.Round(decimal.Parse(price.ToString("F2", CultureInfo.InvariantCulture),
-                CultureInfo.InvariantCulture) * 100m);
+            return (long)(Num.Round2(price) * 100m);   // same øre as Num.Kr shows, on .NET Framework and .NET 10
         }
 
         /// Line-by-line breakdown of one price (friends = friends & family price, else the customer price). The lines'

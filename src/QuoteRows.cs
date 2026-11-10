@@ -27,10 +27,10 @@ namespace PrintPrice
 
         static QuoteRow Sub(string label, string detail, long ore, int colourIndex)
         {
-            return new QuoteRow { Kind = QuoteRowKind.Sub, Label = label, Detail = detail ?? "", Amount = (ore / 100.0).ToString("N2", Num.Dk), ColourIndex = colourIndex };
+            return new QuoteRow { Kind = QuoteRowKind.Sub, Label = label, Detail = detail ?? "", Amount = Num.N2(ore / 100.0), ColourIndex = colourIndex };
         }
 
-        public static string N2(double v) { return v.ToString("N2", Num.Dk); }
+        public static string N2(double v) { return Num.N2(v); }
         public static string PerHour { get { return L.S(" kr/h", " kr/t"); } }   // units as in the windows: kr/kg, kr/kWh, kr/h
         public static string Time(int h, int m) { return L.F("{0} h {1} m", "{0} t {1} m", h, m); }
 

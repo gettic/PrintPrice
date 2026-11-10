@@ -1,0 +1,56 @@
+@* The A4 quote / invoice page (desktop QuotePage) as HTML: WebQuote.Draw's items, placed in the 1000-unit page the
+   desktop draws in, so the page looks the same. The box around it scales it to the screen (printPrice.fitSheet) and to A4
+   when printing (quote.css). Colours = the light or dark palette (quote.css); printing is always light. *@
+
+@{
+    var lay = WebQuote.Draw(Data, true);
+}
+<div class="qs-box">
+    <div class="qs-fit">
+        <div class="qs @(Dark ? "dark" : "light") @(Data.Breakdown.Friends ? "friends" : "customers")" style="height:@Px(lay.Height)">
+            @foreach (var i in lay.Items)
+            {
+                switch (i.Kind)
+                {
+                    case "rect":
+                        <div class="qi" style="@Box(i)background:var(--q-@i.Role)"></div>
+                        break;
+                    case "line":
+                        <div class="qi" style="@Box(i)background:var(--q-@i.Role)"></div>
+                        break;
+                    case "round":
+                        <div class="qi" style="@Box(i)border-radius:@Px(i.R);background:var(--q-@i.Role);border:@(i.Role2 == "line" ? "2px" : "1px") solid var(--q-@i.Role2)"></div>
+                        break;
+                    case "dot":
+                        <div class="qi qdot" style="@Box(i)background:@i.Colour;border-color:var(--q-@i.Role)"></div>
+                        break;
+                    case "logo":
+                        <img class="qi" src="icon-192.png" alt="" style="@Box(i)" />
+                        break;
+                    case "picture":
+                        <div class="qi qpic" style="@Box(i)padding:@Px(Math.Max(4, Math.Min(i.W, i.H) * 0.08))"><img src="@i.Text" alt="" /></div>
+                        break;
+                    case "wrap":
+                        <div class="qi qt qwrap" style="@Box(i)font-size:@Px(i.Size);color:var(--q-@i.Role)">@i.Text</div>
+                        break;
+                    default:
+                        <div class="qi qt @(i.Bold ? "b" : "") @(i.W > 0 ? "cut " + i.Align : "")"
+                             style="left:@Px(i.X);top:@Px(i.Y);@(i.W > 0 ? "width:" + Px(i.W) + ";" : "")font-size:@Px(i.Size);color:var(--q-@i.Role)">@i.Text</div>
+                        break;
+                }
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public WebQuote.Sheet Data { get; set; }
+    [Parameter] public bool Dark { get; set; }
+
+    static string Px(double v) { return v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "px"; }
+
+    static string Box(WebQuote.Item i)
+    {
+        return "left:" + Px(i.X) + ";top:" + Px(i.Y) + ";width:" + Px(i.W) + ";height:" + Px(i.H) + ";";
+    }
+}

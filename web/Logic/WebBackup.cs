@@ -79,6 +79,16 @@ namespace PrintPrice.Web
             return L.F("Backup from {0}{1}: {2}, {3}.", "Kopi fra {0}{1}: {2}, {3}.", when.Length > 0 ? when : "?", app, Quotes(d.Quotes.Count), set);
         }
 
+        /// A desktop history.json (no backup header: no time, no app) rather than a .printprice-backup.
+        public static bool IsPlainHistory(BackupData d) { return d != null && string.IsNullOrEmpty(d.CreatedAt) && string.IsNullOrEmpty(d.App); }
+
+        /// The note under "Also restore the settings" when the file has none, by what the file really is.
+        public static string NoSettingsText(BackupData d)
+        {
+            return IsPlainHistory(d) ? L.S("This file has no settings (a history.json).", "Filen har ingen indstillinger (en history.json).")
+                                     : L.S("This backup was made without the settings.", "Kopien blev lavet uden indstillingerne.");
+        }
+
         public static string MergeText(int here)
         {
             return here == 0 ? L.S("Merge: add the backup's quotes", "Flet: tilføj kopiens tilbud")

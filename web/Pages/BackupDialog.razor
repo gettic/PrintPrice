@@ -103,7 +103,7 @@
                     <label class="check"><input type="checkbox" checked="@(withSettings && Data.Settings != null)" disabled="@(Data.Settings == null)"
                                                 @onchange="e => withSettings = (bool)e.Value" />
                         <span>@L.S("Also restore the settings", "Gendan også indstillingerne")
-                            <span class="muted">@(Data.Settings == null ? L.S("This backup has no settings (a history.json).", "Kopien har ingen indstillinger (en history.json).")
+                            <span class="muted">@(Data.Settings == null ? WebBackup.NoSettingsText(Data)
                                                                          : L.S("Prices, printers and invoice details.", "Priser, printere og fakturaoplysninger."))</span></span></label>
                     <div class="@(replace && Quotes.Count > 0 ? "hinfo warn" : "hinfo")">@(replace && Quotes.Count > 0 ? WebBackup.ReplaceNote(Quotes.Count)
                         : L.S("A safety copy of this browser's history and settings is kept first; you can download it afterwards.",

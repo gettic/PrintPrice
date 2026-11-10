@@ -106,7 +106,14 @@ namespace PrintPrice.Web
 
         public static string GramsText(QuoteRecord r) { return Num.Fmt(r.Grams); }
 
-        public static string PriceText(QuoteRecord r) { return History.PriceFor(r).ToString("0.00", Num.Dk); }
+        public static string PriceText(QuoteRecord r) { return Amount(History.PriceFor(r)); }
+
+        /// A price without " kr." ("72,72"): Num.Kr's text, so every price on the site is rounded by the one function.
+        public static string Amount(double v)
+        {
+            string kr = Num.Kr(v);
+            return kr.EndsWith(" kr.", StringComparison.Ordinal) ? kr.Substring(0, kr.Length - 4) : kr;
+        }
 
         public static bool IsFriends(QuoteRecord r) { return r.For == History.ForFriends; }
 
@@ -228,7 +235,7 @@ namespace PrintPrice.Web
         public static List<Card> Cards(MonthTotals t)
         {
             Func<int, string> prints = n => n == 1 ? L.S("1 print", "1 print") : L.F("{0} prints", "{0} print", n);
-            Func<double, string> plain = v => v.ToString("N2", Num.Dk);
+            Func<double, string> plain = Amount;
             int minutes = (int)Math.Round(t.PrintHours * 60);
             string time = L.F("{0} h {1:00} m", "{0} t {1:00} m", minutes / 60, minutes % 60);
             string grams = t.Grams >= 1000 ? (t.Grams / 1000).ToString("0.00", Num.Dk) + " kg" : Math.Round(t.Grams).ToString("0", Num.Dk) + " g";
@@ -383,6 +390,14 @@ namespace PrintPrice.Web
             return h;
         }
 
+        /// The one-colour line of the job on screen: a job typed in by hand (no file, no reopened material) is saved with
+        /// Settings' filament profile as its name, as the desktop does (MainForm.SetColours: Profile = FilamentPreset), so
+        /// the quote shows the same material when reopened.
+        public static HistoryFilament JobMaterial(FilamentUse single, string materialName, AppSettings s, string filamentType)
+        {
+            return SingleMaterial(single, string.IsNullOrEmpty(materialName) ? s.FilamentPreset : materialName, filamentType);
+        }
+
         /// A colour's material name: the profile's base name, else its type, else "Colour N" (Calculator's rows).
         public static string MaterialName(FilamentUse f)
         {
@@ -406,7 +421,7 @@ namespace PrintPrice.Web
             DateTime t;
             string when = History.TryTime(r.SavedAt, out t) ? t.ToString(DateTimeFormat, Inv) : r.SavedAt;
             main = L.F("↻ Opened from history: {0}, saved {1}.", "↻ Åbnet fra historikken: {0}, gemt {1}.", RecordName(r), when);
-            Func<double, string> n = v => v.ToString("0.00", Num.Dk);
+            Func<double, string> n = Amount;
             string nowText = now != null ? n(now.FriendsPrice) + " / " + n(now.OthersPrice) + " kr." : "–";
             muted = L.F("Saved price {0} / {1} kr. — now {2} (today's settings)", "Gemt pris {0} / {1} kr. — nu {2} (dagens indstillinger)",
                         n(r.FriendsPrice), n(r.OthersPrice), nowText);

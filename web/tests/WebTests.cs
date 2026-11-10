@@ -98,6 +98,9 @@ static class WebTests
         // 10. stage 3b: backup and restore
         BackupTests.Run(True, Eq);
 
+        // 11. stage 4: quote and invoice page
+        QuoteTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

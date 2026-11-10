@@ -42,7 +42,37 @@ namespace PrintPrice
         }
 #endif
 
-        public static string Kr(double v) { return v.ToString("N2", Dk) + " kr."; }
+        /// Money with 2 decimals ("1.234,57 kr."), rounded like .NET Framework's "N2" on every runtime (see Round2).
+        public static string Kr(double v) { return N2(v) + " kr."; }
+
+        /// "N2" in da-DK, the same on .NET Framework (desktop) and .NET Core/10 (website). See Round2.
+        public static string N2(double v)
+        {
+            decimal d;
+            if (!TryRound2(v, out d)) return v.ToString("N2", Dk);   // NaN, infinity, beyond decimal: as before
+            return d.ToString("N2", Dk);
+        }
+
+        /// v rounded to 2 decimals the way .NET Framework's "N2"/"F2" does: first to 15 significant digits, then half
+        /// away from zero (25.005 -> 25.01, though the double is 25.00499...). .NET Core 3.0+ rounds the exact double
+        /// instead (25.00), so we do it by hand: "E14" gives the same 15 digits on both runtimes, the rest is decimal.
+        public static decimal Round2(double v)
+        {
+            decimal d;
+            if (!TryRound2(v, out d)) throw new System.OverflowException("Value can't be rounded to øre: " + v.ToString(CultureInfo.InvariantCulture));
+            return d;
+        }
+
+        static bool TryRound2(double v, out decimal d)
+        {
+            d = 0m;
+            if (double.IsNaN(v) || double.IsInfinity(v) || System.Math.Abs(v) >= 1e27) return false;
+            if (System.Math.Abs(v) < 1e-6) return true;   // 0,00 (and no tiny exponents for decimal.Parse)
+            decimal e = decimal.Parse(v.ToString("E14", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture);
+            d = decimal.Round(e, 2, System.MidpointRounding.AwayFromZero);
+            if (d == 0m) d = 0m;   // no "-0,00" (Framework drops the sign when it rounds to zero)
+            return true;
+        }
         public static string Fmt(double v) { return v.ToString("0.##", Dk); }
     }
 }

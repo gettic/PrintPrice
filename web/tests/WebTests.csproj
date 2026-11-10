@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <!-- Web tests: the linked price code + the web's Json / WebCalc on .NET 10, as the website runs them.
        Run:  dotnet run - -project web\tests   (only a .dll is built, no .exe) -->
@@ -31,6 +31,7 @@
     <Compile Include="..\..\src\Backup.cs" Link="Linked\Backup.cs" />
     <Compile Include="..\Logic\WebBackup.cs" Link="Web\WebBackup.cs" />
     <Compile Include="..\Logic\BackupCrypto.cs" Link="Web\BackupCrypto.cs" />
+    <Compile Include="..\Logic\WebQuote.cs" Link="Web\WebQuote.cs" />
     <Compile Include="..\..\src\OnlineBackup.cs" Link="Linked\OnlineBackup.cs" />
   </ItemGroup>
 
