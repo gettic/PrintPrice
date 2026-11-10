@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, ...; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -127,6 +127,70 @@ namespace PrintPrice
                         Snap(up, folder, "update_end.png");
                         up.Hide();
                     }
+
+                    // several printers (copies in memory, never saved): Choose printer with 1, 3 and 7 printers, the
+                    // Printer tab, History with the Printer column, then the main window after switching printer
+                    var month = new DateTime(2026, 10, 20);   // the sample quotes' month: tiles show their prints / profit
+                    var one = HistoryForm.SampleQuotes();
+                    using (var pick = new PrinterPickerForm(s, one, month))
+                        SnapForm(pick, folder, "printers_one.png");
+                    var multi = s.Clone();
+                    var mini = multi.AddPrinter("Kitchen mini", Wear.ModelA1Mini);
+                    var p1s = multi.AddPrinter("", Wear.ModelP1S);
+                    var pq = HistoryForm.SampleQuotes();
+                    for (int i = 0; i < pq.Count; i++)
+                    {
+                        var p = i % 3 == 1 ? mini : i % 3 == 2 ? p1s : multi.FindPrinter("1");
+                        pq[i].PrinterId = p.Id;
+                        pq[i].PrinterName = p.Name;
+                        pq[i].PrinterModel = p.Model;
+                    }
+                    using (var pick = new PrinterPickerForm(multi, pq, month))
+                    {
+                        SnapForm(pick, folder, "printers.png");
+                        pick.Show();
+                        pick.SampleFocus(1);   // keyboard focus on the second tile
+                        Snap(pick, folder, "printers_focus.png");
+                        pick.Hide();
+                    }
+                    var many = multi.Clone();
+                    many.AddPrinter("A1 #2 (garage)", Wear.ModelA1);
+                    many.AddPrinter("Mini for PETG", Wear.ModelA1Mini);
+                    many.AddPrinter("P1S #2", Wear.ModelP1S);
+                    many.AddPrinter("Spare A1", Wear.ModelA1);
+                    using (var pick = new PrinterPickerForm(many, pq, month))
+                    {
+                        Place(pick);
+                        pick.Show();
+                        pick.SampleScroll(150);   // partway down
+                        Snap(pick, folder, "printers_many.png");
+                        pick.Hide();
+                    }
+                    var setCopy = multi.Clone();
+                    var longName = setCopy.AddPrinter("", Wear.ModelA1Mini);   // "Bambu Lab A1 mini": the longest model name
+                    using (var set = new SettingsForm(setCopy))
+                    {
+                        set.ShowPrinter(longName.Id, false);
+                        SnapForm(set, folder, "settings_printers.png");
+                        // the Add… menu drawn over the window where it opens (a real menu would pop up on screen)
+                        set.Show();
+                        Snap(set, folder, "settings_add_menu.png", set.SampleAddMenu);
+                        set.Hide();
+                    }
+                    using (var hist = new HistoryForm(pq, null, true))
+                    {
+                        hist.Settings = multi;
+                        hist.QuoteRequested = (owner, rec, isInvoice) => { };
+                        Place(hist);
+                        hist.Show();
+                        hist.SelectMonth(new DateTime(2026, 10, 1));
+                        Snap(hist, folder, "history_printers.png");
+                        hist.Hide();
+                    }
+                    main.SetSampleJob();
+                    main.SetSamplePicture(sample);
+                    main.SampleSwitchPrinter(Wear.ModelA1Mini);   // card + warning stripe: sliced for the printer used before
+                    Snap(main, folder, "main_printer_changed.png");
                     main.Hide();
                 }
                 return 0;
@@ -163,12 +227,27 @@ namespace PrintPrice
             f.Location = new Point(all.Left - 4000, all.Top);
         }
 
+        /// Shows a form off-screen, takes its picture and hides it again.
+        static void SnapForm(Form f, string folder, string name)
+        {
+            Place(f);
+            f.Show();
+            Snap(f, folder, name);
+            f.Hide();
+        }
+
         static void Pump()
         {
             for (int i = 0; i < 8; i++) { Application.DoEvents(); Thread.Sleep(40); }
         }
 
         static void Snap(Form f, string folder, string name)
+        {
+            Snap(f, folder, name, null);
+        }
+
+        /// draw: paints extra things (an open menu) over the picture; its Point is the picture's top left on screen.
+        static void Snap(Form f, string folder, string name, Action<Graphics, Point> draw)
         {
             Pump();
             RedrawWindow(f.Handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0080 | 0x0100 | 0x0400);   // INVALIDATE|ALLCHILDREN|UPDATENOW|FRAME
@@ -187,6 +266,13 @@ namespace PrintPrice
                 bmp.Dispose();
                 bmp = next;
                 if (same) break;
+            }
+            if (draw != null)
+            {
+                RECT wr, fr;
+                GetWindowRect(f.Handle, out wr);
+                if (DwmGetWindowAttribute(f.Handle, 9, out fr, Marshal.SizeOf(typeof(RECT))) != 0) fr = wr;
+                using (var g = Graphics.FromImage(bmp)) draw(g, new Point(fr.Left, fr.Top));
             }
             using (bmp) bmp.Save(Path.Combine(folder, name), ImageFormat.Png);
         }

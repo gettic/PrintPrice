@@ -1003,6 +1003,328 @@ namespace PrintPrice.Tests
             return t;
         }
 
+        // ---------- several printers (ideas 7 + 24 + 11) ----------
+        static QuoteRecord PrinterRec(string id, string saved, int h, int m, double material, double power, double rate,
+                                      int forWho, double price, bool printed, bool failed)
+        {
+            return new QuoteRecord
+            {
+                Id = id + saved, PrinterId = id == null ? "" : id, SavedAt = saved, Hours = h, Minutes = m,
+                MaterialCost = material, PowerCost = power, MachineRatePerHour = rate, For = forWho,
+                FriendsPrice = price, OthersPrice = price, Printed = printed, Failed = failed
+            };
+        }
+
+        static void PrinterTests()
+        {
+            // wear per model (stock 0.4 stainless, PLA, smooth PEI):
+            // A1   2099/3000 = 0,6997 + 600/1500 = 0,40 + 139/500 = 0,278 + 200/600 = 0,3333 = 1,711 -> 1,71
+            // A1M  1599/3000 = 0,533 + 500/1500 = 0,3333 + 0,278 + 200 x 0,7 / 600 = 0,2333 = 1,3777 -> 1,38
+            // P1S  4199/3000 = 1,3997 + 800/1500 = 0,5333 + 0,278 + 0,3333 = 2,5443 -> 2,54
+            Eq("DefaultRateFor A1", 1.71, Wear.DefaultRateFor("A1"));
+            Eq("DefaultRateFor A1 mini", 1.38, Wear.DefaultRateFor("A1M"));
+            Eq("DefaultRateFor P1S", 2.54, Wear.DefaultRateFor("P1S"));
+            Eq("DefaultRateFor unknown = A1", 1.71, Wear.DefaultRateFor("X9"));
+            // A1M textured: 0,533 + 0,3333 + 0,278 + 150 x 0,7 / 1000 = 0,105 -> 1,2497 -> 1,25
+            Eq("wear A1 mini textured plate", 1.25, Wear.Calculate(Wear.FindModel("A1M"), Wear.FindNozzle("0.4 stainless"), false,
+                "PLA", Wear.FindPlate("Textured PEI Plate")).Total);
+            True("FindModel unknown/null -> A1", Wear.FindModel(null).Key == "A1" && Wear.FindModel("x").Key == "A1");
+
+            // settings in memory
+            var s = new AppSettings();
+            True("new settings: one printer '1' = the fields", s.PrinterCount == 1 && s.ActivePrinter.Id == "1"
+                 && s.ActivePrinter.Name == "Bambu Lab A1" && s.ActivePrinter.Model == "A1" && s.ActivePrinter.Watts == 100);
+            var mini = s.AddPrinter("", "A1M");
+            True("AddPrinter: id 2, model label, model watts", mini.Id == "2" && mini.Name == "Bambu Lab A1 mini"
+                 && mini.Watts == 70 && mini.AutoWearRate == 1 && s.PrinterCount == 2 && s.ActivePrinterId == "1");
+            Eq("AddPrinter A1 mini wear rate 1,38", 1.38, mini.MachineRatePerHour);
+            s.PrinterWatts = 95;                          // edit printer 1 through the fields
+            True("SelectPrinter 2", s.SelectPrinter("2") && s.ActivePrinterId == "2" && s.PrinterWatts == 70
+                 && s.PrinterModel == "A1M" && s.PrinterName == "Bambu Lab A1 mini");
+            True("printer 1 kept its edited watts", s.FindPrinter("1").Watts == 95);
+            True("SelectPrinter unknown -> false, unchanged", !s.SelectPrinter("9") && s.ActivePrinterId == "2");
+            var p2 = s.FindPrinter("2"); p2.Name = "  Mini  "; p2.Watts = 65;
+            True("SetPrinter active -> fields", s.SetPrinter(p2) && s.PrinterName == "Mini" && s.PrinterWatts == 65);
+            True("Printers are copies", s.Printers[1].Name == "Mini" && (s.Printers[1].Name = "x") == "x" && s.FindPrinter("2").Name == "Mini");
+            var c = s.Clone(); c.AddPrinter("P", "P1S"); c.SelectPrinter("1");
+            True("Clone: own printer list", c.PrinterCount == 3 && s.PrinterCount == 2 && s.ActivePrinterId == "2");
+            var p1s = s.AddPrinter("Big one", "P1S");
+            True("AddPrinter P1S id 3", p1s.Id == "3" && p1s.Watts == 130 && p1s.Name == "Big one");
+            True("RemovePrinter 3", s.RemovePrinter("3") && s.PrinterCount == 2);
+            True("ids never reused", s.AddPrinter("", "A1").Id == "4");
+            s.RemovePrinter("4");
+            True("RemovePrinter active 2 -> printer 1 active", s.RemovePrinter("2") && s.ActivePrinterId == "1" && s.PrinterWatts == 95);
+            True("RemovePrinter last -> false", !s.RemovePrinter("1") && s.PrinterCount == 1);
+
+            // settings file (bin\test-printers, never %APPDATA%)
+            string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-printers");
+            string file = System.IO.Path.Combine(dir, "settings.ini");
+            try
+            {
+                True("UseFolder test-printers", AppSettings.UseFolder(dir));
+                System.IO.Directory.CreateDirectory(dir);
+                // an old file (v1.8.0 keys only) -> one printer "1" with exactly its values
+                System.IO.File.WriteAllText(file, "SettingsVersion=2\r\nPrinterWatts=88\r\nMachineRatePerHour=1.5\r\nAutoWearRate=0\r\n"
+                    + "Nozzle=0.4 hardened\r\nBedType=Textured PEI Plate\r\nProcessPreset=0.20mm Standard\r\nPrinterName=My A1\r\n");
+                var old = AppSettings.Load();
+                var op = old.ActivePrinter;
+                True("old file -> one printer '1', active", old.PrinterCount == 1 && old.ActivePrinterId == "1" && op.Id == "1");
+                True("old file -> values kept", op.Name == "My A1" && op.Model == "A1" && op.Watts == 88 && op.MachineRatePerHour == 1.5
+                     && op.AutoWearRate == 0 && op.Nozzle == "0.4 hardened" && op.BedType == "Textured PEI Plate"
+                     && op.ProcessPreset == "0.20mm Standard" && old.PrinterWatts == 88);
+                // round trip: 2 printers, the second active
+                var mp = old.AddPrinter("Mini", "A1M");
+                mp.Watts = 66; mp.Nozzle = "0.2 stainless"; old.SetPrinter(mp);
+                old.SelectPrinter(mp.Id);
+                old.Save();
+                string text = System.IO.File.ReadAllText(file);
+                True("file: flat keys = printer 1, Printer.2.* lines", text.Contains("PrinterWatts=88\r\n") && text.Contains("PrinterName=My A1\r\n")
+                     && text.Contains("PrinterId=1\r\n") && text.Contains("Printer.2.PrinterWatts=66\r\n")
+                     && text.Contains("Printer.2.PrinterModel=A1M\r\n") && text.Contains("ActivePrinter=2\r\n"));
+                var back = AppSettings.Load();
+                True("round trip: 2 printers, active 2 in the fields", back.PrinterCount == 2 && back.ActivePrinterId == "2"
+                     && back.PrinterWatts == 66 && back.PrinterModel == "A1M" && back.Nozzle == "0.2 stainless" && back.PrinterName == "Mini");
+                True("round trip: printer 1 unchanged", back.FindPrinter("1").Watts == 88 && back.FindPrinter("1").Name == "My A1");
+                True("round trip: next id 3", back.AddPrinter("", "P1S").Id == "3");
+                // unknown active id -> first printer; bad Printer.x lines skipped
+                System.IO.File.WriteAllText(file, "PrinterWatts=90\r\nActivePrinter=7\r\nPrinter.x.PrinterWatts=1\r\nPrinter.5.Foo=1\r\n"
+                    + "Printer.5.PrinterWatts=120\r\nPrinter.5.PrinterModel=P1S\r\nLastPrinterId=6\r\n");
+                var odd = AppSettings.Load();
+                True("unknown active -> first; Printer.5 read; bad lines skipped", odd.ActivePrinterId == "1" && odd.PrinterWatts == 90
+                     && odd.PrinterCount == 2 && odd.FindPrinter("5").Watts == 120 && odd.FindPrinter("5").Model == "P1S");
+                True("LastPrinterId kept -> next id 7", odd.AddPrinter("", "A1").Id == "7");
+                // v1.8.0 run once rewrote the file without Printer.N / ActivePrinter / LastPrinterId (tester A):
+                // the history still has quotes of printers 2 and 5 -> the next new printer is 6, not 2
+                System.IO.File.WriteAllText(file, "SettingsVersion=2\r\nPrinterWatts=100\r\nPrinterName=Bambu Lab A1\r\n");
+                var lost = AppSettings.Load();
+                var lostHist = new List<QuoteRecord> { new QuoteRecord { PrinterId = "2" }, new QuoteRecord { PrinterId = "5" },
+                    new QuoteRecord(), new QuoteRecord { PrinterId = "x" }, null };
+                True("ReservePrinterIds: 2 and 5 in history -> raised", History.ReservePrinterIds(lostHist, lost) && lost.LastPrinterId == 5);
+                True("ReservePrinterIds again -> no change", !History.ReservePrinterIds(lostHist, lost));
+                True("after ReservePrinterIds: next id 6 (old quotes stay on their printers)", lost.AddPrinter("", "A1M").Id == "6");
+                True("ReservePrinterIds null list / settings -> false", !History.ReservePrinterIds(null, lost)
+                     && !History.ReservePrinterIds(lostHist, null));
+                True("ReservePrinterId lower or invalid -> no change", !lost.ReservePrinterId("3") && !lost.ReservePrinterId("0")
+                     && !lost.ReservePrinterId(null) && lost.LastPrinterId == 6);
+            }
+            finally
+            {
+                AppSettings.ClearTestFolder();
+            }
+
+            // history: FromQuote snapshots the active printer; old JSON -> "" = printer "1"
+            var hs = HistSettings(); hs.AddPrinter("Mini", "A1M"); hs.SelectPrinter("2");
+            var hr = History.FromQuote(Example(), Pricing.Calculate(Example(), hs), hs, "Benchy", "", new DateTime(2026, 11, 10, 9, 0, 0));
+            True("FromQuote: printer 2 snapshot", hr.PrinterId == "2" && hr.PrinterName == "Mini" && hr.PrinterModel == "A1M");
+            var hj = History.ParseJson(History.ToJson(new List<QuoteRecord> { hr }));
+            True("printer JSON round trip", hj != null && hj[0].PrinterId == "2" && hj[0].PrinterName == "Mini" && hj[0].PrinterModel == "A1M");
+            var ho = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\"},{\"Id\":\"b\",\"PrinterId\":null}]}");
+            True("old JSON: printer fields empty, PrinterOf = 1", ho != null && ho[0].PrinterId == "" && ho[0].PrinterName == ""
+                 && History.PrinterOf(ho[0]) == "1" && History.PrinterOf(ho[1]) == "1");
+
+            // profit per printer, November 2026:
+            // A printer 1, 2 h, 30 + 0,40, rate 2,50, customer 80 -> 80 - 30 - 0,40 - 5 = 44,60
+            // B printer 2, 1 h 30, 12 + 0,15, rate 1,80, friends 25 -> wear 2,70; 25 - 12 - 0,15 - 2,70 = 10,15
+            // C printer 2 failed, 1 h, 10 + 0,10 + 1,80 -> lost 11,90
+            // D old record (no id), 0 h 30, 8 + 0,05, rate 2,50, customer 50 -> wear 1,25; 50 - 8 - 0,05 - 1,25 = 40,70
+            // E printer 1 not printed -> nothing; F printer 3 (removed) in December: 1 h, 5 + 0,10, rate 1, customer 20 -> 13,90
+            // printer 1 = 44,60 + 40,70 = 85,30; printer 2 = 10,15 - 11,90 = -1,75; sum 83,55
+            var list = new List<QuoteRecord>
+            {
+                PrinterRec("3", "2026-12-02 10:00:00", 1, 0, 5, 0.10, 1, History.ForCustomer, 20, true, false),
+                PrinterRec("1", "2026-11-09 10:00:00", 3, 0, 40, 0.50, 2.5, History.ForCustomer, 99, false, false),
+                PrinterRec("2", "2026-11-08 10:00:00", 1, 0, 10, 0.10, 1.8, History.ForCustomer, 30, false, true),
+                PrinterRec("2", "2026-11-07 10:00:00", 1, 30, 12, 0.15, 1.8, History.ForFriends, 25, true, false),
+                PrinterRec("1", "2026-11-06 10:00:00", 2, 0, 30, 0.40, 2.5, History.ForCustomer, 80, true, false),
+                PrinterRec(null, "2026-11-01 10:00:00", 0, 30, 8, 0.05, 2.5, History.ForCustomer, 50, true, false),
+            };
+            list[0].PrinterName = "Old P1S"; list[0].PrinterModel = "P1S";
+            var ps = new AppSettings(); ps.AddPrinter("Mini", "A1M");
+            var nov = History.PrinterTotals(list, ps, 2026, 11);
+            True("PrinterTotals Nov: rows 1, 2 (no removed printer 3 this month)", nov.Count == 2 && nov[0].Id == "1" && nov[1].Id == "2"
+                 && nov[1].Name == "Mini" && !nov[0].Removed);
+            Eq("printer 1 profit 85,30", 85.30, nov[0].Profit);
+            Eq("printer 1 prints 2 (not printed one ignored)", 2, nov[0].Prints);
+            Eq("printer 1 wear 5 + 1,25", 6.25, nov[0].WearCost);
+            Eq("printer 2 profit -1,75", -1.75, nov[1].Profit);
+            Eq("printer 2 lost 11,90", 11.90, nov[1].Lost);
+            Eq("printer 2 prints 1, failed 1", 11, nov[1].Prints * 10 + nov[1].FailedPrints);
+            Eq("sum = MonthSummary 83,55", History.MonthSummary(list, 2026, 11).Profit, nov[0].Profit + nov[1].Profit);
+            Eq("MonthSummary printer 2 = row", -1.75, History.MonthSummary(list, 2026, 11, "2").Profit);
+            var all = History.PrinterTotals(list, ps, 0, 0);
+            True("PrinterTotals all time: removed printer 3 last, snapshot name", all.Count == 3 && all[2].Id == "3" && all[2].Removed
+                 && all[2].Name == "Old P1S" && all[2].Model == "P1S" && all[2].Month == 0);
+            Eq("printer 3 all time 20 - 5 - 0,10 - 1 = 13,90", 13.90, all[2].Profit);
+            Eq("all time sum 83,55 + 13,90 = 97,45", 97.45, all[0].Profit + all[1].Profit + all[2].Profit);
+            Eq("MonthSummary year 0 = all time 97,45", 97.45, History.MonthSummary(list, 0, 0).Profit);
+            var dec = History.PrinterTotals(list, ps, 2026, 12);
+            True("PrinterTotals Dec: printers 1 and 2 with 0, printer 3 removed", dec.Count == 3 && dec[0].Prints == 0
+                 && dec[1].Prints == 0 && dec[2].Prints == 1);
+            var noSet = History.PrinterTotals(list, null, 2026, 11);
+            True("PrinterTotals without settings: ids from records, not Removed", noSet.Count == 2 && noSet[0].Id == "1"
+                 && noSet[1].Id == "2" && !noSet[1].Removed);
+            True("PrinterTotals null list -> settings printers, 0", History.PrinterTotals(null, ps, 2026, 11).Count == 2);
+        }
+
+        // ---------- several printers: online's pure slicer functions (plans\several-printers\online tests.md) ----------
+        static bool Has(string text, params string[] parts)
+        {
+            if (text == null) return false;
+            foreach (var p in parts) if (text.IndexOf(p, StringComparison.Ordinal) < 0) return false;
+            return true;
+        }
+
+        static void SlicerPrinterTests()
+        {
+            L.Danish = false;
+            // 1. ModelKeyFromName
+            True("ModelKey A1", BambuSlicer.ModelKeyFromName("Bambu Lab A1") == "A1");
+            True("ModelKey A1 mini", BambuSlicer.ModelKeyFromName("Bambu Lab A1 mini") == "A1M");
+            True("ModelKey a1 MINI (case)", BambuSlicer.ModelKeyFromName("bambu lab a1 MINI") == "A1M");
+            True("ModelKey P1S", BambuSlicer.ModelKeyFromName("Bambu Lab P1S") == "P1S");
+            True("ModelKey A1 mini 0.4 nozzle", BambuSlicer.ModelKeyFromName("Bambu Lab A1 mini 0.4 nozzle") == "A1M");
+            True("ModelKey P1S 0.6 nozzle", BambuSlicer.ModelKeyFromName("Bambu Lab P1S 0.6 nozzle") == "P1S");
+            True("ModelKey ids N1/N2S/C12", BambuSlicer.ModelKeyFromName("N1") == "A1M" && BambuSlicer.ModelKeyFromName("N2S") == "A1"
+                 && BambuSlicer.ModelKeyFromName("C12") == "P1S");
+            True("ModelKey X1 Carbon / P1P -> \"\"", BambuSlicer.ModelKeyFromName("Bambu Lab X1 Carbon") == ""
+                 && BambuSlicer.ModelKeyFromName("Bambu Lab P1P") == "");
+            True("ModelKey empty/null -> null", BambuSlicer.ModelKeyFromName("") == null && BambuSlicer.ModelKeyFromName(null) == null);
+
+            // 2. FindPrinter / MachinePreset
+            True("MachinePreset A1M 0.4", BambuSlicer.MachinePreset("A1M", "0.4") == "Bambu Lab A1 mini 0.4 nozzle");
+            True("MachinePreset P1S 0.2", BambuSlicer.MachinePreset("P1S", "0.2") == "Bambu Lab P1S 0.2 nozzle");
+            True("MachinePreset \"\" 0.6 -> A1", BambuSlicer.MachinePreset("", "0.6") == "Bambu Lab A1 0.6 nozzle");
+            True("MachinePreset X9 -> A1", BambuSlicer.MachinePreset("X9", "0.4") == "Bambu Lab A1 0.4 nozzle");
+            True("MachinePreset old (nozzle only)", BambuSlicer.MachinePreset("0.4") == "Bambu Lab A1 0.4 nozzle");
+            True("FindPrinter a1m / null", BambuSlicer.FindPrinter("a1m").Key == "A1M" && BambuSlicer.FindPrinter(null).Key == "A1");
+            True("FindPrinter A1M bed 180 x 180", BambuSlicer.FindPrinter("A1M").BedX == 180 && BambuSlicer.FindPrinter("A1M").BedZ == 180);
+            True("FindPrinter P1S bed Z 250", BambuSlicer.FindPrinter("P1S").BedZ == 250);
+
+            // 3. ShortName
+            True("ShortName @BBL X1C", BambuSlicer.ShortName("0.20mm Standard @BBL X1C") == "0.20mm Standard");
+            True("ShortName @BBL A1M 0.2 nozzle", BambuSlicer.ShortName("0.20mm Standard @BBL A1M 0.2 nozzle") == "0.20mm Standard");
+            True("ShortName @BBL P1S 0.4 nozzle", BambuSlicer.ShortName("Bambu PLA Matte @BBL P1S 0.4 nozzle") == "Bambu PLA Matte");
+            True("ShortName @BBL A1", BambuSlicer.ShortName("Bambu PLA Basic @BBL A1") == "Bambu PLA Basic");
+            True("ShortName no suffix unchanged", BambuSlicer.ShortName("Bambu PLA Basic") == "Bambu PLA Basic");
+
+            // 4. ParseCompatiblePrinters
+            var cp = BambuSlicer.ParseCompatiblePrinters("{\"name\":\"x\",\"compatible_printers\":[\"Bambu Lab A1 0.4 nozzle\",\"Bambu Lab A1 0.6 nozzle\"]}");
+            True("ParseCompatiblePrinters 2 items", cp != null && cp.Count == 2 && cp[0] == "Bambu Lab A1 0.4 nozzle");
+            var cp2 = BambuSlicer.ParseCompatiblePrinters("{\"compatible_printers\": [\n \"Bambu Lab P1S 0.4 nozzle\"\n ]}");
+            True("ParseCompatiblePrinters multi-line 1 item", cp2 != null && cp2.Count == 1);
+            bool cpEmpty = true;
+            foreach (var j in new[] { "{\"compatible_printers\": []}", "{\"name\":\"x\"}", null, "not json" })
+            {
+                var l = BambuSlicer.ParseCompatiblePrinters(j);
+                if (l == null || l.Count != 0) cpEmpty = false;
+            }
+            True("ParseCompatiblePrinters empty/missing/null/bad -> 0, never null", cpEmpty);
+
+            // 5. PickProfile
+            True("PickProfile P1S filament", BambuSlicer.PickProfile(new[] { "Bambu PLA Matte @BBL X1C", "Bambu PLA Matte @BBL P1S 0.4 nozzle",
+                "Bambu PLA Basic @BBL X1C" }, "Bambu PLA Matte", "P1S", "0.4", false) == "Bambu PLA Matte @BBL P1S 0.4 nozzle");
+            True("PickProfile P1S filament fallback X1C", BambuSlicer.PickProfile(new[] { "Bambu PLA Basic @BBL P1P", "Bambu PLA Basic @BBL X1C" },
+                "Bambu PLA Basic", "P1S", "0.4", false) == "Bambu PLA Basic @BBL X1C");
+            True("PickProfile P1S process", BambuSlicer.PickProfile(new[] { "0.20mm Standard @BBL X1C", "0.20mm Strength @BBL X1C" },
+                "0.20mm Standard", "P1S", "0.4", true) == "0.20mm Standard @BBL X1C");
+            True("PickProfile A1 nozzle-specific wins", BambuSlicer.PickProfile(new[] { "Bambu PLA Palette @BBL A1", "Bambu PLA Palette @BBL A1 0.4 nozzle" },
+                "Bambu PLA Palette", "A1", "0.4", false) == "Bambu PLA Palette @BBL A1 0.4 nozzle");
+            True("PickProfile A1 0.6 -> plain A1", BambuSlicer.PickProfile(new[] { "Bambu PLA Matte @BBL A1" },
+                "Bambu PLA Matte", "A1", "0.6", false) == "Bambu PLA Matte @BBL A1");
+            True("PickProfile short is a full name", BambuSlicer.PickProfile(new[] { "Bambu PLA Matte @BBL A1M" },
+                "Bambu PLA Matte @BBL A1", "A1M", "0.4", false) == "Bambu PLA Matte @BBL A1M");
+            True("PickProfile no match -> null", BambuSlicer.PickProfile(new[] { "Bambu PETG HF @BBL A1" },
+                "Bambu PLA Matte", "A1", "0.4", false) == null);
+            True("PickProfile null list -> null", BambuSlicer.PickProfile(null, "Bambu PLA Matte", "A1", "0.4", false) == null);
+
+            // 6. ParseProjectPrinter
+            var pp = BambuSlicer.ParseProjectPrinter("{\"printer_model\":\"Bambu Lab A1 mini\",\"printer_settings_id\":\"Bambu Lab A1 mini 0.4 nozzle\","
+                + "\"nozzle_diameter\":[\"0.4\"]}", "<config><plate><metadata key=\"printer_model_id\" value=\"\"/></plate></config>");
+            True("ParseProjectPrinter CLI output -> A1M", pp != null && pp.Key == "A1M" && pp.Name == "Bambu Lab A1 mini" && pp.Nozzle == "0.4");
+            pp = BambuSlicer.ParseProjectPrinter("{\"printer_settings_id\":\"Bambu Lab P1S 0.6 nozzle\"}", null);
+            True("ParseProjectPrinter only settings id -> P1S", pp != null && pp.Key == "P1S" && pp.Name == "Bambu Lab P1S" && pp.Nozzle == "");
+            pp = BambuSlicer.ParseProjectPrinter("{\"printer_model\":\"Bambu Lab X1 Carbon\",\"nozzle_diameter\":[\"0.4\"]}", null);
+            True("ParseProjectPrinter unsupported X1 Carbon", pp != null && pp.Key == "" && pp.Name == "Bambu Lab X1 Carbon");
+            pp = BambuSlicer.ParseProjectPrinter(null, "<config><plate><metadata key=\"printer_model_id\" value=\"C12\"/><metadata "
+                + "key=\"nozzle_diameters\" value=\"0.4\"/></plate></config>");
+            True("ParseProjectPrinter GUI file C12 -> P1S", pp != null && pp.Key == "P1S" && pp.Name == "Bambu Lab P1S" && pp.Nozzle == "0.4");
+            True("ParseProjectPrinter nothing -> null", BambuSlicer.ParseProjectPrinter("{}", "<config><plate/></config>") == null
+                 && BambuSlicer.ParseProjectPrinter(null, null) == null);
+            bool ppThrew = false;
+            try { BambuSlicer.ParseProjectPrinter(null, "<config><plate"); } catch { ppThrew = true; }
+            True("ParseProjectPrinter bad XML -> no throw", !ppThrew);
+
+            // 7. error texts
+            True("BedErrorText A1M", Has(BambuSlicer.BedErrorText("A1M"), "Bambu Lab A1 mini", "180 × 180 × 180 mm", "plate in the file is empty"));
+            True("BedErrorText P1S", Has(BambuSlicer.BedErrorText("P1S"), "256 × 256 × 250 mm"));
+            True("BedErrorText \"\" -> A1", Has(BambuSlicer.BedErrorText(""), "Bambu Lab A1", "256 × 256 × 256 mm"));
+            True("SliceErrorText -50 = BedErrorText", BambuSlicer.SliceErrorText(-50, "a.stl", "One of the plate is empty…", "A1M")
+                 == BambuSlicer.BedErrorText("A1M"));
+            True("SliceErrorText -17 no message", BambuSlicer.SliceErrorText(-17, "a.stl", "", "A1") == "Bambu Studio could not slice a.stl: exit code -17");
+            True("SliceErrorText 1 with message", BambuSlicer.SliceErrorText(1, "a.stl", "boom", "A1") == "Bambu Studio could not slice a.stl: boom");
+            True("UnsupportedPrinterText X1 Carbon", Has(BambuSlicer.UnsupportedPrinterText("Bambu Lab X1 Carbon"), "Bambu Lab X1 Carbon",
+                "doesn't support yet", "https://github.com/gettic/PrintPrice/issues"));
+            True("UnsupportedPrinterText \"\"", Has(BambuSlicer.UnsupportedPrinterText(""), "another printer"));
+            L.Danish = true;
+            try
+            {
+                True("BedErrorText A1M Danish", Has(BambuSlicer.BedErrorText("A1M"), "byggepladen"));
+                True("UnsupportedPrinterText Danish", Has(BambuSlicer.UnsupportedPrinterText("X"), "https://github.com/gettic/PrintPrice/issues", "endnu"));
+            }
+            finally { L.Danish = false; }
+
+            // 7b. plate / filament clash (Bambu Studio 2.x CLI exit -61)
+            True("IsPlateError -61 + clash text", BambuSlicer.IsPlateError(-61, "Filaments are not compatible with the plate type. "
+                + "Please verify the slicing of all plates in Bambu Studio before uploading."));
+            True("IsPlateError -61 empty -> true", BambuSlicer.IsPlateError(-61, ""));
+            True("IsPlateError -61 other text -> false", !BambuSlicer.IsPlateError(-61, "something else"));
+            True("IsPlateError -50 -> false", !BambuSlicer.IsPlateError(-50, "One of the plate is empty…"));
+            string engPla = "Bambu PLA Matte can't be printed on the Engineering Plate (Bambu Studio doesn't allow it). "
+                + "Pick another build plate in Settings > Printer, or another filament.";
+            True("PlateErrorText Engineering + PLA Matte", BambuSlicer.PlateErrorText("Engineering Plate", new[] { "Bambu PLA Matte" }) == engPla);
+            var pe2 = BambuSlicer.PlateErrorText("High Temp Plate", new[] { "Bambu PLA Matte @BBL A1", "Bambu PETG HF", "Bambu PLA Matte" });
+            True("PlateErrorText short names, no duplicates, plate label", pe2 != null
+                 && pe2.StartsWith("Bambu PLA Matte, Bambu PETG HF can't be printed on the Smooth PEI / High Temp Plate", StringComparison.Ordinal));
+            var pe3 = BambuSlicer.PlateErrorText("", null);
+            True("PlateErrorText no plate/filaments", pe3 != null && pe3.StartsWith("The filament can't be printed on this build plate", StringComparison.Ordinal));
+            True("PlateErrorText unknown plate shown as is", Has(BambuSlicer.PlateErrorText("Odd Plate", new[] { "X" }), "on the Odd Plate"));
+            True("SliceErrorText -61 = PlateErrorText", BambuSlicer.SliceErrorText(-61, "a.stl", "Filaments are not compatible with the plate type. …",
+                "A1", "Engineering Plate", new[] { "Bambu PLA Matte" }) == BambuSlicer.PlateErrorText("Engineering Plate", new[] { "Bambu PLA Matte" }));
+            True("SliceErrorText 6 args -50 = BedErrorText", BambuSlicer.SliceErrorText(-50, "a.stl", "x", "A1M", "Engineering Plate", null)
+                 == BambuSlicer.BedErrorText("A1M"));
+            True("PlateTempKey all plates + unknown", BambuSlicer.PlateTempKey("Engineering Plate") == "eng_plate_temp"
+                 && BambuSlicer.PlateTempKey("High Temp Plate") == "hot_plate_temp"
+                 && BambuSlicer.PlateTempKey("Textured PEI Plate") == "textured_plate_temp"
+                 && BambuSlicer.PlateTempKey("Cool Plate") == "cool_plate_temp"
+                 && BambuSlicer.PlateTempKey("Supertack Plate") == "supertack_plate_temp"
+                 && BambuSlicer.PlateTempKey("x") == "");
+            L.Danish = true;
+            try
+            {
+                True("PlateErrorText Danish", BambuSlicer.PlateErrorText("Engineering Plate", new[] { "Bambu PLA Matte" })
+                     == "Bambu PLA Matte kan ikke printes på Engineering Plate (Bambu Studio tillader det ikke). "
+                     + "Vælg en anden byggeplade i Indstillinger > Printer, eller et andet filament.");
+            }
+            finally { L.Danish = false; }
+
+            // 8. printer table
+            True("Thumb n2s / n1 / p1s", BambuSlicer.FindPrinter("A1").Thumb == "n2s" && BambuSlicer.FindPrinter("A1M").Thumb == "n1"
+                 && BambuSlicer.FindPrinter("P1S").Thumb == "p1s");
+            bool picThrew = false; string pic1 = "x", pic2 = "x";
+            try
+            {
+                pic1 = BambuSlicer.PrinterPicture(null, "A1");
+                pic2 = BambuSlicer.PrinterPicture(@"C:\nowhere\bambu-studio.exe", "P1S");
+            }
+            catch { picThrew = true; }
+            True("PrinterPicture null exe / missing exe -> null, no throw", !picThrew && pic1 == null && pic2 == null);
+            bool tableOk = true;
+            var keys = new HashSet<string>();
+            foreach (var p in BambuSlicer.Printers)
+                if (!keys.Add(p.Key) || BambuSlicer.FindPrinter(p.Key) != p) tableOk = false;
+            True("Printers: distinct keys, FindPrinter finds each", tableOk);
+        }
+
         static int Main()
         {
             // Wear: printer 2099/3000 = 0.6997 + parts 600/1500 = 0.40 + hotend + plate
@@ -1612,6 +1934,8 @@ namespace PrintPrice.Tests
             PaybackTests();
             QuoteTests();
             InvoiceTests();
+            PrinterTests();
+            SlicerPrinterTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;

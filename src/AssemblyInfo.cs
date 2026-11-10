@@ -6,8 +6,8 @@ using System.Reflection;
 [assembly: AssemblyDescription("Price quotes for 3D prints on a Bambu Lab A1")]
 [assembly: AssemblyCompany("Gettic")]
 [assembly: AssemblyCopyright("Copyright © 2026 Gettic")]
-[assembly: AssemblyVersion("1.8.0.0")]
-[assembly: AssemblyFileVersion("1.8.0.0")]
+[assembly: AssemblyVersion("1.9.0.0")]
+[assembly: AssemblyFileVersion("1.9.0.0")]
 
 namespace PrintPrice
 {

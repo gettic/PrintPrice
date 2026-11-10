@@ -77,12 +77,44 @@ namespace PrintPrice
         public QuoteResult Result;        // the full Pricing.Calculate result
     }
 
-    /// Estimated wear & tear for a Bambu Lab A1 per print hour, depending on nozzle, filament and build plate.
+    /// Estimated wear & tear per print hour, depending on the printer model, nozzle, filament and build plate.
     public static class Wear
     {
+        // Bambu Lab A1 (Models[0]); the other models are in Models.
         public const double PrinterPriceDkk = 2099, PrinterLifeHours = 3000;   // printer paid off before it is worn out or outdated
         // parts and upkeep: PTFE tube, wiper, cutter, belts, extruder gears, rods/bearings, grease, IPA, glue stick, shipping
         public const double PartsPriceDkk = 600, PartsLifeHours = 1500;
+
+        public const string ModelA1 = "A1", ModelA1Mini = "A1M", ModelP1S = "P1S";
+
+        /// A printer model: its own printer and parts cost, hotend/plate price factors (x the Nozzles / Plates prices,
+        /// which are the A1's) and typical power use (W) for a new printer of this model.
+        public class Model
+        {
+            public string Key, Label;
+            public double PrinterPriceDkk, PrinterLifeHours, PartsPriceDkk, PartsLifeHours;
+            public double HotendFactor = 1, PlateFactor = 1;
+            public double DefaultWatts;
+        }
+
+        public static readonly Model[] Models =
+        {
+            new Model { Key = ModelA1, Label = "Bambu Lab A1", PrinterPriceDkk = PrinterPriceDkk, PrinterLifeHours = PrinterLifeHours,
+                        PartsPriceDkk = PartsPriceDkk, PartsLifeHours = PartsLifeHours, DefaultWatts = 100 },
+            // smaller 180 mm plate (~70 % of the A1 plate's price), same hotend as the A1
+            new Model { Key = ModelA1Mini, Label = "Bambu Lab A1 mini", PrinterPriceDkk = 1599, PrinterLifeHours = 3000,
+                        PartsPriceDkk = 500, PartsLifeHours = 1500, PlateFactor = 0.7, DefaultWatts = 70 },
+            // enclosed CoreXY: carbon rods, belts, chamber/aux fans and filters in the parts
+            new Model { Key = ModelP1S, Label = "Bambu Lab P1S", PrinterPriceDkk = 4199, PrinterLifeHours = 3000,
+                        PartsPriceDkk = 800, PartsLifeHours = 1500, DefaultWatts = 130 },
+        };
+
+        /// The model with this key; unknown or empty = A1.
+        public static Model FindModel(string key)
+        {
+            foreach (var m in Models) if (m.Key == key) return m;
+            return Models[0];
+        }
 
         public class Nozzle
         {
@@ -148,25 +180,39 @@ namespace PrintPrice
             public double Total { get { return Math.Round(Printer + Parts + Hotend + Plate, 2); } }
         }
 
+        /// Bambu Lab A1 (unchanged formula).
         public static Breakdown Calculate(Nozzle n, bool abrasive, string filamentType, Plate p)
         {
+            return Calculate(Models[0], n, abrasive, filamentType, p);
+        }
+
+        /// Wear of this model (null = A1): printer + parts + hotend x HotendFactor + plate x PlateFactor, per hour.
+        public static Breakdown Calculate(Model m, Nozzle n, bool abrasive, string filamentType, Plate p)
+        {
+            if (m == null) m = Models[0];
             var b = new Breakdown();
-            b.Printer = PrinterPriceDkk / PrinterLifeHours;
-            b.Parts = PartsPriceDkk / PartsLifeHours;
+            b.Printer = m.PrinterPriceDkk / m.PrinterLifeHours;
+            b.Parts = m.PartsPriceDkk / m.PartsLifeHours;
             b.HotendLife = HotendLifeHours(n.Hardened, abrasive);
-            b.Hotend = n.PriceDkk / b.HotendLife;
+            b.Hotend = n.PriceDkk * m.HotendFactor / b.HotendLife;
             b.PlateHalved = HarshOnPlate(p, filamentType);
             b.PlateLife = b.PlateHalved ? p.LifeHours / 2 : p.LifeHours;
-            b.Plate = p.PriceDkk / b.PlateLife;
+            b.Plate = p.PriceDkk * m.PlateFactor / b.PlateLife;
             b.Abrasive = abrasive;
             b.AbrasiveOnStainless = abrasive && !n.Hardened;
             return b;
         }
 
-        /// Stock setup: 0.4 stainless nozzle, PLA, smooth PEI plate.
+        /// Stock setup: 0.4 stainless nozzle, PLA, smooth PEI plate (A1).
         public static double DefaultRate
         {
             get { return Calculate(Nozzles[0], false, "PLA", Plates[0]).Total; }
+        }
+
+        /// Stock setup (0.4 stainless, PLA, smooth PEI) for this model key (unknown = A1).
+        public static double DefaultRateFor(string modelKey)
+        {
+            return Calculate(FindModel(modelKey), Nozzles[0], false, "PLA", Plates[0]).Total;
         }
     }
 

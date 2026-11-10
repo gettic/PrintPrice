@@ -24,6 +24,10 @@ namespace PrintPrice
         public static readonly Color InfoBack = Color.FromArgb(42, 45, 50);
         public static readonly Color InfoAccent = Color.FromArgb(150, 30, 35);    // dark red
         public static readonly Color Warning = Color.FromArgb(240, 180, 70);
+        public static readonly Color HotBack = Color.FromArgb(52, 55, 60);       // hover fill of cards / tiles (printer card, Choose printer)
+        public static readonly Color HotBorder = Color.FromArgb(110, 110, 116);  // hover / focus frame (combos, cards, tiles)
+        public static readonly Color ScrollTrack = Color.FromArgb(34, 36, 41);   // slim red scroll bar's track (thumb InfoAccent, Others when hot)
+        public static readonly Color ArtDark = Color.FromArgb(105, 105, 108);    // darker parts of the drawn printers (PrinterArt)
 
         /// Customer-facing quote page (QuotePage), light look: printed / sent, so it is NOT the app's dark theme.
         /// The dark quote look uses the app colours above (Back, InfoBack, Border, Text, Muted, InfoAccent, Others, Friends).
@@ -693,6 +697,7 @@ namespace PrintPrice
             MaximumSize = new Size(width, 0);
             MinimumSize = new Size(width, 0);
             label.MaximumSize = new Size(InnerWidth, 0);
+            if (link != null) link.MaximumSize = new Size(InnerWidth, 0);
             if (grid != null) grid.MinimumSize = new Size(InnerWidth, 0);
             if (note != null) note.MaximumSize = new Size(InnerWidth, 0);
         }
@@ -722,7 +727,27 @@ namespace PrintPrice
         {
             if (grid != null) { Controls.Remove(grid); grid.Dispose(); grid = null; }
             if (note != null) { Controls.Remove(note); note.Dispose(); note = null; }
+            if (link != null) { Controls.Remove(link); link.Dispose(); link = null; }
             noteMuted = false;
+        }
+
+        Theme.LinkText link;   // optional clickable line under the text (SetLink)
+
+        /// Adds a clickable, underlined line under the text (e.g. a web address in an error), in Theme.Text also in
+        /// an error box. Setting Text, SetText or SetTable removes it again.
+        public void SetLink(string text, Action click)
+        {
+            if (label == null || string.IsNullOrEmpty(text)) return;
+            SuspendLayout();
+            if (link != null) { Controls.Remove(link); link.Dispose(); }
+            link = new Theme.LinkText { Text = text, AutoSize = true, Margin = new Padding(0, 3, 0, 0), UseMnemonic = false,
+                                        MaximumSize = new Size(InnerWidth, 0) };
+            link.Font = SharedFont(fontSize, FontStyle.Underline);
+            if (click != null) link.Click += delegate { click(); };
+            Controls.Add(link, 0, 3);
+            Visible = true;
+            ApplyTheme();
+            ResumeLayout(true);
         }
 
         bool noteMuted;   // the note is a muted second line (SetText), not a table note
@@ -851,6 +876,7 @@ namespace PrintPrice
             ColorTree(this, fore);
             if (note != null && noteMuted) note.ForeColor = Theme.Muted;
             else if (note != null && kind != InfoKind.Info) note.ForeColor = Accent;   // warnings stand out under the table
+            if (link != null) link.ForeColor = Theme.Text;
             Invalidate();
         }
 

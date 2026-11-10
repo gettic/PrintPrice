@@ -5,7 +5,7 @@
 > [!NOTE]
 > **AI disclaimer:** This app, including its code, logo and documentation, was made with the help of AI. It has been tested, but it may still contain mistakes. The prices it calculates are estimates, so check them before you send a quote.
 
-A small dark-mode Windows app that turns a 3D print job into two price quotes: one for **friends & family** and one for **customers**. It's made for the **Bambu Lab A1** and Danish prices (DKK).
+A small dark-mode Windows app that turns a 3D print job into two price quotes: one for **friends & family** and one for **customers**. It's made for the **Bambu Lab A1**, **A1 mini** and **P1S**, and Danish prices (DKK).
 
 <p align="center"><img src="assets/screenshot-multicolour.png" width="480" alt="Screenshot"></p>
 
@@ -17,21 +17,33 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 **Optional:** install [Bambu Studio](https://bambulab.com/en/download/studio) to detect print time and filament use automatically.
 
 ## Features
-- **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with A1 profiles.
+- **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with the profiles of the printer in use.
   - **Other sites** (MakerWorld, Thingiverse…) block automatic downloads. Download the STL/3MF yourself and drop it on the window instead.
-  - **Already-sliced `.gcode.3mf` files** are read instantly, without slicing again.
+  - **Already-sliced `.gcode.3mf` files** are read instantly, without slicing again. A file sliced for another of the supported printers is priced, with a warning.
+  - **Printers PrintPrice doesn't support yet:** a sliced file made for another printer (for example X1 Carbon or H2D) is not priced. You can ask for your printer to be added by opening an issue at [github.com/gettic/PrintPrice/issues](https://github.com/gettic/PrintPrice/issues). The message has the link.
+  - **Model too big:** if the model doesn't fit the printer (or a plate in the file is empty), the message says so and shows the build volume: A1 256 × 256 × 256 mm, A1 mini 180 × 180 × 180 mm, P1S 256 × 256 × 250 mm.
+  - **Plate and filament:** if Bambu Studio won't print a filament on the chosen build plate, the message names the filament and the plate. Pick another plate in Settings > Printer, or another filament.
   - **Multi-colour prints:** if the model uses 2 or more filaments, the Cost breakdown shows one row per colour with its own kr/kg box. A line below shows the purge waste and the time spent on colour changes (for example "incl. 124 g purge · 8,7 h colour changes"). With more than 4 colours the rest are grouped in one "+N more" row. Colours for which the sliced file names no real filament (empty, or just generic PLA) get the filament chosen in Settings (default Bambu PLA Matte). Filaments the file names are kept. If you pick several model files, they are added together. **Filament used** becomes the read-only total.
   - **Empty link:** if you press **Get time & weight** with an empty link box, a red "Paste a link or load a file first" hint shows in the box. After 10 seconds the grey example link comes back. The empty box says "Paste a Printables link, or press Enter for an example". Pressing Enter there slices a 4-colour Benchy straight away, without the file picker, and gets its time and weight, so you can see the multi-colour rows.
   - **Model picture:** a small picture of the model shows under the Model link: the Printables photo, or the picture inside a `.3mf`. After slicing, it switches to Bambu's render of the plate. Without a model it shows the logo.
-- **Open in Studio:** after a successful slice, the **Get time & weight** button becomes **Open in Studio**. It opens the sliced file in Bambu Studio's Prepare tab with the A1 profiles. Click **Slice plate** there before you print. If you used several model files, the first one opens. An already-sliced `.gcode.3mf` opens your own file. Editing the link, **Clear**, **Load file…**, opening a quote from History or changing the slicing settings turns the button back into **Get time & weight**. Enter in the link box does what the button shows.
-- **Material rows with remembered prices:** the Cost breakdown starts with one material row per colour (one row for a one-colour print). Each row has a colour swatch, a drop-down with the full filament name (Bambu Studio's A1 filament profiles), the grams, and a kr/kg box. Picking another material changes only that row and fills in its last kr/kg, with no new slicing. The app remembers one kr/kg price per filament (for example Bambu PLA Matte = 200). A filament you have never priced uses the last filament price. The filament chosen in Settings is the default for new slices.
-- **Printer card:** under the link, right of the print time and electricity rows, a card shows the Bambu Lab A1 and its power ("Bambu Lab A1 · 100 W"). The photo comes from your installed Bambu Studio, otherwise a drawn A1 is shown. Click it to open Settings.
+- **Open in Studio:** after a successful slice, the **Get time & weight** button becomes **Open in Studio**. It opens the sliced file in Bambu Studio's Prepare tab with the same printer profiles. Click **Slice plate** there before you print. If you used several model files, the first one opens. An already-sliced `.gcode.3mf` opens your own file. Editing the link, **Clear**, **Load file…**, opening a quote from History or changing the slicing settings turns the button back into **Get time & weight**. Enter in the link box does what the button shows.
+- **Material rows with remembered prices:** the Cost breakdown starts with one material row per colour (one row for a one-colour print). Each row has a colour swatch, a drop-down with the full filament name (Bambu Studio's filament profiles for the printer in use), the grams, and a kr/kg box. Picking another material changes only that row and fills in its last kr/kg, with no new slicing. The app remembers one kr/kg price per filament (for example Bambu PLA Matte = 200). A filament you have never priced uses the last filament price. The filament chosen in Settings is the default for new slices.
+- **Several printers:** add a Bambu Lab A1, A1 mini or P1S, as many as you like. Each printer has its own name, nozzle, print profile, build plate, power and wear rate. Markups, minimum price, failed prints, electricity and filament prices are the same for all printers.
+  - **Printer card:** right of the print time and electricity rows, a card shows the printer in use and its power ("Bambu Lab A1 · 100 W"). The photo comes from your installed Bambu Studio, otherwise a drawn printer is shown.
+  - **Choose printer:** click the card to open this window. It has a tile per printer with its picture, name, model, nozzle and plate, wear rate and power, and this month's prints and profit. Click a tile (or use the arrow keys and Enter) to use that printer for this quote and the next ones. With many printers the tiles scroll.
+  - **Add printer…** in that window opens Settings to add one, and puts it in use. **Printer settings…** opens Settings > Printer.
+  - **Changing printer after slicing:** a yellow note asks you to get time & weight again for the new printer.
+
+<p align="center"><img src="assets/screenshot-printers.png" width="480" alt="Screenshot of the Choose printer window"></p>
+
 - **Live electricity price:** the current 15-minute spot price for DK1/DK2 comes from Energinet's free [Energi Data Service](https://www.energidataservice.dk/). The app adds your tariffs, taxes and fees, then 25 % VAT.
-- **Wear & tear:** a machine-time rate is worked out from the chosen **nozzle**, **filament** and **build plate**. It is added to both prices.
+- **Wear & tear:** a machine-time rate is worked out from the printer in use and the chosen **nozzle**, **filament** and **build plate**. It is added to both prices.
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Failed prints:** optional. Set a % in Settings and material and power are raised by it for failed prints and reprints, before the markup. The default is 0 % (off). When it is above 0, the Cost breakdown shows a "Failed prints" line.
 - **Failed prints payback:** on by default. In the price history, tick **Failed** on a saved quote. With **Earn back failed prints** on in Settings, new quotes get a payback of 10 % (**% per quote**) of material + power until the failed print's material, power and wear are made back. It never adds more than what is left. It is shown as **Failed prints payback** in the Cost breakdown, is not marked up, and is added after the minimum price and before rounding. **Paid by** is **Customers only** (default; only quotes saved For = Customer count) or **Both prices**. Settings shows **Not made back yet**. A saved quote counts as sold, so delete quotes you didn't sell.
-- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (nozzle, print profile, filament, build plate, wear rate), **Electricity** (price area, tariffs and fees, VAT, printer power and name), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank) and **App** (language, update check, Bambu Studio path). Clicking the printer card opens the Printer tab. **Printer name** is shown on the printer card and the quote.
+- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank) and **App** (language, update check, Bambu Studio path).
+  - On the **Printer** tab, the **Printer** drop-down picks which printer you edit; the one in use is marked "(in use)". **Add…** adds an A1, A1 mini or P1S with that model's defaults. **Remove** removes the printer shown (only when you have 2 or more).
+  - Each printer's **Name** is shown on the printer card and the quote. Left empty, the model name is used. The filament profile is the same for all printers.
 - **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
 - **Quote page:** **Show quote…** opens a window with a live preview of an A4 quote page: logo, model picture, print time, weight, printer, material, a full price breakdown (material per colour, electricity, machine wear split into printer / spare parts / nozzle / build plate, "Work & handling", and failed prints payback, minimum price or rounding when used), the total, a quote number, a valid-until date and small print.
   - **For:** an optional customer name (recent names from the history are offered).
@@ -46,13 +58,15 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 
 - **Price history:** **Save to history** saves the quote (the status line shows "Saved to history."). **History…** (next to **Load file…**) lists the saved quotes.
   - **Month** picker (all months or one month, ‹ › to step) with six cards for that month: prints and failed prints, print time and filament, customers, friends & family, costs (material + power + wear) and profit with % of income.
+  - **Printer:** every saved quote keeps its printer. Quotes saved before there were several printers count as your first printer. With 2 or more printers, the list gets a **Printer** column and a **Printer** filter. With one printer picked, the cards show that printer's totals (**All months** = all time). With **All printers**, the Profit card's tooltip lists the profit per printer. A removed printer is shown as "(removed)".
+  - Profit per printer = price − material − power − that printer's wear. A failed print counts as a loss on its own printer.
   - You can search and filter the list. One **Price** column shows the friends & family or the customer price, following each row's **For** choice (Customer by default).
   - **For** and **Note** can be edited in the list and are saved at once. **Delete** asks for a second click.
   - **Printed** and **Failed** are tick columns. Click to tick. Quotes saved before **Printed** existed count as printed. Failed quotes feed the payback (see Failed prints payback above).
   - **Quote…** opens the quote page of a saved quote with its saved prices.
   - **Invoice…** makes a bill: the title is Invoice, with a random invoice code (for example 2026-K7Q4), the invoice date and a due date. A customer name is required ("Bill to"). A **Payment** block with MobilePay and/or bank details shows only if you set them in Settings. Making an invoice ticks **Printed**. The code shows in the **Invoice** column. The due date and payment details are kept with the invoice.
   - **Repeat print** prices the same print again with today's filament and electricity prices and slices the saved link or file again. If that isn't possible, the saved time and weight are used, with a note. The info box shows "Was … → now …". A repeat is never merged with its original.
-  - **Open again** (or double-click, or Enter) puts the inputs back, including the filament name and colour, and recalculates with today's settings. The model box shows the saved price next to today's.
+  - **Open again** (or double-click, or Enter) puts the inputs back, including the filament name and colour, and recalculates with today's settings. The model box shows the saved price next to today's. Open again and **Repeat print** switch back to the quote's printer, if you still have it.
   - All actions are also in the right-click menu.
   - The same quote saved again within 10 minutes replaces the last one. The newest 5000 quotes are kept.
   - Saved quote and invoice files are named `<date> <model> - <name>`.
@@ -72,23 +86,31 @@ Customers  = Base × (1 + customer markup) + hours × machine-time rate   (at le
 ```
 The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr. Failed prints are 0 % by default and do not affect the machine-time rate. The failed prints payback (on by default) is added to the price after the minimum price and before rounding.
 
-**Machine-time rate** (kr per print hour):
+**Machine-time rate** (kr per print hour, for the printer in use):
 
 | Part | How it's calculated |
 |---|---|
-| Printer | 2.099 kr. ÷ 3.000 h |
-| Parts and upkeep (PTFE tube, wiper, cutter, belts, extruder gears, rods/bearings, grease, IPA, glue stick, shipping) | 600 kr. ÷ 1.500 h |
+| Printer | printer price ÷ 3.000 h (see the table below) |
+| Parts and upkeep (PTFE tube, wiper, cutter, belts, extruder gears, rods/bearings, grease, IPA, glue stick, shipping) | parts price ÷ 1.500 h |
 | Hotend | 139 kr. stainless (500 h; ~100 h with abrasive filament) or 185 kr. hardened steel (750 h; 300 h abrasive) |
 | Build plate | price ÷ life; PETG/TPU halve the smooth PEI plate's life |
 
 Plate prices and lives: Smooth PEI 200 kr. / 600 h, Textured PEI 150 kr. / 1.000 h, SuperTack 260 kr. / 500 h, Cool 150 kr. / 500 h, Engineering 180 kr. / 800 h.
 
-The default setup (0.4 stainless nozzle, PLA, smooth PEI plate) comes to **1,71 kr/h**. All of these numbers are estimates and live in `src/Pricing.cs`.
+| Printer | Printer price | Parts price | Plates | Default setup |
+|---|---|---|---|---|
+| A1 | 2.099 kr. | 600 kr. | full price | 1,71 kr/h |
+| A1 mini | 1.599 kr. | 500 kr. | 70 % of the price | 1,38 kr/h |
+| P1S | 4.199 kr. | 800 kr. | full price | 2,54 kr/h |
+
+The default setup is a 0.4 stainless nozzle, PLA and the smooth PEI plate. All of these numbers are estimates and live in `src/Pricing.cs`.
 
 ## Defaults
 | Setting | Default |
 |---|---|
-| Printer power | 100 W (A1 average when printing PLA) |
+| Printer | One Bambu Lab A1 |
+| Printer power | A1 100 W, A1 mini 70 W, P1S 130 W (average while printing) |
+| Wear rate | A1 1,71 kr/h, A1 mini 1,38 kr/h, P1S 2,54 kr/h (worked out from the printer) |
 | Markups | 25 % friends & family, 75 % customers |
 | Failed prints | 0 % (off; % of material + power) |
 | Minimum price | 50 kr. (customers only) |
@@ -99,9 +121,9 @@ The default setup (0.4 stainless nozzle, PLA, smooth PEI plate) comes to **1,71 
 | Slicing | 0.4 mm nozzle, 0.16mm Optimal, Bambu PLA Matte, Smooth PEI plate |
 | Electricity | DK1, 0,55 kr/kWh fees on top of spot, 25 % VAT |
 
-Settings, including the remembered kr/kg price per filament, are saved in `%APPDATA%\PrintPrice\settings.ini`.
+Settings, including your printers and the remembered kr/kg price per filament, are saved in `%APPDATA%\PrintPrice\settings.ini`.
 
-When you update from an older version, the old untouched defaults move to the new ones once (minimum price 50 kr., earn back failed prints on at 10 %). Values you changed are kept. The **Defaults** button in Settings uses the new defaults.
+When you update from an older version, the old untouched defaults move to the new ones once (minimum price 50 kr., earn back failed prints on at 10 %). Values you changed are kept. Your printer settings become printer 1, unchanged. The **Defaults** button in Settings uses the new defaults. On the Printer tab it sets the printer shown to its model's defaults and keeps its name.
 
 ## Privacy
 The app sends no personal information anywhere. It has no account, cookies or tracking. It only connects to these services:
@@ -110,10 +132,10 @@ The app sends no personal information anywhere. It has no account, cookies or tr
 |---|---|---|
 | GitHub | At startup, every 10 minutes while the program is open, and when you open Settings, to look for a new version (all of it can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version. Unchanged answers are not downloaded again (ETag), and if GitHub says "too many requests" the app quietly waits longer |
 | Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
-| Your browser | Only when you click **GitHub** in "Made by Gettic · GitHub" at the bottom of the main window | Opens this project's page (github.com/gettic/PrintPrice). Nothing is sent before the click |
+| Your browser | Only when you click **GitHub** in "Made by Gettic · GitHub" at the bottom of the main window, or the issues link in the message about an unsupported printer | Opens this project's page (github.com/gettic/PrintPrice) or its issues page. Nothing is sent before the click |
 | Printables | Only when you paste a Printables link | The model's ID, then the file and a small model picture (~10 KB, from media.printables.com) download |
 
-Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer, and reads its A1 filament profiles (for the material drop-down) and the A1 printer picture from its install folder. This stays on your PC and is never sent anywhere.
+Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer, and reads its printer and filament profiles (for slicing and the material drop-down) and the printer pictures from its install folder. This stays on your PC and is never sent anywhere.
 
 Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\history.json` and are never sent anywhere. Delete that file to clear the history. If the file is damaged, the app keeps it as `history.bad-<date>-<time>.json` in the same folder and starts with an empty history.
 
@@ -136,13 +158,14 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 ### Project layout
 | Path | What |
 |---|---|
-| `src/Pricing.cs` | Price formula and wear model |
+| `src/Pricing.cs` | Price formula and wear model per printer |
 | `src/Slicer.cs` | Bambu Studio command-line slicing; merges profile inheritance, which the CLI doesn't do |
 | `src/Printables.cs` | Printables API: model files and downloads |
 | `src/PowerPrice.cs` | Energi Data Service spot prices |
 | `src/Updater.cs` | Update check and install from GitHub releases |
 | `src/History.cs` | Saved quotes (price history) |
 | `src/HistoryForm.cs` | The History window |
+| `src/PrinterPickerForm.cs` | The Choose printer window |
 | `src/QuotePage.cs`, `src/QuoteForm.cs` | The quote and invoice page (picture, PDF) and its window |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |
 | `src/Lang.cs` | English and Danish texts |

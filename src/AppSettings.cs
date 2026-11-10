@@ -65,6 +65,172 @@ namespace PrintPrice
             return v.Length == 0 ? DefaultPrinterName : v;
         }
 
+        // ---------- several printers (ideas 7 + 24 + 11) ----------
+        // The flat fields PrinterName, PrinterModel, PrinterWatts, AutoWearRate, MachineRatePerHour, Nozzle, BedType and
+        // ProcessPreset are the ACTIVE printer's working copy (Pricing and the slicer read them). The list keeps every
+        // printer; SelectPrinter swaps the fields. settings.ini: the flat keys always hold the FIRST printer (+ "PrinterId",
+        // missing = "1"), so an old file is printer 1 unchanged; other printers are "Printer.<id>.<key>=..." lines.
+        public string PrinterModel = Wear.ModelA1;     // Wear.Models key of the active printer
+        public string ActivePrinterId = "1";
+        public double LastPrinterId = 1;               // highest id ever given out: ids are never reused
+        List<PrinterProfile> printers;                 // null = one printer made from the fields
+
+        const string PrinterIdKey = "PrinterId", PrinterLinePrefix = "Printer.";
+
+        PrinterProfile FromFields(string id)
+        {
+            return new PrinterProfile
+            {
+                Id = id, Name = CleanPrinterName(PrinterName), Model = Wear.FindModel(PrinterModel).Key,
+                Watts = PrinterWatts, AutoWearRate = AutoWearRate, MachineRatePerHour = MachineRatePerHour,
+                Nozzle = Nozzle, BedType = BedType, ProcessPreset = ProcessPreset
+            };
+        }
+
+        void ToFields(PrinterProfile p)
+        {
+            PrinterName = p.Name; PrinterModel = p.Model; PrinterWatts = p.Watts; AutoWearRate = p.AutoWearRate;
+            MachineRatePerHour = p.MachineRatePerHour; Nozzle = p.Nozzle; BedType = p.BedType; ProcessPreset = p.ProcessPreset;
+        }
+
+        int PrinterIndex(string id)
+        {
+            if (printers == null || id == null) return -1;
+            for (int i = 0; i < printers.Count; i++) if (printers[i].Id == id) return i;
+            return -1;
+        }
+
+        // Makes sure the list exists and holds the active printer, and copies the fields into the active entry.
+        void SyncPrinters()
+        {
+            if (printers == null) printers = new List<PrinterProfile>();
+            if (string.IsNullOrEmpty(ActivePrinterId)) ActivePrinterId = printers.Count > 0 ? printers[0].Id : "1";
+            int i = PrinterIndex(ActivePrinterId);
+            if (i < 0) printers.Add(FromFields(ActivePrinterId));
+            else printers[i] = FromFields(ActivePrinterId);
+            NoteId(ActivePrinterId);
+        }
+
+        /// A printer id is a whole number 1-999999999 written without signs or leading zeros ("1", "2", ...).
+        public static bool ValidPrinterId(string id)
+        {
+            int n;
+            return !string.IsNullOrEmpty(id) && id.Length <= 9 && id[0] != '0'
+                && int.TryParse(id, NumberStyles.None, Inv, out n) && n >= 1;
+        }
+
+        /// Marks a printer id as used (e.g. one found in the history): AddPrinter then never hands it out.
+        /// Invalid ids are ignored. True when LastPrinterId went up. Doesn't save.
+        public bool ReservePrinterId(string id)
+        {
+            double before = LastPrinterId;
+            if (ValidPrinterId(id)) NoteId(id);
+            return LastPrinterId > before;
+        }
+
+        void NoteId(string id)
+        {
+            int n;
+            if (int.TryParse(id, NumberStyles.None, Inv, out n) && n > LastPrinterId) LastPrinterId = n;
+        }
+
+        /// Copies of all printers, in order (never empty; the active one has the current field values).
+        public List<PrinterProfile> Printers
+        {
+            get
+            {
+                SyncPrinters();
+                var res = new List<PrinterProfile>(printers.Count);
+                foreach (var p in printers) res.Add(p.Clone());
+                return res;
+            }
+        }
+
+        public int PrinterCount { get { SyncPrinters(); return printers.Count; } }
+
+        /// A copy of the active printer.
+        public PrinterProfile ActivePrinter { get { return FindPrinter(ActivePrinterId); } }
+
+        /// A copy of the printer with this id, or null.
+        public PrinterProfile FindPrinter(string id)
+        {
+            SyncPrinters();
+            int i = PrinterIndex(id);
+            return i < 0 ? null : printers[i].Clone();
+        }
+
+        /// Makes this printer the active one (its values go into the fields). False (nothing changes) if not found.
+        public bool SelectPrinter(string id)
+        {
+            SyncPrinters();
+            int i = PrinterIndex(id);
+            if (i < 0) return false;
+            ActivePrinterId = id;
+            ToFields(printers[i]);
+            return true;
+        }
+
+        /// Adds a printer of this model (unknown = A1) with the model's power use and stock wear rate (auto wear on,
+        /// 0.4 stainless, smooth PEI, today's print profile). Name empty = the model's label. Doesn't select it or save.
+        public PrinterProfile AddPrinter(string name, string modelKey)
+        {
+            SyncPrinters();
+            var m = Wear.FindModel(modelKey);
+            LastPrinterId = Math.Floor(LastPrinterId) + 1;
+            var p = new PrinterProfile
+            {
+                Id = ((long)LastPrinterId).ToString(Inv), Model = m.Key,
+                Name = CleanPrinterName((name ?? "").Trim().Length == 0 ? m.Label : name),
+                Watts = m.DefaultWatts, AutoWearRate = 1, MachineRatePerHour = Wear.DefaultRateFor(m.Key),
+                ProcessPreset = ProcessPreset
+            };
+            printers.Add(p);
+            return p.Clone();
+        }
+
+        /// Replaces the printer with p's Id by a cleaned copy of p (the fields too when it is the active one).
+        /// False if no printer has that Id.
+        public bool SetPrinter(PrinterProfile p)
+        {
+            if (p == null) return false;
+            SyncPrinters();
+            int i = PrinterIndex(p.Id);
+            if (i < 0) return false;
+            var c = p.Clone();
+            c.Clean();
+            printers[i] = c;
+            if (c.Id == ActivePrinterId) ToFields(c);
+            return true;
+        }
+
+        /// Removes a printer (its history keeps its id and name). The last printer can't be removed. Removing the
+        /// active one selects the first one left.
+        public bool RemovePrinter(string id)
+        {
+            SyncPrinters();
+            int i = PrinterIndex(id);
+            if (i < 0 || printers.Count < 2) return false;
+            printers.RemoveAt(i);
+            if (id == ActivePrinterId) { ActivePrinterId = printers[0].Id; ToFields(printers[0]); }
+            return true;
+        }
+
+        // printer keys as written in the file (flat for the first printer, "Printer.<id>." prefix for the others)
+        static void PutPrinter(Dictionary<string, double> nums, Dictionary<string, string> strs, PrinterProfile p)
+        {
+            nums["PrinterWatts"] = p.Watts;
+            nums["MachineRatePerHour"] = p.MachineRatePerHour;
+            nums["AutoWearRate"] = p.AutoWearRate;
+            strs["PrinterName"] = CleanPrinterName(p.Name);
+            strs["PrinterModel"] = p.Model;
+            strs["Nozzle"] = p.Nozzle;
+            strs["BedType"] = p.BedType;
+            strs["ProcessPreset"] = p.ProcessPreset;
+        }
+
+        static readonly string[] PrinterNumberKeys = { "PrinterWatts", "MachineRatePerHour", "AutoWearRate" };
+        static readonly string[] PrinterStringKeys = { "PrinterName", "PrinterModel", "Nozzle", "BedType", "ProcessPreset" };
+
         public string Language = "";            // "" = auto (Danish if Windows is Danish), "en", "da"
 
         // Quote export (picture / PDF)
@@ -241,6 +407,7 @@ namespace PrintPrice
             d["QuoteLook"] = QuoteDark;
             d["InvoiceDueDays"] = InvoiceDueDays;
             d["SettingsVersion"] = SettingsVersion;
+            d["LastPrinterId"] = LastPrinterId;
             return d;
         }
 
@@ -255,6 +422,8 @@ namespace PrintPrice
             d["PriceArea"] = PriceArea;
             d["Language"] = Language;
             d["PrinterName"] = CleanPrinterName(PrinterName);
+            d["PrinterModel"] = PrinterModel;
+            d["ActivePrinter"] = ActivePrinterId;
             d["QuoteName"] = QuoteName;
             d["QuotePrice"] = QuotePrice;
             d["PayMobilePay"] = PayMobilePay;
@@ -288,6 +457,7 @@ namespace PrintPrice
                 case "QuoteLook": QuoteDark = v != 0 ? 1 : 0; break;
                 case "InvoiceDueDays": if (v >= 1 && v <= 365) InvoiceDueDays = Math.Round(v); break;
                 case "SettingsVersion": SettingsVersion = Math.Floor(v); break;
+                case "LastPrinterId": if (v >= 1 && v < 1e9) LastPrinterId = Math.Floor(v); break;
             }
         }
 
@@ -304,6 +474,8 @@ namespace PrintPrice
                 case "PriceArea": if (v == "DK1" || v == "DK2") PriceArea = v; break;
                 case "Language": if (v == "" || v == "en" || v == "da") Language = v; break;
                 case "PrinterName": PrinterName = CleanPrinterName(v); break;
+                case "PrinterModel": PrinterModel = Wear.FindModel(v).Key; break;
+                case "ActivePrinter": if (ValidPrinterId(v)) ActivePrinterId = v; break;
                 case "QuoteName": QuoteName = v; break;
                 case "QuotePrice": if (v == QuotePriceCustomer || v == QuotePriceFriends) QuotePrice = v; break;
                 case "PayMobilePay": PayMobilePay = v; break;
@@ -320,17 +492,50 @@ namespace PrintPrice
             {
                 if (!File.Exists(FilePath)) return s;   // new install: version 2 defaults
                 s.SettingsVersion = 0;                  // a file without the key is from before version 2
+                s.ActivePrinterId = "";                 // not in the file = the first printer
+                string firstId = "1";
                 var stringKeys = s.Strings();
+                var extraIds = new List<string>();      // other printers, in file order
+                var extras = new Dictionary<string, AppSettings>(StringComparer.Ordinal);
                 foreach (var line in File.ReadAllLines(FilePath))
                 {
                     int eq = line.IndexOf('=');
                     if (eq <= 0) continue;
                     string key = line.Substring(0, eq).Trim(), val = line.Substring(eq + 1).Trim();
                     if (key == FilamentPriceKey) { s.ReadFilamentPrice(val); continue; }
-                    if (stringKeys.ContainsKey(key)) { s.SetString(key, val); continue; }
+                    if (key == PrinterIdKey) { if (ValidPrinterId(val)) firstId = val; continue; }
+                    AppSettings target = s;
+                    if (key.StartsWith(PrinterLinePrefix, StringComparison.Ordinal))   // Printer.<id>.<key>
+                    {
+                        int dot = key.IndexOf('.', PrinterLinePrefix.Length);
+                        if (dot < 0) continue;
+                        string id = key.Substring(PrinterLinePrefix.Length, dot - PrinterLinePrefix.Length);
+                        key = key.Substring(dot + 1);
+                        if (!ValidPrinterId(id) || (Array.IndexOf(PrinterNumberKeys, key) < 0
+                            && Array.IndexOf(PrinterStringKeys, key) < 0)) continue;
+                        if (!extras.TryGetValue(id, out target))
+                        {
+                            target = new AppSettings();
+                            extras[id] = target;
+                            extraIds.Add(id);
+                        }
+                    }
+                    if (stringKeys.ContainsKey(key)) { target.SetString(key, val); continue; }
                     double v;
-                    if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0) s.SetNumber(key, v);
+                    if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0) target.SetNumber(key, v);
                 }
+                // printer list: the flat keys = the first printer, then the others (a doubled id is skipped)
+                s.printers = new List<PrinterProfile> { s.FromFields(firstId) };
+                s.NoteId(firstId);
+                foreach (var id in extraIds)
+                {
+                    if (s.PrinterIndex(id) >= 0) continue;
+                    s.printers.Add(extras[id].FromFields(id));
+                    s.NoteId(id);
+                }
+                int active = s.PrinterIndex(s.ActivePrinterId);
+                if (active < 0) s.ActivePrinterId = firstId;
+                else if (active > 0) s.ToFields(s.printers[active]);
                 read = true;
             }
             catch { /* fall back to defaults */ }
@@ -348,10 +553,24 @@ namespace PrintPrice
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
                 var lines = new List<string>();
-                foreach (var kv in Numbers())
+                SyncPrinters();
+                var nums = Numbers();
+                var strs = Strings();
+                PutPrinter(nums, strs, printers[0]);   // the flat keys always hold the first printer
+                foreach (var kv in nums)
                     lines.Add(kv.Key + "=" + kv.Value.ToString("R", Inv));
-                foreach (var kv in Strings())
-                    lines.Add(kv.Key + "=" + (kv.Value ?? "").Replace("\r", "").Replace("\n", ""));
+                foreach (var kv in strs)
+                    lines.Add(kv.Key + "=" + Line(kv.Value));
+                lines.Add(PrinterIdKey + "=" + printers[0].Id);
+                for (int i = 1; i < printers.Count; i++)
+                {
+                    var pn = new Dictionary<string, double>();
+                    var ps = new Dictionary<string, string>();
+                    PutPrinter(pn, ps, printers[i]);
+                    string pre = PrinterLinePrefix + printers[i].Id + ".";
+                    foreach (var kv in pn) lines.Add(pre + kv.Key + "=" + kv.Value.ToString("R", Inv));
+                    foreach (var kv in ps) lines.Add(pre + kv.Key + "=" + Line(kv.Value));
+                }
                 if (FilamentPrices != null)
                 {
                     var names = new List<string>(FilamentPrices.Keys);
@@ -369,13 +588,50 @@ namespace PrintPrice
             catch { /* non-fatal */ }
         }
 
+        static string Line(string v) { return (v ?? "").Replace("\r", "").Replace("\n", ""); }
+
         public AppSettings Clone()
         {
             var c = (AppSettings)MemberwiseClone();
             c.FilamentPrices = FilamentPrices != null
                 ? new Dictionary<string, double>(FilamentPrices, StringComparer.Ordinal)
                 : new Dictionary<string, double>(StringComparer.Ordinal);
+            if (printers != null)
+            {
+                c.printers = new List<PrinterProfile>(printers.Count);
+                foreach (var p in printers) c.printers.Add(p.Clone());
+            }
             return c;
+        }
+    }
+
+    /// One printer (AppSettings.Printers). Id never changes and is never reused; History saves it with each quote.
+    public class PrinterProfile
+    {
+        public string Id = "1";
+        public string Name = AppSettings.DefaultPrinterName;   // trimmed, max 40, empty = "Bambu Lab A1"
+        public string Model = Wear.ModelA1;                    // Wear.Models key
+        public double Watts = 100;
+        public double AutoWearRate = 1;                        // 1 = wear rate from model, nozzle, filament & plate
+        public double MachineRatePerHour = Wear.DefaultRate;   // kr/h
+        public string Nozzle = "0.4 stainless";
+        public string BedType = "High Temp Plate";
+        public string ProcessPreset = "0.16mm Optimal";
+
+        public PrinterProfile Clone() { return (PrinterProfile)MemberwiseClone(); }
+
+        /// Fixes bad values in place: name (CleanPrinterName), unknown model -> A1, unknown nozzle -> stock,
+        /// empty bed type / profile -> defaults, negative or NaN numbers -> defaults.
+        public void Clean()
+        {
+            Name = AppSettings.CleanPrinterName(Name);
+            Model = Wear.FindModel(Model).Key;
+            if (Wear.FindNozzle(Nozzle).Key != Nozzle) Nozzle = Wear.Nozzles[0].Key;
+            if (string.IsNullOrEmpty(BedType)) BedType = Wear.Plates[0].Key;
+            if (string.IsNullOrEmpty(ProcessPreset)) ProcessPreset = "0.16mm Optimal";
+            if (!(Watts >= 0) || double.IsInfinity(Watts)) Watts = Wear.FindModel(Model).DefaultWatts;
+            if (!(MachineRatePerHour >= 0) || double.IsInfinity(MachineRatePerHour)) MachineRatePerHour = Wear.DefaultRateFor(Model);
+            AutoWearRate = AutoWearRate != 0 ? 1 : 0;
         }
     }
 

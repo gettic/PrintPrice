@@ -25,6 +25,33 @@ namespace PrintPrice
         // file to open in Bambu Studio: ReadSliceInfo sets the .3mf it read (our out.3mf in the work folder, or the user's
         // .gcode.3mf); after a slice, KeepForStudio moves it out of the work folder. null = nothing to open
         public string StudioFile;
+        // printer the file was sliced for (ReadSliceInfo, from project_settings / slice_info): PrinterModel = our key ("A1",
+        // "A1M", "P1S"), "" = a printer we don't support, null = the file doesn't say. PrinterName = the file's name for it
+        // ("Bambu Lab X1 Carbon"), PrinterNozzle = "0.4" etc. ("" unknown). UnsupportedPrinter = PrinterModel == "".
+        public string PrinterModel;
+        public string PrinterName = "";
+        public string PrinterNozzle = "";
+        public bool UnsupportedPrinter;
+    }
+
+    /// One Bambu Lab printer model the app can slice for (BambuSlicer.Printers).
+    public sealed class BambuPrinter
+    {
+        public string Key;              // "A1", "A1M", "P1S" (= AppSettings.PrinterModel)
+        public string MachineName;      // Bambu's printer_model, e.g. "Bambu Lab A1 mini"
+        public string ModelId;          // slice_info printer_model_id, e.g. "N1"
+        public string Thumb;            // resources\images\printer_thumbnail_<Thumb>_png.png
+        public string[] ProcessFamilies;    // "@BBL <family>" process names, best first
+        public string[] FilamentFamilies;   // "@BBL <family>" filament names, best first
+        public int BedX, BedY, BedZ;    // build volume in mm
+    }
+
+    /// The printer a (sliced) project file was made for (BambuSlicer.ParseProjectPrinter).
+    public sealed class ProjectPrinter
+    {
+        public string Key = "";      // our key, "" = not one we support
+        public string Name = "";     // the file's printer name, e.g. "Bambu Lab X1 Carbon"
+        public string Nozzle = "";   // "0.4" etc., "" unknown
     }
 
     /// One filament slot used by a sliced print (summed over all plates).
@@ -54,18 +81,360 @@ namespace PrintPrice
         public SliceException(string message) : base(message) { }
     }
 
-    /// Drives the Bambu Studio command line to slice models with Bambu Lab A1 profiles.
+    /// Drives the Bambu Studio command line to slice models with Bambu Lab A1 / A1 mini / P1S profiles.
     public static class BambuSlicer
     {
-        public static string MachinePreset(string nozzleSize)
+        // ---------- printer models (several printers) ----------
+
+        /// The supported printers. The P1S has no process profiles of its own: Bambu uses the X1C ones for it.
+        public static readonly BambuPrinter[] Printers = {
+            new BambuPrinter { Key = "A1", MachineName = "Bambu Lab A1", ModelId = "N2S", Thumb = "n2s",
+                ProcessFamilies = new[] { "A1" }, FilamentFamilies = new[] { "A1" }, BedX = 256, BedY = 256, BedZ = 256 },
+            new BambuPrinter { Key = "A1M", MachineName = "Bambu Lab A1 mini", ModelId = "N1", Thumb = "n1",
+                ProcessFamilies = new[] { "A1M" }, FilamentFamilies = new[] { "A1M" }, BedX = 180, BedY = 180, BedZ = 180 },
+            new BambuPrinter { Key = "P1S", MachineName = "Bambu Lab P1S", ModelId = "C12", Thumb = "p1s",
+                ProcessFamilies = new[] { "X1C", "P1P" }, FilamentFamilies = new[] { "P1S", "X1C", "P1P" }, BedX = 256, BedY = 256, BedZ = 250 },
+        };
+
+        /// The printer with this key (ignores case); unknown / empty = the A1.
+        public static BambuPrinter FindPrinter(string key)
         {
-            return "Bambu Lab A1 " + nozzleSize + " nozzle";
+            foreach (var p in Printers) if (string.Equals(p.Key, (key ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return p;
+            return Printers[0];
         }
 
-        /// Process/filament preset suffix for a nozzle: 0.4 is "@BBL A1", others "@BBL A1 0.6 nozzle".
+        /// Our key for a Bambu printer name ("Bambu Lab A1 mini", also "Bambu Lab A1 mini 0.4 nozzle") or model id ("N1");
+        /// "" = a printer we don't support, null = empty input.
+        public static string ModelKeyFromName(string name)
+        {
+            string n = (name ?? "").Trim();
+            if (n.Length == 0) return null;
+            n = Regex.Replace(n, @"\s+\d+(\.\d+)?\s*nozzle$", "", RegexOptions.IgnoreCase).Trim();
+            foreach (var p in Printers)
+                if (string.Equals(p.MachineName, n, StringComparison.OrdinalIgnoreCase) || string.Equals(p.ModelId, n, StringComparison.OrdinalIgnoreCase))
+                    return p.Key;
+            return "";
+        }
+
+        /// Bambu's machine preset, e.g. ("A1M", "0.4") -> "Bambu Lab A1 mini 0.4 nozzle". Unknown model = A1.
+        public static string MachinePreset(string model, string nozzleSize)
+        {
+            return FindPrinter(model).MachineName + " " + nozzleSize + " nozzle";
+        }
+
+        public static string MachinePreset(string nozzleSize)
+        {
+            return MachinePreset("A1", nozzleSize);
+        }
+
+        /// Process/filament preset suffix for a nozzle on the A1: 0.4 is "@BBL A1", others "@BBL A1 0.6 nozzle".
         public static string Suffix(string nozzleSize)
         {
-            return nozzleSize == "0.4" ? " @BBL A1" : " @BBL A1 " + nozzleSize + " nozzle";
+            return FamilySuffix("A1", nozzleSize);
+        }
+
+        static string FamilySuffix(string family, string nozzleSize)
+        {
+            return nozzleSize == "0.4" ? " @BBL " + family : " @BBL " + family + " " + nozzleSize + " nozzle";
+        }
+
+        /// Path of Bambu Studio's own picture of the printer (<exe folder>\resources\images\printer_thumbnail_<x>_png.png),
+        /// null when the exe or the file is missing. Never throws.
+        public static string PrinterPicture(string exe, string model)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(exe)) return null;
+                string p = Path.Combine(Path.GetDirectoryName(exe), "resources", "images",
+                    "printer_thumbnail_" + FindPrinter(model).Thumb + "_png.png");
+                return File.Exists(p) ? p : null;
+            }
+            catch { return null; }
+        }
+
+        /// The error text for a model that doesn't fit the printer's build volume (CLI exit code -50).
+        public static string BedErrorText(string model)
+        {
+            var p = FindPrinter(model);
+            return L.F("The model doesn't fit on the {0}'s build plate ({1} × {2} × {3} mm), or a plate in the file is empty. " +
+                       "Choose a bigger printer, or scale the model down in Bambu Studio.",
+                       "Modellen passer ikke på byggepladen i {0} ({1} × {2} × {3} mm), eller en plade i filen er tom. " +
+                       "Vælg en større printer, eller skalér modellen ned i Bambu Studio.",
+                       p.MachineName, p.BedX, p.BedY, p.BedZ);
+        }
+
+        /// The user-facing text when the CLI fails: -50 = BedErrorText(model), else "could not slice <file>: <error>".
+        public static string SliceErrorText(int exitCode, string fileName, string cliError, string model)
+        {
+            if (exitCode == -50) return BedErrorText(model);
+            return L.F("Bambu Studio could not slice {0}: {1}", "Bambu Studio kunne ikke slice {0}: {1}",
+                fileName, string.IsNullOrEmpty(cliError) ? L.F("exit code {0}", "fejlkode {0}", exitCode) : cliError);
+        }
+
+        /// As above, plus the plate/filament clash ("Filaments are not compatible with the plate type", CLI -61):
+        /// PlateErrorText(bedType, clashing filaments).
+        public static string SliceErrorText(int exitCode, string fileName, string cliError, string model, string bedType, IList<string> filaments)
+        {
+            if (IsPlateError(exitCode, cliError)) return PlateErrorText(bedType, filaments);
+            return SliceErrorText(exitCode, fileName, cliError, model);
+        }
+
+        /// True when Bambu Studio refused the plate type for the filament(s): its text, or code -61 without a text.
+        public static bool IsPlateError(int exitCode, string cliError)
+        {
+            if (!string.IsNullOrEmpty(cliError))
+                return cliError.IndexOf("not compatible with the plate type", StringComparison.OrdinalIgnoreCase) >= 0;
+            return exitCode == -61;
+        }
+
+        /// Our text for a filament that can't go on the chosen build plate (plate = Bambu bed type key; filaments = short
+        /// names, null/empty = "The filament").
+        public static string PlateErrorText(string bedType, IList<string> filaments)
+        {
+            string plate = (bedType ?? "").Trim();
+            if (plate.Length > 0)
+                foreach (var p in Wear.Plates)
+                    if (string.Equals(p.Key, plate, StringComparison.OrdinalIgnoreCase)) { plate = p.Label; break; }
+            if (plate.Length == 0) plate = L.S("this build plate", "denne byggeplade");
+            else plate = L.S("the ", "") + plate;
+            var names = (filaments ?? new string[0]).Where(n => !string.IsNullOrEmpty(n) && n.Trim().Length > 0)
+                .Select(n => ShortName(n).Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            string fil = names.Count == 0 ? L.S("The filament", "Filamentet") : string.Join(", ", names);
+            return L.F("{0} can't be printed on {1} (Bambu Studio doesn't allow it). Pick another build plate in Settings > Printer, " +
+                       "or another filament.",
+                       "{0} kan ikke printes på {1} (Bambu Studio tillader det ikke). Vælg en anden byggeplade i Indstillinger > Printer, " +
+                       "eller et andet filament.", fil, plate);
+        }
+
+        /// The filament profile key holding the bed temperature for a Bambu bed type ("" unknown). 0 there = not allowed.
+        public static string PlateTempKey(string bedType)
+        {
+            switch ((bedType ?? "").Trim().ToLowerInvariant())
+            {
+                case "cool plate": return "cool_plate_temp";
+                case "engineering plate": return "eng_plate_temp";
+                case "high temp plate": return "hot_plate_temp";
+                case "textured pei plate": return "textured_plate_temp";
+                case "supertack plate": return "supertack_plate_temp";
+                case "textured cool plate": return "textured_cool_plate_temp";
+                default: return "";
+            }
+        }
+
+        /// After a failed slice: the bed type from workDir\process.json and the loaded filaments (";"-list or filament.json)
+        /// whose temperature for that plate is 0 (none found = all of them). Never throws.
+        static List<string> ClashingFilaments(string workDir, string filamentFiles, out string bedType)
+        {
+            bedType = "";
+            var all = new List<string>();
+            var clash = new List<string>();
+            try
+            {
+                var proc = Json().Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(workDir, "process.json")));
+                bedType = FirstString(proc, "curr_bed_type") ?? "";
+                string key = PlateTempKey(bedType);
+                var files = (filamentFiles ?? Path.Combine(workDir, "filament.json")).Split(';');
+                foreach (var f in files)
+                {
+                    if (string.IsNullOrEmpty(f) || !File.Exists(f)) continue;
+                    var d = Json().Deserialize<Dictionary<string, object>>(File.ReadAllText(f));
+                    string name = ShortName(FirstString(d, "name") ?? "").Trim();
+                    if (name.Length == 0) continue;
+                    all.Add(name);
+                    double t;
+                    if (key.Length > 0 && double.TryParse(FirstString(d, key), NumberStyles.Float, CultureInfo.InvariantCulture, out t) && t <= 0)
+                        clash.Add(name);
+                }
+            }
+            catch { }
+            return clash.Count > 0 ? clash : all;
+        }
+
+        public const string IssuesUrl ="https://github.com/gettic/PrintPrice/issues";
+
+        /// The text for a sliced file made for a printer we don't support (name "" = "another printer").
+        public static string UnsupportedPrinterText(string printerName)
+        {
+            string n = (printerName ?? "").Trim();
+            if (n.Length == 0) n = L.S("another printer", "en anden printer");
+            return L.F("This file was sliced for the {0}, which PrintPrice doesn't support yet. You can ask for it to be added: " +
+                       "open an issue on GitHub at {1}",
+                       "Filen er slicet til {0}, som PrintPrice ikke understøtter endnu. Du kan bede om at få den tilføjet: " +
+                       "opret et issue på GitHub på {1}", n, IssuesUrl);
+        }
+
+        /// Which printer a project was made for: project_settings.config ("printer_model", then "printer_settings_id",
+        /// nozzle from "nozzle_diameter"), then slice_info.config ("printer_model_id", "nozzle_diameters"; empty in CLI
+        /// output). Null when neither names a printer.
+        public static ProjectPrinter ParseProjectPrinter(string projectSettingsJson, string sliceInfoXml)
+        {
+            string name = "", nozzle = "";
+            var model = ParseSlotStrings(projectSettingsJson, "printer_model");
+            if (model.Count > 0) name = (model[0] ?? "").Trim();
+            if (name.Length == 0)
+            {
+                var id = ParseSlotStrings(projectSettingsJson, "printer_settings_id");
+                if (id.Count > 0) name = Regex.Replace((id[0] ?? "").Trim(), @"\s+\d+(\.\d+)?\s*nozzle$", "", RegexOptions.IgnoreCase).Trim();
+            }
+            var nz = ParseSlotStrings(projectSettingsJson, "nozzle_diameter");
+            if (nz.Count > 0) nozzle = (nz[0] ?? "").Trim();
+            if ((name.Length == 0 || nozzle.Length == 0) && !string.IsNullOrEmpty(sliceInfoXml))
+            {
+                try
+                {
+                    var doc = new XmlDocument();
+                    doc.LoadXml(sliceInfoXml);
+                    if (name.Length == 0)
+                    {
+                        var n = doc.SelectSingleNode("/config/plate/metadata[@key='printer_model_id']");
+                        if (n != null) name = AttrText(n, "value");
+                    }
+                    if (nozzle.Length == 0)
+                    {
+                        var n = doc.SelectSingleNode("/config/plate/metadata[@key='nozzle_diameters']");
+                        if (n != null) nozzle = AttrText(n, "value").Split(',')[0].Trim();
+                    }
+                }
+                catch { }
+            }
+            if (name.Length == 0) return null;
+            var res = new ProjectPrinter { Key = ModelKeyFromName(name) ?? "", Name = name, Nozzle = nozzle };
+            if (res.Key.Length > 0 && string.Equals(name, FindPrinter(res.Key).ModelId, StringComparison.OrdinalIgnoreCase))
+                res.Name = FindPrinter(res.Key).MachineName;   // a model id ("N1") -> the printer's name
+            return res;
+        }
+
+        // ---------- profile index: which process/filament profiles fit a machine preset ----------
+        // Bambu's names can't be guessed from the printer (the P1S uses "@BBL X1C" processes and a mix of P1S/X1C/P1P
+        // filaments), so profiles are picked by their own "compatible_printers" list. Read once per profile folder set
+        // (~2 400 files, ~0,3 s), kept in memory.
+
+        sealed class ProfileEntry
+        {
+            public string Name;
+            public string Inherits;
+            public bool HasCompat;
+            public bool Instance = true;
+            public List<string> Compat = new List<string>();
+        }
+
+        static readonly object indexLock = new object();
+        static readonly Dictionary<string, List<ProfileEntry>> indexCache = new Dictionary<string, List<ProfileEntry>>();
+        static readonly Regex CompatRx = new Regex("\"compatible_printers\"\\s*:\\s*\\[([^\\]]*)\\]");
+        static readonly Regex JsonStringRx = new Regex("\"((?:[^\"\\\\]|\\\\.)*)\"");
+        static readonly Regex InheritsRx = new Regex("\"inherits\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+        static readonly Regex InstanceRx = new Regex("\"instantiation\"\\s*:\\s*\"false\"", RegexOptions.IgnoreCase);
+
+        /// The "compatible_printers" list of a profile's JSON text; empty when missing or bad. Never null.
+        public static List<string> ParseCompatiblePrinters(string json)
+        {
+            var list = new List<string>();
+            if (string.IsNullOrEmpty(json)) return list;
+            var m = CompatRx.Match(json);
+            if (!m.Success) return list;
+            foreach (Match s in JsonStringRx.Matches(m.Groups[1].Value))
+            {
+                string v;
+                try { v = Regex.Unescape(s.Groups[1].Value).Trim(); } catch { v = s.Groups[1].Value.Trim(); }
+                if (v.Length > 0) list.Add(v);
+            }
+            return list;
+        }
+
+        static List<ProfileEntry> Index(List<string> roots, string kind)
+        {
+            string key = kind + "|" + string.Join("|", roots);
+            lock (indexLock)
+            {
+                List<ProfileEntry> cached;
+                if (indexCache.TryGetValue(key, out cached)) return cached;
+                var byName = new Dictionary<string, ProfileEntry>(StringComparer.OrdinalIgnoreCase);
+                foreach (var r in roots)
+                {
+                    string dir = Path.Combine(r, kind);
+                    if (!Directory.Exists(dir)) continue;
+                    string[] files;
+                    try { files = Directory.GetFiles(dir, "*.json", SearchOption.AllDirectories); } catch { continue; }
+                    foreach (var f in files.OrderBy(x => x.Length - Path.GetFileName(x).Length))   // top-level files first
+                    {
+                        string name = Path.GetFileNameWithoutExtension(f);
+                        if (byName.ContainsKey(name)) continue;
+                        string text;
+                        try { text = File.ReadAllText(f); } catch { continue; }
+                        var im = InheritsRx.Match(text);
+                        byName[name] = new ProfileEntry {
+                            Name = name, Inherits = im.Success ? im.Groups[1].Value : "",
+                            HasCompat = CompatRx.IsMatch(text), Compat = ParseCompatiblePrinters(text), Instance = !InstanceRx.IsMatch(text) };
+                    }
+                }
+                foreach (var e in byName.Values)
+                {
+                    if (e.HasCompat) continue;
+                    ProfileEntry p = e;
+                    for (int d = 0; d < 25 && !p.HasCompat && p.Inherits.Length > 0; d++)
+                        if (!byName.TryGetValue(p.Inherits, out p)) break;
+                    if (p != null && p.HasCompat) e.Compat = p.Compat;
+                }
+                var list = byName.Values.Where(e => e.Instance && e.Compat.Count > 0).ToList();
+                if (list.Count > 0) indexCache[key] = list;
+                return list;
+            }
+        }
+
+        /// Full profile names of a kind that list this machine preset as compatible.
+        static List<string> CompatibleNames(List<string> roots, string kind, string machinePreset)
+        {
+            return Index(roots, kind)
+                .Where(e => e.Compat.Any(c => string.Equals(c, machinePreset, StringComparison.OrdinalIgnoreCase)))
+                .Select(e => e.Name).ToList();
+        }
+
+        /// Pure: from compatible full names, the one for this short name: the family's own name with the nozzle beats the
+        /// family's plain name, earlier families beat later ones, any other compatible name comes last (then by name).
+        /// Null when none has this short name.
+        public static string PickProfile(IEnumerable<string> compatibleNames, string shortName, string model, string nozzleSize, bool process)
+        {
+            if (compatibleNames == null) return null;
+            var p = FindPrinter(model);
+            var families = process ? p.ProcessFamilies : p.FilamentFamilies;
+            string best = null;
+            int bestRank = int.MaxValue;
+            string want = ShortName(shortName);
+            foreach (var n in compatibleNames)
+            {
+                if (n == null || !string.Equals(ShortName(n), want, StringComparison.OrdinalIgnoreCase)) continue;
+                int rank = 1000;
+                int at = n.IndexOf("@BBL ", StringComparison.OrdinalIgnoreCase);
+                string rest = at < 0 ? "" : n.Substring(at + 5).Trim();
+                for (int i = 0; i < families.Length; i++)
+                {
+                    if (string.Equals(rest, families[i] + " " + nozzleSize + " nozzle", StringComparison.OrdinalIgnoreCase)) { rank = 2 * i; break; }
+                    if (string.Equals(rest, families[i], StringComparison.OrdinalIgnoreCase)) { rank = 2 * i + 1; break; }
+                }
+                if (rank < bestRank || (rank == bestRank && string.CompareOrdinal(n, best) < 0)) { best = n; bestRank = rank; }
+            }
+            return best;
+        }
+
+        /// The full profile name for a short name on this printer + nozzle, or null when no compatible one exists.
+        static string ResolveOrNull(List<string> roots, string kind, string model, string nozzleSize, string shortName)
+        {
+            return PickProfile(CompatibleNames(roots, kind, MachinePreset(model, nozzleSize)), shortName, model, nozzleSize, kind == "process");
+        }
+
+        /// As ResolveOrNull; none = the family's usual name (FindProfile then reports it as missing).
+        static string Resolve(List<string> roots, string kind, string model, string nozzleSize, string shortName)
+        {
+            string n = ResolveOrNull(roots, kind, model, nozzleSize, shortName);
+            if (n != null) return n;
+            var p = FindPrinter(model);
+            return ShortName(shortName) + FamilySuffix((kind == "process" ? p.ProcessFamilies : p.FilamentFamilies)[0], nozzleSize);
+        }
+
+        /// Reads the profile index off the UI thread so the Settings lists open fast. Never throws.
+        public static void WarmProfiles(string exe)
+        {
+            try { var roots = Roots(exe); Index(roots, "process"); Index(roots, "filament"); } catch { }
         }
 
         public static readonly string[] ModelExtensions = { ".stl", ".3mf", ".obj", ".step", ".stp", ".amf" };
@@ -109,59 +478,56 @@ namespace PrintPrice
             return roots;
         }
 
-        /// Short preset names (without "@BBL A1 …") that exist for the given suffix.
-        static SortedSet<string> ListShort(string exe, string kind, string suffix)
+        /// Short preset names (without "@BBL …") of a kind that fit the printer + nozzle (by compatible_printers), sorted.
+        static List<string> ListShort(string exe, string kind, string model, string nozzleSize)
         {
             var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var r in Roots(exe))
+            foreach (var n in CompatibleNames(Roots(exe), kind, MachinePreset(model, nozzleSize)))
             {
-                string dir = Path.Combine(r, kind);
-                if (!Directory.Exists(dir)) continue;
-                foreach (var f in Directory.GetFiles(dir, "*" + suffix + ".json", SearchOption.AllDirectories))
-                {
-                    string name = Path.GetFileNameWithoutExtension(f);
-                    if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-                        set.Add(name.Substring(0, name.Length - suffix.Length));
-                }
+                string s = ShortName(n).Trim();
+                if (s.Length > 0) set.Add(s);
             }
-            return set;
+            return set.ToList();
+        }
+
+        public static List<string> ListProcesses(string exe, string model, string nozzleSize)
+        {
+            return ListShort(exe, "process", model, nozzleSize);
         }
 
         public static List<string> ListProcesses(string exe, string nozzleSize)
         {
-            return ListShort(exe, "process", Suffix(nozzleSize)).ToList();
+            return ListProcesses(exe, "A1", nozzleSize);
         }
 
-        /// 0.2 nozzles need dedicated filament presets; 0.6/0.8 can also use the standard (0.4) ones.
+        /// Filaments Bambu lists as compatible with the printer + nozzle (0.6/0.8 include the standard ones, 0.2 not).
+        public static List<string> ListFilaments(string exe, string model, string nozzleSize)
+        {
+            return ListShort(exe, "filament", model, nozzleSize);
+        }
+
         public static List<string> ListFilaments(string exe, string nozzleSize)
         {
-            var set = ListShort(exe, "filament", Suffix(nozzleSize));
-            if (nozzleSize != "0.2" && nozzleSize != "0.4") set.UnionWith(ListShort(exe, "filament", Suffix("0.4")));
-            return set.ToList();
+            return ListFilaments(exe, "A1", nozzleSize);
         }
 
-        static string ResolveFilament(List<string> roots, string shortName, string nozzleSize)
-        {
-            string specific = shortName + Suffix(nozzleSize);
-            foreach (var r in roots)
-            {
-                string dir = Path.Combine(r, "filament");
-                if (Directory.Exists(dir) && Directory.GetFiles(dir, specific + ".json", SearchOption.AllDirectories).Length > 0)
-                    return specific;
-            }
-            return shortName + Suffix("0.4");
-        }
-
+        /// A preset name without its printer part: "0.20mm Standard @BBL X1C" / "Bambu PLA Basic @BBL A1M 0.2 nozzle" -> the
+        /// part before " @BBL".
         public static string ShortName(string preset)
         {
-            return System.Text.RegularExpressions.Regex.Replace(preset ?? "", @"\s*@BBL A1.*$", "");
+            return Regex.Replace(preset ?? "", @"\s*@BBL\b.*$", "");
         }
 
         /// Reads filament type and whether Bambu marks it abrasive (required nozzle hardness ≥ 40 HRC).
         public static void FilamentInfo(string exe, string shortName, string nozzleSize, out string type, out bool abrasive)
         {
+            FilamentInfo(exe, "A1", shortName, nozzleSize, out type, out abrasive);
+        }
+
+        public static void FilamentInfo(string exe, string model, string shortName, string nozzleSize, out string type, out bool abrasive)
+        {
             var roots = Roots(exe);
-            var f = Flatten(roots, "filament", ResolveFilament(roots, shortName, nozzleSize), 0);
+            var f = Flatten(roots, "filament", Resolve(roots, "filament", model, nozzleSize, shortName), 0);
             type = FirstString(f, "filament_type") ?? "";
             double hrc;
             abrasive = double.TryParse(FirstString(f, "required_nozzle_HRC"), NumberStyles.Float, CultureInfo.InvariantCulture, out hrc) && hrc >= 40;
@@ -216,16 +582,39 @@ namespace PrintPrice
         /// Writes fully merged machine/process/filament profiles for the chosen nozzle into workDir.
         public static void PrepareProfiles(string exe, string nozzleSize, string process, string filament, string bedType, string workDir)
         {
+            PrepareProfiles(exe, "A1", nozzleSize, process, filament, bedType, workDir);
+        }
+
+        /// As above for a printer model ("A1", "A1M", "P1S"; unknown = A1). Also writes printer.txt (the model key) so
+        /// SliceFile knows the printer for per-slot filaments and the bed-size error.
+        public static void PrepareProfiles(string exe, string model, string nozzleSize, string process, string filament, string bedType, string workDir)
+        {
             var roots = Roots(exe);
             if (roots.Count == 0) throw new SliceException(L.S("Could not find Bambu Studio's printer profiles.", "Kunne ikke finde Bambu Studios printerprofiler."));
+            model = FindPrinter(model).Key;
             Directory.CreateDirectory(workDir);
             var json = Json();
-            File.WriteAllText(Path.Combine(workDir, "machine.json"), json.Serialize(Flatten(roots, "machine", MachinePreset(nozzleSize), 0)));
-            var proc = Flatten(roots, "process", ShortName(process) + Suffix(nozzleSize), 0);
+            File.WriteAllText(Path.Combine(workDir, "machine.json"), json.Serialize(Flatten(roots, "machine", MachinePreset(model, nozzleSize), 0)));
+            var proc = Flatten(roots, "process", Resolve(roots, "process", model, nozzleSize, process), 0);
             if (!string.IsNullOrEmpty(bedType)) proc["curr_bed_type"] = bedType;   // CLI default is Cool Plate
             File.WriteAllText(Path.Combine(workDir, "process.json"), json.Serialize(proc));
             File.WriteAllText(Path.Combine(workDir, "filament.json"),
-                json.Serialize(Flatten(roots, "filament", ResolveFilament(roots, ShortName(filament), nozzleSize), 0)));
+                json.Serialize(Flatten(roots, "filament", Resolve(roots, "filament", model, nozzleSize, filament), 0)));
+            File.WriteAllText(Path.Combine(workDir, PrinterFile), model);
+        }
+
+        const string PrinterFile = "printer.txt";
+
+        /// The printer key PrepareProfiles wrote into workDir; "A1" when missing.
+        static string WorkDirPrinter(string workDir)
+        {
+            try
+            {
+                string p = Path.Combine(workDir, PrinterFile);
+                if (File.Exists(p)) return FindPrinter(File.ReadAllText(p)).Key;
+            }
+            catch { }
+            return "A1";
         }
 
         static string Quote(string a)
@@ -244,11 +633,19 @@ namespace PrintPrice
         /// nozzleSize / defaultFilament null = one filament as before.
         public static SliceResult SliceFile(string exe, string model, string workDir, string nozzleSize, string defaultFilament, CancellationToken ct)
         {
+            return SliceFile(exe, model, workDir, null, nozzleSize, defaultFilament, ct);
+        }
+
+        /// As above for a printer model ("A1", "A1M", "P1S"); null = the one PrepareProfiles used for workDir.
+        /// A model too big for the printer (CLI -50) throws BedErrorText.
+        public static SliceResult SliceFile(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament, CancellationToken ct)
+        {
+            printer = string.IsNullOrEmpty(printer) ? WorkDirPrinter(workDir) : FindPrinter(printer).Key;
             string outDir = Path.Combine(workDir, "out_" + Guid.NewGuid().ToString("N").Substring(0, 8));
             Directory.CreateDirectory(outDir);
             string filaments = null;
             if (!string.IsNullOrEmpty(nozzleSize) && !string.IsNullOrEmpty(defaultFilament))
-                filaments = SlotFilaments(exe, model, nozzleSize, defaultFilament, outDir);
+                filaments = SlotFilaments(exe, model, printer, nozzleSize, defaultFilament, outDir);
             var args = new[] {
                 "--slice", "0", "--arrange", "1", "--orient", "0",
                 "--load-settings", Path.Combine(workDir, "machine.json") + ";" + Path.Combine(workDir, "process.json"),
@@ -292,8 +689,11 @@ namespace PrintPrice
             }
             string out3mf = Path.Combine(outDir, "out.3mf");
             if (exit != 0 || !File.Exists(out3mf))
-                throw new SliceException(L.F("Bambu Studio could not slice {0}: {1}", "Bambu Studio kunne ikke slice {0}: {1}",
-                    Path.GetFileName(model), string.IsNullOrEmpty(error) ? L.F("exit code {0}", "fejlkode {0}", exit) : error));
+            {
+                string bed = "";
+                var clash = IsPlateError(exit, error) ? ClashingFilaments(workDir, filaments, out bed) : null;
+                throw new SliceException(SliceErrorText(exit, Path.GetFileName(model), error, printer, bed, clash));
+            }
 
             var res = ReadSliceInfo(out3mf);
             if (res == null) throw new SliceException(L.F("Bambu Studio returned no print estimate for {0}.",
@@ -338,6 +738,14 @@ namespace PrintPrice
                 var profiles = ParseFilamentSlots(settings);
                 foreach (var f in res.Filaments)
                     if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
+                var pp = ParseProjectPrinter(settings, xml);
+                if (pp != null)
+                {
+                    res.PrinterModel = pp.Key;
+                    res.PrinterName = pp.Name;
+                    res.PrinterNozzle = pp.Nozzle;
+                    res.UnsupportedPrinter = pp.Key.Length == 0;
+                }
             }
             return res;
         }
@@ -418,24 +826,10 @@ namespace PrintPrice
             return plan;
         }
 
-        /// The A1 profile name for a short filament name (the nozzle's own, else the 0.4 one), null if neither exists.
-        static string A1Filament(List<string> roots, string shortName, string nozzleSize)
-        {
-            foreach (var name in new[] { shortName + Suffix(nozzleSize), shortName + Suffix("0.4") })
-                foreach (var r in roots)
-                {
-                    string dir = Path.Combine(r, "filament");
-                    if (!Directory.Exists(dir)) continue;
-                    if (File.Exists(Path.Combine(dir, name + ".json")) ||
-                        Directory.GetFiles(dir, name + ".json", SearchOption.AllDirectories).Length > 0) return name;
-                }
-            return null;
-        }
-
         /// For a project .3mf with 2+ filament slots: writes one flattened filament profile per planned slot into outDir
         /// (colour = the file's slot colour, "from" kept) and returns the --load-filaments value ("a;b;;d", empty = the
-        /// file's own). Null = use filament.json as before: not a .3mf, 0-1 slots, no slot with an A1 profile, or any error.
-        static string SlotFilaments(string exe, string model, string nozzleSize, string defaultFilament, string outDir)
+        /// file's own). Null = use filament.json as before: not a .3mf, 0-1 slots, no slot with a profile for the printer, or any error.
+        static string SlotFilaments(string exe, string model, string printer, string nozzleSize, string defaultFilament, string outDir)
         {
             if (!model.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase)) return null;
             try
@@ -446,7 +840,7 @@ namespace PrintPrice
                 if (profiles.Count < 2) return null;
                 var colours = ParseSlotStrings(settings, "filament_colour");
                 var roots = Roots(exe);
-                var plan = SlotPlan(profiles, ShortName(defaultFilament), n => A1Filament(roots, n, nozzleSize));
+                var plan = SlotPlan(profiles, ShortName(defaultFilament), n => ResolveOrNull(roots, "filament", printer, nozzleSize, n));
                 if (plan.All(p => p == null)) return null;
                 var json = Json();
                 var flat = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
@@ -470,9 +864,11 @@ namespace PrintPrice
 
         /// Reads an already-sliced .3mf like ReadSliceInfo(path); with 2+ colours, colours naming no filament get
         /// `defaultFilament` as their name (ApplyDefaultFilament). Grams and time stay the file's.
+        /// A file sliced for a printer we don't support is refused: SliceException(UnsupportedPrinterText).
         public static SliceResult ReadSliceInfo(string path3mf, string defaultFilament)
         {
             var res = ReadSliceInfo(path3mf);
+            if (res != null && res.UnsupportedPrinter) throw new SliceException(UnsupportedPrinterText(res.PrinterName));
             if (res != null) ApplyDefaultFilament(res.Filaments, defaultFilament);
             return res;
         }

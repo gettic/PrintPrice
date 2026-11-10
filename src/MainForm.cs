@@ -64,6 +64,7 @@ namespace PrintPrice
         Button btnAnalyze, btnLoadFile;
         InfoBox lblAuto;
         bool autoIsError;
+        bool autoWarning;   // warning stripe: printer changed after slicing, or a file sliced for another printer (SetAuto clears it)
         CancellationTokenSource cts;
 
         // "Open in Studio" (idea 13): after a successful slice the first top button opens the sliced file in Bambu Studio
@@ -256,11 +257,11 @@ namespace PrintPrice
 
             // printer card in the free space right of the Print time … Electricity rows (see "Printer card")
             printerCard = new PrinterCard { Size = new Size(161, 80), Margin = Padding.Empty, Anchor = AnchorStyles.Top | AnchorStyles.Left };
-            printerCard.Click += delegate { OpenSettings(SettingsForm.TabPrinter); };
+            printerCard.Click += delegate { ChoosePrinter(); };
             printerTip = new ToolTip { OwnerDraw = true, InitialDelay = 400 };
             printerTip.Draw += DrawDarkTip;
-            printerTip.SetToolTip(printerCard, L.S("Change in Settings", "Ret i Indstillinger"));
-            printerCard.AccessibleDescription = L.S("Change in Settings", "Ret i Indstillinger");
+            printerTip.SetToolTip(printerCard, L.S("Choose printer", "Vælg printer"));
+            printerCard.AccessibleDescription = L.S("Choose printer", "Vælg printer");
             inputs.Controls.Add(printerCard, 2, timeRowIndex);
             inputs.SetRowSpan(printerCard, 3);   // Print time, Filament used, Electricity price
             root.Controls.Add(inputs);
@@ -473,6 +474,12 @@ namespace PrintPrice
             if (!offline && !AppSettings.TestMode) Shown += delegate { StartupUpdateCheck(); };
             // sliced files kept for "Open in Studio" by an earlier run (off the UI thread; files Studio still has open stay)
             if (!offline) Shown += delegate { Task.Run(() => BambuSlicer.CleanStudioFiles(null)); };
+            // read Bambu Studio's profile index once in the background (Settings' lists and the first slice are quicker)
+            if (!offline) Shown += delegate
+            {
+                string slicer = BambuSlicer.FindExe(settings.SlicerPath);
+                if (slicer != null) Task.Run(() => { try { BambuSlicer.WarmProfiles(slicer); } catch { } });
+            };
             if (settings.AutoPowerPrice != 0) { if (!offline) Shown += delegate { FetchPowerPrice(); }; }
             else SetPowerInfo(L.S("Live price is off (Settings). Click Update to fetch it once.",
                                   "Live-pris er slået fra (Indstillinger). Klik Opdatér for at hente den én gang."), false);
@@ -492,9 +499,9 @@ namespace PrintPrice
             var nozzle = Wear.FindNozzle(s.Nozzle);
             string type = "";
             bool abrasive = false;
-            try { BambuSlicer.FilamentInfo(BambuSlicer.FindExe(s.SlicerPath), s.FilamentPreset, nozzle.Size, out type, out abrasive); }
+            try { BambuSlicer.FilamentInfo(BambuSlicer.FindExe(s.SlicerPath), s.PrinterModel, s.FilamentPreset, nozzle.Size, out type, out abrasive); }
             catch { /* Bambu Studio missing: treat as normal filament */ }
-            return Wear.Calculate(nozzle, abrasive, type, Wear.FindPlate(s.BedType));
+            return Wear.Calculate(Wear.FindModel(s.PrinterModel), nozzle, abrasive, type, Wear.FindPlate(s.BedType));
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -641,16 +648,35 @@ namespace PrintPrice
             reopened = null;   // any other message replaces the "Opened from history" / "Repeat print" lines
             repeatLine = null;
             autoIsError = error;
+            autoWarning = false;
             lblAuto.Text = text;
             SetAutoColor();
+        }
+
+        /// An error in the model info box; a web address in it (e.g. "open an issue on GitHub at https://…") becomes a
+        /// clickable line of its own under the text.
+        void SetAutoError(string text)
+        {
+            text = text ?? "";
+            int at = text.IndexOf("https://", StringComparison.Ordinal);
+            if (at < 0) { SetAuto(text, true); return; }
+            int end = at;
+            while (end < text.Length && !char.IsWhiteSpace(text[end])) end++;
+            string url = text.Substring(at, end - at).TrimEnd('.', ',', ')');
+            // only our own issues page is clickable: the text can come from a downloaded file or Bambu Studio
+            if (url != BambuSlicer.IssuesUrl && !url.StartsWith("https://github.com/gettic/PrintPrice/", StringComparison.Ordinal))
+            { SetAuto(text, true); return; }
+            SetAuto((text.Substring(0, at).TrimEnd() + " " + text.Substring(at + url.Length).Trim()).Trim(), true);
+            lblAuto.SetLink(url, () => { try { Process.Start(url); } catch { } });
         }
 
         void SetAutoColor()
         {
             // results keep the red info stripe too (the ✓ in the text already shows it worked); a repeat print that
-            // couldn't slice again gets the warning stripe
+            // couldn't slice again, a printer change after slicing and a file sliced for another printer get the warning stripe
             if (lblAuto != null)
-                lblAuto.Kind = autoIsError ? InfoKind.Error : repeatLine != null && repeatWhy != null ? InfoKind.Warning : InfoKind.Info;
+                lblAuto.Kind = autoIsError ? InfoKind.Error
+                             : autoWarning || (repeatLine != null && repeatWhy != null) ? InfoKind.Warning : InfoKind.Info;
         }
 
         void ShowAutoIdle()
@@ -864,6 +890,7 @@ namespace PrintPrice
             UpdateAnalyzeButton();   // Cancel while busy (cts is set first), else Get time / Open in Studio
             btnLoadFile.Enabled = !busy;
             btnHistory.Enabled = !busy;   // "Open again" would clash with a running job
+            printerCard.Enabled = !busy;  // the job uses the active printer's profiles: dimmed, no hand, no click
             txtUrl.ReadOnly = busy;
             UseWaitCursor = false;
         }
@@ -891,6 +918,7 @@ namespace PrintPrice
 
             string process = settings.ProcessPreset, filament = settings.FilamentPreset, bed = settings.BedType;
             string nozzle = Wear.FindNozzle(settings.Nozzle).Size;
+            string printer = settings.PrinterModel;   // the active printer's model: its Bambu Studio profiles
             cts = new CancellationTokenSource();
             var token = cts.Token;
             SetBusy(true);
@@ -937,7 +965,7 @@ namespace PrintPrice
                     }
                 }
 
-                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, localFiles, nozzle, process, filament, bed, progress, token));
+                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, localFiles, printer, nozzle, process, filament, bed, progress, token));
                 if (result.Picture != null)
                 {
                     byte[] render = result.Picture;
@@ -980,10 +1008,20 @@ namespace PrintPrice
                                                       "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", parts));
                     SetAutoColor();
                 }
+                // a sliced file made for another of our printers: its time and weight are that printer's (warning stripe)
+                if (result.FromSlicedFile && !string.IsNullOrEmpty(result.PrinterModel) &&
+                    Wear.FindModel(result.PrinterModel).Key != Wear.FindModel(settings.PrinterModel).Key)
+                {
+                    lblAuto.SetText(lblAuto.Text, L.F("The file was sliced for the {0}, not the {1}: its time and weight are for that printer.",
+                                                      "Filen er slicet til {0}, ikke {1}: tid og vægt gælder den printer.",
+                                                      Wear.FindModel(result.PrinterModel).Label, Wear.FindModel(settings.PrinterModel).Label));
+                    autoWarning = true;
+                    SetAutoColor();
+                }
                 ok = true;
             }
             catch (OperationCanceledException) { SetAuto(L.S("Cancelled.", "Annulleret."), false); }
-            catch (SliceException ex) { SetAuto(ex.Message, true); }
+            catch (SliceException ex) { SetAutoError(ex.Message); }
             catch (Exception ex) { SetAuto(L.S("Something went wrong: ", "Noget gik galt: ") + ex.Message, true); }
             finally
             {
@@ -995,7 +1033,7 @@ namespace PrintPrice
             return ok;
         }
 
-        static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local,
+        static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
                                   string nozzle, string process, string filament, string bed, IProgress<string> progress, CancellationToken ct)
         {
             string work = Path.Combine(Path.GetTempPath(), "PrintPrice", Guid.NewGuid().ToString("N"));
@@ -1027,8 +1065,9 @@ namespace PrintPrice
                 }
 
                 ct.ThrowIfCancellationRequested();
-                progress.Report(L.S("Preparing Bambu Lab A1 profiles…", "Klargør Bambu Lab A1-profiler…"));
-                BambuSlicer.PrepareProfiles(exe, nozzle, process, filament, bed, work);
+                string label = Wear.FindModel(printer).Label;   // "Bambu Lab A1 mini"
+                progress.Report(L.F("Preparing {0} profiles…", "Klargør {0}-profiler…", label));
+                BambuSlicer.PrepareProfiles(exe, printer, nozzle, process, filament, bed, work);
 
                 var total = new SliceResult();
                 for (int i = 0; i < models.Count; i++)
@@ -1036,7 +1075,7 @@ namespace PrintPrice
                     ct.ThrowIfCancellationRequested();
                     progress.Report(L.S("Slicing ", "Slicer ") + models[i].Key + (models.Count > 1 ? " (" + (i + 1) + "/" + models.Count + ")" : "") +
                                     L.S(" in Bambu Studio…", " i Bambu Studio…"));
-                    var r = BambuSlicer.SliceFile(exe, models[i].Value, work, nozzle, filament, ct);
+                    var r = BambuSlicer.SliceFile(exe, models[i].Value, work, printer, nozzle, filament, ct);
                     total.Seconds += r.Seconds;
                     total.Grams += r.Grams;
                     total.Plates += r.Plates;
@@ -1217,7 +1256,7 @@ namespace PrintPrice
         }
 
         /// Decodes the picture, cuts off transparent margins (slicer renders have lots) and scales it down to at most 384 px.
-        static Bitmap PrepareModelPicture(byte[] bytes)
+        internal static Bitmap PrepareModelPicture(byte[] bytes)
         {
             using (var ms = new MemoryStream(bytes))
             using (var src = new Bitmap(ms))
@@ -1580,16 +1619,17 @@ namespace PrintPrice
             cb.DropDownWidth = Math.Max(cb.Width, width + SystemInformation.VerticalScrollBarWidth + cb.Height / 2);
         }
 
-        /// Bambu Studio's A1 filament profiles for the chosen nozzle, short names (as Settings lists them); read once per
+        /// Bambu Studio's filament profiles for the active printer and nozzle, short names (as Settings lists them); read once per
         /// slicer + nozzle. Empty when Bambu Studio isn't found (the rows then list only their own name).
         List<string> FilamentNames()
         {
             string exe = BambuSlicer.FindExe(settings.SlicerPath);
             string size = Wear.FindNozzle(settings.Nozzle).Size;
-            string key = (exe ?? "") + "|" + size;
+            string model = settings.PrinterModel;
+            string key = (exe ?? "") + "|" + model + "|" + size;
             if (filamentNames != null && key == filamentNamesKey) return filamentNames;
             filamentNamesKey = key;
-            try { filamentNames = exe == null ? new List<string>() : BambuSlicer.ListFilaments(exe, size); }
+            try { filamentNames = exe == null ? new List<string>() : BambuSlicer.ListFilaments(exe, model, size); }
             catch { filamentNames = new List<string>(); }
             filamentNamesWidth = 0;
             foreach (var n in filamentNames) filamentNamesWidth = Math.Max(filamentNamesWidth, TextRenderer.MeasureText(n, rowCombo[0].Font).Width);
@@ -1616,7 +1656,7 @@ namespace PrintPrice
             try
             {
                 string type; bool abrasive;
-                BambuSlicer.FilamentInfo(BambuSlicer.FindExe(settings.SlicerPath), name, Wear.FindNozzle(settings.Nozzle).Size, out type, out abrasive);
+                BambuSlicer.FilamentInfo(BambuSlicer.FindExe(settings.SlicerPath), settings.PrinterModel, name, Wear.FindNozzle(settings.Nozzle).Size, out type, out abrasive);
                 if (type.Length > 0) f.Type = type;   // "PETG" for the history; unknown name: keeps the old type
             }
             catch { }
@@ -1676,6 +1716,7 @@ namespace PrintPrice
             var t = (TableLayoutPanel)printerCard.Parent;
             // small first, so an older, taller card doesn't stretch the rows we measure
             printerCard.Margin = Padding.Empty;
+            printerCard.MaxWidth = 0;
             printerCard.FitTo(1);
             t.PerformLayout();
             Func<Control, Rectangle> inTable = c => t.RectangleToClient(c.Parent.RectangleToScreen(c.Bounds));
@@ -1689,15 +1730,14 @@ namespace PrintPrice
             printerCard.Margin = new Padding(Math.Max(0, right - printerCard.Width - cellLeft), Math.Max(0, hours.Top - cellTop), 0, 0);
         }
 
-        /// Bambu Studio's own A1 picture from its install folder (read at runtime, nothing of it is in our exe);
-        /// null = the card draws a simple A1 itself.
-        static Bitmap LoadPrinterPhoto(string exe)
+        /// Bambu Studio's own picture of this printer model from its install folder (read at runtime, nothing of it is in
+        /// our exe); null = the card draws a simple printer itself (PrinterArt).
+        internal static Bitmap LoadPrinterPhoto(string exe, string model)
         {
             try
             {
-                if (exe == null) return null;
-                string f = Path.Combine(Path.GetDirectoryName(exe), "resources", "images", "printer_thumbnail_n2s_png.png");
-                return File.Exists(f) ? PrepareModelPicture(File.ReadAllBytes(f)) : null;
+                string f = BambuSlicer.PrinterPicture(exe, model);
+                return f != null ? PrepareModelPicture(File.ReadAllBytes(f)) : null;
             }
             catch { return null; }
         }
@@ -1725,9 +1765,9 @@ namespace PrintPrice
         /// (rounded; lighter fill, border and text on hover; hand cursor). No photo = a simple A1 drawn in the theme colours.
         sealed class PrinterCard : Control
         {
-            static readonly Color HotBack = Color.FromArgb(52, 55, 60), HotBorder = Color.FromArgb(110, 110, 116);
+            static readonly Color HotBack = Theme.HotBack, HotBorder = Theme.HotBorder;
             const TextFormatFlags TextFlags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis;
-            /// Widest the card may get (device px, 0 = no limit): a long printer name is cut with … (LayoutPrinterCard).
+            /// The card's width (device px, 0 = fit the text): a long printer name is cut with … (LayoutPrinterCard).
             public int MaxWidth;
             Bitmap photo;
             int photoHeight;   // device px, set by FitTo
@@ -1736,11 +1776,28 @@ namespace PrintPrice
             public PrinterCard()
             {
                 SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-                SetStyle(ControlStyles.Selectable, false);
-                TabStop = false;
+                SetStyle(ControlStyles.Selectable, true);   // Tab stop: Enter / Space open the Choose printer window
+                TabStop = true;
                 Cursor = Cursors.Hand;
                 AccessibleRole = AccessibleRole.PushButton;
             }
+
+            /// Wear.Models key: which printer the fallback drawing shows when there is no photo.
+            public string Model = Wear.ModelA1;
+
+            protected override bool IsInputKey(Keys keyData)
+            {
+                return keyData == Keys.Enter || keyData == Keys.Space || base.IsInputKey(keyData);
+            }
+
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) { e.Handled = e.SuppressKeyPress = true; OnClick(EventArgs.Empty); return; }
+                base.OnKeyDown(e);
+            }
+
+            protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+            protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
             public Bitmap Photo
             {
@@ -1760,12 +1817,14 @@ namespace PrintPrice
                 int rest = Px(5) + Px(3) + ts.Height + Px(5);
                 photoHeight = Math.Max(Px(16), Math.Min(Px(88), height - rest));
                 int w = Math.Max(PhotoWidth(photoHeight), ts.Width) + Px(20);
-                if (MaxWidth > 0) w = Math.Max(PhotoWidth(photoHeight) + Px(20), Math.Min(w, MaxWidth));
+                // fixed width (the whole cell): the card doesn't jump when another printer's name is longer or shorter
+                if (MaxWidth > 0) w = Math.Max(PhotoWidth(photoHeight) + Px(20), MaxWidth);
                 Size = new Size(w, Math.Max(height, photoHeight + rest));
                 Invalidate();
             }
 
             protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
+            protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); hot = false; Invalidate(); }
             protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hot = true; Invalidate(); }
             protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hot = false; Invalidate(); }
             protected override void OnClick(EventArgs e) { hot = false; Invalidate(); base.OnClick(e); }   // Settings opens over it: no stuck hover
@@ -1794,31 +1853,14 @@ namespace PrintPrice
                     g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
                     g.DrawImage(photo, pr);
                 }
-                else DrawA1(g, pr);
+                else PrinterArt.Draw(g, pr, Model);
+                if (!Enabled)   // while slicing: the picture dimmed (text stays muted)
+                    using (var b = new SolidBrush(Color.FromArgb(140, Theme.InfoBack))) g.FillRectangle(b, pr);
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
                 int ty = pr.Bottom + Px(3);
-                TextRenderer.DrawText(g, Text, Font, new Rectangle(Px(6), ty, Width - Px(12), Math.Max(1, Height - ty)), hot ? Theme.Text : Theme.Muted, TextFlags);
-            }
-
-            /// Simple Bambu Lab A1 on a 24 × 28 grid: base + bed, frame, X gantry, red toolhead.
-            static void DrawA1(Graphics g, Rectangle r)
-            {
-                float u = r.Height / 28f, x0 = r.X + (r.Width - 24 * u) / 2f, y0 = r.Y;
-                Func<float, float, float, float, RectangleF> R = (x, y, rw, rh) => new RectangleF(x0 + x * u, y0 + y * u, rw * u, rh * u);
-                using (var m = new SolidBrush(Theme.Muted))
-                using (var d = new SolidBrush(Color.FromArgb(105, 105, 108)))
-                using (var red = new SolidBrush(Theme.Others))
-                {
-                    g.FillRectangle(m, R(1, 23, 22, 4));      // base
-                    g.FillRectangle(d, R(4, 21, 15, 1.5f));   // bed
-                    g.FillRectangle(m, R(3, 2, 2, 21));       // left upright
-                    g.FillRectangle(m, R(19, 2, 2, 21));      // right upright
-                    g.FillRectangle(m, R(3, 1, 18, 2));       // top bar
-                    g.FillRectangle(m, R(1, 10, 22, 2));      // X gantry
-                    g.FillRectangle(red, R(9, 8, 6, 7));      // toolhead
-                    g.FillRectangle(red, R(11, 15, 2, 1.5f)); // nozzle
-                    g.FillRectangle(d, R(16, 24, 4, 2));      // screen
-                }
+                TextRenderer.DrawText(g, Text, Font, new Rectangle(Px(6), ty, Width - Px(12), Math.Max(1, Height - ty)), hot || Focused ? Theme.Text : Theme.Muted, TextFlags);
+                if (Focused && ShowFocusCues)
+                    ControlPaint.DrawFocusRectangle(g, Rectangle.Inflate(ClientRectangle, -Px(3), -Px(3)), Theme.Text, hot ? HotBack : Theme.InfoBack);
             }
         }
 
@@ -2027,12 +2069,14 @@ namespace PrintPrice
             // Settings > Electricity > Printer name (N2); a long name is cut with … on the card, full text in the tooltip
             printerCard.Text = AppSettings.CleanPrinterName(settings.PrinterName) + " · " + Num.Fmt(settings.PrinterWatts) + " W";
             printerCard.AccessibleName = printerCard.Text;
-            printerTip.SetToolTip(printerCard, printerCard.Text + "\n" + L.S("Change in Settings", "Ret i Indstillinger"));
+            printerTip.SetToolTip(printerCard, printerCard.Text + "\n" + L.S("Click to choose the printer", "Klik for at vælge printer"));
             string exe = BambuSlicer.FindExe(settings.SlicerPath);
-            if (exe != printerPhotoExe)   // first time, or the slicer path changed in Settings
+            string photoKey = (exe ?? "") + "|" + Wear.FindModel(settings.PrinterModel).Key;
+            if (photoKey != printerPhotoExe)   // first time, the slicer path changed in Settings, or another printer model
             {
-                printerPhotoExe = exe;
-                printerCard.Photo = LoadPrinterPhoto(exe);
+                printerPhotoExe = photoKey;
+                printerCard.Model = settings.PrinterModel;
+                printerCard.Photo = LoadPrinterPhoto(exe, settings.PrinterModel);
             }
             LayoutPrinterCard();   // the text width may have changed
             string wear = settings.MachineRatePerHour > 0 ? L.F(", {0} kr/h wear", ", {0} kr/t slid", Num.Fmt(settings.MachineRatePerHour)) : "";
@@ -2109,6 +2153,12 @@ namespace PrintPrice
         /// tab = SettingsForm.TabPrices … TabApp, or -1 = the tab used last.
         void OpenSettings(int tab)
         {
+            OpenSettings(tab, null);
+        }
+
+        /// prepare: called with the new Settings window before it shows (e.g. which printer the Printer tab shows).
+        void OpenSettings(int tab, Action<SettingsForm> prepare)
+        {
             // building Settings takes a moment: say so on the button (also when opened from the printer card)
             string btnText = btnSettings.Text;
             var oldCursor = Cursor.Current;
@@ -2122,6 +2172,7 @@ namespace PrintPrice
                 using (var dlg = new SettingsForm(settings, offline ? sampleDebt : History.FailedDebt(history, null), tab))
                 {
                     if (!offline) dlg.UpdateFound = ShowUpdateButton;   // "check now" in Settings
+                    if (prepare != null) prepare(dlg);
                     dlg.Shown += delegate { restore(); };   // back to normal once the window is up
                     if (dlg.ShowDialog(this) == DialogResult.OK)
                     {
@@ -2135,15 +2186,19 @@ namespace PrintPrice
                                             (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
                         if (powerChanged && settings.AutoPowerPrice != 0) BeginInvoke((MethodInvoker)FetchPowerPrice);
                         // other slicing settings make the slice out of date: the button slices again instead of opening it
-                        if (old.ProcessPreset != settings.ProcessPreset || old.FilamentPreset != settings.FilamentPreset ||
-                            old.Nozzle != settings.Nozzle || old.BedType != settings.BedType || old.SlicerPath != settings.SlicerPath)
+                        bool slicingChanged = SlicingChanged(old, settings);
+                        if (slicingChanged || old.FilamentPreset != settings.FilamentPreset || old.SlicerPath != settings.SlicerPath)
                             SetStudioFile(null);
                         SaveLastPrices();
                         RefreshSettingsLabels();
                         foreach (var cb in rowCombo) cb.Tag = null;   // nozzle / slicer may have changed: re-read the list when opened
                         if (!jobLoaded && cts == null) SetColours(null);   // no model yet: the row follows Settings' filament profile
                         Recalculate();
-                        if (cts == null) ShowAutoIdle();
+                        if (cts == null)
+                        {
+                            if (jobLoaded && slicingChanged && old.ActivePrinterId != settings.ActivePrinterId) ShowPrinterChanged();
+                            else ShowAutoIdle();
+                        }
                         if (dlg.RestartRequested && !offline)
                         {
                             // new language: settings are already saved above; Restart closes this window (saves again) and starts anew
@@ -2154,6 +2209,84 @@ namespace PrintPrice
                 }
             }
             finally { restore(); }   // also if building the window failed
+        }
+
+        // ---------- several printers (ideas 7 + 24 + 11) ----------
+        /// The printer card: the Choose printer window (a tile per printer). A pick makes that printer the active one;
+        /// "Printer settings…" / the Add tile open Settings > Printer.
+        void ChoosePrinter()
+        {
+            if (cts != null) return;   // not while slicing: the job uses the active printer's profiles
+            EnsureHistory();
+            using (var dlg = new PrinterPickerForm(settings, history, DateTime.Now))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                if (dlg.AddRequested)
+                    OpenSettings(SettingsForm.TabPrinter, s => s.ShowPrinter(null, true));
+                else if (dlg.SettingsRequested)
+                {
+                    string id = dlg.SettingsPrinterId;
+                    OpenSettings(SettingsForm.TabPrinter, s => s.ShowPrinter(id, false));
+                }
+                else UsePrinter(dlg.ChosenId);
+            }
+        }
+
+        /// Makes printer `id` the active one: its wear (auto rate recalculated), power, nozzle, plate and profiles are
+        /// used from now on (saved). A model already sliced with other printer settings gets the warning line.
+        void UsePrinter(string id)
+        {
+            if (string.IsNullOrEmpty(id) || id == settings.ActivePrinterId) return;
+            var old = settings.Clone();
+            if (!settings.SelectPrinter(id)) return;
+            if (settings.AutoWearRate != 0) settings.MachineRatePerHour = AutoWearRate(settings);
+            if (!offline) settings.Save();
+            bool slicingChanged = SlicingChanged(old, settings);
+            if (slicingChanged) SetStudioFile(null);   // the slice was made for the other printer
+            foreach (var cb in rowCombo) cb.Tag = null;   // another printer's filament list
+            RefreshSettingsLabels();
+            if (!jobLoaded && cts == null) SetColours(null);
+            Recalculate();
+            if (cts != null) return;
+            if (jobLoaded && slicingChanged && reopened == null) ShowPrinterChanged();
+            else if (!jobLoaded) ShowAutoIdle();
+        }
+
+        /// True when the printer settings that change a slice differ (model, nozzle, print profile, build plate).
+        static bool SlicingChanged(AppSettings a, AppSettings b)
+        {
+            return Wear.FindModel(a.PrinterModel).Key != Wear.FindModel(b.PrinterModel).Key || a.Nozzle != b.Nozzle ||
+                   a.ProcessPreset != b.ProcessPreset || a.BedType != b.BedType;
+        }
+
+        /// Warning stripe in the model info box: the time and weight shown were sliced for the printer used before.
+        void ShowPrinterChanged()
+        {
+            // two lines at most (a third line would make the window taller)
+            SetAuto(L.F("Printer changed to {0}: click \"{1}\" to slice for it again.",
+                        "Printer skiftet til {0}: klik \"{1}\" for at beregne den igen.",
+                        AppSettings.CleanPrinterName(settings.PrinterName), AnalyzeText.Replace("&&", "&")), false);
+            autoWarning = true;
+            SetAutoColor();
+        }
+
+        /// Picture mode: adds a printer of this model (in memory) and switches to it, as a pick in Choose printer does.
+        internal void SampleSwitchPrinter(string modelKey)
+        {
+            if (!offline) return;
+            UsePrinter(settings.AddPrinter("", modelKey).Id);
+        }
+
+        /// A saved quote's printer becomes the active one again if it still exists (Open again / Repeat print).
+        void UseRecordPrinter(QuoteRecord r)
+        {
+            string id = History.PrinterOf(r);
+            if (id == settings.ActivePrinterId || settings.FindPrinter(id) == null) return;
+            if (!settings.SelectPrinter(id)) return;
+            if (settings.AutoWearRate != 0) settings.MachineRatePerHour = AutoWearRate(settings);
+            if (!offline) settings.Save();
+            foreach (var cb in rowCombo) cb.Tag = null;
+            RefreshSettingsLabels();
         }
 
         // ---------- updates from GitHub ----------
@@ -2561,8 +2694,17 @@ namespace PrintPrice
 
         string PrinterText()
         {
-            var nozzle = Wear.FindNozzle(settings.Nozzle);
-            return L.F("{0}, {1} mm nozzle", "{0}, {1} mm dyse", AppSettings.CleanPrinterName(settings.PrinterName),
+            return PrinterText(null);
+        }
+
+        /// "<printer name>, 0.4 mm nozzle": the active printer, or a saved quote's printer (its saved name; the nozzle of
+        /// that printer today, if it still exists).
+        string PrinterText(QuoteRecord r)
+        {
+            var p = r != null ? settings.FindPrinter(History.PrinterOf(r)) : null;
+            string name = r != null && !string.IsNullOrEmpty(r.PrinterName) ? r.PrinterName : p != null ? p.Name : settings.PrinterName;
+            var nozzle = Wear.FindNozzle(p != null ? p.Nozzle : settings.Nozzle);
+            return L.F("{0}, {1} mm nozzle", "{0}, {1} mm dyse", AppSettings.CleanPrinterName(name),
                        L.Danish ? nozzle.Size.Replace('.', ',') : nozzle.Size);
         }
 
@@ -2646,7 +2788,7 @@ namespace PrintPrice
                 Logo = Logo,
                 Hours = r.Hours, Minutes = r.Minutes,
                 Weight = Num.Fmt(r.Grams) + " g",
-                Printer = PrinterText(),
+                Printer = PrinterText(r),
                 Number = History.QuoteNumber(r), Date = saved, ValidUntil = settings.QuoteValidUntil(saved),
                 PlateName = QuotePlate(),
                 PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? r.PurgeGrams : -1,
@@ -2891,6 +3033,7 @@ namespace PrintPrice
             if (history != null) return;
             if (offline) { history = new List<QuoteRecord>(); return; }
             history = History.Load(out historyProblem);
+            History.ReservePrinterIds(history, settings);   // a new printer never reuses an id from the history
         }
 
         /// Adds the quote on screen to the history and writes the file. null = OK, else the error text.
@@ -2948,6 +3091,7 @@ namespace PrintPrice
             using (var dlg = new HistoryForm(history, problem, offline))
             {
                 dlg.QuoteRequested = (owner, rec, invoice) => ShowRecordQuote(owner, rec, invoice);
+                dlg.Settings = settings;   // printer names (Printer column / filter with 2+ printers)
                 if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Selected != null)
                 {
                     if (dlg.RepeatSelected) Repeat(dlg.Selected);
@@ -3028,6 +3172,7 @@ namespace PrintPrice
             repeatOf = null;
             savedId = null;    // saving it again is a new sale: it pays back again
             SetUrlHint(false);
+            UseRecordPrinter(r);   // the quote's printer (if it still exists): its wear and power, and Repeat print slices for it
             txtUrl.Text = r.Source ?? "";
             SetStudioFile(null);   // no slice from this session (also when the link was the same, so TextChanged didn't fire)
             jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)

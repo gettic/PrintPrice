@@ -27,7 +27,21 @@ namespace PrintPrice
         readonly TableLayoutPanel top, bottom, cards;
         readonly ComboBox cmbMonth;
         readonly StatCard cardPrints, cardTime, cardCustomers, cardFriends, cardCosts, cardProfit;
-        readonly DataGridViewTextBoxColumn colDate, colModel, colTime, colGrams, colPrice, colNote, colInvoice;
+        readonly DataGridViewTextBoxColumn colDate, colModel, colTime, colGrams, colPrice, colNote, colInvoice, colPrinter;
+        readonly ComboBox cmbPrinter;    // Printer filter (only with 2+ printers): All printers / one printer
+        readonly Label lblPrinterCap;
+        bool printerMode;                // 2+ printers (in Settings or in the records): Printer column + filter + profit tooltip
+        Dictionary<string, string> printerNames = new Dictionary<string, string>();   // id -> name now (removed ones: the records' name)
+
+        /// The settings (printer names and order); set before the window shows. null = names from the records only.
+        public AppSettings Settings;
+
+        sealed class PrinterChoice
+        {
+            public string Id;   // null = all printers
+            public string Text;
+            public override string ToString() { return Text; }
+        }
         readonly DataGridViewComboBoxColumn colFor;
         readonly ToolTip modelTip;   // dark tooltip with the full model name when it is cut off
         readonly DataGridViewCheckBoxColumn colPrinted, colFailed;   // read-only cells, toggled by click / Space, drawn in the theme (PaintTicks)
@@ -82,8 +96,8 @@ namespace PrintPrice
             Controls.Add(root);
 
             // ---------- search + month + filter + count ----------
-            top = new TableLayoutPanel { ColumnCount = 9, AutoSize = true, Margin = new Padding(0, 0, 0, 8), Anchor = AnchorStyles.Left | AnchorStyles.Right };
-            for (int i = 0; i < 8; i++) top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            top = new TableLayoutPanel { ColumnCount = 11, AutoSize = true, Margin = new Padding(0, 0, 0, 8), Anchor = AnchorStyles.Left | AnchorStyles.Right };
+            for (int i = 0; i < 10; i++) top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             // search box and Show combo: same top (Top anchor, same margin) and same height (FitLayout), captions centred beside them
             // Tag "single": stays a single-line edit (its cue banner needs that), see Theme.TextMargins
@@ -114,6 +128,11 @@ namespace PrintPrice
             });
             cmbShow.SelectedIndex = 0;
             cmbShow.SelectedIndexChanged += delegate { Fill(); };
+            // Printer filter (shown on Load only with 2+ printers): the cards and the list follow it
+            cmbPrinter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 0, 3), Visible = false };
+            cmbPrinter.SelectedIndexChanged += delegate { if (!filling) Fill(); };
+            lblPrinterCap = Caption("Printer");
+            lblPrinterCap.Visible = false;
             lblCount = new Label { AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Right, Margin = new Padding(8, 3, 0, 3) };
             top.Controls.Add(Caption(L.S("Search", "Søg")), 0, 0);
             top.Controls.Add(txtSearch, 1, 0);
@@ -123,7 +142,9 @@ namespace PrintPrice
             top.Controls.Add(btnNewer, 5, 0);
             top.Controls.Add(Caption(L.S("Show", "Vis")), 6, 0);
             top.Controls.Add(cmbShow, 7, 0);
-            top.Controls.Add(lblCount, 8, 0);
+            top.Controls.Add(lblPrinterCap, 8, 0);
+            top.Controls.Add(cmbPrinter, 9, 0);
+            top.Controls.Add(lblCount, 10, 0);
             root.Controls.Add(top);
 
             // ---------- the month in six cards (History.MonthSummary) ----------
@@ -183,6 +204,8 @@ namespace PrintPrice
                 },
                 ValueMember = "Value", DisplayMember = "Text", ValueType = typeof(int), SortMode = DataGridViewColumnSortMode.NotSortable
             };
+            colPrinter = TextColumn("Printer", false);   // the quote's printer (only with 2+ printers)
+            colPrinter.Visible = false;
             colNote = TextColumn(L.S("Note", "Note"), false);
             colNote.ReadOnly = false;
             colNote.MaxInputLength = 200;
@@ -194,7 +217,7 @@ namespace PrintPrice
             colPrinted = new DataGridViewCheckBoxColumn { HeaderText = L.S("Printed", "Printet"), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable };
             colPrinted.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
             colInvoice = TextColumn(L.S("Invoice", "Faktura"), false);   // invoice no. (muted), empty = no invoice yet
-            grid.Columns.AddRange(new DataGridViewColumn[] { colDate, colModel, colTime, colGrams, colPrice, colFor, colNote, colPrinted, colFailed, colInvoice });
+            grid.Columns.AddRange(new DataGridViewColumn[] { colDate, colModel, colTime, colGrams, colPrice, colFor, colPrinter, colNote, colPrinted, colFailed, colInvoice });
 
             grid.CellFormatting += GridCellFormatting;
             grid.CurrentCellDirtyStateChanged += delegate
@@ -214,12 +237,23 @@ namespace PrintPrice
             {
                 using (var b = new SolidBrush(Theme.InfoBack)) e.Graphics.FillRectangle(b, e.Bounds);
                 using (var p = new Pen(Theme.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
-                TextRenderer.DrawText(e.Graphics, e.ToolTipText, e.Font, e.Bounds, Theme.Text,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                string text = e.ToolTipText ?? "";
+                if (text.IndexOf('\n') < 0)
+                {
+                    TextRenderer.DrawText(e.Graphics, text, e.Font, e.Bounds, Theme.Text,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                    return;
+                }
+                // several lines (the Profit card's "by printer"): the measured block centred, each line centred
+                const TextFormatFlags multi = TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix;
+                Size sz = TextRenderer.MeasureText(e.Graphics, text, e.Font, e.Bounds.Size, multi);
+                TextRenderer.DrawText(e.Graphics, text, e.Font,
+                    new Rectangle(e.Bounds.X, e.Bounds.Y + (e.Bounds.Height - sz.Height) / 2, e.Bounds.Width, sz.Height), Theme.Text, multi);
             };
             grid.CellMouseEnter += (s, e) =>
             {
-                if (e.RowIndex < 0 || (e.ColumnIndex != colModel.Index && e.ColumnIndex != colNote.Index && e.ColumnIndex != colInvoice.Index)) return;   // cut-off model, note or invoice code
+                if (e.RowIndex < 0 || (e.ColumnIndex != colModel.Index && e.ColumnIndex != colNote.Index && e.ColumnIndex != colInvoice.Index &&
+                                       e.ColumnIndex != colPrinter.Index)) return;   // cut-off model, printer, note or invoice code
                 var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
                 string text = Convert.ToString(cell.FormattedValue);
                 var r = grid.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
@@ -380,6 +414,7 @@ namespace PrintPrice
             Load += delegate
             {
                 btnQuote.Visible = btnInvoice.Visible = QuoteRequested != null;
+                SetupPrinters();
                 FitLayout(); Fill(); ShowInfo(); UpdateMonthButtons();
             };
             FormClosed += delegate { if (deleteTimer != null) { deleteTimer.Stop(); deleteTimer.Dispose(); deleteTimer = null; } };
@@ -429,6 +464,7 @@ namespace PrintPrice
             colGrams.Width = width(colGrams, "0000,00", 70);
             colPrice.Width = width(colPrice, "0000,00", 74);
             colFor.Width = width(colFor, L.S("Customer", "Venner"), 96);
+            colPrinter.Width = width(colPrinter, null, 140);   // "Bambu Lab A1 mini" fits; longer names get the dark tooltip
             colNote.MinimumWidth = px(110);
             colPrinted.Width = width(colPrinted, null, 72);
             colFailed.Width = width(colFailed, null, 64);
@@ -436,18 +472,22 @@ namespace PrintPrice
 
             // Month / Show combos exactly as tall as the search box (owner-drawn: height = ItemHeight + its frame, measured),
             // the ‹ › buttons too
-            foreach (var cb in new[] { cmbShow, cmbMonth })
+            foreach (var cb in new[] { cmbShow, cmbMonth, cmbPrinter })
             {
                 int frame = cb.Height - cb.ItemHeight;
                 if (txtSearch.Height - frame > 0) cb.ItemHeight = txtSearch.Height - frame;
             }
             btnOlder.Size = btnNewer.Size = new Size(px(28), txtSearch.Height);
+            // the top row exactly as tall as the search box + its margins (the Printer caption / filter made it 1 px taller)
+            top.RowStyles.Clear();
+            top.RowStyles.Add(new RowStyle(SizeType.Absolute, txtSearch.Height + txtSearch.Margin.Vertical));
 
             int rowH = TextRenderer.MeasureText("Ag", grid.Font).Height + px(8);
             grid.RowTemplate.Height = rowH;
             grid.ColumnHeadersHeight = rowH + px(4);
             int cols = colDate.Width + colModel.Width + colTime.Width + colGrams.Width + colPrice.Width + colFor.Width
-                     + colPrinted.Width + colFailed.Width + colInvoice.Width + px(155);   // Note gets the rest (~155 px + no-scroll-bar room; +40 from Model / Invoice)
+                     + colPrinted.Width + colFailed.Width + colInvoice.Width + px(155)    // Note gets the rest (~155 px + no-scroll-bar room; +40 from Model / Invoice)
+                     + (printerMode ? colPrinter.Width : 0);                              // 2+ printers: the window is wider by the Printer column
             gridFrame.Size = new Size(cols + SystemInformation.VerticalScrollBarWidth + 2,
                                       grid.ColumnHeadersHeight + VisibleRows * rowH + 2);
             info.SetWidth(gridFrame.Width);
@@ -470,6 +510,40 @@ namespace PrintPrice
         }
 
         static string ConfirmText { get { return L.S("Really delete?", "Slet virkelig?"); } }
+
+        // ---------- several printers ----------
+        /// Load: with 2+ printers (in Settings, or removed ones still in the records) the Printer column, the Printer
+        /// filter and the Profit card's "by printer" tooltip show; with one printer nothing changes.
+        void SetupPrinters()
+        {
+            var all = History.PrinterTotals(list, Settings, 0, 0);
+            printerNames = new Dictionary<string, string>();
+            foreach (var t in all) printerNames[t.Id] = AppSettings.CleanPrinterName(t.Name);
+            printerMode = all.Count >= 2;
+            colPrinter.Visible = cmbPrinter.Visible = lblPrinterCap.Visible = printerMode;
+            if (!printerMode) return;
+            cmbShow.Margin = new Padding(0, 3, 24, 3);
+            filling = true;
+            cmbPrinter.Items.Clear();
+            cmbPrinter.Items.Add(new PrinterChoice { Id = null, Text = L.S("All printers", "Alle printere") });
+            foreach (var t in all)
+                cmbPrinter.Items.Add(new PrinterChoice { Id = t.Id, Text = printerNames[t.Id] + (t.Removed ? L.S(" (removed)", " (fjernet)") : "") });
+            cmbPrinter.SelectedIndex = 0;
+            filling = false;
+        }
+
+        /// The printer chosen in the filter (null = all printers).
+        string SelectedPrinter
+        {
+            get { var c = printerMode ? cmbPrinter.SelectedItem as PrinterChoice : null; return c == null ? null : c.Id; }
+        }
+
+        string PrinterText(QuoteRecord r)
+        {
+            string name;
+            if (printerNames.TryGetValue(History.PrinterOf(r), out name)) return name;
+            return AppSettings.CleanPrinterName(r.PrinterName);
+        }
 
         // ---------- list ----------
         static string ModelText(QuoteRecord r)
@@ -524,6 +598,8 @@ namespace PrintPrice
         bool Matches(QuoteRecord r)
         {
             if (!InMonth(r)) return false;
+            string printer = SelectedPrinter;
+            if (printer != null && History.PrinterOf(r) != printer) return false;
             switch (cmbShow.SelectedIndex)
             {
                 case 1: if (r.For != History.ForFriends) return false; break;
@@ -533,7 +609,7 @@ namespace PrintPrice
             }
             string q = txtSearch.Text.Trim();
             if (q.Length == 0) return true;
-            foreach (var s in new[] { r.Model, r.Source, r.Note, ModelText(r), r.Customer, r.InvoiceNo })
+            foreach (var s in new[] { r.Model, r.Source, r.Note, ModelText(r), r.Customer, r.InvoiceNo, printerMode ? PrinterText(r) : null })
                 if (!string.IsNullOrEmpty(s) && s.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0) return true;
             return false;
         }
@@ -554,7 +630,7 @@ namespace PrintPrice
                                       r.Hours + L.S(" h ", " t ") + r.Minutes + " m",
                                       Num.Fmt(r.Grams), History.PriceFor(r).ToString("0.00", Num.Dk),
                                       r.For == History.ForFriends ? History.ForFriends : History.ForCustomer,
-                                      r.Note ?? "", r.Printed, r.Failed, r.InvoiceNo ?? "");
+                                      printerMode ? PrinterText(r) : "", r.Note ?? "", r.Printed, r.Failed, r.InvoiceNo ?? "");
                 grid.Rows[i].Tag = r;
                 grid.Rows[i].Height = grid.RowTemplate.Height;
                 if (r == keep) { grid.CurrentCell = grid.Rows[i].Cells[0]; }
@@ -580,7 +656,10 @@ namespace PrintPrice
         {
             MonthTotals t;
             var m = SelectedMonth;
-            if (m != DateTime.MinValue) t = History.MonthSummary(list, m.Year, m.Month);
+            string printer = SelectedPrinter;
+            UpdateProfitTip(m);
+            if (m != DateTime.MinValue) t = History.MonthSummary(list, m.Year, m.Month, printer);
+            else if (printer != null) t = History.MonthSummary(list, 0, 0, printer);   // one printer, all time
             else
             {
                 t = new MonthTotals();
@@ -609,6 +688,17 @@ namespace PrintPrice
                 Math.Abs(t.Income) < 1e-9 ? L.S("no income yet", "ingen indtægt endnu")
                                           : L.F("{0} % of income", "{0} % af indtægten", Math.Round(t.ProfitPct).ToString("0", Num.Dk)),
                 t.Profit < 0 ? Theme.Error : Theme.Success);
+        }
+
+        /// With 2+ printers and "All printers": the Profit card's dark tooltip lists each printer's profit for the month
+        /// (all months = all time).
+        void UpdateProfitTip(DateTime m)
+        {
+            if (!printerMode || SelectedPrinter != null) { modelTip.SetToolTip(cardProfit, null); return; }
+            var lines = new List<string> { L.S("Profit by printer", "Overskud pr. printer") };
+            foreach (var t in History.PrinterTotals(list, Settings, m == DateTime.MinValue ? 0 : m.Year, m.Month))
+                lines.Add(AppSettings.CleanPrinterName(t.Name) + (t.Removed ? L.S(" (removed)", " (fjernet)") : "") + ":  " + Num.Kr(t.Profit));
+            modelTip.SetToolTip(cardProfit, string.Join("\n", lines));
         }
 
         /// One card: muted caption, big bold value in its colour, muted second line; InfoBack fill, Border frame, the
@@ -789,11 +879,11 @@ namespace PrintPrice
 
         void ShowInfo()
         {
-            string help = L.S("Quote… makes a quote page for the selected print, Invoice… a bill (it ticks Printed). Repeat print slices it again " +
-                              "with today's prices; Open again (or double-click) loads it as saved. Right-click a quote for all of these.\n" +
+            string help = L.S("Quote… makes a quote page for the selected print, Invoice… a bill (it ticks Printed). Repeat print slices it " +
+                              "with today's prices; Open again (or double-click) loads it as saved. Right-click for all of these.\n" +
                               "Click For, Note, Printed or Failed to change them, changes are saved at once. The history is kept only on this PC and never sent anywhere.",
-                              "Tilbud… laver en tilbudsside for det valgte print, Faktura… en regning (den sætter Printet). Print igen slicer det igen " +
-                              "med dagens priser; Åbn igen (eller dobbeltklik) henter det, som det blev gemt. Højreklik på et tilbud for det hele.\n" +
+                              "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (den sætter Printet). Print igen slicer det " +
+                              "med dagens priser; Åbn igen (eller dobbeltklik) henter det som gemt. Højreklik for det hele.\n" +
                               "Klik på Til, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Historikken ligger kun på denne pc og sendes aldrig nogen steder.");
             if (saveError != null) { info.Text = saveError; info.Kind = InfoKind.Error; }
             else if (!string.IsNullOrEmpty(problem)) { info.Text = problem + "\n" + help; info.Kind = InfoKind.Warning; }

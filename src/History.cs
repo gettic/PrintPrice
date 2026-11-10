@@ -80,6 +80,12 @@ namespace PrintPrice
         // idea 23: repeat print of an earlier record (its Id); "" = not a repeat. Never merged with the original (SameQuote).
         public string RepeatOf = "";
 
+        // ideas 24 + 11: the printer the quote was made for (AppSettings.ActivePrinterId when saved) and a snapshot of
+        // its name and model. "" in records saved before several printers = printer "1" (History.PrinterOf).
+        public string PrinterId = "";
+        public string PrinterName = "";
+        public string PrinterModel = "";
+
         // invoice (History.MakeInvoice): number like "2026-006" ("" = no invoice yet) and the date it was made (TimeFormat)
         public string InvoiceNo = "";
         public string BilledAt = "";
@@ -118,6 +124,15 @@ namespace PrintPrice
         public double Lost;                  // failed prints: sum of History.FailedCost
         public double Profit;                // Income - Costs - Lost
         public double ProfitPct;             // Profit / Income x 100; 0 when Income is 0
+    }
+
+    /// One printer's totals (History.PrinterTotals): MonthTotals (Prints = print count, Profit, ...) plus the printer.
+    public class PrinterTotals : MonthTotals
+    {
+        public string Id = "";
+        public string Name = "";
+        public string Model = "";
+        public bool Removed;                 // no longer in settings: id/name from its history records
     }
 
     /// The file's top level: {"Version":1,"Quotes":[...]} (newest first).
@@ -178,6 +193,9 @@ namespace PrintPrice
                     new HistoryFilament { Grams = input.FilamentGrams, PricePerKg = input.FilamentDkkPerKg } };
             r.ElectricityDkkPerKwh = input.ElectricityDkkPerKwh;
 
+            r.PrinterId = AppSettings.ValidPrinterId(s.ActivePrinterId) ? s.ActivePrinterId : FirstPrinterId;
+            r.PrinterName = AppSettings.CleanPrinterName(s.PrinterName);
+            r.PrinterModel = Wear.FindModel(s.PrinterModel).Key;
             r.PrinterWatts = s.PrinterWatts;
             r.MachineRatePerHour = s.MachineRatePerHour;
             r.FailedPrintPct = s.FailedPrintPct;
@@ -522,12 +540,27 @@ namespace PrintPrice
         /// (FailedCost). Not printed, not failed quotes count for nothing. Empty month / null list = all 0.
         public static MonthTotals MonthSummary(List<QuoteRecord> list, int year, int month)
         {
-            var m = new MonthTotals { Year = year, Month = month };
+            return MonthSummary(list, year, month, null);
+        }
+
+        /// MonthSummary for one printer (PrinterOf(r) == printerId; null = all printers). year 0 = all time (every
+        /// record, month ignored).
+        public static MonthTotals MonthSummary(List<QuoteRecord> list, int year, int month, string printerId)
+        {
+            var m = new MonthTotals { Year = year, Month = year == 0 ? 0 : month };
+            Sum(m, list, year, month, printerId);
+            return m;
+        }
+
+        static void Sum(MonthTotals m, List<QuoteRecord> list, int year, int month, string printerId)
+        {
             if (list != null)
                 foreach (var r in list)
                 {
+                    if (r == null) continue;
+                    if (printerId != null && PrinterOf(r) != printerId) continue;
                     int y, mo;
-                    if (!SavedMonth(r, out y, out mo) || y != year || mo != month) continue;
+                    if (year != 0 && (!SavedMonth(r, out y, out mo) || y != year || mo != month)) continue;
                     if (r.Failed) { m.FailedPrints++; m.Lost += FailedCost(r); continue; }
                     if (!r.Printed) continue;
                     m.Prints++;
@@ -544,7 +577,70 @@ namespace PrintPrice
             m.Costs = m.MaterialCost + m.PowerCost + m.WearCost;
             m.Profit = m.Income - m.Costs - m.Lost;
             m.ProfitPct = Math.Abs(m.Income) < 1e-9 ? 0 : m.Profit / m.Income * 100;
-            return m;
+        }
+
+        // ---------- several printers (ideas 24 + 11) ----------
+
+        /// The id old records (saved before several printers) belong to: the first and only printer back then.
+        public const string FirstPrinterId = "1";
+
+        /// The printer id of a record; "" (old record) = FirstPrinterId.
+        public static string PrinterOf(QuoteRecord r)
+        {
+            if (r == null || string.IsNullOrEmpty(r.PrinterId)) return FirstPrinterId;
+            return r.PrinterId;
+        }
+
+        /// Reserves every printer id used in the history (AppSettings.ReservePrinterId), so a new printer never gets the
+        /// id of a removed or lost one (e.g. after an older version rewrote settings.ini without the printer lines).
+        /// True when settings.LastPrinterId went up. Doesn't save.
+        public static bool ReservePrinterIds(List<QuoteRecord> list, AppSettings settings)
+        {
+            bool changed = false;
+            if (list == null || settings == null) return false;
+            foreach (var r in list)
+                if (r != null && settings.ReservePrinterId(PrinterOf(r))) changed = true;
+            return changed;
+        }
+
+        /// Totals per printer (same rules as MonthSummary; year 0 = all time). First every printer in settings, in
+        /// order (also with no records: all 0), with today's name; then printers no longer in settings that have records
+        /// in the period (Removed = true; name/model = the newest record's snapshot, else "Bambu Lab A1" / A1).
+        /// The rows add up to MonthSummary(list, year, month). settings null = only printers found in the records.
+        public static List<PrinterTotals> PrinterTotals(List<QuoteRecord> list, AppSettings settings, int year, int month)
+        {
+            var res = new List<PrinterTotals>();
+            var seen = new Dictionary<string, PrinterTotals>(StringComparer.Ordinal);
+            if (settings != null)
+                foreach (var p in settings.Printers)
+                {
+                    var t = new PrinterTotals { Id = p.Id, Name = p.Name, Model = p.Model };
+                    res.Add(t);
+                    seen[p.Id] = t;
+                }
+            if (list != null)
+                foreach (var r in list)   // newest first: the first record seen gives a removed printer's name
+                {
+                    if (r == null) continue;
+                    int y, mo;
+                    if (year != 0 && (!SavedMonth(r, out y, out mo) || y != year || mo != month)) continue;
+                    string id = PrinterOf(r);
+                    if (seen.ContainsKey(id)) continue;
+                    var t = new PrinterTotals
+                    {
+                        Id = id, Removed = settings != null,
+                        Name = AppSettings.CleanPrinterName(r.PrinterName),
+                        Model = Wear.FindModel(r.PrinterModel).Key
+                    };
+                    res.Add(t);
+                    seen[id] = t;
+                }
+            foreach (var t in res)
+            {
+                t.Year = year; t.Month = year == 0 ? 0 : month;
+                Sum(t, list, year, month, t.Id);
+            }
+            return res;
         }
 
         /// The months that have records (any kind, readable SavedAt), as the 1st of each month, newest first, no doubles.
@@ -682,6 +778,9 @@ namespace PrintPrice
                 if (r.Customer == null) r.Customer = "";
                 if (r.FailedAt == null) r.FailedAt = "";
                 if (r.RepeatOf == null) r.RepeatOf = "";
+                if (r.PrinterId == null) r.PrinterId = "";
+                if (r.PrinterName == null) r.PrinterName = "";
+                if (r.PrinterModel == null) r.PrinterModel = "";
                 if (r.InvoiceNo == null) r.InvoiceNo = "";
                 if (r.BilledAt == null) r.BilledAt = "";
                 if (r.InvoiceDue == null) r.InvoiceDue = "";

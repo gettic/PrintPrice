@@ -25,6 +25,23 @@ namespace PrintPrice
         public bool RestartRequested;
         InfoBox lblWear;
 
+        // several printers: the Printer tab edits one printer of `work` (a copy of the settings) at a time
+        AppSettings work;
+        string shownId;          // the printer the Printer tab shows
+        ComboBox cmbPrinter;
+        Button btnAddPrinter, btnRemovePrinter;
+        Label lblWattsUnit;
+        ContextMenuStrip addMenu;
+        bool useAdded;        // opened from Choose printer's "Add printer…": the printer added is put in use
+        string printerNote;   // a line under the wear table after Remove / a Remove that can't be done (null = none)
+
+        sealed class PrinterItem
+        {
+            public string Id, Name;
+            public bool InUse;   // the printer quotes use now: "(in use)" after its name
+            public override string ToString() { return InUse ? Name + "  " + L.S("(in use)", "(i brug)") : Name; }
+        }
+
         /// "" = automatic (Windows language), "en", "da".
         string SelectedLanguage { get { return cmbLang.SelectedIndex == 1 ? "en" : cmbLang.SelectedIndex == 2 ? "da" : ""; } }
         bool filling;   // suppress change events while filling the form
@@ -43,7 +60,8 @@ namespace PrintPrice
         bool fitted;   // Load has sized the window
 
         // layout (96 dpi units)
-        const int WindowW = 520, MinWindowH = 534, Edge = 14, StripTop = 6, StripH = 28, PageTop = 44,
+        // 560 wide (was 520): room for the Printer row (drop-down with "Bambu Lab A1 mini" + Add… + Remove)
+        const int WindowW = 560, MinWindowH = 534, Edge = 14, StripTop = 6, StripH = 28, PageTop = 44,
                   PageGap = 16, SepGap = 9, ButtonH = 32, ButtonMinW = 75, NumberBoxW = 70, UnitGap = 6;
 
         public SettingsForm(AppSettings current) : this(current, 0, -1) { }
@@ -119,13 +137,35 @@ namespace PrintPrice
 
             // ----- Printer -----
             t = pages[TabPrinter];
-            Section(t, L.S("Printer  (used for slicing and wear)", "Printer  (til slicing og slid)"));
+            // which printer the tab shows (no heading: this row heads the tab) + Add… (menu of models) + Remove
+            int pk = t.RowCount++;
+            t.Controls.Add(Caption("Printer"), 0, pk);
+            var pick = new TableLayoutPanel { ColumnCount = 3, RowCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = Padding.Empty,
+                                              Padding = Padding.Empty, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+            pick.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pick.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            pick.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            cmbPrinter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120, Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                                        Margin = new Padding(0, 3, 0, 3), MaxDropDownItems = 20, AccessibleName = "Printer" };
+            btnAddPrinter = new Button { Text = L.S("Add…", "Tilføj…"), Size = new Size(64, 25), Padding = Padding.Empty, Margin = new Padding(6, 3, 0, 3),
+                                         Anchor = AnchorStyles.Top | AnchorStyles.Left, UseMnemonic = false, Font = new Font("Segoe UI", 9f) };   // 9 pt like btnPower: fits a box-high button (descenders)
+            btnRemovePrinter = new Button { Text = L.S("Remove", "Fjern"), Size = new Size(64, 25), Padding = Padding.Empty, Margin = new Padding(6, 3, 0, 3),
+                                            Anchor = AnchorStyles.Top | AnchorStyles.Left, UseMnemonic = false, Font = new Font("Segoe UI", 9f) };   // 9 pt like btnPower: fits a box-high button (descenders)
+            pick.Controls.Add(cmbPrinter, 0, 0);
+            pick.Controls.Add(btnAddPrinter, 1, 0);
+            pick.Controls.Add(btnRemovePrinter, 2, 0);
+            t.Controls.Add(pick, 1, pk);
+            t.SetColumnSpan(pick, 2);
+            // the printer's name; empty = its model's name (grey placeholder)
+            txtPrinterName = TextRow(t, L.S("Name", "Navn"), AppSettings.DefaultPrinterName, 40);
             cmbNozzle = Combo(t, L.S("Nozzle", "Dyse"));
             foreach (var n in Wear.Nozzles) cmbNozzle.Items.Add(NozzleLabel(n));
             cmbProcess = Combo(t, L.S("Print profile", "Printprofil"));
             cmbFilament = Combo(t, L.S("Filament profile", "Filamentprofil"));
             cmbBed = Combo(t, L.S("Build plate", "Byggeplade"));
             foreach (var p in Wear.Plates) cmbBed.Items.Add(L.Danish && p.Label == "Smooth PEI / High Temp Plate" ? "Glat PEI / High Temp" : p.Label);   // short: fits the combo ("Byggeplade" already says plate)
+            txtWatts = Row(t, L.S("Power (avg.)", "Effekt (gns.)"), "W (A1: ~100)");
+            lblWattsUnit = (Label)t.GetControlFromPosition(2, t.RowCount - 1);   // the note follows the printer's model
 
             Section(t, L.S("Wear && tear  (both prices)", "Slid  (begge priser)"));
             txtRate = Row(t, L.S("Machine-time rate", "Maskintimepris"), L.S("kr/h", "kr/t"));
@@ -145,11 +185,7 @@ namespace PrintPrice
                         "og dit elselskabs gebyr. Se din elregning."));
             chkVat = Check(t, L.S("Add 25 % VAT", "Læg 25 % moms til"));
             chkAutoPower = Check(t, L.S("Fetch the live price when the program starts", "Hent den aktuelle pris, når programmet starter"));
-
-            Section(t, L.S("Power use", "Strømforbrug"));
-            txtWatts = Row(t, L.S("Power (avg.)", "Effekt (gns.)"), "W (A1: 80–110)");
-            // printer name (ready for more printers later); empty = the default, shown as grey placeholder text
-            txtPrinterName = TextRow(t, L.S("Printer name", "Printernavn"), AppSettings.DefaultPrinterName, 40);
+            // power use (W) and the printer's name are per printer: on the Printer tab
 
             // ----- Quote & invoice -----
             t = pages[TabQuote];
@@ -206,7 +242,7 @@ namespace PrintPrice
             ok = new Button { Text = "OK", TabIndex = 8 };
             cancel = new Button { Text = L.S("Cancel", "Annullér"), DialogResult = DialogResult.Cancel, TabIndex = 9 };
             ok.Click += delegate { Accept(); };
-            reset.Click += delegate { Fill(new AppSettings()); };   // every tab
+            reset.Click += delegate { Defaults(); };   // every tab (the shown printer: its model's defaults)
             root.Controls.Add(reset);
             root.Controls.Add(ok);
             root.Controls.Add(cancel);
@@ -216,6 +252,11 @@ namespace PrintPrice
             cmbFilament.SelectedIndexChanged += delegate { if (!filling) UpdateWear(); };
             cmbBed.SelectedIndexChanged += delegate { if (!filling) UpdateWear(); };
             chkAutoWear.CheckedChanged += delegate { if (!filling) UpdateWear(); };
+            cmbPrinter.SelectedIndexChanged += delegate { if (!filling) PrinterChosen(); };
+            txtPrinterName.TextChanged += delegate { if (!filling) NameTyped(); };
+            btnAddPrinter.Click += delegate { addMenu.Show(btnAddPrinter, new Point(0, btnAddPrinter.Height)); };
+            btnRemovePrinter.Click += delegate { RemoveShownPrinter(); };
+            BuildAddMenu();
             // before Load only remember it: every page stays visible until Load has measured them all
             strip.SelectedChanged += delegate { if (fitted) SelectTab(strip.Selected); else selected = strip.Selected; };
 
@@ -245,7 +286,7 @@ namespace PrintPrice
 
         int Px(float v) { return (int)Math.Round(v * DeviceDpi / 96f); }
 
-        /// Load: window 520 wide, the caption column measured over all tabs, every page as wide as the content, drop-downs as
+        /// Load: window 560 wide, the caption column measured over all tabs, every page as wide as the content, drop-downs as
         /// tall as the boxes, the height from the tallest tab (at least 534), then only the chosen tab stays visible.
         void FitLayout()
         {
@@ -276,7 +317,12 @@ namespace PrintPrice
             foreach (var b in new[] { reset, ok, cancel })
                 bw = Math.Max(bw, TextRenderer.MeasureText(b.Text, b.Font).Width + Px(20));
             foreach (var b in new[] { reset, ok, cancel }) b.Size = new Size(bw, Px(ButtonH));
+            // Add… / Remove: box height, each its text + 24 px (flat buttons draw with inner padding), so the printer
+            // drop-down keeps room for "Bambu Lab A1 mini"; its open list is as wide as the longest name
+            foreach (var b in new[] { btnAddPrinter, btnRemovePrinter })
+                b.Size = new Size(TextRenderer.MeasureText(b.Text, b.Font).Width + Px(24), txtWatts.Height);
             FitHeight();
+            FitPrinterList();
             fitted = true;
             SelectTab(selected);
         }
@@ -662,8 +708,8 @@ namespace PrintPrice
             string size = SelectedNozzle.Size;
             bool was = filling;
             filling = true;
-            SetItems(cmbProcess, BambuSlicer.ListProcesses(exe, size), process, "Optimal");
-            SetItems(cmbFilament, BambuSlicer.ListFilaments(exe, size), filament, "Bambu PLA Matte");
+            SetItems(cmbProcess, BambuSlicer.ListProcesses(exe, ShownModel, size), process, "Optimal");
+            SetItems(cmbFilament, BambuSlicer.ListFilaments(exe, ShownModel, size), filament, "Bambu PLA Matte");
             filling = was;
         }
 
@@ -686,10 +732,11 @@ namespace PrintPrice
             string filament = (string)cmbFilament.SelectedItem ?? "";
             string type = "";
             bool abrasive = false;
-            try { BambuSlicer.FilamentInfo(exe, filament, nozzle.Size, out type, out abrasive); }
+            try { BambuSlicer.FilamentInfo(exe, ShownModel, filament, nozzle.Size, out type, out abrasive); }
             catch { /* no Bambu Studio / profile: treat as normal filament */ }
 
-            var b = Wear.Calculate(nozzle, abrasive, type, plate);
+            var model = Wear.FindModel(ShownModel);
+            var b = Wear.Calculate(model, nozzle, abrasive, type, plate);
             bool auto = chkAutoWear.Checked;
             txtRate.ReadOnly = auto;
             if (auto) txtRate.Text = Num.Fmt(b.Total);
@@ -698,12 +745,13 @@ namespace PrintPrice
             var rows = new[]
             {
                 new[] { L.S("Printer (depreciation)", "Printer (afskrivning)"), Kr(b.Printer) },
-                new[] { L.S("Belts, PTFE tube, wiper…", "Remme, PTFE-rør, wiper…"), Kr(b.Parts) },
-                new[] { "Hotend  (" + nozzle.PriceDkk + " kr. / " + Hours(b.HotendLife) + ")", Kr(b.Hotend) },
-                new[] { L.S("Plate", "Plade") + "  (" + plate.PriceDkk + " kr. / " + Hours(b.PlateLife) + ")", Kr(b.Plate) },
+                new[] { L.S("Belts, PTFE tube, wiper…", "Remme, PTFE-rør, visker…"), Kr(b.Parts) },
+                new[] { "Hotend  (" + Math.Round(nozzle.PriceDkk * model.HotendFactor) + " kr. / " + Hours(b.HotendLife) + ")", Kr(b.Hotend) },
+                new[] { L.S("Plate", "Plade") + "  (" + Math.Round(plate.PriceDkk * model.PlateFactor) + " kr. / " + Hours(b.PlateLife) + ")", Kr(b.Plate) },
                 new[] { L.S("= Wear per print hour", "= Slid pr. printtime"), Kr(b.Total) + " kr." },
             };
             var notes = new List<string>();
+            if (printerNote != null) notes.Add(printerNote);
             if (!auto) notes.Add(L.S("Not used: tick the box above to use this rate.", "Bruges ikke: sæt flueben ovenfor for at bruge denne sats."));
             if (b.AbrasiveOnStainless)
                 notes.Add(L.F("⚠ {0} is abrasive and needs a hardened steel nozzle. A stainless nozzle wears out in ~100 h.",
@@ -728,16 +776,38 @@ namespace PrintPrice
                     if (c is TextBox) yield return (TextBox)c;
         }
 
+        /// Fills every tab from s; the Printer tab edits a copy (work) and shows the active printer.
         void Fill(AppSettings s)
+        {
+            work = s.Clone();
+            FillGeneral(s);
+            FillPrinterList();
+            ShowPrinterNow(work.ActivePrinterId);
+        }
+
+        /// Defaults: every tab's defaults; the printer the Printer tab shows gets its model's defaults (name, other
+        /// printers and the list stay).
+        void Defaults()
+        {
+            var d = new AppSettings();
+            FillGeneral(d);
+            var p = work.FindPrinter(shownId);
+            if (p != null)
+            {
+                var m = Wear.FindModel(p.Model);
+                work.SetPrinter(new PrinterProfile { Id = p.Id, Name = p.Name, Model = m.Key, Watts = m.DefaultWatts,
+                                                     MachineRatePerHour = Wear.DefaultRateFor(m.Key) });
+            }
+            work.FilamentPreset = d.FilamentPreset;
+            ShowPrinterNow(shownId);
+        }
+
+        void FillGeneral(AppSettings s)
         {
             filling = true;
             foreach (var box in AllBoxes()) box.BackColor = Theme.Input;   // Defaults: no red boxes left over
-            txtWatts.Text = Num.Fmt(s.PrinterWatts);
-            txtPrinterName.Text = s.PrinterName == AppSettings.DefaultPrinterName ? "" : (s.PrinterName ?? "");   // empty = the grey default
             txtFriends.Text = Num.Fmt(s.FriendsMarkupPct);
             txtOthers.Text = Num.Fmt(s.OthersMarkupPct);
-            txtRate.Text = Num.Fmt(s.MachineRatePerHour);
-            chkAutoWear.Checked = s.AutoWearRate != 0;
             txtMin.Text = Num.Fmt(s.MinimumPrice);
             txtRound.Text = Num.Fmt(s.RoundTo);
             txtFailed.Text = Num.Fmt(s.FailedPrintPct);
@@ -745,9 +815,6 @@ namespace PrintPrice
             cmbPaybackWho.SelectedIndex = s.FailedPaybackWho == 1 ? 1 : 0;
             chkPayback.Checked = s.FailedPayback != 0;
             txtPayback.Enabled = cmbPaybackWho.Enabled = chkPayback.Checked;   // CheckedChanged doesn't fire when it stays the same
-            cmbNozzle.SelectedIndex = Array.IndexOf(Wear.Nozzles, Wear.FindNozzle(s.Nozzle));
-            RefillPresets(BambuSlicer.ShortName(s.ProcessPreset), BambuSlicer.ShortName(s.FilamentPreset));
-            cmbBed.SelectedIndex = Array.IndexOf(Wear.Plates, Wear.FindPlate(s.BedType));
             txtSlicer.Text = s.SlicerPath;
             chkAutoPower.Checked = s.AutoPowerPrice != 0;
             cmbArea.SelectedIndex = s.PriceArea == "DK1" ? 0 : 1;
@@ -761,7 +828,206 @@ namespace PrintPrice
             txtMobilePay.Text = s.PayMobilePay ?? "";
             txtBank.Text = s.PayBank ?? "";
             filling = false;
+        }
+
+        // ---------- several printers (Printer tab) ----------
+        /// Model key of the printer the Printer tab shows (its Bambu Studio lists and wear).
+        string ShownModel
+        {
+            get { var p = work != null ? work.FindPrinter(shownId) : null; return p != null ? p.Model : Wear.ModelA1; }
+        }
+
+        void FillPrinterList()
+        {
+            bool was = filling;
+            filling = true;
+            cmbPrinter.BeginUpdate();
+            cmbPrinter.Items.Clear();
+            string active = work.ActivePrinterId;
+            foreach (var p in work.Printers)
+                cmbPrinter.Items.Add(new PrinterItem { Id = p.Id, Name = AppSettings.CleanPrinterName(p.Name), InUse = p.Id == active });
+            cmbPrinter.EndUpdate();
+            filling = was;
+            if (fitted) FitPrinterList();
+        }
+
+        /// The printer drop-down's open list: as wide as the longest name (the closed box may cut it with …).
+        void FitPrinterList()
+        {
+            int longest = 0;
+            foreach (var o in cmbPrinter.Items) longest = Math.Max(longest, TextRenderer.MeasureText(o.ToString(), cmbPrinter.Font).Width);
+            cmbPrinter.DropDownWidth = Math.Max(cmbPrinter.Width, longest + Px(30));
+        }
+
+        int PrinterIndex(string id)
+        {
+            for (int i = 0; i < cmbPrinter.Items.Count; i++) if (((PrinterItem)cmbPrinter.Items[i]).Id == id) return i;
+            return -1;
+        }
+
+        /// Shows printer `id` on the Printer tab (no saving of the one shown before: see StorePrinter).
+        void ShowPrinterNow(string id)
+        {
+            var p = work.FindPrinter(id) ?? work.ActivePrinter;
+            shownId = p.Id;
+            var model = Wear.FindModel(p.Model);
+            filling = true;
+            cmbPrinter.SelectedIndex = PrinterIndex(p.Id);
+            foreach (var box in new[] { txtWatts, txtRate, txtPrinterName }) box.BackColor = Theme.Input;
+            ((CueBox)txtPrinterName).Cue = model.Label;
+            txtPrinterName.AccessibleDescription = model.Label;
+            string name = AppSettings.CleanPrinterName(p.Name);
+            txtPrinterName.Text = name == model.Label ? "" : name;   // empty = the model's name (grey)
+            txtPrinterName.Invalidate();
+            txtWatts.Text = Num.Fmt(p.Watts);
+            lblWattsUnit.Text = "W (" + model.Label.Replace("Bambu Lab ", "") + ": ~" + Num.Fmt(model.DefaultWatts) + ")";
+            txtRate.Text = Num.Fmt(p.MachineRatePerHour);
+            chkAutoWear.Checked = p.AutoWearRate != 0;
+            cmbNozzle.SelectedIndex = Array.IndexOf(Wear.Nozzles, Wear.FindNozzle(p.Nozzle));
+            RefillPresets(BambuSlicer.ShortName(p.ProcessPreset), BambuSlicer.ShortName(work.FilamentPreset));
+            cmbBed.SelectedIndex = Array.IndexOf(Wear.Plates, Wear.FindPlate(p.BedType));
+            printerNote = null;
+            filling = false;
             UpdateWear();
+        }
+
+        /// Puts the Printer tab's boxes into the shown printer (in `work`). False (boxes red, focus on the first) when
+        /// power or wear rate isn't a valid number.
+        bool StorePrinter()
+        {
+            double w, rate;
+            bool ok = ReadBox(txtWatts, out w);
+            ok &= ReadBox(txtRate, out rate);
+            if (!ok)
+            {
+                SelectTab(TabPrinter);
+                (txtWatts.BackColor == Theme.InvalidBack ? txtWatts : txtRate).Focus();
+                return false;
+            }
+            var p = work.FindPrinter(shownId);
+            if (p == null) return true;
+            string name = txtPrinterName.Text.Trim();
+            p.Name = name.Length == 0 ? Wear.FindModel(p.Model).Label : name;
+            p.Watts = w;
+            p.MachineRatePerHour = rate;
+            p.AutoWearRate = chkAutoWear.Checked ? 1 : 0;
+            p.Nozzle = SelectedNozzle.Key;
+            p.ProcessPreset = (string)cmbProcess.SelectedItem ?? p.ProcessPreset;
+            p.BedType = Wear.Plates[Math.Max(0, cmbBed.SelectedIndex)].Key;
+            work.SetPrinter(p);
+            work.FilamentPreset = (string)cmbFilament.SelectedItem ?? work.FilamentPreset;   // shared by all printers
+            return true;
+        }
+
+        /// Another printer picked in the drop-down: keep the shown one's values, then show the new one (a bad number
+        /// keeps the old printer shown).
+        void PrinterChosen()
+        {
+            var item = cmbPrinter.SelectedItem as PrinterItem;
+            if (item == null || item.Id == shownId) return;
+            if (!StorePrinter())
+            {
+                filling = true;
+                cmbPrinter.SelectedIndex = PrinterIndex(shownId);
+                filling = false;
+                return;
+            }
+            ShowPrinterNow(item.Id);
+        }
+
+        /// Typing a name renames the printer in the drop-down at once.
+        void NameTyped()
+        {
+            int i = PrinterIndex(shownId);
+            if (i < 0) return;
+            var item = (PrinterItem)cmbPrinter.Items[i];
+            string name = txtPrinterName.Text.Trim();
+            item.Name = AppSettings.CleanPrinterName(name.Length == 0 ? Wear.FindModel(ShownModel).Label : name);
+            filling = true;
+            cmbPrinter.Items[i] = item;   // redraws its text
+            cmbPrinter.SelectedIndex = i;
+            filling = false;
+            cmbPrinter.Invalidate();
+        }
+
+        void BuildAddMenu()
+        {
+            addMenu = new ContextMenuStrip { ShowImageMargin = false, ShowCheckMargin = true, Renderer = new QuoteMenuRenderer(),
+                                             BackColor = Theme.Input, ForeColor = Theme.Text };
+            addMenu.Items.Add(new ToolStripMenuItem(L.S("Add which printer?", "Hvilken printer?")) { Enabled = false });
+            foreach (var m in Wear.Models)
+            {
+                var model = m;
+                var mi = new ToolStripMenuItem(model.Label) { ForeColor = Theme.Text };
+                mi.Click += delegate { AddPrinter(model.Key); };
+                addMenu.Items.Add(mi);
+            }
+            FormClosed += delegate { addMenu.Dispose(); };
+        }
+
+        /// Adds a printer of this model (the model's power, wear and stock nozzle / plate), shows it, focus to its name.
+        /// Its name = the model's, with " 2", " 3"… when that is taken.
+        void AddPrinter(string modelKey)
+        {
+            if (!StorePrinter()) return;
+            string label = Wear.FindModel(modelKey).Label, name = label;
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in work.Printers) names.Add(AppSettings.CleanPrinterName(p.Name));
+            for (int n = 2; names.Contains(name); n++) name = label + " " + n;
+            var added = work.AddPrinter(name, modelKey);
+            if (useAdded) { work.SelectPrinter(added.Id); useAdded = false; }   // from Choose printer: use it after OK
+            FillPrinterList();
+            ShowPrinterNow(added.Id);
+            SelectTab(TabPrinter);
+            txtPrinterName.Focus();
+            txtPrinterName.SelectAll();
+        }
+
+        /// Removes the shown printer (only when there are 2+; Cancel brings it back). Its quotes keep its name in History.
+        /// A note under the wear table says so (or why the only printer can't be removed).
+        void RemoveShownPrinter()
+        {
+            if (work.PrinterCount < 2)
+            {
+                printerNote = L.S("One printer is always needed: add another one before removing this one.",
+                                  "Der skal altid være én printer: tilføj en til, før du fjerner denne.");
+                UpdateWear();
+                return;
+            }
+            var gone = work.FindPrinter(shownId);
+            string name = gone != null ? AppSettings.CleanPrinterName(gone.Name) : "";
+            if (!work.RemovePrinter(shownId)) return;
+            FillPrinterList();
+            ShowPrinterNow(work.ActivePrinterId);
+            printerNote = L.F("Removed \"{0}\". Cancel brings it back.", "Fjernede \"{0}\". Annullér fortryder det.", name);
+            UpdateWear();
+            cmbPrinter.Focus();
+        }
+
+        /// Before the window shows (MainForm's Choose printer): show printer `id` (null = the active one) on the Printer
+        /// tab; addMenu = open the Add… menu once the window is up.
+        public void ShowPrinter(string id, bool openAddMenu)
+        {
+            if (id != null && work.FindPrinter(id) != null) ShowPrinterNow(id);
+            SelectedTab = TabPrinter;
+            useAdded = openAddMenu;
+            if (openAddMenu && !Screenshots.Active && !Program.Hidden)
+                Shown += delegate { BeginInvoke((MethodInvoker)delegate { btnAddPrinter.Focus(); addMenu.Show(btnAddPrinter, new Point(0, btnAddPrinter.Height)); }); };
+        }
+
+        /// Picture mode: draws the Add… menu (never shown on screen there) under its button, as it opens.
+        /// origin = the picture's top left on screen.
+        internal void SampleAddMenu(Graphics g, Point origin)
+        {
+            addMenu.PerformLayout();
+            var size = addMenu.GetPreferredSize(Size.Empty);
+            addMenu.Size = size;
+            using (var bmp = new Bitmap(size.Width, size.Height))
+            {
+                addMenu.DrawToBitmap(bmp, new Rectangle(Point.Empty, size));
+                var at = btnAddPrinter.PointToScreen(new Point(0, btnAddPrinter.Height));
+                g.DrawImage(bmp, at.X - origin.X, at.Y - origin.Y);
+            }
         }
 
         /// A number box's value; anything but a valid number (also empty) turns the box red.
@@ -823,23 +1089,16 @@ namespace PrintPrice
                 else MessageBox.Show(this, msg, Text);
                 return;
             }
-            Result = source.Clone();
-            Result.PrinterWatts = w;
-            Result.PrinterName = AppSettings.CleanPrinterName(txtPrinterName.Text);
+            StorePrinter();   // the shown printer's boxes are valid (checked above)
+            Result = work.Clone();   // printers (the active one = the flat fields) + everything not shown here
             Result.FriendsMarkupPct = f;
             Result.OthersMarkupPct = o;
-            Result.MachineRatePerHour = rate;
-            Result.AutoWearRate = chkAutoWear.Checked ? 1 : 0;
             Result.MinimumPrice = min;
             Result.RoundTo = round;
             Result.FailedPrintPct = failed;
             Result.FailedPayback = chkPayback.Checked ? 1 : 0;
             Result.FailedPaybackPct = payback;
             Result.FailedPaybackWho = cmbPaybackWho.SelectedIndex == 1 ? 1 : 2;
-            Result.Nozzle = SelectedNozzle.Key;
-            Result.ProcessPreset = (string)cmbProcess.SelectedItem ?? source.ProcessPreset;
-            Result.FilamentPreset = (string)cmbFilament.SelectedItem ?? source.FilamentPreset;
-            Result.BedType = Wear.Plates[Math.Max(0, cmbBed.SelectedIndex)].Key;
             Result.SlicerPath = txtSlicer.Text.Trim().Trim('"');
             Result.AutoPowerPrice = chkAutoPower.Checked ? 1 : 0;
             Result.PriceArea = cmbArea.SelectedIndex == 0 ? "DK1" : "DK2";
