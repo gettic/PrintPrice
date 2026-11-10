@@ -9,7 +9,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, backup*.png / restore*.png (Backup window), ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -74,12 +74,33 @@ namespace PrintPrice
                     using (var hist = new HistoryForm(quotes, null, true))
                     {
                         hist.QuoteRequested = (owner, rec, isInvoice) => { };   // shows Quote… / Invoice… (never clicked here)
+                        hist.BackupRequested = owner => false;                  // shows Backup… (never clicked here)
                         Place(hist);
                         hist.Show();
                         hist.SelectMonth(new DateTime(2026, 10, 1));   // October: billed, failed and not-printed quotes
                         Snap(hist, folder, "history.png");
                         hist.Hide();
                     }
+                    // the Backup window (idea 27) with made-up states: nothing is read, written or sent
+                    using (var bf = new BackupForm(quotes, s, BackupForm.TabBackup, true))
+                    {
+                        Place(bf);
+                        bf.Show();
+                        Snap(bf, folder, "backup.png");                // to a file (warning: not locked); online greyed out (coming soon)
+                        bf.SampleCode();
+                        Snap(bf, folder, "backup_code.png");           // the code page (reached once the service is there)
+                        bf.SelectedTab = BackupForm.TabRestore;
+                        Snap(bf, folder, "restore_empty.png");         // nothing chosen yet
+                        bf.SampleLoad(false);
+                        Snap(bf, folder, "restore.png");               // a file loaded, Merge + settings
+                        bf.SampleLoad(true);
+                        Snap(bf, folder, "restore_replace.png");       // Replace: warning
+                        bf.SampleDone();
+                        Snap(bf, folder, "restore_done.png");          // the result
+                        bf.Hide();
+                    }
+                    using (var ask = BackupForm.NewReplaceAsk(312))
+                        SnapForm(ask, folder, "restore_ask.png");     // the question before Replace
                     main.SetSampleJob();   // back to the single-colour example for the update picture
                     main.SetSamplePicture(sample);
                     main.ShowUpdateButton(fake);
@@ -181,6 +202,7 @@ namespace PrintPrice
                     {
                         hist.Settings = multi;
                         hist.QuoteRequested = (owner, rec, isInvoice) => { };
+                        hist.BackupRequested = owner => false;   // shows Backup… like the real window
                         Place(hist);
                         hist.Show();
                         hist.SelectMonth(new DateTime(2026, 10, 1));

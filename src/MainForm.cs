@@ -2172,6 +2172,7 @@ namespace PrintPrice
                 using (var dlg = new SettingsForm(settings, offline ? sampleDebt : History.FailedDebt(history, null), tab))
                 {
                     if (!offline) dlg.UpdateFound = ShowUpdateButton;   // "check now" in Settings
+                    dlg.BackupRequested = (owner, t) => OpenBackup(owner, t);   // App tab: Back up… / Restore…
                     if (prepare != null) prepare(dlg);
                     dlg.Shown += delegate { restore(); };   // back to normal once the window is up
                     if (dlg.ShowDialog(this) == DialogResult.OK)
@@ -3092,6 +3093,13 @@ namespace PrintPrice
             {
                 dlg.QuoteRequested = (owner, rec, invoice) => ShowRecordQuote(owner, rec, invoice);
                 dlg.Settings = settings;   // printer names (Printer column / filter with 2+ printers)
+                // Backup…: the Restore tab first while the history is empty (a new PC)
+                dlg.BackupRequested = owner =>
+                {
+                    bool restored = OpenBackup(owner, history.Count == 0 ? BackupForm.TabRestore : BackupForm.TabBackup);
+                    if (restored) dlg.Settings = settings;
+                    return restored;
+                };
                 if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Selected != null)
                 {
                     if (dlg.RepeatSelected) Repeat(dlg.Selected);
@@ -3099,6 +3107,47 @@ namespace PrintPrice
                 }
                 else Recalculate();   // Failed / For / Delete in the list change the payback debt
             }
+        }
+
+        /// The Backup window (idea 27) from History or Settings > App, on tab BackupForm.TabBackup / TabRestore.
+        /// true = a restore saved a new history and settings (already taken over here by AdoptRestore).
+        bool OpenBackup(IWin32Window owner, int tab)
+        {
+            EnsureHistory();
+            bool restored = false;
+            using (var dlg = new BackupForm(history, settings, tab, offline))
+            {
+                dlg.Restored = res => { AdoptRestore(res); restored = true; };
+                dlg.ShowDialog(owner);
+                if (dlg.RestartRequested && !offline)
+                {
+                    // restored settings in another language: they are saved; Restart closes the windows and starts anew
+                    if (cts != null) cts.Cancel();
+                    BeginInvoke((MethodInvoker)Program.Restart);
+                }
+            }
+            return restored;
+        }
+
+        /// After a restore (History.Restore saved both files): the same history list gets the new records (History
+        /// and Settings windows hold this list), the settings become the restored ones (also when only the history was
+        /// restored: they carry the merged invoice codes and printer ids), then the same follow-ups as Settings' OK.
+        void AdoptRestore(RestoreResult res)
+        {
+            history.Clear();
+            history.AddRange(res.Quotes);
+            historyProblem = null;
+            var old = settings;
+            if (res.Settings != null) settings = res.Settings;
+            History.ReservePrinterIds(history, settings);
+            SyncUpdateTimer();
+            if (SlicingChanged(old, settings) || old.FilamentPreset != settings.FilamentPreset || old.SlicerPath != settings.SlicerPath)
+                SetStudioFile(null);
+            RefreshSettingsLabels();
+            foreach (var cb in rowCombo) cb.Tag = null;
+            if (!jobLoaded && cts == null) SetColours(null);
+            Recalculate();
+            if (cts == null) ShowAutoIdle();
         }
 
         /// "Open again": puts a saved quote's inputs back (time, grams, colour rows with their kr/kg, filament and

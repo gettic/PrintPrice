@@ -77,9 +77,15 @@ The site runs entirely in your browser. It stores your settings in the browser's
   - All actions are also in the right-click menu.
   - The same quote saved again within 10 minutes replaces the last one. The newest 5000 quotes are kept.
   - Saved quote and invoice files are named `<date> <model> - <name>`.
+  - **Backup…** opens the Backup window (also in Settings > App as **Back up…** and **Restore…**). See Backup and restore below.
 
 <p align="center"><img src="assets/screenshot-history.png" width="480" alt="Screenshot of the History window"></p>
 
+- **Backup and restore:** the Backup window has two tabs.
+  - **Back up** saves the price history and your settings to a `.printprice-backup` file. The file is not locked with a code, and it holds customer names and payment details, so keep it somewhere private.
+  - **Restore** reads a backup file or a `history.json`. **Merge** adds the backup's quotes to the ones on this PC. **Replace** swaps this PC's history for the backup's, and asks first. **Also restore the settings** is possible when the file has settings; the Bambu Studio path stays as it is.
+  - A safety copy of the current history and settings is saved first, next to them (`history.before-restore-<date>-<time>.json`).
+  - Online backup with a code is coming; it is greyed out and does nothing yet.
 - **Windows:** every window can be dragged by any empty spot. All text (labels, info boxes, prices, status line) can be marked with the mouse and copied with Ctrl+C or right-click Copy. Double-click marks a word.
 - **Auto-update:** at startup, and then every 10 minutes while the program is open, the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. You can switch the check off in Settings (**Check for new versions automatically**); that switches off the 10-minute check too. Opening Settings also checks once (if the automatic check is on). Next to the version number in Settings, **check now** looks once when you click it. A newer version shows there and as the red update button.
 
@@ -146,7 +152,11 @@ Like any web request, these show your IP address to the service. Local `.3mf` fi
 
 Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\history.json` and are never sent anywhere. Delete that file to clear the history. If the file is damaged, the app keeps it as `history.bad-<date>-<time>.json` in the same folder and starts with an empty history.
 
+A backup file holds your price history (customer names) and your settings (including MobilePay and bank details). It is written only where you choose to save it and is not locked with a code, so keep it private. Online backup isn't active yet, so nothing is sent. A restore also leaves safety copies (`history.before-restore-*.json`, `settings.before-restore-*.ini`) in `%APPDATA%\PrintPrice`.
+
 **Open in Studio** starts the Bambu Studio program on your PC with a copy of the sliced file. The copy is kept in `%TEMP%\PrintPrice\studio\` (older copies are deleted) and is never sent anywhere. Bambu Studio may add it to its own list of recent projects.
+
+The **Open folder** link in the Backup window opens Windows Explorer at the saved backup file or safety copy, only when you click it. Nothing is sent.
 
 Quotes and invoices are made on your PC. A quote picture or PDF is written only where you choose to save it, and **Copy picture** and **Copy text** put it on the clipboard. Nothing is uploaded. The invoice codes already used are kept in `settings.ini`.
 
@@ -172,6 +182,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/Updater.cs` | Update check and install from GitHub releases |
 | `src/History.cs` | Saved quotes (price history) |
 | `src/HistoryForm.cs` | The History window |
+| `src/Backup.cs`, `src/BackupForm.cs` | Backup codes and the Backup window |
 | `src/PrinterPickerForm.cs` | The Choose printer window |
 | `src/QuotePage.cs`, `src/QuoteForm.cs` | The quote and invoice page (picture, PDF) and its window |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |

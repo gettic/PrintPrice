@@ -24,6 +24,10 @@ namespace PrintPrice
         /// True when the dialog was closed with "Restart now" (MainForm saves and restarts the program).
         public bool RestartRequested;
         InfoBox lblWear;
+        Button btnBackupTo, btnRestoreFrom;   // App tab: the Backup window (idea 27)
+        /// Back up… / Restore…: (owner, BackupForm tab) opens the Backup window (MainForm.OpenBackup); true = a restore
+        /// saved new settings, so this window closes without saving.
+        public Func<IWin32Window, int, bool> BackupRequested;
 
         // several printers: the Printer tab edits one printer of `work` (a copy of the settings) at a time
         AppSettings work;
@@ -216,12 +220,29 @@ namespace PrintPrice
             cmbLang.SelectedIndexChanged += delegate { lnkRestart.Visible = AppSettings.IsDanish(SelectedLanguage) != L.Danish; };
             Section(t, L.S("Updates", "Opdateringer"));
             chkAutoUpdate = Check(t, L.S("Check for new versions automatically", "Søg automatisk efter nye versioner"));
-            Section(t, "Bambu Studio");
+            // App tab headings: the same visible gap (14 px at 100 %, measured) above each, whatever is above it
+            // (a box row, the check box with its 4 px margin, a hint box)
+            Section(t, "Bambu Studio").Margin = new Padding(0, 2, 0, 4);
             txtSlicer = TextRow(t, L.S("Bambu Studio path", "Sti til Bambu Studio"), null, 32767);
             Hint(t, exe == null
                 ? L.S("Bambu Studio not found. Install it, or enter the path to bambu-studio.exe.",
                       "Bambu Studio blev ikke fundet. Installér det, eller angiv stien til bambu-studio.exe.")
                 : L.F("Found: {0}.\nLeave empty to find it automatically.", "Fundet: {0}.\nLad feltet være tomt for at finde det automatisk.", exe));
+            // backup (idea 27): the Backup window on its Back up / Restore tab; a restore closes Settings (its fields are out of date)
+            Section(t, L.S("Backup", "Sikkerhedskopi")).Margin = new Padding(0, 5, 0, 4);
+            int br = t.RowCount++;
+            t.Controls.Add(Caption(L.S("Price history", "Prishistorik")), 0, br);
+            var backupFlow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+            btnBackupTo = new Button { Text = L.S("Back up…", "Tag kopi…"), Size = new Size(80, 25), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3),
+                                       UseMnemonic = false, Font = new Font("Segoe UI", 9f) };   // 9 pt like Add… / Remove (box-high button)
+            btnRestoreFrom = new Button { Text = L.S("Restore…", "Gendan…"), Size = new Size(80, 25), Padding = Padding.Empty, Margin = new Padding(6, 3, 0, 3),
+                                          UseMnemonic = false, Font = new Font("Segoe UI", 9f) };
+            btnBackupTo.Click += delegate { OpenBackup(BackupForm.TabBackup); };
+            btnRestoreFrom.Click += delegate { OpenBackup(BackupForm.TabRestore); };
+            backupFlow.Controls.Add(btnBackupTo);
+            backupFlow.Controls.Add(btnRestoreFrom);
+            t.Controls.Add(backupFlow, 1, br);
+            t.SetColumnSpan(backupFlow, 2);
 
             // ----- below the tabs: line, version + "check now" (left), Defaults / OK / Cancel (right) -----
             separator = new Panel { Height = 1 };
@@ -319,7 +340,7 @@ namespace PrintPrice
             foreach (var b in new[] { reset, ok, cancel }) b.Size = new Size(bw, Px(ButtonH));
             // Add… / Remove: box height, each its text + 24 px (flat buttons draw with inner padding), so the printer
             // drop-down keeps room for "Bambu Lab A1 mini"; its open list is as wide as the longest name
-            foreach (var b in new[] { btnAddPrinter, btnRemovePrinter })
+            foreach (var b in new[] { btnAddPrinter, btnRemovePrinter, btnBackupTo, btnRestoreFrom })
                 b.Size = new Size(TextRenderer.MeasureText(b.Text, b.Font).Width + Px(24), txtWatts.Height);
             FitHeight();
             FitPrinterList();
@@ -349,6 +370,14 @@ namespace PrintPrice
             separator.SetBounds(m, by - Px(SepGap) - 1, cw, 1);
             checkFlow.MaximumSize = new Size(Math.Max(1, reset.Left - Px(8) - m), 0);
             checkFlow.Location = new Point(m, by + (cancel.Height - checkFlow.Height) / 2);
+        }
+
+        /// Back up… / Restore… on the App tab. After a restore the settings on disk are new: close without saving.
+        void OpenBackup(int backupTab)
+        {
+            if (BackupRequested == null || !BackupRequested(this, backupTab)) return;
+            DialogResult = DialogResult.Cancel;
+            Close();
         }
 
         /// Shows tab i; focus inside the tab that hides moves to the tab strip.
@@ -482,12 +511,13 @@ namespace PrintPrice
             return box;
         }
 
-        void Section(TableLayoutPanel t, string text)
+        Label Section(TableLayoutPanel t, string text)
         {
             int r = t.RowCount++;
             var lbl = new Label { Text = text, AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = new Padding(0, 6, 0, 4) };
             t.Controls.Add(lbl, 0, r);
             t.SetColumnSpan(lbl, 3);
+            return lbl;
         }
 
         /// Unit label drawn without GDI's side padding, so "6 px after the box" is 6 px to the text.
@@ -510,7 +540,7 @@ namespace PrintPrice
         }
 
         /// Text box that paints grey placeholder text (Theme.Muted) on its text line while empty, where typed text starts.
-        sealed class CueBox : TextBox
+        internal sealed class CueBox : TextBox
         {
             public string Cue;   // null = none
 
@@ -524,7 +554,20 @@ namespace PrintPrice
                 using (var g = Graphics.FromHwnd(Handle))
                     TextRenderer.DrawText(g, Cue, Font, new Rectangle(1 + margin, top, Math.Max(1, ClientSize.Width - 2 - 2 * margin), Math.Max(1, ClientSize.Height - top - 1)),
                         Theme.Muted, TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis);
+                // the empty box's paint brings back Windows' light frame: draw the theme's 1 px Border frame over it again
+                IntPtr dc = GetWindowDC(Handle);
+                if (dc == IntPtr.Zero) return;
+                try
+                {
+                    using (var g = Graphics.FromHdc(dc))
+                    using (var pen = new Pen(Theme.Border))
+                        g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
+                }
+                finally { ReleaseDC(Handle, dc); }
             }
+
+            [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetWindowDC(IntPtr hwnd);
+            [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
 
             protected override void OnTextChanged(EventArgs e)
             {
@@ -535,7 +578,7 @@ namespace PrintPrice
 
         /// Hand-drawn tab strip (no stock TabControl): other tabs Muted (Text on hover), the chosen one bold Text with a
         /// 2 px InfoAccent underline. A Tab stop: Left/Right/Home/End switch tabs, focus rectangle round the chosen tab's text.
-        sealed class TabStrip : Control
+        internal sealed class TabStrip : Control
         {
             readonly string[] names;
             Rectangle[] cells;

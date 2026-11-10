@@ -7,7 +7,7 @@ New-Item -ItemType Directory -Force bin | Out-Null
 
 $refs = '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll',
         '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll'
-$core = 'src\Pricing.cs', 'src\AppSettings.cs', 'src\Num.cs', 'src\Theme.cs', 'src\Slicer.cs', 'src\Printables.cs', 'src\PowerPrice.cs', 'src\Updater.cs', 'src\Lang.cs', 'src\History.cs'
+$core = 'src\Pricing.cs', 'src\AppSettings.cs', 'src\Num.cs', 'src\Theme.cs', 'src\Slicer.cs', 'src\Printables.cs', 'src\PowerPrice.cs', 'src\Updater.cs', 'src\Lang.cs', 'src\History.cs', 'src\Backup.cs'
 
 & $csc /nologo /codepage:65001 /optimize+ /target:exe /out:bin\PricingTests.exe $refs $core tests\PricingTests.cs
 if ($LASTEXITCODE) { throw 'Test build failed' }

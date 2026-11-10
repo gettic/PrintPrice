@@ -144,6 +144,41 @@ namespace PrintPrice
         public List<QuoteRecord> Quotes;
     }
 
+    /// A backup file's top level (idea 27, History.ToBackup): {"Format":"PrintPriceBackup","Version":1,"CreatedAt":...,
+    /// "App":"1.10.0","History":{HistoryFile},"Settings":[settings.ini lines]}. Settings null = a history-only backup.
+    public class BackupFile
+    {
+        public string Format;
+        public int Version;
+        public string CreatedAt;
+        public string App;
+        public HistoryFile History;
+        public List<string> Settings;
+    }
+
+    /// A read backup (History.ReadBackup): the records (cleaned like Load does) and the settings.ini lines (null = none:
+    /// a plain history.json or a history-only backup).
+    public class BackupData
+    {
+        public List<QuoteRecord> Quotes = new List<QuoteRecord>();
+        public string[] Settings;
+        public string CreatedAt = "";
+        public string App = "";
+    }
+
+    /// What a restore gives (History.Combine / Restore): the new history and settings, and counts for the message.
+    public class RestoreResult
+    {
+        public List<QuoteRecord> Quotes = new List<QuoteRecord>();
+        public AppSettings Settings;
+        public bool SettingsRestored;     // the backup's settings were used (asked for and in the backup)
+        public int Added;                 // records from the backup that weren't here (Replace: all of them)
+        public int Updated;               // same record here, filled in from the backup (invoice, Printed, Failed, Note, Customer)
+        public int Same;                  // same record here, nothing new
+        public int PrintersMoved;         // printer ids moved to a new id (same id, different model)
+        public List<string> InvoiceClashes = new List<string>();   // invoice codes now on 2+ different records (kept as they are)
+    }
+
     /// Price history: saved quotes in history.json next to settings.ini. Local only, never sent anywhere.
     public static class History
     {
@@ -763,8 +798,14 @@ namespace PrintPrice
             try { f = Json.Deserialize<HistoryFile>(json); }
             catch { return null; }
             if (f == null || f.Version != Version || f.Quotes == null) return null;
-            var list = new List<QuoteRecord>(f.Quotes.Count);
-            foreach (var r in f.Quotes)
+            return CleanQuotes(f.Quotes);
+        }
+
+        // the records of a read file: nulls dropped, missing strings "", old-file rules (Printed, For, empty Filaments)
+        static List<QuoteRecord> CleanQuotes(List<QuoteRecord> quotes)
+        {
+            var list = new List<QuoteRecord>(quotes.Count);
+            foreach (var r in quotes)
             {
                 if (r == null) continue;
                 if (r.Id == null) r.Id = "";
@@ -845,10 +886,16 @@ namespace PrintPrice
         /// history.bad-yyyyMMdd-HHmmss.json in the same folder, with -2, -3... if taken.
         public static string BackupName(string path, DateTime now)
         {
+            return BackupName(path, "history.bad-", ".json", now);
+        }
+
+        /// <prefix>yyyyMMdd-HHmmss<ext> in path's folder, with -2, -3... if taken.
+        public static string BackupName(string path, string prefix, string ext, DateTime now)
+        {
             string dir = Path.GetDirectoryName(path);
-            string stem = "history.bad-" + now.ToString("yyyyMMdd-HHmmss", Inv);
-            string name = Path.Combine(dir, stem + ".json");
-            for (int n = 2; File.Exists(name); n++) name = Path.Combine(dir, stem + "-" + n.ToString(Inv) + ".json");
+            string stem = prefix + now.ToString("yyyyMMdd-HHmmss", Inv);
+            string name = Path.Combine(dir, stem + ext);
+            for (int n = 2; File.Exists(name); n++) name = Path.Combine(dir, stem + "-" + n.ToString(Inv) + ext);
             return name;
         }
 
@@ -875,6 +922,332 @@ namespace PrintPrice
 
         /// Tests only.
         internal static void ResetBlock() { saveBlocked = false; }
+
+        /// Tests only: as if history.json couldn't be read.
+        internal static void SetBlock() { saveBlocked = true; }
+
+        // ---------- backup and restore (idea 27) ----------
+
+        public const string BackupFormat = "PrintPriceBackup";
+        public const int BackupVersion = 1;
+        public const string BackupExtension = ".printprice-backup";
+
+        /// settings.ini keys a backup never holds and a restore never brings back (they belong to the PC).
+        public static readonly string[] PcOnlyKeys = { "SlicerPath" };
+
+        /// "PrintPrice backup 2026-11-10.printprice-backup"
+        public static string BackupFileName(DateTime now)
+        {
+            return "PrintPrice backup " + now.ToString("yyyy-MM-dd", Inv) + BackupExtension;
+        }
+
+        /// The backup text (BackupFile JSON): all records, and the settings.ini lines without PcOnlyKeys (s null = history only).
+        public static string ToBackup(List<QuoteRecord> list, AppSettings s, string app, DateTime now)
+        {
+            List<string> lines = null;
+            if (s != null)
+            {
+                lines = new List<string>();
+                foreach (var l in s.ToIni()) if (!IsPcOnly(l)) lines.Add(l);
+            }
+            return Json.Serialize(new BackupFile
+            {
+                Format = BackupFormat, Version = BackupVersion, CreatedAt = Stamp(now), App = app ?? "",
+                History = new HistoryFile { Version = Version, Quotes = list ?? new List<QuoteRecord>() },
+                Settings = lines
+            });
+        }
+
+        static bool IsPcOnly(string line)
+        {
+            if (line == null) return true;
+            int eq = line.IndexOf('=');
+            string key = (eq < 0 ? line : line.Substring(0, eq)).Trim();
+            return Array.IndexOf(PcOnlyKeys, key) >= 0;
+        }
+
+        /// Reads a backup's text, or a plain history.json (no settings). null = OK (data set); else the problem text for
+        /// the ui (data null): not a backup, or made by a newer version (backup Version or history Version).
+        public static string ReadBackup(string text, out BackupData data)
+        {
+            data = null;
+            string notBackup = L.S("This is not a PrintPrice backup.", "Det er ikke en PrintPrice-sikkerhedskopi.");
+            string newer = L.S("This backup was made by a newer PrintPrice. Update the app first.",
+                               "Sikkerhedskopien er lavet af en nyere PrintPrice. Opdater programmet først.");
+            if (string.IsNullOrEmpty(text) || text.Trim().Length == 0) return notBackup;
+            BackupFile b;
+            try { b = Json.Deserialize<BackupFile>(text); }
+            catch { return notBackup; }
+            if (b == null) return notBackup;
+            if (b.Format == BackupFormat)
+            {
+                if (b.Version > BackupVersion) return newer;
+                if (b.Version < 1 || b.History == null) return notBackup;
+                if (b.History.Version > Version) return newer;
+                if (b.History.Version != Version || b.History.Quotes == null) return notBackup;
+                data = new BackupData { Quotes = CleanQuotes(b.History.Quotes), CreatedAt = b.CreatedAt ?? "", App = b.App ?? "" };
+                if (b.Settings != null)
+                {
+                    var l = new List<string>();
+                    foreach (var x in b.Settings) if (!IsPcOnly(x)) l.Add(x);
+                    data.Settings = l.ToArray();
+                }
+                return null;
+            }
+            if (b.Format != null) return notBackup;
+            // a plain history.json: {"Version":1,"Quotes":[...]}
+            HistoryFile f;
+            try { f = Json.Deserialize<HistoryFile>(text); }
+            catch { return notBackup; }
+            if (f == null || f.Quotes == null) return notBackup;
+            if (f.Version > Version) return newer;
+            if (f.Version != Version) return notBackup;
+            data = new BackupData { Quotes = CleanQuotes(f.Quotes) };
+            return null;
+        }
+
+        /// Matches the same record on both sides: its Id; records without one by SavedAt, model, source, time, grams, price.
+        public static string RecordKey(QuoteRecord r)
+        {
+            if (!string.IsNullOrEmpty(r.Id)) return "id:" + r.Id;
+            return "k:" + r.SavedAt + "|" + r.Model + "|" + r.Source + "|" + r.Hours.ToString(Inv) + "|" + r.Minutes.ToString(Inv)
+                + "|" + r.Grams.ToString("R", Inv) + "|" + r.OthersPrice.ToString("R", Inv);
+        }
+
+        // deep copies (through the JSON), so a restore never changes the caller's records
+        static List<QuoteRecord> CopyQuotes(List<QuoteRecord> list)
+        {
+            if (list == null || list.Count == 0) return new List<QuoteRecord>();
+            return ParseJson(ToJson(list)) ?? new List<QuoteRecord>();
+        }
+
+        // fills keep (this PC's) from other (the same record in the backup); true when something changed
+        static bool FillFrom(QuoteRecord keep, QuoteRecord other)
+        {
+            bool changed = false;
+            if (string.IsNullOrEmpty(keep.InvoiceNo) && !string.IsNullOrEmpty(other.InvoiceNo))   // an issued code is never lost
+            {
+                keep.InvoiceNo = other.InvoiceNo; keep.BilledAt = other.BilledAt; keep.InvoiceDue = other.InvoiceDue;
+                keep.InvoicePayMobilePay = other.InvoicePayMobilePay; keep.InvoicePayBank = other.InvoicePayBank;
+                keep.InvoiceFromName = other.InvoiceFromName;
+                changed = true;
+            }
+            if (other.Printed && !keep.Printed) { keep.Printed = true; changed = true; }
+            if (other.Failed && !keep.Failed)
+            {
+                keep.Failed = true; keep.FailedAt = other.FailedAt; keep.PaidBack = other.PaidBack;
+                changed = true;
+            }
+            if (keep.Note.Trim().Length == 0 && other.Note.Trim().Length > 0) { keep.Note = other.Note; changed = true; }
+            if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
+            return changed;
+        }
+
+        // Records whose printer id is one of kept's printers but with a different model than their own printer (from
+        // theirs, else the record's snapshot) move to a new id, reserved in kept. One decision per id. Returns ids moved.
+        static int MovePrinters(List<QuoteRecord> records, AppSettings theirs, AppSettings kept)
+        {
+            var map = new Dictionary<string, string>(StringComparer.Ordinal);
+            int moved = 0;
+            foreach (var r in records)
+            {
+                string id = PrinterOf(r), to;
+                if (!map.TryGetValue(id, out to))
+                {
+                    to = id;
+                    var here = kept.FindPrinter(id);
+                    string own = null;
+                    if (theirs != null)
+                    {
+                        var p = theirs.FindPrinter(id);
+                        if (p != null) own = p.Model;
+                    }
+                    if (own == null && !string.IsNullOrEmpty(r.PrinterModel)) own = r.PrinterModel;
+                    if (here != null && own != null && Wear.FindModel(own).Key != Wear.FindModel(here.Model).Key)
+                    {
+                        to = ((long)kept.LastPrinterId + 1).ToString(Inv);
+                        kept.ReservePrinterId(to);
+                        moved++;
+                    }
+                    map[id] = to;
+                }
+                if (to != id) r.PrinterId = to;
+            }
+            return moved;
+        }
+
+        static void AddCodes(List<string> codes, HashSet<string> seen, IEnumerable<string> more)
+        {
+            foreach (var c in more)
+            {
+                string t = (c ?? "").Trim();
+                if (t.Length > 0 && seen.Add(t)) codes.Add(t);
+            }
+        }
+
+        static IEnumerable<string> CodesOf(List<QuoteRecord> list)
+        {
+            var res = new List<string>();
+            if (list != null)
+                foreach (var r in list) if (r != null && !string.IsNullOrEmpty(r.InvoiceNo)) res.Add(r.InvoiceNo);
+            return res;
+        }
+
+        /// The restore without files (pure). Never changes current, currentSettings or backup.
+        /// - replace: the history becomes the backup's; else merge: this PC's records stay, the backup's new ones are added,
+        ///   the same record (RecordKey) is filled in from the backup (FillFrom: invoice if none here, Printed, Failed, empty
+        ///   Note / Customer). Then newest first by SavedAt and Trim(MaxQuotes).
+        /// - withSettings (and the backup has settings): settings = the backup's, but SlicerPath stays this PC's; else this PC's.
+        /// - printers: an id both sides use for different models moves the records of the side whose settings are NOT kept to a
+        ///   new id (MovePrinters); every printer id in either history or settings is reserved.
+        /// - UsedInvoiceNos = both sides' lists + every invoice code in both histories (also replaced ones): never given again.
+        ///   Codes on 2+ different records are kept and listed in InvoiceClashes.
+        public static RestoreResult Combine(List<QuoteRecord> current, AppSettings currentSettings, BackupData backup,
+                                            bool replace, bool withSettings)
+        {
+            if (backup == null) throw new ArgumentNullException("backup");
+            if (currentSettings == null) currentSettings = new AppSettings();
+            var res = new RestoreResult();
+            var cur = replace ? new List<QuoteRecord>() : CopyQuotes(current);
+            var inc = CopyQuotes(backup.Quotes);
+            AppSettings bs = backup.Settings != null ? AppSettings.FromIni(backup.Settings) : null;
+            AppSettings rs;
+            if (withSettings && bs != null)
+            {
+                rs = bs.Clone();
+                rs.SlicerPath = currentSettings.SlicerPath;
+                res.SettingsRestored = true;
+            }
+            else rs = currentSettings.Clone();
+
+            // printer ids: never hand out one used on either side, then move clashing ones
+            rs.ReservePrinterId(((long)currentSettings.LastPrinterId).ToString(Inv));
+            if (bs != null) rs.ReservePrinterId(((long)bs.LastPrinterId).ToString(Inv));
+            ReservePrinterIds(current, rs);
+            ReservePrinterIds(inc, rs);
+            res.PrintersMoved = res.SettingsRestored ? MovePrinters(cur, currentSettings, rs) : MovePrinters(inc, bs, rs);
+
+            // merge
+            var index = new Dictionary<string, QuoteRecord>(StringComparer.Ordinal);
+            var all = new List<QuoteRecord>(cur.Count + inc.Count);
+            foreach (var r in cur)
+            {
+                string k = RecordKey(r);
+                if (!index.ContainsKey(k)) index[k] = r;
+                all.Add(r);
+            }
+            foreach (var r in inc)
+            {
+                string k = RecordKey(r);
+                QuoteRecord here;
+                if (index.TryGetValue(k, out here))
+                {
+                    if (FillFrom(here, r)) res.Updated++; else res.Same++;
+                    continue;
+                }
+                index[k] = r;
+                all.Add(r);
+                res.Added++;
+            }
+            var order = new Dictionary<QuoteRecord, int>();
+            for (int i = 0; i < all.Count; i++) order[all[i]] = i;
+            all.Sort(delegate(QuoteRecord a, QuoteRecord b)
+            {
+                DateTime ta, tb;
+                if (!TryTime(a.SavedAt, out ta)) ta = DateTime.MinValue;
+                if (!TryTime(b.SavedAt, out tb)) tb = DateTime.MinValue;
+                int c = tb.CompareTo(ta);   // newest first, unreadable times last
+                return c != 0 ? c : order[a].CompareTo(order[b]);
+            });
+            Trim(all, MaxQuotes);
+
+            // invoice codes
+            var codes = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddCodes(codes, seen, (currentSettings.UsedInvoiceNos ?? "").Split(','));
+            if (bs != null) AddCodes(codes, seen, (bs.UsedInvoiceNos ?? "").Split(','));
+            AddCodes(codes, seen, CodesOf(current));
+            AddCodes(codes, seen, CodesOf(all));
+            if (codes.Count > MaxUsedInvoiceNos) codes.RemoveRange(0, codes.Count - MaxUsedInvoiceNos);
+            rs.UsedInvoiceNos = string.Join(",", codes.ToArray());
+            var count = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in all)
+            {
+                if (string.IsNullOrEmpty(r.InvoiceNo)) continue;
+                string c = r.InvoiceNo.Trim();
+                int n;
+                count.TryGetValue(c, out n);
+                count[c] = n + 1;
+                if (n + 1 == 2) res.InvoiceClashes.Add(c);
+            }
+
+            res.Quotes = all;
+            res.Settings = rs;
+            return res;
+        }
+
+        /// Restores a backup: Combine, then safety copies of history.json and settings.ini (when they exist) as
+        /// history.before-restore-yyyyMMdd-HHmmss.json / settings.before-restore-yyyyMMdd-HHmmss.ini (the restore stops if a
+        /// copy fails), then saves the history and the settings. null = OK. Refused while history.json couldn't be read.
+        /// result is set once the history is saved (also when only the settings failed): the caller uses result.Quotes and
+        /// result.Settings from then on. Never throws.
+        public static string Restore(List<QuoteRecord> current, AppSettings settings, BackupData backup, bool replace,
+                                     bool withSettings, DateTime now, out RestoreResult result)
+        {
+            result = null;
+            if (saveBlocked)
+                return L.S("Backup not restored: the price history file could not be read.",
+                           "Sikkerhedskopien blev ikke gendannet: prishistorik-filen kunne ikke læses.");
+            RestoreResult r;
+            try { r = Combine(current, settings, backup, replace, withSettings); }
+            catch (Exception ex) { return L.S("Backup not restored: ", "Sikkerhedskopien blev ikke gendannet: ") + ex.Message; }
+            string hist = FilePath, ini = AppSettings.FilePath;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(hist));
+                if (File.Exists(hist)) File.Copy(hist, BackupName(hist, "history.before-restore-", ".json", now));
+                if (File.Exists(ini)) File.Copy(ini, BackupName(ini, "settings.before-restore-", ".ini", now));
+            }
+            catch (Exception ex)
+            {
+                return L.S("Backup not restored, the safety copy failed: ", "Sikkerhedskopien blev ikke gendannet, sikkerhedskopien af det nuværende fejlede: ")
+                    + ex.Message;
+            }
+            string problem = Save(r.Quotes);
+            if (problem != null) return problem;
+            result = r;
+            try { File.WriteAllLines(ini, r.Settings.ToIni()); }
+            catch (Exception ex)
+            {
+                return L.S("Price history restored, but the settings could not be saved: ",
+                           "Prishistorikken er gendannet, men indstillingerne kunne ikke gemmes: ") + ex.Message;
+            }
+            return null;
+        }
+
+        /// Writes a backup file (ToBackup). null = OK, else the problem text. Never throws.
+        public static string WriteBackupFile(string path, List<QuoteRecord> list, AppSettings s, string app, DateTime now)
+        {
+            try
+            {
+                File.WriteAllText(path, ToBackup(list, s, app, now), new UTF8Encoding(false));
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return L.S("Backup not saved: ", "Sikkerhedskopien blev ikke gemt: ") + ex.Message;
+            }
+        }
+
+        /// Reads a backup file or a plain history.json (ReadBackup). null = OK. Never throws.
+        public static string ReadBackupFile(string path, out BackupData data)
+        {
+            data = null;
+            string text;
+            try { text = File.ReadAllText(path, Encoding.UTF8); }
+            catch (Exception ex) { return L.S("Backup could not be read: ", "Sikkerhedskopien kunne ikke læses: ") + ex.Message; }
+            return ReadBackup(text, out data);
+        }
     }
 
 #if !WEB

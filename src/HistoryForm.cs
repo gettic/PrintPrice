@@ -16,14 +16,14 @@ namespace PrintPrice
     {
         readonly List<QuoteRecord> list;
         readonly bool offline;
-        readonly string problem;
+        string problem;
         readonly TextBox txtSearch;
         readonly ComboBox cmbShow;
         readonly Label lblCount;
         readonly HistoryGrid grid;
         readonly Panel gridFrame;
         readonly InfoBox info;
-        readonly Button btnDelete, btnOpen, btnRepeat, btnQuote, btnInvoice, btnOlder, btnNewer;
+        readonly Button btnDelete, btnOpen, btnRepeat, btnQuote, btnInvoice, btnOlder, btnNewer, btnBackup;
         readonly TableLayoutPanel top, bottom, cards;
         readonly ComboBox cmbMonth;
         readonly StatCard cardPrints, cardTime, cardCustomers, cardFriends, cardCosts, cardProfit;
@@ -58,6 +58,9 @@ namespace PrintPrice
         /// Quote… / Invoice…: (owner, record, invoice) opens the quote window for the record (MainForm.ShowRecordQuote);
         /// null = the two buttons are hidden.
         public Action<IWin32Window, QuoteRecord, bool> QuoteRequested;
+        /// Backup…: (owner) opens the Backup window (MainForm.OpenBackup); true = a restore replaced the list (in place)
+        /// and the settings, so the window reloads. null = the button is hidden.
+        public Func<IWin32Window, bool> BackupRequested;
 
         sealed class MonthItem
         {
@@ -395,7 +398,14 @@ namespace PrintPrice
                 miQuote.Visible = miInvoice.Visible = QuoteRequested != null;
             };
             FormClosed += delegate { rowMenu.Dispose(); };
-            bottom.Controls.Add(btnDelete, 0, 0);
+            // left: Delete + Backup… (6 px apart)
+            var left = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Anchor = AnchorStyles.Left };
+            btnBackup = MakeButton(L.S("Backup…", "Sikkerhedskopi…"), 0);
+            btnBackup.Margin = new Padding(6, 0, 0, 0);
+            btnBackup.Click += delegate { BackupClicked(); };
+            left.Controls.Add(btnDelete);
+            left.Controls.Add(btnBackup);
+            bottom.Controls.Add(left, 0, 0);
             bottom.Controls.Add(right, 1, 0);
             root.Controls.Add(bottom);
 
@@ -414,6 +424,7 @@ namespace PrintPrice
             Load += delegate
             {
                 btnQuote.Visible = btnInvoice.Visible = QuoteRequested != null;
+                btnBackup.Visible = BackupRequested != null;
                 SetupPrinters();
                 FitLayout(); Fill(); ShowInfo(); UpdateMonthButtons();
             };
@@ -521,6 +532,7 @@ namespace PrintPrice
             foreach (var t in all) printerNames[t.Id] = AppSettings.CleanPrinterName(t.Name);
             printerMode = all.Count >= 2;
             colPrinter.Visible = cmbPrinter.Visible = lblPrinterCap.Visible = printerMode;
+            cmbShow.Margin = new Padding(0, 3, 0, 3);   // again after a restore that left one printer
             if (!printerMode) return;
             cmbShow.Margin = new Padding(0, 3, 24, 3);
             filling = true;
@@ -881,13 +893,30 @@ namespace PrintPrice
         {
             string help = L.S("Quote… makes a quote page for the selected print, Invoice… a bill (it ticks Printed). Repeat print slices it " +
                               "with today's prices; Open again (or double-click) loads it as saved. Right-click for all of these.\n" +
-                              "Click For, Note, Printed or Failed to change them, changes are saved at once. The history is kept only on this PC and never sent anywhere.",
+                              "Click For, Note, Printed or Failed to change them, changes are saved at once. Backup… saves or restores the history and settings.",
                               "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (den sætter Printet). Print igen slicer det " +
                               "med dagens priser; Åbn igen (eller dobbeltklik) henter det som gemt. Højreklik for det hele.\n" +
-                              "Klik på Til, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Historikken ligger kun på denne pc og sendes aldrig nogen steder.");
+                              "Klik på Til, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Sikkerhedskopi… gemmer eller gendanner historikken og indstillingerne.");
             if (saveError != null) { info.Text = saveError; info.Kind = InfoKind.Error; }
             else if (!string.IsNullOrEmpty(problem)) { info.Text = problem + "\n" + help; info.Kind = InfoKind.Warning; }
             else { info.Text = help; info.Kind = InfoKind.Info; }
+        }
+
+        /// Backup…: the Backup window (Restore tab first when the history is empty); after a restore the months,
+        /// printers, cards and list are built again from the new list.
+        void BackupClicked()
+        {
+            if (BackupRequested == null) return;
+            if (grid.IsCurrentCellInEditMode) grid.EndEdit();
+            if (!BackupRequested(this)) return;
+            problem = null;
+            saveError = null;
+            cmbMonth.Items.Clear();
+            cmbMonth.Items.Add(new MonthItem { Month = DateTime.MinValue, Text = L.S("All months", "Alle måneder") });
+            foreach (var m in History.Months(list)) cmbMonth.Items.Add(new MonthItem { Month = m, Text = MonthText(m) });
+            cmbMonth.SelectedIndex = cmbMonth.Items.Count > 1 ? 1 : 0;
+            SetupPrinters();
+            FitLayout(); Fill(); ShowInfo(); UpdateMonthButtons();
         }
 
         void UpdateButtons()

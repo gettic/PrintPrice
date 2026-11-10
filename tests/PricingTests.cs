@@ -323,6 +323,288 @@ namespace PrintPrice.Tests
                  System.IO.Path.Combine(AppSettings.RealFolder, "history.json"), StringComparison.OrdinalIgnoreCase));
         }
 
+        // ---------- backup and restore (idea 27): History backup/merge/restore, Backup code + blob ----------
+        static QuoteRecord BRec(string id, string savedAt)
+        {
+            var r = HistRecord(DateTime.ParseExact(savedAt, History.TimeFormat, System.Globalization.CultureInfo.InvariantCulture));
+            r.Id = id;
+            return r;
+        }
+
+        static string Hex(byte[] b)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var x in b) sb.Append(x.ToString("x2"));
+            return sb.ToString();
+        }
+
+        static List<string> Ids(List<QuoteRecord> l)
+        {
+            var res = new List<string>();
+            foreach (var r in l) res.Add(r.Id);
+            return res;
+        }
+
+        static void BackupTests()
+        {
+            var t = new DateTime(2026, 11, 10, 12, 0, 0);
+            var A = BRec("A", "2026-11-05 10:00:00");
+            var B = BRec("B", "2026-11-01 10:00:00");
+            var C = BRec("C", "2026-11-07 10:00:00");
+            var s = new AppSettings();
+            s.SlicerPath = @"C:\Bambu\bambu-studio.exe"; s.FriendsMarkupPct = 33; s.UsedInvoiceNos = "2026-AAAA";
+
+            // backup text round trip
+            string text = History.ToBackup(new List<QuoteRecord> { A, B, C }, s, "1.10.0", t);
+            BackupData data;
+            True("Backup round trip reads", History.ReadBackup(text, out data) == null && data != null);
+            True("Backup round trip records", J(Ids(data.Quotes)) == "A|B|C" && data.CreatedAt == "2026-11-10 12:00:00" && data.App == "1.10.0");
+            True("Backup has settings without SlicerPath", data.Settings != null
+                 && !Array.Exists(data.Settings, x => x.StartsWith("SlicerPath")) && text.IndexOf("bambu-studio", StringComparison.Ordinal) < 0);
+            True("Backup settings read back", AppSettings.FromIni(data.Settings).FriendsMarkupPct == 33
+                 && AppSettings.FromIni(data.Settings).UsedInvoiceNos == "2026-AAAA");
+            True("Backup Format/Version in text", text.Contains("\"Format\":\"PrintPriceBackup\"") && text.Contains("\"Version\":1"));
+            True("Backup file name", History.BackupFileName(t) == "PrintPrice backup 2026-11-10.printprice-backup");
+            True("Backup history only (null settings)", History.ReadBackup(History.ToBackup(new List<QuoteRecord> { A }, null, "x", t), out data) == null
+                 && data.Settings == null && data.Quotes.Count == 1);
+            // plain history.json
+            True("Backup reads plain history.json", History.ReadBackup(History.ToJson(new List<QuoteRecord> { A, B, C }), out data) == null
+                 && data.Settings == null && J(Ids(data.Quotes)) == "A|B|C");
+            // refused
+            string p;
+            p = History.ReadBackup(Json.Serialize(new BackupFile { Format = History.BackupFormat, Version = 2,
+                History = new HistoryFile { Version = 1, Quotes = new List<QuoteRecord>() } }), out data);
+            True("Backup Version 2 -> newer", p != null && p.Contains("newer") && data == null);
+            p = History.ReadBackup(Json.Serialize(new BackupFile { Format = History.BackupFormat, Version = 1,
+                History = new HistoryFile { Version = 2, Quotes = new List<QuoteRecord>() } }), out data);
+            True("Backup History Version 2 -> newer", p != null && p.Contains("newer") && data == null);
+            p = History.ReadBackup("{\"Version\":2,\"Quotes\":[]}", out data);
+            True("Plain history Version 2 -> newer", p != null && p.Contains("newer") && data == null);
+            True("Backup garbage refused", History.ReadBackup("garbage{", out data) != null && data == null);
+            True("Backup empty refused", History.ReadBackup("", out data) != null && History.ReadBackup(null, out data) != null);
+            True("Backup other Format refused", History.ReadBackup("{\"Format\":\"Other\",\"Version\":1}", out data) != null);
+            True("Backup [] refused", History.ReadBackup("[1,2]", out data) != null);
+
+            // merge: new ones in, newest first; caller's list untouched
+            var cur = new List<QuoteRecord> { A, B };
+            var res = History.Combine(cur, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { BRec("B", "2026-11-01 10:00:00"), C } }, false, false);
+            True("Merge order C|A|B", J(Ids(res.Quotes)) == "C|A|B");
+            True("Merge counts added 1 same 1", res.Added == 1 && res.Same == 1 && res.Updated == 0 && res.PrintersMoved == 0);
+            True("Merge leaves current list alone", cur.Count == 2 && !object.ReferenceEquals(res.Quotes[1], A));
+
+            // merge: same Id filled in from the backup
+            var B2 = BRec("B", "2026-11-01 10:00:00");
+            B2.InvoiceNo = "2026-K7Q4"; B2.BilledAt = "2026-11-02 09:00:00"; B2.InvoiceDue = "2026-11-16"; B2.InvoicePayBank = "1234 5678";
+            B2.Printed = true; B2.Note = "theirs"; B2.Customer = "Anna";
+            var Bh = BRec("B", "2026-11-01 10:00:00"); Bh.Note = "mine";
+            res = History.Combine(new List<QuoteRecord> { Bh }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { B2 } }, false, false);
+            var mb = res.Quotes[0];
+            True("Merge same Id: invoice taken", res.Updated == 1 && mb.InvoiceNo == "2026-K7Q4" && mb.BilledAt == "2026-11-02 09:00:00"
+                 && mb.InvoiceDue == "2026-11-16" && mb.InvoicePayBank == "1234 5678");
+            True("Merge same Id: Printed, own Note kept, Customer filled", mb.Printed && mb.Note == "mine" && mb.Customer == "Anna");
+            True("Merge same Id: caller's record unchanged", Bh.InvoiceNo == "" && !Bh.Printed && Bh.Customer == "");
+            res = History.Combine(new List<QuoteRecord> { B2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Bh } }, false, false);
+            True("Merge same Id: this PC's invoice kept, nothing new = Same", res.Same == 1 && res.Updated == 0 && res.Quotes[0].InvoiceNo == "2026-K7Q4" && res.Quotes[0].Note == "theirs");
+            // failed in the backup only -> failed
+            var Fb = BRec("A", "2026-11-05 10:00:00"); History.MarkFailed(Fb, true, new DateTime(2026, 11, 6, 8, 0, 0));
+            res = History.Combine(new List<QuoteRecord> { A }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Fb } }, false, false);
+            True("Merge same Id: Failed taken", res.Quotes[0].Failed && res.Quotes[0].FailedAt == "2026-11-06 08:00:00" && res.Updated == 1);
+            // no Id: matched by content
+            var N1 = BRec("", "2026-11-03 10:00:00"); var N2 = BRec("", "2026-11-03 10:00:00");
+            res = History.Combine(new List<QuoteRecord> { N1 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { N2 } }, false, false);
+            True("Merge no Id: same content = same record", res.Quotes.Count == 1 && res.Same == 1);
+
+            // invoice codes: clash kept, used list = both sides + both histories
+            var Ai = BRec("A", "2026-11-05 10:00:00"); Ai.InvoiceNo = "2026-K7Q4";
+            var Ci = BRec("C", "2026-11-07 10:00:00"); Ci.InvoiceNo = "2026-K7Q4";
+            var bs = new AppSettings(); bs.UsedInvoiceNos = "2026-BBBB";
+            var cs = new AppSettings(); cs.UsedInvoiceNos = "2026-AAAA";
+            res = History.Combine(new List<QuoteRecord> { Ai }, cs, new BackupData { Quotes = new List<QuoteRecord> { Ci }, Settings = bs.ToIni() }, false, false);
+            True("Invoice clash: both kept, codes unchanged", res.Quotes.Count == 2 && res.Quotes[0].InvoiceNo == "2026-K7Q4"
+                 && res.Quotes[1].InvoiceNo == "2026-K7Q4" && J(res.InvoiceClashes) == "2026-K7Q4");
+            True("Invoice used list = AAAA, BBBB, K7Q4", res.Settings.UsedInvoiceNos == "2026-AAAA,2026-BBBB,2026-K7Q4");
+            True("Settings not restored -> this PC's", !res.SettingsRestored && res.Settings.UsedInvoiceNos != cs.UsedInvoiceNos
+                 && cs.UsedInvoiceNos == "2026-AAAA");
+
+            // replace: history = the backup's, replaced codes still never given again
+            var Az = BRec("A", "2026-11-05 10:00:00"); Az.InvoiceNo = "2026-ZZZZ";
+            res = History.Combine(new List<QuoteRecord> { Az }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { C } }, true, false);
+            True("Replace: only the backup's", J(Ids(res.Quotes)) == "C" && res.Added == 1);
+            True("Replace: replaced code stays used", res.Settings.UsedInvoiceNos == "2026-ZZZZ");
+
+            // printers: same id, different model -> moved to a new id
+            cs = new AppSettings(); cs.AddPrinter("Mini", Wear.ModelA1Mini);              // here: 1 = A1, 2 = A1 mini
+            bs = new AppSettings(); bs.AddPrinter("Big", Wear.ModelP1S);                  // backup: 1 = A1, 2 = P1S
+            True("Printers set up", cs.FindPrinter("2") != null && bs.FindPrinter("2") != null && cs.LastPrinterId == 2);
+            var R1 = BRec("R1", "2026-11-04 10:00:00"); R1.PrinterId = "1";
+            var R2 = BRec("R2", "2026-11-04 11:00:00"); R2.PrinterId = "2"; R2.PrinterModel = Wear.ModelP1S;
+            var R5 = BRec("R5", "2026-11-04 12:00:00"); R5.PrinterId = "5"; R5.PrinterModel = Wear.ModelP1S;
+            var bdata = new BackupData { Quotes = new List<QuoteRecord> { R5, R2, R1 }, Settings = bs.ToIni() };
+            res = History.Combine(new List<QuoteRecord>(), cs, bdata, false, false);
+            var byId = new Dictionary<string, QuoteRecord>();
+            foreach (var r in res.Quotes) byId[r.Id] = r;
+            // ids reserved first: here 2, backup 2, history 5 -> LastPrinterId 5, so the moved printer gets 6
+            True("Printer clash moved to 6", byId["R2"].PrinterId == "6" && res.PrintersMoved == 1);
+            True("Printer same model kept, unknown id kept", byId["R1"].PrinterId == "1" && byId["R5"].PrinterId == "5");
+            True("Printer ids reserved (LastPrinterId 6)", res.Settings.LastPrinterId == 6 && R2.PrinterId == "2");
+            var bs2 = new AppSettings(); bs2.AddPrinter("Other name", Wear.ModelA1Mini);
+            var R2b = BRec("R2", "2026-11-04 11:00:00"); R2b.PrinterId = "2";
+            res = History.Combine(new List<QuoteRecord>(), cs, new BackupData { Quotes = new List<QuoteRecord> { R2b }, Settings = bs2.ToIni() }, false, false);
+            True("Printer renamed only -> not moved", res.Quotes[0].PrinterId == "2" && res.PrintersMoved == 0);
+            // with the backup's settings: this PC's records move instead, SlicerPath stays this PC's
+            cs.SlicerPath = @"D:\Studio\bambu-studio.exe";
+            var H2 = BRec("H2", "2026-11-03 10:00:00"); H2.PrinterId = "2"; H2.PrinterModel = Wear.ModelA1Mini;
+            res = History.Combine(new List<QuoteRecord> { H2 }, cs, new BackupData { Quotes = new List<QuoteRecord> { R2 }, Settings = bs.ToIni() }, false, true);
+            byId.Clear();
+            foreach (var r in res.Quotes) byId[r.Id] = r;
+            True("With settings: backup's printers", res.SettingsRestored && res.Settings.FindPrinter("2").Model == Wear.ModelP1S
+                 && res.Settings.SlicerPath == @"D:\Studio\bambu-studio.exe");
+            True("With settings: this PC's clashing records moved", byId["H2"].PrinterId == "3" && byId["R2"].PrinterId == "2" && res.PrintersMoved == 1);
+            res = History.Combine(new List<QuoteRecord>(), cs, new BackupData { Quotes = new List<QuoteRecord> { C } }, false, true);
+            True("With settings but none in backup -> this PC's", !res.SettingsRestored && res.Settings.FindPrinter("2").Model == Wear.ModelA1Mini);
+
+            // failed-print debt is not doubled: FailedCost = 21,60 + 1,10 + 5,5 h x 2 = 33,70; paid 12,00 -> 21,70
+            var F = BRec("F", "2026-11-02 10:00:00"); History.MarkFailed(F, true, new DateTime(2026, 11, 2, 12, 0, 0));
+            var P = BRec("P", "2026-11-04 10:00:00"); P.PaybackCost = 12; P.FailedPaybackWho = 2; P.For = History.ForCustomer;
+            var both = new List<QuoteRecord> { P, F };
+            Eq("Debt before merge 33,70 - 12,00", 21.70, History.FailedDebt(both, null));
+            res = History.Combine(both, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { BRec("P", "2026-11-04 10:00:00"), F } }, false, false);
+            Eq("Debt after merge 21,70", 21.70, History.FailedDebt(res.Quotes, null));
+
+            // trimmed to MaxQuotes
+            var many = new List<QuoteRecord>();
+            for (int i = 0; i < 4990; i++) { var q = new QuoteRecord(); q.Id = "L" + i; many.Add(q); }
+            var more = new List<QuoteRecord>();
+            for (int i = 0; i < 20; i++) { var q = new QuoteRecord(); q.Id = "N" + i; more.Add(q); }
+            res = History.Combine(many, new AppSettings(), new BackupData { Quotes = more }, false, false);
+            True("Merge 4990 + 20 -> 5000", res.Quotes.Count == 5000 && res.Added == 20);
+
+            BackupCodeTests();
+            BackupFileTests();
+        }
+
+        static void BackupCodeTests()
+        {
+            // the code
+            string code = Backup.NewCode();
+            True("Code format XXXXX-XXXXX-XXXXX-XXXXX", System.Text.RegularExpressions.Regex.IsMatch(code,
+                 "^[0-9A-HJKMNP-TV-Z]{5}(-[0-9A-HJKMNP-TV-Z]{5}){3}$"));
+            True("Code valid", Backup.Normalize(code) == code.Replace("-", ""));
+            True("Two codes differ", Backup.NewCode() != code);
+            // vector code: first 19 = alphabet 0..18, check = Alphabet[SHA-256("0123456789ABCDEFGHJ")[0] & 31] = Alphabet[15] = 'F'
+            const string V = "0123456789ABCDEFGHJF";
+            True("Code from pick(i) = i", Backup.NewCode(i => i) == "01234-56789-ABCDE-FGHJF");
+            True("Normalize lower case, spaces", Backup.Normalize(" 01234 56789-abcde-fghjf ") == V);
+            True("Normalize O -> 0", Backup.Normalize("O1234-56789-ABCDE-FGHJF") == V);
+            True("Normalize I/L -> 1", Backup.Normalize("0I234-56789-ABCDE-FGHJF") == V && Backup.Normalize("0l234-56789-ABCDE-FGHJF") == V);
+            True("Normalize wrong check char -> null", Backup.Normalize("01234-56789-ABCDE-FGHJG") == null);
+            True("Normalize U -> null", Backup.Normalize("U1234-56789-ABCDE-FGHJF") == null);
+            True("Normalize 19 chars -> null", Backup.Normalize("01234-56789-ABCDE-FGHJ") == null && Backup.Normalize(null) == null);
+
+            // fixed test vector (also in plans\history-backup\test vector.md; HMAC values checked with Python)
+            True("Vector StorageId", Backup.StorageId(V) == "5c22a78a2694ed52be5c1efa1565dd0d");
+            True("Vector StorageId from typed code", Backup.StorageId("01234-56789-abcde-fghjf") == "5c22a78a2694ed52be5c1efa1565dd0d");
+            True("Vector EncKey", Hex(Backup.EncKey(V)) == "5a6ec9831e244ec017f8235240eb60a6260fea40d69b7ace51bf638f09d94b12");
+            True("Vector MacKey", Hex(Backup.MacKey(V)) == "058bf9d37c15b495e88de8ca61700934426ed365204c826abb053d58420b7711");
+            var iv = new byte[16];
+            for (int i = 0; i < 16; i++) iv[i] = (byte)i;
+            var plain = System.Text.Encoding.ASCII.GetBytes("PrintPrice backup test vector");
+            const string VBlob = "50504231000102030405060708090a0b0c0d0e0fe7b16e3df4b922480ef68fcee419f9fd65ae5df3cd3a4487289b836f84fa9e4375a63f8abc7eca18d55324858906c9521c6e1edc1309753ef28412b8936718db";
+            var sealedBlob = Backup.Seal(plain, V, iv);
+            True("Vector Seal bytes (84)", Hex(sealedBlob) == VBlob && sealedBlob.Length == 84);
+            string p;
+            var opened = Backup.Open(sealedBlob, V, out p);
+            True("Vector Open", opened != null && p == null && System.Text.Encoding.ASCII.GetString(opened) == "PrintPrice backup test vector");
+            const string VPack = "UFBCMRAREhMUFRYXGBkaGxwdHh91dDP3/rCpAGMKMZKP+W33pKtcLHi+MX5czFGyEmQLlbB2qKl/xtLBE8uIs8Gtf6hjkYX67mJuicMydWhoob9EzyZdDVbGlw7sFKasuVyFImsPtdAngkO+V/ft3GO5o01Go3kxBZfYS4/F+hhalEFWRSR/6xO8+9Apfz2s+XGOhlLNOcdelYMPXTcgnZmyDNYjbVf5Is+TtMI+o6n8wMuI5TKC7F/roCM/j8EmKHcOmQ==";
+            const string VJson = "{\"Format\":\"PrintPriceBackup\",\"Version\":1,\"CreatedAt\":\"2026-11-10 12:00:00\",\"App\":\"test\",\"History\":{\"Version\":1,\"Quotes\":[]},\"Settings\":null}";
+            True("Vector Unpack (gzip blob)", Backup.Unpack(Convert.FromBase64String(VPack), V) == VJson);
+            BackupData vd;
+            True("Vector JSON is an empty backup", History.ReadBackup(VJson, out vd) == null && vd.Quotes.Count == 0 && vd.Settings == null);
+
+            // Pack / Unpack
+            string json = History.ToBackup(new List<QuoteRecord> { BRec("A", "2026-11-05 10:00:00") }, new AppSettings(), "1.10.0", DateTime.Now);
+            byte[] blob = Backup.Pack(json, code);
+            True("Pack starts with PPB1", Backup.IsBlob(blob) && blob[0] == (byte)'P' && blob[3] == (byte)'1');
+            True("Pack/Unpack round trip", Backup.Unpack(blob, code, out p) == json && p == null);
+            True("Unpack typed code (lower case, spaces)", Backup.Unpack(blob, code.ToLowerInvariant().Replace("-", " ")) == json);
+            string other = Backup.NewCode();
+            True("Unpack wrong code -> null + problem", Backup.Unpack(blob, other, out p) == null && p != null);
+            True("Unpack invalid code -> null", Backup.Unpack(blob, "nonsense", out p) == null && p != null);
+            var b1 = (byte[])blob.Clone(); b1[30] ^= 1;
+            True("Unpack flipped ciphertext byte -> null", Backup.Unpack(b1, code, out p) == null && p != null);
+            var b2 = (byte[])blob.Clone(); b2[5] ^= 1;
+            True("Unpack flipped IV byte -> null", Backup.Unpack(b2, code) == null);
+            var b3 = (byte[])blob.Clone(); b3[0] = (byte)'X';
+            True("Unpack wrong magic -> null", Backup.Unpack(b3, code, out p) == null && p != null);
+            var b4 = (byte[])blob.Clone(); b4[b4.Length - 1] ^= 1;
+            True("Unpack flipped HMAC byte -> null", Backup.Unpack(b4, code) == null);
+            True("Unpack short / null -> null", Backup.Unpack(new byte[10], code) == null && Backup.Unpack(null, code) == null);
+            True("Two Packs differ (random IV)", Hex(Backup.Pack(json, code)) != Hex(blob));
+            bool threw = false;
+            try { Backup.Pack(json, "bad"); } catch (ArgumentException) { threw = true; }
+            True("Pack invalid code throws", threw);
+            var big = new List<QuoteRecord>();
+            for (int i = 0; i < 5000; i++) big.Add(BRec("Q" + i, "2026-11-05 10:00:00"));
+            string bigJson = History.ToBackup(big, new AppSettings(), "1.10.0", DateTime.Now);
+            byte[] bigBlob = Backup.Pack(bigJson, code);
+            Console.WriteLine("INFO 5000 quotes: JSON " + bigJson.Length + " chars, blob " + bigBlob.Length + " bytes");
+            True("5000 quotes blob under 512 KB (Worker limit)", bigBlob.Length < 512 * 1024 && Backup.Unpack(bigBlob, code) == bigJson);
+        }
+
+        static void BackupFileTests()
+        {
+            // files: only in bin\test-backup (test mode), never %APPDATA%
+            string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-backup");
+            try
+            {
+                True("Backup UseFolder test-backup", AppSettings.UseFolder(dir));
+                System.IO.Directory.CreateDirectory(dir);
+                foreach (var f in System.IO.Directory.GetFiles(dir)) System.IO.File.Delete(f);
+                History.ResetBlock();
+                var A = BRec("A", "2026-11-05 10:00:00"); A.InvoiceNo = "2026-ZZZZ";
+                var C = BRec("C", "2026-11-07 10:00:00");
+                var s = new AppSettings(); s.FriendsMarkupPct = 41; s.Save();
+                True("Backup test history saved", History.Save(new List<QuoteRecord> { A }) == null);
+                string histBefore = System.IO.File.ReadAllText(History.FilePath);
+                string iniBefore = System.IO.File.ReadAllText(AppSettings.FilePath);
+
+                string bf = System.IO.Path.Combine(dir, History.BackupFileName(new DateTime(2026, 11, 10)));
+                var bset = new AppSettings(); bset.FriendsMarkupPct = 55;
+                True("WriteBackupFile OK", History.WriteBackupFile(bf, new List<QuoteRecord> { C }, bset, "1.10.0", DateTime.Now) == null);
+                BackupData data;
+                True("ReadBackupFile OK", History.ReadBackupFile(bf, out data) == null && data.Quotes.Count == 1 && data.Settings != null);
+                True("ReadBackupFile missing -> problem", History.ReadBackupFile(System.IO.Path.Combine(dir, "nope.printprice-backup"), out data) != null);
+                History.ReadBackupFile(bf, out data);
+
+                // blocked (history.json unreadable): refused, nothing written
+                History.SetBlock();
+                RestoreResult rr;
+                True("Restore refused while blocked", History.Restore(new List<QuoteRecord> { A }, s, data, true, true, DateTime.Now, out rr) != null
+                     && rr == null && System.IO.File.ReadAllText(History.FilePath) == histBefore);
+                History.ResetBlock();
+
+                var now = new DateTime(2026, 11, 10, 12, 0, 0);
+                True("Restore replace + settings OK", History.Restore(new List<QuoteRecord> { A }, s, data, true, true, now, out rr) == null && rr != null);
+                string[] hs = System.IO.Directory.GetFiles(dir, "history.before-restore-20261110-120000*.json");
+                string[] ss = System.IO.Directory.GetFiles(dir, "settings.before-restore-20261110-120000*.ini");
+                True("Restore safety copies made", hs.Length == 1 && ss.Length == 1
+                     && System.IO.File.ReadAllText(hs[0]) == histBefore && System.IO.File.ReadAllText(ss[0]) == iniBefore);
+                string problem;
+                var loaded = History.Load(out problem);
+                True("Restore saved the backup's history", problem == null && J(Ids(loaded)) == "C");
+                var ls = AppSettings.Load();
+                True("Restore saved the backup's settings + used code", ls.FriendsMarkupPct == 55 && ls.UsedInvoiceNos.Contains("2026-ZZZZ"));
+                // a second restore in the same second: -2 names
+                True("Restore again OK", History.Restore(loaded, ls, data, false, false, now, out rr) == null && rr.Same == 1);
+                True("Restore safety copy -2", System.IO.Directory.GetFiles(dir, "history.before-restore-20261110-120000-2.json").Length == 1);
+            }
+            finally
+            {
+                History.ResetBlock();
+                AppSettings.ClearTestFolder();
+            }
+        }
+
         // ---------- quote export (idea 5): breakdown, settings helpers, history helpers ----------
         static string Line(QuoteBreakdown b, string key, int index)
         {
@@ -1983,6 +2265,7 @@ namespace PrintPrice.Tests
             InvoiceTests();
             PrinterTests();
             SlicerPrinterTests();
+            BackupTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
