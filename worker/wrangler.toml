@@ -1,0 +1,25 @@
+# PrintPrice Worker (https://printprice.gtd-relay.workers.dev). Nothing in here is a secret:
+# the KV id is only a name inside the Cloudflare account; the login stays in wrangler's own config in the user profile.
+name = "printprice"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "BACKUPS"
+id = "07e8dfc3533148a2b8520bb8cd878b5d"
+
+# Per-IP limits (approximate, per Cloudflare location). period must be 10 or 60 seconds.
+[[ratelimits]]
+name = "PUT_LIMIT"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 5
+  period = 60
+
+[[ratelimits]]
+name = "READ_LIMIT"
+namespace_id = "1002"
+  [ratelimits.simple]
+  limit = 30
+  period = 60

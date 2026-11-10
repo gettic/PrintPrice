@@ -981,7 +981,7 @@ namespace PrintPrice
         public const string BackupExtension = ".printprice-backup";
 
         /// settings.ini keys a backup never holds and a restore never brings back (they belong to the PC).
-        public static readonly string[] PcOnlyKeys = { "SlicerPath" };
+        public static readonly string[] PcOnlyKeys = { "SlicerPath", "BackupCode", "LastOnlineBackup" };
 
         /// "PrintPrice backup 2026-11-10.printprice-backup"
         public static string BackupFileName(DateTime now)
@@ -1164,7 +1164,7 @@ namespace PrintPrice
         /// - replace: the history becomes the backup's; else merge: this PC's records stay, the backup's new ones are added,
         ///   the same record (RecordKey) is filled in from the backup (FillFrom: invoice if none here, Printed, Failed, empty
         ///   Note / Customer). Then newest first by SavedAt and Trim(MaxQuotes).
-        /// - withSettings (and the backup has settings): settings = the backup's, but SlicerPath stays this PC's; else this PC's.
+        /// - withSettings (and the backup has settings): settings = the backup's, but all PcOnlyKeys stay this PC's; else this PC's.
         /// - printers: an id both sides use for different models moves the records of the side whose settings are NOT kept to a
         ///   new id (MovePrinters); every printer id in either history or settings is reserved.
         /// - UsedInvoiceNos = both sides' lists + every invoice code in both histories (also replaced ones): never given again.
@@ -1182,7 +1182,7 @@ namespace PrintPrice
             if (withSettings && bs != null)
             {
                 rs = bs.Clone();
-                rs.SlicerPath = currentSettings.SlicerPath;
+                rs.CopyKeys(currentSettings, PcOnlyKeys);   // SlicerPath, BackupCode, LastOnlineBackup stay this PC's
                 res.SettingsRestored = true;
             }
             else rs = currentSettings.Clone();

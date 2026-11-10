@@ -54,6 +54,18 @@ namespace PrintPrice.Web
             catch (Exception) { }
         }
 
+        /// The live electricity price for an area (DK1/DK2): the Worker on the real site, a test answer elsewhere.
+        /// Never throws; status 0 = no answer.
+        public async Task<LivePower.Answer> FetchPower(string area)
+        {
+            try
+            {
+                string host = await js.InvokeAsync<string>("printPrice.host");
+                return await js.InvokeAsync<LivePower.Answer>("printPrice.fetchPower", LivePower.Url(host, area), LivePower.TimeoutMs);
+            }
+            catch (Exception) { return new LivePower.Answer(); }
+        }
+
         /// Opens the browser's file picker (the hidden file input).
         public async Task PickFile()
         {

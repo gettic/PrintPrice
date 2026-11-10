@@ -51,6 +51,19 @@
                 if (id !== pp.fileId || !pp.file) return new Uint8Array(0);
                 return new Uint8Array(await pp.file.slice(start, start + length).arrayBuffer());
             },
+            // live electricity price: only the price area goes out (in the address), no cookies, nothing else
+            host: function () { return location.hostname; },
+            fetchPower: async function (url, ms) {
+                var ctl = new AbortController(), timedOut = false;
+                var timer = setTimeout(function () { timedOut = true; ctl.abort(); }, ms);
+                try {
+                    var r = await fetch(url, { signal: ctl.signal, credentials: 'omit', cache: 'no-store' });
+                    var text = await r.text();
+                    return { status: r.status, text: text, stale: r.headers.get('X-Price-Stale'), timedOut: false };
+                } catch (e) {
+                    return { status: 0, text: '', stale: null, timedOut: timedOut };
+                } finally { clearTimeout(timer); }
+            },
             pick: function () { if (window.printPrice.input) window.printPrice.input.click(); }
         };
     </script>

@@ -82,19 +82,28 @@ namespace PrintPrice
                         hist.Hide();
                     }
                     // the Backup window (idea 27) with made-up states: nothing is read, written or sent
-                    using (var bf = new BackupForm(quotes, s, BackupForm.TabBackup, true))
+                    // (a copy of the settings: the sample code is set on it; nothing goes online, nothing is saved)
+                    using (var bf = new BackupForm(quotes, s.Clone(), BackupForm.TabBackup, true))
                     {
                         Place(bf);
                         bf.Show();
-                        Snap(bf, folder, "backup.png");                // to a file (warning: not locked); online greyed out (coming soon)
+                        Snap(bf, folder, "backup.png");                // to a file (warning: not locked)
+                        bf.SampleOnline(false);
+                        Snap(bf, folder, "backup_online.png");         // online, no code yet ("none yet")
+                        bf.SampleOnline(true);
+                        Snap(bf, folder, "backup_online_code.png");    // a remembered code: Show code / New code… / Delete online backup…
                         bf.SampleCode();
-                        Snap(bf, folder, "backup_code.png");           // the code page (reached once the service is there)
+                        Snap(bf, folder, "backup_code.png");           // the code page after an upload, "2 online backups left today"
+                        bf.SampleCountdown();
+                        Snap(bf, folder, "backup_countdown.png");      // daily cap reached: countdown in place of the button
                         bf.SelectedTab = BackupForm.TabRestore;
                         Snap(bf, folder, "restore_empty.png");         // nothing chosen yet
                         bf.SampleLoad(false);
                         Snap(bf, folder, "restore.png");               // a file loaded, Merge + settings
                         bf.SampleLoad(true);
                         Snap(bf, folder, "restore_replace.png");       // Replace: warning
+                        bf.SampleCodeRestore();
+                        Snap(bf, folder, "restore_code.png");          // an online backup fetched with its code, "Keep backing up" ticked
                         bf.SampleDone();
                         Snap(bf, folder, "restore_done.png");          // the result
                         bf.Hide();

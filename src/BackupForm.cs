@@ -3,15 +3,17 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace PrintPrice
 {
     /// Backup window (idea 27), opened from History (Backup…) and Settings > App (Back up… / Restore…). Two tabs:
     /// Back up = the price history + settings to a .printprice-backup file (History.WriteBackupFile), or online with a
-    /// code (coming soon: shown, greyed out); Restore = from a file (or a code: coming soon; the typed code is checked
-    /// with its check character already), Merge or Replace, "Also restore the settings". History.Restore makes the
-    /// safety copies and saves; Restored hands the result to MainForm. The result replaces the Restore tab's content.
+    /// code (OnlineBackup.Upload; the code is remembered in the settings, DPAPI); Restore = from a file or an online code
+    /// (OnlineBackup.Download), Merge or Replace, "Also restore the settings". History.Restore makes the safety copies
+    /// and saves; Restored hands the result to MainForm. The result replaces the Restore tab's content.
+    /// Online calls run with await Task.Run; the 5-a-day upload cap shows a countdown in place of "Back up online".
     internal class BackupForm : CaptionForm
     {
         public const int TabBackup = 0, TabRestore = 1;
@@ -20,8 +22,10 @@ namespace PrintPrice
         /// True when the window closed with "Restart now" (restored settings in another language).
         public bool RestartRequested;
 
-        // the online backup service isn't there yet: its parts show "coming soon" and their buttons are greyed out
-        static readonly bool OnlineReady = false;
+        // the online parts are on (false = greyed out, e.g. if the service ever has to be switched off)
+        static readonly bool OnlineReady = true;
+        // the daily upload cap was reached: no upload until then (UTC; MinValue = none). For this run only.
+        static DateTime limitUntilUtc = DateTime.MinValue;
 
         // layout (96 dpi units)
         const int WindowW = 520, MinWindowH = 480, Edge = 14, StripTop = 6, StripH = 28, PageTop = 44, SepGap = 9,
@@ -34,19 +38,25 @@ namespace PrintPrice
         readonly SettingsForm.TabStrip strip;
         readonly TableLayoutPanel pageBackup, pageCode, pageRestore, pageDone, rowFile, rowCode, rowShowCode;
         readonly TableLayoutPanel[] pages;
-        readonly Button btnAction, btnClose, btnBrowse, btnGet, btnCopy;
+        readonly Button btnAction, btnClose, btnBrowse, btnGet, btnCopy, btnShowCode, btnNewCode, btnDeleteOnline;
+        readonly FlowLayoutPanel rowCodeButtons;   // Show code / New code… / Delete online backup… (a code is remembered)
         readonly QuoteForm.Choice rbFile, rbOnline, rbFromFile, rbFromCode, rbMerge, rbReplace;
         readonly InfoBox infoContents, infoMode, infoResult, infoSummary, infoNote;
-        readonly InfoBox infoCodeOk, infoCodeWarn, infoCodeNext;
+        readonly InfoBox infoCodeOk, infoCodeLeft, infoCodeWarn, infoCodeNext;
         readonly InfoBox doneMain, doneClash, doneMoved, doneSafety, doneLang;
         readonly TextBox txtFile;
         readonly SettingsForm.CueBox txtCode;
-        readonly Tick chkSettings;
+        readonly Tick chkSettings, chkKeep;
         readonly Label lblSettingsNote, lblCode;
+        readonly Timer clock = new Timer { Interval = 1000 };   // the daily-cap countdown
         BackupData fileData;     // the backup file chosen on the Restore tab (null = none yet)
         string fileProblem;      // why the chosen file can't be restored (null = none)
+        BackupData codeData;     // the online backup fetched with Get backup (null = none yet)
+        string codeProblem;      // why it couldn't be fetched / read (null = none)
+        string codeLoaded = "";  // the normalised code codeData came from
         string shownCode = "";   // the code on the code page
-        bool codeShown, doneShown, fitted, measured;
+        bool codeShown, doneShown, fitted, measured, busy, keptCode;
+        string busyText;         // the action button's text while busy ("Backing up…")
         TableLayoutPanel current;   // the page that shows (ShowPage)
         readonly int[] pageH = new int[4];   // each page's height when it last showed (FitHeight)
         int tab;
@@ -79,7 +89,7 @@ namespace PrintPrice
             pageBackup.Controls.Add(Heading(L.S("Back up the price history to", "Tag kopi af prishistorikken til"), 0));
             var grpTo = Group();
             rbFile = new QuoteForm.Choice { Text = L.S("A file (.printprice-backup)", "En fil (.printprice-backup)"), Checked = true };
-            rbOnline = new QuoteForm.Choice { Text = L.S("Online, with a code", "Online, med en kode") + Soon, Enabled = OnlineReady };
+            rbOnline = new QuoteForm.Choice { Text = L.S("Online, with a code", "Online, med en kode"), Enabled = OnlineReady };
             grpTo.Controls.Add(rbFile);
             grpTo.Controls.Add(rbOnline);
             pageBackup.Controls.Add(grpTo);
@@ -88,6 +98,20 @@ namespace PrintPrice
             infoResult = Info(8);
             pageBackup.Controls.Add(infoContents);
             pageBackup.Controls.Add(infoMode);
+            // a code is remembered: Show code (no network) / New code… / Delete online backup…
+            rowCodeButtons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
+                                                   Margin = new Padding(0, 8, 0, 0), Padding = Padding.Empty };
+            btnShowCode = SmallButton(L.S("Show code", "Vis kode"));
+            btnNewCode = SmallButton(L.S("New code…", "Ny kode…"));
+            btnDeleteOnline = SmallButton(L.S("Delete online backup…", "Slet online-kopi…"));
+            btnShowCode.Margin = Padding.Empty;
+            btnShowCode.Click += delegate { ShowRememberedCode(); };
+            btnNewCode.Click += delegate { NewCodeClicked(); };
+            btnDeleteOnline.Click += delegate { DeleteOnlineClicked(); };
+            rowCodeButtons.Controls.Add(btnShowCode);
+            rowCodeButtons.Controls.Add(btnNewCode);
+            rowCodeButtons.Controls.Add(btnDeleteOnline);
+            pageBackup.Controls.Add(rowCodeButtons);
             pageBackup.Controls.Add(infoResult);
             rbFile.CheckedChanged += delegate { infoResult.Text = ""; UpdateBackup(); };
 
@@ -106,6 +130,9 @@ namespace PrintPrice
             rowShowCode.Controls.Add(lblCode, 0, 0);
             rowShowCode.Controls.Add(btnCopy, 1, 0);
             pageCode.Controls.Add(rowShowCode);
+            infoCodeLeft = Info(10);
+            infoCodeLeft.Kind = InfoKind.Warning;
+            pageCode.Controls.Add(infoCodeLeft);
             infoCodeWarn = Info(10);
             infoCodeWarn.Kind = InfoKind.Warning;
             infoCodeNext = Info(8);
@@ -125,20 +152,29 @@ namespace PrintPrice
             btnBrowse.Click += delegate { Browse(); };
             rowFile.Controls.Add(txtFile, 0, 0);
             rowFile.Controls.Add(btnBrowse, 1, 0);
-            rbFromCode = new QuoteForm.Choice { Text = L.S("An online code", "En online-kode") + Soon, Enabled = OnlineReady };
+            rbFromCode = new QuoteForm.Choice { Text = L.S("An online code", "En online-kode"), Enabled = OnlineReady };
             rowCode = Row();
             rowCode.Margin = new Padding(Indent, 2, 0, 0);
             txtCode = new SettingsForm.CueBox { Cue = "XXXXX-XXXXX-XXXXX-XXXXX", Width = 300, Margin = Padding.Empty, MaxLength = 40,
                                                 CharacterCasing = CharacterCasing.Upper, AccessibleName = L.S("Backup code", "Kode til kopien") };
             txtCode.TextChanged += delegate { UpdateRestore(); };
+            txtCode.Enter += delegate { UpdateAccept(); };
+            txtCode.Leave += delegate { UpdateAccept(); };
             txtCode.Leave += delegate { string n = Backup.Normalize(txtCode.Text); if (n != null) txtCode.Text = Backup.Format(n); };
             btnGet = SmallButton(L.S("Get backup", "Hent kopi"));
+            btnGet.Click += delegate { GetBackup(); };
             rowCode.Controls.Add(txtCode, 0, 0);
             rowCode.Controls.Add(btnGet, 1, 0);
+            // after a restore from a code: back up to that code from now on (sets the remembered code)
+            chkKeep = new Tick { Text = L.S("Keep backing up to this code", "Bliv ved med at tage kopi til denne kode"), Checked = true,
+                                 Margin = new Padding(Indent, 2, 0, 0) };
+            string remembered = settings.GetBackupCode();
+            if (remembered.Length > 0) txtCode.Text = Backup.Format(remembered);
             grpFrom.Controls.Add(rbFromFile);
             grpFrom.Controls.Add(rowFile);
             grpFrom.Controls.Add(rbFromCode);
             grpFrom.Controls.Add(rowCode);
+            grpFrom.Controls.Add(chkKeep);
             pageRestore.Controls.Add(grpFrom);
             infoSummary = Info(10);
             pageRestore.Controls.Add(infoSummary);
@@ -193,6 +229,9 @@ namespace PrintPrice
             UpdateRestore();
             strip.Selected = tab;
             Load += delegate { FitLayout(); };
+            clock.Tick += delegate { ClockTick(); };
+            clock.Start();
+            FormClosed += delegate { clock.Stop(); clock.Dispose(); };
         }
 
         int Px(float v) { return (int)Math.Round(v * DeviceDpi / 96f); }
@@ -266,7 +305,11 @@ namespace PrintPrice
             Width = Px(WindowW);
             int cw = ClientSize.Width - 2 * Px(Edge);
             // box-high buttons: one width for both (text + 24 px, like Settings' Add… / Remove)
-            int sw = Math.Max(TextRenderer.MeasureText(btnBrowse.Text, btnBrowse.Font).Width, TextRenderer.MeasureText(btnGet.Text, btnGet.Font).Width) + Px(24);
+            int sw = Px(24);
+            foreach (var s in new[] { btnBrowse.Text, btnGet.Text, GettingText })
+                sw = Math.Max(sw, TextRenderer.MeasureText(s, btnGet.Font).Width + Px(24));
+            foreach (var b in new[] { btnShowCode, btnNewCode, btnDeleteOnline })
+                b.Size = new Size(TextRenderer.MeasureText(b.Text, b.Font).Width + Px(24), txtFile.Height);
             foreach (var b in new[] { btnBrowse, btnGet }) b.Size = new Size(sw, txtFile.Height);
             int rowW = cw - Px(Indent);
             txtFile.Width = txtCode.Width = rowW - Px(6) - sw;
@@ -285,7 +328,7 @@ namespace PrintPrice
             }
             // the action button fits all its texts (no jump between file / online / restore)
             int aw = Px(130);
-            foreach (var s in new[] { FileText, OnlineText, RestoreText })
+            foreach (var s in new[] { FileText, OnlineText, RestoreText, BackText, BackingUpText, DeletingText, CountdownText(new TimeSpan(23, 59, 59)) })
                 aw = Math.Max(aw, TextRenderer.MeasureText(s, btnAction.Font).Width + Px(28));
             btnAction.Size = new Size(aw, Px(ButtonH));
             btnClose.Size = new Size(Math.Max(Px(90), TextRenderer.MeasureText(btnClose.Text, btnClose.Font).Width + Px(28)), Px(ButtonH));
@@ -293,6 +336,7 @@ namespace PrintPrice
             foreach (var p in pages) p.Visible = true;   // measured while shown, then ShowPage keeps one
             // the Restore tab at its tallest (Replace's warning is longer than the safety note): no jump when Replace is chosen
             if (list.Count > 0) { infoNote.Kind = InfoKind.Warning; infoNote.Text = ReplaceNote(); }
+            chkKeep.Visible = true;   // (from a code) also at its tallest
             FitHeight();
             UpdateRestore();
             ShowPage();
@@ -306,7 +350,7 @@ namespace PrintPrice
                 if (info != null) { info.SetWidth(cw - info.Margin.Horizontal); continue; }
                 var choice = child as QuoteForm.Choice;
                 if (choice != null) { choice.Size = new Size(cw, Px(28)); continue; }
-                if (child is Tick) { child.Size = new Size(cw, Px(26)); continue; }
+                if (child is Tick) { child.Size = new Size(cw - child.Margin.Left, Px(26)); continue; }
                 if (child is FlowLayoutPanel) FitChildren(child, cw);
             }
         }
@@ -357,22 +401,89 @@ namespace PrintPrice
         string FileText { get { return L.S("Save file…", "Gem fil…"); } }
         string OnlineText { get { return L.S("Back up online", "Tag kopi online"); } }
         string RestoreText { get { return L.S("Restore", "Gendan"); } }
-        static string Soon { get { return L.S(" (coming soon)", " (kommer snart)"); } }
+        static string BackText { get { return L.S("Back", "Tilbage"); } }
+        static string BackingUpText { get { return L.S("Backing up…", "Tager kopi…"); } }
+        static string DeletingText { get { return L.S("Deleting…", "Sletter…"); } }
+        static string GettingText { get { return L.S("Getting…", "Henter…"); } }
         static string CopiedText { get { return L.S("✓ Copied", "✓ Kopieret"); } }
 
-        /// The accent button: Save file… / Back up online / Restore; hidden on the code and result pages (Close is the
-        /// default there). Greyed out = a normal button's look (no red behind muted text).
+        /// "Next online backup in 3:20:15" (the countdown in place of "Back up online" while the daily cap is reached).
+        static string CountdownText(TimeSpan left)
+        {
+            if (left < TimeSpan.Zero) left = TimeSpan.Zero;
+            string t = ((int)left.TotalHours).ToString(Num.Dk) + ":" + left.Minutes.ToString("00") + ":" + left.Seconds.ToString("00");
+            return L.F("Next online backup in {0}", "Næste online-kopi om {0}", t);
+        }
+
+        /// The daily-limit box: no time and no "tomorrow" (the reset may be hours away); the button counts down.
+        static string LimitBoxText()
+        {
+            return L.F("Daily limit reached ({0} online backups a day).", "Dagens grænse er nået ({0} online-kopier om dagen).",
+                       OnlineBackup.DailyUploads);
+        }
+
+        static bool LimitActive { get { return limitUntilUtc > DateTime.UtcNow; } }
+
+        static DateTime NextUtcMidnight() { return DateTime.UtcNow.Date.AddDays(1); }
+
+        /// The bottom button: Save file… / Back up online (or the countdown) / Restore (accent), Back on the code page
+        /// (normal look), hidden on the result page (Close is the default there). Busy = its busy text, greyed out.
+        /// Greyed out = a normal button's look (no red behind muted text).
         void UpdateAction()
         {
-            bool done = tab == TabBackup ? codeShown : doneShown;
+            bool code = tab == TabBackup && codeShown, done = tab == TabRestore && doneShown;
             btnAction.Visible = !done;
-            string text = tab == TabRestore ? RestoreText : rbOnline.Checked ? OnlineText : FileText;
-            bool on = tab == TabRestore ? CurrentData != null : rbFile.Checked || OnlineReady;
+            string text;
+            bool on, accent = true;
+            if (busy) { text = busyText ?? BackingUpText; on = false; }
+            else if (code) { text = BackText; on = true; accent = false; }
+            else if (tab == TabRestore) { text = RestoreText; on = CurrentData != null; }
+            else if (rbOnline.Checked && LimitActive) { text = CountdownText(limitUntilUtc - DateTime.UtcNow); on = false; }
+            else { text = rbOnline.Checked ? OnlineText : FileText; on = rbFile.Checked || OnlineReady; }
             if (btnAction.Text != text) btnAction.Text = text;
-            btnAction.Enabled = on;
+            if (btnAction.Enabled != on) btnAction.Enabled = on;
             Theme.Apply(btnAction);
-            if (on) Theme.AccentButton(btnAction);
-            AcceptButton = done ? btnClose : on ? btnAction : null;
+            if (on && accent) Theme.AccentButton(btnAction);
+            UpdateAccept();
+        }
+
+        /// Enter: Close on the result page, Copy on the code page, Get backup while the code box has the focus
+        /// (and can be pressed), else the bottom button when it is on.
+        void UpdateAccept()
+        {
+            if (btnAction == null || btnGet == null) return;
+            bool code = tab == TabBackup && codeShown, done = tab == TabRestore && doneShown;
+            if (done) AcceptButton = btnClose;
+            else if (code) AcceptButton = btnCopy;
+            else if (tab == TabRestore && txtCode.ContainsFocus && btnGet.Enabled) AcceptButton = btnGet;
+            else AcceptButton = btnAction.Enabled ? btnAction : null;
+        }
+
+        /// Every second: the countdown on the button; at the reset time it turns back into "Back up online".
+        void ClockTick()
+        {
+            if (limitUntilUtc == DateTime.MinValue) return;
+            if (!LimitActive)
+            {
+                limitUntilUtc = DateTime.MinValue;
+                if (infoResult.Kind == InfoKind.Error && rbOnline.Checked) infoResult.Text = "";   // the limit text
+                UpdateBackup();
+                return;
+            }
+            if (tab == TabBackup && !codeShown && rbOnline.Checked && !busy) UpdateAction();
+        }
+
+        /// While an online call runs: the window's inputs are greyed out, the button (or Get backup) says what is going on.
+        void SetBusy(bool on, string text)
+        {
+            busy = on;
+            busyText = text;
+            foreach (Control c in new Control[] { strip, rbFile, rbOnline, btnShowCode, btnNewCode, btnDeleteOnline, rbFromFile, rbFromCode,
+                                                  btnBrowse, txtCode, btnGet, rbMerge, rbReplace, chkSettings, chkKeep })
+                c.Enabled = !on;
+            UseWaitCursor = on;
+            if (!on) { UpdateBackup(); UpdateRestore(); }
+            else UpdateAction();
         }
 
         // ---------- Back up ----------
@@ -393,19 +504,129 @@ namespace PrintPrice
             else
             {
                 infoMode.Kind = InfoKind.Info;
-                infoMode.SetText(L.S("Online backup with a code is coming soon. Until then, save a backup file.",
-                                     "Online-kopi med en kode kommer snart. Indtil da kan du gemme en kopi-fil."),
-                                 L.S("The backup will be locked on this PC with a 20-character code before it is sent, and kept 400 days after the last backup.",
-                                     "Kopien bliver låst på denne pc med en kode på 20 tegn, før den sendes, og gemmes 400 dage efter seneste kopi."));
+                infoMode.SetText(L.F("The backup is locked on this PC with a 20-character code before it is sent: only the code opens it. It is kept {0} days after the last upload. The newest backup replaces the older one, even if the older one was made on another PC with the same code.",
+                                     "Kopien låses på denne pc med en kode på 20 tegn, før den sendes: kun koden åbner den. Den gemmes {0} dage efter seneste kopi. Den nyeste kopi erstatter den ældre, også en, der er sendt fra en anden pc med samme kode.",
+                                     OnlineBackup.KeptDays),
+                                 LastBackupLine());
             }
+            bool hasCode = settings.HasBackupCode;
+            rowCodeButtons.Visible = rbOnline.Checked && hasCode;
+            if (!busy) btnNewCode.Enabled = !LimitActive;
             UpdateAction();
+        }
+
+        /// "Last online backup: 10-11-2026 14:05 · kept until 15-12-2027" / "Last online backup: none yet".
+        string LastBackupLine()
+        {
+            DateTime t;
+            if (!settings.TryLastOnlineBackup(out t)) return L.S("Last online backup: none yet", "Seneste online-kopi: ingen endnu");
+            return L.F("Last online backup: {0} · kept until {1}", "Seneste online-kopi: {0} · gemmes til {1}",
+                       t.ToString("dd-MM-yyyy HH:mm", Num.Dk), t.AddDays(OnlineBackup.KeptDays).ToString("dd-MM-yyyy", Num.Dk));
         }
 
         void Action()
         {
-            if (!btnAction.Enabled) return;
+            if (!btnAction.Enabled || busy) return;
+            if (tab == TabBackup && codeShown) { codeShown = false; UpdateBackup(); ShowPage(); return; }   // Back
             if (tab == TabRestore) DoRestore();
             else if (rbFile.Checked) SaveFile();
+            else BackupOnline(false);
+        }
+
+        // ---------- online backup ----------
+        /// Back up online: the remembered code (or a new one; newCode = always a new one, then the old online copy is
+        /// deleted) -> ToBackup -> Upload (off the UI thread). Success: the code and time are saved, the code page shows.
+        async void BackupOnline(bool newCode)
+        {
+            if (offline || busy) return;
+            string old = settings.GetBackupCode();
+            string code = newCode || old.Length == 0 ? Backup.NewCode() : Backup.Format(old);
+            string json = History.ToBackup(list, settings, Updater.CurrentText, DateTime.Now);
+            infoResult.Text = "";
+            SetBusy(true, BackingUpText);
+            UploadResult r = null;
+            string error = null, deleteProblem = null;
+            try { r = await Task.Run(() => OnlineBackup.Upload(code, json)); }
+            catch (OnlineBackupException ex)
+            {
+                if (ex.DailyLimit)
+                {
+                    limitUntilUtc = ex.ResetUtc ?? NextUtcMidnight();
+                    error = LimitBoxText();
+                }
+                else error = ex.Message;
+            }
+            if (r != null)
+            {
+                DateTime now = DateTime.Now;
+                settings.SetBackupCode(code);
+                settings.SetLastOnlineBackup(now);
+                settings.Save();
+                if (r.UploadsLeft == 0) limitUntilUtc = r.ResetUtc ?? NextUtcMidnight();
+                if (newCode && old.Length > 0 && Backup.Normalize(old) != Backup.Normalize(code))
+                {
+                    try { await Task.Run(() => OnlineBackup.Delete(old)); }
+                    catch (OnlineBackupException ex) { deleteProblem = ex.Message; }
+                }
+                if (IsDisposed) return;
+                SetBusy(false, null);
+                ShowCode(code, now, true, r.UploadsLeft, deleteProblem);
+                return;
+            }
+            if (IsDisposed) return;
+            SetBusy(false, null);
+            infoResult.Kind = InfoKind.Error;
+            infoResult.Text = error;
+        }
+
+        /// Show code: the remembered code on the code page (no network).
+        void ShowRememberedCode()
+        {
+            string code = settings.GetBackupCode();
+            if (code.Length == 0) return;
+            DateTime t;
+            ShowCode(Backup.Format(code), settings.TryLastOnlineBackup(out t) ? t : DateTime.MinValue, false, -1, null);
+        }
+
+        /// New code…: asks, then uploads under a new code and deletes the online backup under the old one.
+        void NewCodeClicked()
+        {
+            if (busy || offline) return;
+            using (var ask = new AskForm(L.S("New code", "Ny kode"), L.S("Make a new code?", "Lav en ny kode?"),
+                                         L.S("The backup is sent again under a new code, and the online backup under the old code is deleted. The old code stops working, so keep the new one safe.",
+                                             "Kopien sendes igen med en ny kode, og online-kopien under den gamle kode slettes. Den gamle kode holder op med at virke, så gem den nye godt."),
+                                         L.S("Yes", "Ja"), L.S("No", "Nej")))
+                if (ask.ShowDialog(this) != DialogResult.Yes) return;
+            BackupOnline(true);
+        }
+
+        /// Delete online backup…: asks, deletes it on the service, then this PC forgets the code and the time.
+        async void DeleteOnlineClicked()
+        {
+            if (busy || offline) return;
+            string code = settings.GetBackupCode();
+            if (code.Length == 0) return;
+            using (var ask = new AskForm(L.S("Delete online backup", "Slet online-kopi"), L.S("Delete the online backup?", "Slet online-kopien?"),
+                                         L.S("It is deleted from the backup service, and this PC forgets the code. Backup files you saved stay as they are.",
+                                             "Den slettes fra kopi-tjenesten, og denne pc glemmer koden. Kopi-filer, du har gemt, bliver, som de er."),
+                                         L.S("Yes", "Ja"), L.S("No", "Nej")))
+                if (ask.ShowDialog(this) != DialogResult.Yes) return;
+            infoResult.Text = "";
+            SetBusy(true, DeletingText);
+            string error = null;
+            try { await Task.Run(() => OnlineBackup.Delete(code)); }
+            catch (OnlineBackupException ex) { error = ex.Message; }
+            if (error == null)
+            {
+                settings.SetBackupCode("");
+                settings.LastOnlineBackup = "";
+                settings.Save();
+            }
+            if (IsDisposed) return;
+            SetBusy(false, null);
+            infoResult.Kind = error == null ? InfoKind.Success : InfoKind.Error;
+            infoResult.Text = error ?? L.S("✓ The online backup is deleted, and this PC no longer has a code.",
+                                           "✓ Online-kopien er slettet, og denne pc har ikke længere en kode.");
         }
 
         void SaveFile()
@@ -431,20 +652,45 @@ namespace PrintPrice
         }
 
         // ---------- the code page (after an online backup) ----------
-        /// Shows the code, Copy, the keep-it-safe warning and when it expires (online backup done).
-        void ShowCode(string code, DateTime when, DateTime keptUntil)
+        /// Shows the code, Copy, the keep-it-safe warning and when it expires. justBackedUp = after an upload (✓ line,
+        /// uploads left today: 1-2 = Warning, 0 = the countdown note); else Show code (when = the last upload, MinValue = unknown).
+        /// deleteProblem = New code couldn't delete the old online backup (shown as a warning).
+        void ShowCode(string code, DateTime when, bool justBackedUp, int left, string deleteProblem)
         {
             shownCode = code ?? "";
             lblCode.Text = shownCode;
             btnCopy.Text = L.S("Copy", "Kopiér");
-            infoCodeOk.Text = L.F("✓ Backed up online: {0} and your settings, {1}.", "✓ Kopi gemt online: {0} og dine indstillinger, {1}.",
-                                  Quotes(list.Count), when.ToString("dd-MM-yyyy HH:mm", Num.Dk));
+            if (justBackedUp)
+            {
+                infoCodeOk.Kind = InfoKind.Success;
+                infoCodeOk.Text = L.F("✓ Backed up online: {0} and your settings, {1}.", "✓ Kopi gemt online: {0} og dine indstillinger, {1}.",
+                                      Quotes(list.Count), when.ToString("dd-MM-yyyy HH:mm", Num.Dk));
+            }
+            else
+            {
+                infoCodeOk.Kind = InfoKind.Info;
+                infoCodeOk.Text = L.S("The code of this PC's online backup.", "Koden til denne pc's online-kopi.");
+            }
+            string leftText = "";
+            if (justBackedUp && left == 0)
+                leftText = L.F("That was today's last online backup ({0} a day). You can back up again in {1}.",
+                               "Det var dagens sidste online-kopi ({0} om dagen). Du kan tage en kopi igen om {1}.",
+                               OnlineBackup.DailyUploads, OnlineBackup.WaitText(limitUntilUtc - DateTime.UtcNow));
+            else if (justBackedUp && left == 1)
+                leftText = L.S("1 online backup left today.", "1 online-kopi tilbage i dag.");
+            else if (justBackedUp && left == 2)
+                leftText = L.S("2 online backups left today.", "2 online-kopier tilbage i dag.");
+            if (deleteProblem != null)
+                leftText = (leftText.Length > 0 ? leftText + "\n" : "") +
+                           L.S("The online backup under the old code could not be deleted: ", "Online-kopien under den gamle kode kunne ikke slettes: ") + deleteProblem;
+            infoCodeLeft.Text = leftText;
             infoCodeWarn.Text = L.S("Keep this code safe, for example in a password manager or written on paper. It is the only way to get the backup back: it can't be reset or sent to you.\nAnyone who has the code can read the backup, so don't share it.",
                                     "Gem koden et sikkert sted, fx i en adgangskode-app eller på papir. Den er den eneste vej til kopien: den kan ikke nulstilles eller sendes til dig.\nAlle med koden kan læse kopien, så del den ikke.");
-            infoCodeNext.SetText(L.S("Next time, \"Back up online\" updates this same backup and keeps the code.",
-                                     "Næste gang opdaterer \"Tag kopi online\" den samme kopi og beholder koden."),
-                                 L.F("Kept until {0} (400 days after the last backup).", "Gemmes til {0} (400 dage efter seneste kopi).",
-                                     keptUntil.ToString("dd-MM-yyyy", Num.Dk)));
+            infoCodeNext.SetText(L.S("Next time, \"Back up online\" replaces this backup and keeps the code. The newest backup always wins, even if the older one was made on another PC with this code.",
+                                     "Næste gang erstatter \"Tag kopi online\" denne kopi og beholder koden. Den nyeste kopi vinder altid, også hvis den ældre er lavet på en anden pc med denne kode."),
+                                 when == DateTime.MinValue ? null
+                                 : L.F("Last online backup: {0} · kept until {1}", "Seneste online-kopi: {0} · gemmes til {1}",
+                                       when.ToString("dd-MM-yyyy HH:mm", Num.Dk), when.AddDays(OnlineBackup.KeptDays).ToString("dd-MM-yyyy", Num.Dk)));
             codeShown = true;
             if (fitted) ShowPage();
         }
@@ -457,7 +703,37 @@ namespace PrintPrice
         }
 
         // ---------- Restore ----------
-        BackupData CurrentData { get { return rbFromFile.Checked && fileProblem == null ? fileData : null; } }
+        BackupData CurrentData
+        {
+            get
+            {
+                if (rbFromFile.Checked) return fileProblem == null ? fileData : null;
+                return codeProblem == null && codeLoaded.Length > 0 && codeLoaded == Backup.Normalize(txtCode.Text) ? codeData : null;
+            }
+        }
+
+        /// Get backup: downloads the backup for the typed code (off the UI thread) and reads it like a file.
+        async void GetBackup()
+        {
+            string code = Backup.Normalize(txtCode.Text);
+            if (code == null || busy || offline) return;
+            codeData = null;
+            codeProblem = null;
+            codeLoaded = "";
+            SetBusy(true, null);
+            btnGet.Text = GettingText;
+            string text = null, problem = null;
+            try { text = await Task.Run(() => OnlineBackup.Download(code)); }
+            catch (OnlineBackupException ex) { problem = ex.Message; }
+            if (IsDisposed) return;
+            BackupData d = null;
+            if (problem == null) problem = History.ReadBackup(text, out d);
+            codeData = d;
+            codeProblem = problem;
+            codeLoaded = code;
+            btnGet.Text = L.S("Get backup", "Hent kopi");
+            SetBusy(false, null);
+        }
 
         void Browse()
         {
@@ -492,10 +768,15 @@ namespace PrintPrice
         {
             bool fromFile = rbFromFile.Checked;
             txtFile.Enabled = btnBrowse.Enabled = fromFile;
-            txtCode.Enabled = !fromFile && OnlineReady;   // coming soon: greyed out, can't be typed in
+            txtCode.Enabled = !fromFile && OnlineReady;
             bool typo = !fromFile && CodeTypo(txtCode.Text);
             txtCode.BackColor = typo ? Theme.InvalidBack : Theme.Input;
-            btnGet.Enabled = !fromFile && OnlineReady && !typo && Backup.Normalize(txtCode.Text) != null;
+            string typed = Backup.Normalize(txtCode.Text);
+            btnGet.Enabled = !fromFile && OnlineReady && !typo && typed != null;
+            UpdateAccept();
+            chkKeep.Visible = true;   // always there (greyed for a file) so the tab keeps its height
+            chkKeep.Enabled = !fromFile && OnlineReady;
+            bool fetched = codeLoaded.Length > 0 && codeLoaded == typed;   // Get backup ran for the code in the box
             var data = CurrentData;
             if (fromFile)
             {
@@ -513,11 +794,12 @@ namespace PrintPrice
                 infoSummary.Kind = InfoKind.Error;
                 infoSummary.Text = L.S("This code has a typo: check it letter by letter.", "Koden har en tastefejl: tjek den tegn for tegn.");
             }
+            else if (fetched && codeProblem != null) { infoSummary.Kind = InfoKind.Error; infoSummary.Text = codeProblem; }
+            else if (data != null) { infoSummary.Kind = InfoKind.Info; infoSummary.Text = Summary(data); }
             else
             {
                 infoSummary.Kind = InfoKind.Info;
-                infoSummary.Text = L.S("Restoring from an online code is coming soon. Until then, restore from a backup file.",
-                                       "Gendannelse fra en online-kode kommer snart. Indtil da kan du gendanne fra en kopi-fil.");
+                infoSummary.Text = L.S("Type the 20-character code, then click Get backup.", "Skriv koden på 20 tegn, og klik på Hent kopi.");
             }
 
             bool loaded = data != null;
@@ -585,7 +867,15 @@ namespace PrintPrice
             }
             if (Restored != null) Restored(res);   // MainForm: the history list (in place) and the settings
             if (res.Settings != null) settings = res.Settings;
+            // restored from a code with "Keep backing up to this code": online backups go to that code from now on
+            if (!rbFromFile.Checked && chkKeep.Checked && codeLoaded.Length > 0)
+            {
+                settings.SetBackupCode(codeLoaded);
+                settings.Save();
+                keptCode = true;
+            }
             ShowDone(res, problem, SafetyCopy(now));
+            UpdateBackup();   // the remembered code / Last online backup line
         }
 
         /// The newest history.before-restore-*.json next to history.json (made by History.Restore just now), or null.
@@ -618,6 +908,7 @@ namespace PrintPrice
                     : L.F(", {0} were already here", ", {0} var her allerede", here.ToString("N0", Num.Dk));
             main += ".";
             if (r.SettingsRestored) main += L.S(" Settings restored.", " Indstillinger gendannet.");
+            if (keptCode) main += L.S(" Online backups now go to this code.", " Online-kopier går nu til denne kode.");
             if (problem != null) main += "\n" + problem;
             doneMain.Kind = problem != null ? InfoKind.Warning : InfoKind.Success;
             doneMain.SetText(main, L.F("Now {0} in the history.", "Nu {0} i historikken.", Quotes(r.Quotes.Count)));
@@ -683,9 +974,48 @@ namespace PrintPrice
         // ---------- picture mode (Screenshots): made-up states, nothing is read, written or sent ----------
 
 
+        static readonly string SampleCodeText = Backup.NewCode(i => (i * 7 + 3) & 31);   // a valid made-up code
+        static readonly DateTime SampleTime = new DateTime(2026, 11, 10, 14, 5, 0);
+
+        /// Back up tab, online chosen; remembered = a code and a last backup are known (Show code / New code / Delete).
+        internal void SampleOnline(bool remembered)
+        {
+            if (remembered) { settings.SetBackupCode(SampleCodeText); settings.SetLastOnlineBackup(SampleTime); }
+            codeShown = false;
+            rbOnline.Checked = true;
+            UpdateBackup();
+            ShowPage();
+        }
+
+        /// The code page right after an upload, with "2 online backups left today".
         internal void SampleCode()
         {
-            ShowCode("K7QF2-9XMRT-B3HDW-P5ZNC", new DateTime(2026, 11, 10, 14, 5, 0), new DateTime(2027, 12, 15));
+            ShowCode(SampleCodeText, SampleTime, true, 2, null);
+        }
+
+        /// The daily cap reached: the countdown in place of "Back up online" and the limit text.
+        internal void SampleCountdown()
+        {
+            codeShown = false;
+            limitUntilUtc = DateTime.UtcNow.AddHours(3).AddMinutes(20).AddSeconds(15);
+            infoResult.Kind = InfoKind.Error;
+            infoResult.Text = LimitBoxText();
+            UpdateBackup();
+            ShowPage();
+        }
+
+        /// The Restore tab after Get backup (this window's quotes + settings as the downloaded backup), "Keep backing up" ticked.
+        internal void SampleCodeRestore()
+        {
+            limitUntilUtc = DateTime.MinValue;
+            rbFromCode.Checked = true;
+            txtCode.Text = SampleCodeText;
+            BackupData d;
+            codeProblem = History.ReadBackup(History.ToBackup(list, settings, Updater.CurrentText, SampleTime), out d);
+            codeData = d;
+            codeLoaded = Backup.Normalize(SampleCodeText) ?? "";
+            rbMerge.Checked = true;
+            UpdateRestore();
         }
 
         /// The Restore tab with this window's quotes + settings as a loaded backup file (through ToBackup / ReadBackup).

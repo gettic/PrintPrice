@@ -246,6 +246,83 @@ namespace PrintPrice
         public string PayBank = "";
         public string UsedInvoiceNos = "";   // invoice codes ever given out, comma-separated, last 2000 (History.AddUsedInvoiceNo): a code is never given twice
 
+        // ---------- online backup (idea 27) ----------
+        // Both belong to this PC (History.PcOnlyKeys): never in a backup, never replaced by a restore.
+        // BackupCode = the backup code encrypted for this Windows user with DPAPI ("dpapi1:<base64>", "" = none); use
+        // GetBackupCode / SetBackupCode. The website never stores a code. LastOnlineBackup = last successful upload
+        // ("yyyy-MM-dd HH:mm", invariant, "" = never); use SetLastOnlineBackup / TryLastOnlineBackup.
+        public string BackupCode = "";
+        public string LastOnlineBackup = "";
+
+        public const string BackupCodePrefix = "dpapi1:";
+        public const string OnlineBackupTimeFormat = "yyyy-MM-dd HH:mm";
+        const string BackupCodeEntropy = "PrintPrice backup code";
+
+        /// The plain backup code, or "" (none, or a stored value that can't be decrypted: other user / PC, garbled).
+        public string GetBackupCode() { return UnprotectCode(BackupCode); }
+
+        /// Stores the code encrypted (null / blank = no code). Doesn't save. On the website it never stores anything.
+        public void SetBackupCode(string code) { BackupCode = ProtectCode(code); }
+
+        public bool HasBackupCode { get { return GetBackupCode().Length > 0; } }
+
+        /// "dpapi1:<base64 of DPAPI(CurrentUser, entropy "PrintPrice backup code")>" of the trimmed code; "" for null/blank
+        /// (and always "" on the website).
+        public static string ProtectCode(string code)
+        {
+            string c = (code ?? "").Trim();
+            if (c.Length == 0) return "";
+#if WEB
+            return "";
+#else
+            byte[] enc = System.Security.Cryptography.ProtectedData.Protect(System.Text.Encoding.UTF8.GetBytes(c),
+                System.Text.Encoding.UTF8.GetBytes(BackupCodeEntropy), System.Security.Cryptography.DataProtectionScope.CurrentUser);
+            return BackupCodePrefix + Convert.ToBase64String(enc);
+#endif
+        }
+
+        /// The plain code of a stored value, or "" (empty, no "dpapi1:" prefix, bad base64, can't be decrypted). Never throws.
+        public static string UnprotectCode(string stored)
+        {
+#if WEB
+            return "";
+#else
+            if (string.IsNullOrEmpty(stored) || !stored.StartsWith(BackupCodePrefix, StringComparison.Ordinal)) return "";
+            try
+            {
+                byte[] plain = System.Security.Cryptography.ProtectedData.Unprotect(Convert.FromBase64String(stored.Substring(BackupCodePrefix.Length)),
+                    System.Text.Encoding.UTF8.GetBytes(BackupCodeEntropy), System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                return System.Text.Encoding.UTF8.GetString(plain).Trim();
+            }
+            catch { return ""; }
+#endif
+        }
+
+        /// LastOnlineBackup = t as "yyyy-MM-dd HH:mm". Doesn't save.
+        public void SetLastOnlineBackup(DateTime t) { LastOnlineBackup = t.ToString(OnlineBackupTimeFormat, Inv); }
+
+        /// The last successful upload; false when never (or unreadable).
+        public bool TryLastOnlineBackup(out DateTime t)
+        {
+            return DateTime.TryParseExact(LastOnlineBackup ?? "", OnlineBackupTimeFormat, Inv, DateTimeStyles.None, out t);
+        }
+
+        /// Copies these settings.ini keys' values from other (strings and numbers; unknown keys ignored). A restore uses
+        /// it to keep this PC's History.PcOnlyKeys.
+        public void CopyKeys(AppSettings from, IEnumerable<string> keys)
+        {
+            if (from == null || keys == null) return;
+            var fs = from.Strings();
+            var fn = from.Numbers();
+            foreach (var k in keys)
+            {
+                string sv;
+                double nv;
+                if (fs.TryGetValue(k, out sv)) SetString(k, sv ?? "");
+                else if (fn.TryGetValue(k, out nv)) SetNumber(k, nv);
+            }
+        }
+
         /// Payment due date: the billed date (time dropped) + InvoiceDueDays (whole, 1-365; bad values -> 14).
         public DateTime InvoiceDue(DateTime billed)
         {
@@ -429,6 +506,8 @@ namespace PrintPrice
             d["PayMobilePay"] = PayMobilePay;
             d["PayBank"] = PayBank;
             d["UsedInvoiceNos"] = UsedInvoiceNos;
+            d["BackupCode"] = BackupCode;
+            d["LastOnlineBackup"] = LastOnlineBackup;
             return d;
         }
 
@@ -481,6 +560,13 @@ namespace PrintPrice
                 case "PayMobilePay": PayMobilePay = v; break;
                 case "PayBank": PayBank = v; break;
                 case "UsedInvoiceNos": UsedInvoiceNos = v; break;
+                case "BackupCode": BackupCode = v; break;   // kept as is; GetBackupCode gives "" when it can't be decrypted
+                case "LastOnlineBackup":
+                {
+                    DateTime t;
+                    if (v.Length == 0 || DateTime.TryParseExact(v, OnlineBackupTimeFormat, Inv, DateTimeStyles.None, out t)) LastOnlineBackup = v;
+                    break;
+                }
             }
         }
 

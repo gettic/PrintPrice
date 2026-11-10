@@ -6,8 +6,8 @@ $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 New-Item -ItemType Directory -Force bin | Out-Null
 
 $refs = '/r:System.Windows.Forms.dll', '/r:System.Drawing.dll', '/r:System.Web.Extensions.dll',
-        '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll'
-$core = 'src\Pricing.cs', 'src\AppSettings.cs', 'src\Num.cs', 'src\Theme.cs', 'src\Slicer.cs', 'src\SliceInfo.cs', 'src\Printables.cs', 'src\PowerPrice.cs', 'src\Updater.cs', 'src\Lang.cs', 'src\History.cs', 'src\Backup.cs'
+        '/r:System.IO.Compression.dll', '/r:System.IO.Compression.FileSystem.dll', '/r:System.Security.dll'
+$core = 'src\Pricing.cs', 'src\AppSettings.cs', 'src\Num.cs', 'src\Theme.cs', 'src\Slicer.cs', 'src\SliceInfo.cs', 'src\Printables.cs', 'src\PowerPrice.cs', 'src\Updater.cs', 'src\Lang.cs', 'src\History.cs', 'src\Backup.cs', 'src\OnlineBackup.cs'
 
 & $csc /nologo /codepage:65001 /optimize+ /target:exe /out:bin\PricingTests.exe $refs $core tests\PricingTests.cs
 if ($LASTEXITCODE) { throw 'Test build failed' }

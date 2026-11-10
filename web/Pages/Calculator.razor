@@ -94,6 +94,12 @@ else
                        @oninput='e => { elec = (string)e.Value; Changed(); }' />
                 <span class="unit">kr/kWh</span>
             </div>
+
+            <div class="power">
+                <button @onclick="FetchPower" disabled="@fetchingPower"
+                        title="@L.S("Fetch the current electricity price", "Hent den aktuelle elpris")">@L.S("Update", "Opdatér")</button>
+                <div class="@(powerError ? "power-line error" : "power-line")" role="status">@powerLine</div>
+            </div>
         </div>
 
         @if (problem != null)
@@ -202,6 +208,10 @@ else
 
     bool Multi { get { return rows.Count >= 2; } }
 
+    // ---------- live electricity price ----------
+    bool fetchingPower, powerError, powerStarted;
+    string powerLine;
+
     string Title { get { return L.S("Gettic's 3D Print Price Calculator", "Gettics 3D-print prisberegner"); } }
 
     protected override async Task OnInitializedAsync()
@@ -221,6 +231,7 @@ else
         string hash = await Store.Hash();   // a link to ...#settings / #printer / #language opens Settings there
         if (hash == "#settings") OpenSettings(SettingsDialog.TabPrices);
         else if (hash == "#printer") OpenSettings(SettingsDialog.TabPrinter);
+        else if (hash == "#electricity") OpenSettings(SettingsDialog.TabElectricity);
         else if (hash == "#language") OpenSettings(SettingsDialog.TabApp);
         ready = true;
         await Store.SetPageLanguage(L.Danish, Title);
@@ -333,9 +344,52 @@ else
             self = DotNetObjectReference.Create(this);
             await Store.HookFiles(self, fileInput);
         }
+        if (ready && !powerStarted)
+        {
+            powerStarted = true;   // once per page open, as the desktop does at startup (no timer)
+            if (settings.AutoPowerPrice != 0) await FetchPower();
+            else { powerLine = PowerOffText; StateHasChanged(); }
+        }
     }
 
     Task ChooseFile() { return Store.PickFile(); }
+
+    static string PowerOffText
+    {
+        get { return L.S("Live price is off (Settings). Click Update to fetch it once.", "Live-pris er slået fra (Indstillinger). Klik Opdatér for at hente den én gang."); }
+    }
+
+    // MainForm.FetchPowerPrice on the web: one try, no retry timer; failure = the typed / last price stays
+    async Task FetchPower()
+    {
+        if (fetchingPower) return;
+        fetchingPower = true;
+        string area = settings.PriceArea;
+        double addOn = settings.PowerAddOn;
+        bool vat = settings.PowerIncludeVat != 0;
+        string before = elec;
+        powerError = false;
+        powerLine = L.F("Fetching the current electricity price for {0}…", "Henter den aktuelle elpris for {0}…", area);
+        StateHasChanged();
+        try
+        {
+            var answer = await Store.FetchPower(area);
+            var r = LivePower.Interpret(answer, area, DateTime.UtcNow, addOn, vat);
+            bool applied = r.Ok && elec == before;
+            if (applied)
+            {
+                elec = r.Total.ToString("0.00", Num.Dk);
+                Changed();   // recalculates and remembers it as the last price
+            }
+            powerError = !r.Ok;
+            powerLine = LivePower.Line(r, addOn, vat, applied, t => t.ToLocalTime(), DateTime.Now);
+        }
+        finally
+        {
+            fetchingPower = false;
+            StateHasChanged();
+        }
+    }
 
     [JSInvokable]
     public async Task FileChosen(int id, string name, double size, int count)
@@ -456,6 +510,8 @@ else
     {
         settingsOpen = false;
         if (r == null) return;   // cancelled
+        bool powerChanged = r.Settings.PriceArea != settings.PriceArea || r.Settings.PowerAddOn != settings.PowerAddOn
+                            || r.Settings.PowerIncludeVat != settings.PowerIncludeVat || r.Settings.AutoPowerPrice != settings.AutoPowerPrice;
         settings = r.Settings;
         prefs.FilamentType = r.FilamentType;
         WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
@@ -466,6 +522,12 @@ else
         await SaveSettings();
         await Store.Set(Store.PrefsKey, prefs.ToText());
         await Store.SetPageLanguage(L.Danish, Title);
+        // electricity settings changed: ask once more (on), or say it's off; never on a timer
+        if (powerChanged)
+        {
+            if (settings.AutoPowerPrice != 0) await FetchPower();
+            else { powerError = false; powerLine = PowerOffText; }
+        }
     }
 
     static string Bad(FieldState s) { return s == FieldState.Invalid ? "invalid" : ""; }

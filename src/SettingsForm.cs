@@ -1134,6 +1134,9 @@ namespace PrintPrice
             }
             StorePrinter();   // the shown printer's boxes are valid (checked above)
             Result = work.Clone();   // printers (the active one = the flat fields) + everything not shown here
+            // the online backup code / time may have changed while Settings was open (Back up… on the App tab): take the live ones
+            Result.BackupCode = source.BackupCode;
+            Result.LastOnlineBackup = source.LastOnlineBackup;
             Result.FriendsMarkupPct = f;
             Result.OthersMarkupPct = o;
             Result.MinimumPrice = min;

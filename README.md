@@ -24,9 +24,16 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 - An unsliced STL or 3MF gets a message to slice it in Bambu Studio first and export the sliced plate.
 - A file sliced for another of your printers shows a warning and a button to switch printer. Unsupported printers are refused, like in the app.
 
-It does less than the Windows app: no slicing, no History and no live electricity price (you type the price yourself).
+**Live electricity price:** under **Electricity price**, the **Update** button fetches the current Danish price, with a line that shows what it is made of. **Settings → Electricity** has the price area (DK1 or DK2), tariffs and fees, 25 % VAT, and **Fetch the live price when the page opens**. If the price service is busy or can't be reached, the page keeps the price you typed.
 
-The site runs entirely in your browser. It stores your settings in the browser's own storage and sends nothing anywhere. Files you drop on it are read on your PC and never leave it. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
+It does less than the Windows app: no slicing and no History.
+
+The site runs in your browser. It stores your settings in the browser's own storage. Files you drop on it are read on your PC and never leave it. The only link out is **GitHub** at the bottom, and nothing is sent before you click it.
+
+The one outside service the site calls is PrintPrice's small Cloudflare relay (`printprice.gtd-relay.workers.dev`), and only for the live electricity price. It is sent the price area (DK1 or DK2) and nothing else. Cloudflare sees your IP address, like any website does. Turn it off in **Settings → Electricity**: then the page only asks when you click **Update**.
+
+## Linux and Steam Deck
+The Windows app isn't tested under Wine or Proton. Use the website instead, in any browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). To fill in time and grams from a model, slice it in Bambu Studio for Linux (Flathub `com.bambulab.BambuStudio`, or the AppImage), export the sliced plate, and drop the `.gcode.3mf` or `.gcode` file on the site.
 
 ## Features
 - **Print time & filament from a link:** paste a **Printables** link and the app downloads the model and slices it in Bambu Studio with the profiles of the printer in use.
@@ -90,7 +97,9 @@ The site runs entirely in your browser. It stores your settings in the browser's
   - **Back up** saves the price history and your settings to a `.printprice-backup` file. The file is not locked with a code, and it holds customer names and payment details, so keep it somewhere private.
   - **Restore** reads a backup file or a `history.json`. **Merge** adds the backup's quotes to the ones on this PC. **Replace** swaps this PC's history for the backup's, and asks first. **Also restore the settings** is possible when the file has settings; the Bambu Studio path stays as it is.
   - A safety copy of the current history and settings is saved first, next to them (`history.before-restore-<date>-<time>.json`).
-  - Online backup with a code is coming; it is greyed out and does nothing yet.
+  - **Online, with a code** sends the encrypted history and settings to the backup service and shows a 20-character code (**Copy**). Keep the code safe: it is the only way to get the backup back, it can't be reset, and anyone who has it can read the backup. This PC remembers the code (**Show code**, **New code…**, **Delete online backup…**) and shows "Last online backup: … · kept until …". A backup is kept 400 days after the last upload. The newest upload replaces the older one, also when it comes from another PC with the same code.
+  - **Restore from an online code:** choose **An online code**, type the code and click **Get backup**. **Keep backing up to this code** makes later online backups go to that code.
+  - **5 online backups a day.** With 1 or 2 left, a note says so. When the limit is reached, the button counts down to the next one ("Next online backup in 3:20:15").
 - **Windows:** every window can be dragged by any empty spot. All text (labels, info boxes, prices, status line) can be marked with the mouse and copied with Ctrl+C or right-click Copy. Double-click marks a word.
 - **Auto-update:** at startup, and then every 10 minutes while the program is open, the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. You can switch the check off in Settings (**Check for new versions automatically**); that switches off the 10-minute check too. Opening Settings also checks once (if the automatic check is on). Next to the version number in Settings, **check now** looks once when you click it. A newer version shows there and as the red update button.
 
@@ -150,14 +159,17 @@ The app sends no personal information anywhere. It has no account, cookies or tr
 |---|---|---|
 | GitHub | At startup, every 10 minutes while the program is open, and when you open Settings, to look for a new version (all of it can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version. Unchanged answers are not downloaded again (ETag), and if GitHub says "too many requests" the app quietly waits longer |
 | Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
+| PrintPrice's backup service (Cloudflare relay) | Only when you use **Online, with a code** in the Backup window: back up, get a backup, new code or delete | The encrypted backup and a storage id made from the code. The backup is locked on your PC first, and the code itself is never sent |
 | Your browser | Only when you click **GitHub** in "Made by Gettic · GitHub" at the bottom of the main window, or the issues link in the message about an unsupported printer | Opens this project's page (github.com/gettic/PrintPrice) or its issues page. Nothing is sent before the click |
 | Printables | Only when you paste a Printables link | The model's ID, then the file and a small model picture (~10 KB, from media.printables.com) download |
+
+To enforce the 5-a-day online backup limit, the relay keeps only a salted hash of your IP address (not the address itself) for 2 days.
 
 Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer, and reads its printer and filament profiles (for slicing and the material drop-down) and the printer pictures from its install folder. This stays on your PC and is never sent anywhere.
 
 Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\history.json` and are never sent anywhere. Delete that file to clear the history. If the file is damaged, the app keeps it as `history.bad-<date>-<time>.json` in the same folder and starts with an empty history.
 
-A backup file holds your price history (customer names) and your settings (including MobilePay and bank details). It is written only where you choose to save it and is not locked with a code, so keep it private. Online backup isn't active yet, so nothing is sent. A restore also leaves safety copies (`history.before-restore-*.json`, `settings.before-restore-*.ini`) in `%APPDATA%\PrintPrice`.
+A backup file holds your price history (customer names) and your settings (including MobilePay and bank details). A backup file is written only where you choose to save it and is not locked with a code, so keep it private. An online backup is locked with its code on your PC before it is sent, and nothing is sent unless you click an online button. A restore also leaves safety copies (`history.before-restore-*.json`, `settings.before-restore-*.ini`) in `%APPDATA%\PrintPrice`.
 
 **Open in Studio** starts the Bambu Studio program on your PC with a copy of the sliced file. The copy is kept in `%TEMP%\PrintPrice\studio\` (older copies are deleted) and is never sent anywhere. Bambu Studio may add it to its own list of recent projects.
 
@@ -189,6 +201,8 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/History.cs` | Saved quotes (price history) |
 | `src/HistoryForm.cs` | The History window |
 | `src/Backup.cs`, `src/BackupForm.cs` | Backup codes and the Backup window |
+| `src/OnlineBackup.cs` | Online backup: encrypt, upload, download, delete |
+| `worker/` | The Cloudflare relay: online backup and the website's live electricity price |
 | `src/PrinterPickerForm.cs` | The Choose printer window |
 | `src/QuotePage.cs`, `src/QuoteForm.cs` | The quote and invoice page (picture, PDF) and its window |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |

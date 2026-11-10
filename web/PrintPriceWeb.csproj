@@ -29,6 +29,7 @@
     <Compile Include="..\src\History.cs" Link="Linked\History.cs" />
     <Compile Include="..\src\Lang.cs" Link="Linked\Lang.cs" />
     <Compile Include="..\src\SliceInfo.cs" Link="Linked\SliceInfo.cs" />
+    <Compile Include="..\src\PowerPrice.cs" Link="Linked\PowerPrice.cs" />
   </ItemGroup>
 
   <!-- Json (System.Text.Json, reflection) reads/writes the linked classes' public fields: keep them all when trimming -->

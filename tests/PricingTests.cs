@@ -503,6 +503,79 @@ namespace PrintPrice.Tests
 
             BackupCodeTests();
             BackupFileTests();
+            BackupSettingsTests();
+        }
+
+        // online backup settings: BackupCode (DPAPI) and LastOnlineBackup, both PC-only
+        static void BackupSettingsTests()
+        {
+            const string Code = "K7QF2-9XMRT-B3HDW-P5ZNC";
+            var s = new AppSettings();
+            True("BackupCode default none", s.BackupCode == "" && s.GetBackupCode() == "" && !s.HasBackupCode && s.LastOnlineBackup == "");
+            s.SetBackupCode(" " + Code + " ");
+            True("BackupCode stored encrypted", s.BackupCode.StartsWith("dpapi1:") && s.BackupCode.IndexOf("K7QF2", StringComparison.Ordinal) < 0);
+            True("BackupCode DPAPI round trip", s.GetBackupCode() == Code && s.HasBackupCode);
+            True("UnprotectCode garbled -> none", AppSettings.UnprotectCode("dpapi1:AAAA") == "" && AppSettings.UnprotectCode("dpapi1:not base64!") == ""
+                 && AppSettings.UnprotectCode(Code) == "" && AppSettings.UnprotectCode(null) == "" && AppSettings.UnprotectCode("dpapi1:") == "");
+            int mid = "dpapi1:".Length + 40;
+            string flipped = s.BackupCode.Substring(0, mid) + (s.BackupCode[mid] == 'A' ? 'B' : 'A') + s.BackupCode.Substring(mid + 1);
+            var g = new AppSettings(); g.BackupCode = flipped;
+            True("BackupCode flipped character -> no code", g.GetBackupCode() == "" && !g.HasBackupCode);
+            g.SetBackupCode("  ");
+            True("SetBackupCode blank -> empty", g.BackupCode == "");
+
+            s.SetLastOnlineBackup(new DateTime(2026, 11, 10, 14, 5, 33));
+            DateTime last;
+            True("LastOnlineBackup format", s.LastOnlineBackup == "2026-11-10 14:05" && s.TryLastOnlineBackup(out last)
+                 && last == new DateTime(2026, 11, 10, 14, 5, 0));
+            True("TryLastOnlineBackup never -> false", !new AppSettings().TryLastOnlineBackup(out last));
+
+            // ini round trip
+            var r = AppSettings.FromIni(s.ToIni());
+            True("BackupCode ini round trip", r.BackupCode == s.BackupCode && r.GetBackupCode() == Code);
+            True("LastOnlineBackup ini round trip", r.LastOnlineBackup == "2026-11-10 14:05");
+            True("LastOnlineBackup bad value ignored", AppSettings.FromIni(new[] { "LastOnlineBackup=yesterday" }).LastOnlineBackup == "");
+            True("BackupCode garbled ini -> no code", !AppSettings.FromIni(new[] { "BackupCode=dpapi1:xyz" }).HasBackupCode);
+
+            // never in a backup
+            s.SlicerPath = @"C:\Bambu\bambu-studio.exe";
+            string text = History.ToBackup(new List<QuoteRecord>(), s, "1.12.0", DateTime.Now);
+            True("ToBackup has no BackupCode / LastOnlineBackup", text.IndexOf("BackupCode", StringComparison.Ordinal) < 0
+                 && text.IndexOf("LastOnlineBackup", StringComparison.Ordinal) < 0 && text.IndexOf("dpapi1", StringComparison.Ordinal) < 0);
+            True("PcOnlyKeys has all three", J(new List<string>(History.PcOnlyKeys)) == "SlicerPath|BackupCode|LastOnlineBackup");
+
+            // Combine with "also settings": this PC's keys stay, even when the backup's lines hold another PC's
+            var other = new AppSettings(); other.FriendsMarkupPct = 55; other.SetBackupCode("ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ");
+            other.LastOnlineBackup = "2025-01-01 00:00"; other.SlicerPath = @"E:\Other\bambu-studio.exe";
+            var res = History.Combine(new List<QuoteRecord>(), s, new BackupData { Quotes = new List<QuoteRecord>(), Settings = other.ToIni() }, true, true);
+            True("Combine with settings: backup's settings", res.SettingsRestored && res.Settings.FriendsMarkupPct == 55);
+            True("Combine with settings: this PC's keys kept", res.Settings.GetBackupCode() == Code && res.Settings.LastOnlineBackup == "2026-11-10 14:05"
+                 && res.Settings.SlicerPath == @"C:\Bambu\bambu-studio.exe");
+            res = History.Combine(new List<QuoteRecord>(), s, new BackupData { Quotes = new List<QuoteRecord>(), Settings = other.ToIni() }, false, false);
+            True("Combine without settings: this PC's keys kept", res.Settings.GetBackupCode() == Code && res.Settings.FriendsMarkupPct == s.FriendsMarkupPct);
+
+            // Restore (files, test folder only)
+            string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-backup-keys");
+            try
+            {
+                True("UseFolder test-backup-keys", AppSettings.UseFolder(dir));
+                System.IO.Directory.CreateDirectory(dir);
+                foreach (var f in System.IO.Directory.GetFiles(dir)) System.IO.File.Delete(f);
+                History.ResetBlock();
+                s.Save();
+                BackupData data;
+                History.ReadBackup(History.ToBackup(new List<QuoteRecord> { BRec("C", "2026-11-07 10:00:00") }, other, "1.12.0", DateTime.Now), out data);
+                RestoreResult rr;
+                True("Restore with settings OK", History.Restore(new List<QuoteRecord>(), s, data, true, true, DateTime.Now, out rr) == null);
+                var ls = AppSettings.Load();
+                True("Restore with settings: saved file keeps this PC's code, time, slicer", ls.FriendsMarkupPct == 55 && ls.GetBackupCode() == Code
+                     && ls.LastOnlineBackup == "2026-11-10 14:05" && ls.SlicerPath == @"C:\Bambu\bambu-studio.exe");
+            }
+            finally
+            {
+                History.ResetBlock();
+                AppSettings.ClearTestFolder();
+            }
         }
 
         static void BackupCodeTests()
@@ -2360,9 +2433,224 @@ namespace PrintPrice.Tests
             SlicerPrinterTests();
             SlicedProjectTests();
             BackupTests();
+            OnlineBackupTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
         }
+
+        // ---------- online backup (OnlineBackup.cs, online): texts, size check, headers, fake Worker ----------
+        static void OnlineBackupTests()
+        {
+            bool wasDanish = L.Danish;
+            L.Danish = false;
+            try
+            {
+                True("online: no connection text", OnlineBackup.ErrorText(0, false).Contains("internet"));
+                True("online: 404 on get = no backup", OnlineBackup.ErrorText(404, true).StartsWith("No online backup") && OnlineBackup.ErrorText(404, true).Contains("400 days"));
+                True("online: 404 not get = generic", OnlineBackup.ErrorText(404, false).Contains("error 404"));
+                True("online: 413 too big", OnlineBackup.ErrorText(413, false).Contains("512 KB"));
+                True("online: 429 = 503 busy", OnlineBackup.ErrorText(429, false) == OnlineBackup.ErrorText(503, false) && OnlineBackup.ErrorText(503, false).Contains("busy"));
+                True("online: 400 update", OnlineBackup.ErrorText(400, false).Contains("Update PrintPrice"));
+                True("online: 500 generic", OnlineBackup.ErrorText(500, true).Contains("error 500"));
+                True("online: 512 KB allowed", OnlineBackup.SizeProblem(512 * 1024) == null);
+                True("online: 512 KB + 1 refused", OnlineBackup.SizeProblem(512 * 1024 + 1) == OnlineBackup.ErrorText(413, false));
+                L.Danish = true;
+                True("online: Danish 404", OnlineBackup.ErrorText(404, true).StartsWith("Der blev ikke fundet"));
+                True("online: Danish daily limit", OnlineBackup.DailyLimitText(null, DateTime.UtcNow).StartsWith("Dagens grænse er nået (5"));
+                True("online: Danish wait", OnlineBackup.WaitText(TimeSpan.FromMinutes(200)) == "3 t. 20 min.");
+                {
+                    var n0 = new DateTime(2026, 11, 10, 20, 40, 0, DateTimeKind.Utc);
+                    bool noDouble = true;
+                    foreach (bool da in new[] { true, false })
+                    {
+                        L.Danish = da;
+                        foreach (int m in new[] { 0, 21, 60, 201 })
+                        {
+                            string t = OnlineBackup.DailyLimitText(n0.AddMinutes(m), n0);
+                            if (t.Contains("..") || !t.EndsWith(".")) noDouble = false;
+                        }
+                        if (OnlineBackup.DailyLimitText(null, n0).Contains("..")) noDouble = false;
+                    }
+                    L.Danish = true;
+                    True("online: daily text no '..' (EN + DA)", noDouble);
+                    True("online: Danish daily text", OnlineBackup.DailyLimitText(n0.AddMinutes(201), n0) ==
+                         "Dagens grænse er nået (5 online-kopier om dagen). Du kan tage en kopi igen om 3 t. 21 min.");
+                }
+                L.Danish = false;
+
+                // headers
+                var now = new DateTime(2026, 11, 10, 20, 40, 0, DateTimeKind.Utc);
+                var h = OnlineBackup.ParseLimitHeaders("3", "2026-11-11T00:00:00Z", null, now);
+                True("online: headers left 3", h.UploadsLeft == 3);
+                True("online: headers reset", h.ResetUtc == new DateTime(2026, 11, 11, 0, 0, 0, DateTimeKind.Utc) && h.ResetUtc.Value.Kind == DateTimeKind.Utc);
+                h = OnlineBackup.ParseLimitHeaders(null, null, "3600", now);
+                True("online: Retry-After only", h.UploadsLeft == -1 && h.ResetUtc == now.AddHours(1));
+                h = OnlineBackup.ParseLimitHeaders("x", "junk", "-5", now);
+                True("online: junk headers", h.UploadsLeft == -1 && h.ResetUtc == null);
+                True("online: wait 3 h 20 min", OnlineBackup.WaitText(TimeSpan.FromMinutes(199.2)) == "3 h 20 min");
+                True("online: wait 2 h", OnlineBackup.WaitText(TimeSpan.FromHours(2)) == "2 h");
+                True("online: wait 0 -> 1 min", OnlineBackup.WaitText(TimeSpan.Zero) == "1 min");
+                True("online: daily text", OnlineBackup.DailyLimitText(now.AddMinutes(200), now) ==
+                     "Daily limit reached (5 online backups a day). You can back up again in 3 h 20 min.");
+                True("online: daily text no time", OnlineBackup.DailyLimitText(null, now).EndsWith("again tomorrow."));
+
+                // URL and invalid code
+                string code = Backup.NewCode(delegate(int i) { return (i * 7 + 3) & 31; });
+                string other = Backup.NewCode(delegate(int i) { return (i * 5 + 1) & 31; });
+                True("online: url", OnlineBackup.Url("https://x.example/", code) == "https://x.example/b/" + Backup.StorageId(code));
+                int st = 99;
+                try { OnlineBackup.Url("https://x.example", "ABC"); } catch (OnlineBackupException ex) { st = ex.Status; }
+                True("online: invalid code = -1", st == -1);
+
+                // too big: refused before any network (port 1 would give status 0)
+                var rnd = new Random(1);
+                var big = new System.Text.StringBuilder("{\"x\":\"");
+                for (int i = 0; i < 1200000; i++) big.Append((char)('a' + rnd.Next(26)));   // random letters: ~700 KB after gzip
+                big.Append("\"}");
+                st = 99;
+                try { OnlineBackup.Upload("http://127.0.0.1:1", code, big.ToString()); } catch (OnlineBackupException ex) { st = ex.Status; }
+                True("online: too big refused locally", st == -1);
+
+                // fake Worker on 127.0.0.1
+                using (var fake = new FakeWorker())
+                {
+                    string json = "{\"Format\":\"PrintPriceBackup\",\"Version\":1}";
+                    var up = OnlineBackup.Upload(fake.Url, code, json);
+                    True("online fake: upload stored", fake.Count == 1 && Backup.IsBlob(fake.Get(Backup.StorageId(code))));
+                    True("online fake: upload left 4 + reset", up.UploadsLeft == 4 && up.ResetUtc == new DateTime(2026, 11, 11, 0, 0, 0, DateTimeKind.Utc));
+                    True("online fake: download", OnlineBackup.Download(fake.Url, code) == json);
+
+                    st = 99;
+                    try { OnlineBackup.Download(fake.Url, other); } catch (OnlineBackupException ex) { st = ex.Status; }
+                    True("online fake: other code 404", st == 404);
+
+                    fake.Get(Backup.StorageId(code))[30] ^= 1;
+                    st = 99;
+                    try { OnlineBackup.Download(fake.Url, code); } catch (OnlineBackupException ex) { st = ex.Status; }
+                    True("online fake: damaged = -1", st == -1);
+
+                    OnlineBackup.Delete(fake.Url, code);
+                    True("online fake: deleted", fake.Count == 0);
+                    bool threw = false;
+                    try { OnlineBackup.Delete(fake.Url, code); } catch (OnlineBackupException) { threw = true; }
+                    True("online fake: delete missing is OK", !threw);
+
+                    foreach (int s in new[] { 413, 429, 500, 503 })
+                    {
+                        fake.Force = s;
+                        OnlineBackupException e = null;
+                        try { OnlineBackup.Upload(fake.Url, code, json); } catch (OnlineBackupException ex) { e = ex; }
+                        True("online fake: forced " + s, e != null && e.Status == s && !e.DailyLimit && e.Message == OnlineBackup.ErrorText(s, false));
+                    }
+
+                    fake.Force = 429;
+                    fake.ForceHeaders = "Retry-After: 3600\r\nX-Uploads-Left: 0\r\nX-Uploads-Reset: 2030-01-01T00:00:00Z\r\n";
+                    OnlineBackupException d = null;
+                    try { OnlineBackup.Upload(fake.Url, code, json); } catch (OnlineBackupException ex) { d = ex; }
+                    True("online fake: daily limit", d != null && d.Status == 429 && d.DailyLimit &&
+                         d.ResetUtc == new DateTime(2030, 1, 1, 0, 0, 0, DateTimeKind.Utc) && d.Message.StartsWith("Daily limit reached (5"));
+                    fake.ForceHeaders = "Retry-After: 60\r\n";
+                    d = null;
+                    try { OnlineBackup.Upload(fake.Url, code, json); } catch (OnlineBackupException ex) { d = ex; }
+                    True("online fake: minute limit = busy", d != null && d.Status == 429 && !d.DailyLimit);
+                    fake.Force = 0;
+                    fake.ForceHeaders = "";
+
+                    string deadUrl = fake.Url;
+                    fake.Dispose();
+                    st = 99;
+                    try { OnlineBackup.Download(deadUrl, code); } catch (OnlineBackupException ex) { st = ex.Status; }
+                    True("online fake: server gone = 0", st == 0);
+                }
+            }
+            finally { L.Danish = wasDanish; }
+        }
+    }
+
+    /// A tiny HTTP/1.1 server on 127.0.0.1 (random port; loopback only, so no admin rights and no firewall prompt) that
+    /// acts like the Worker's /b/<id> route. Force > 0 = answer every request with that status (plus ForceHeaders).
+    class FakeWorker : IDisposable
+    {
+        readonly System.Net.Sockets.TcpListener listener;
+        readonly Dictionary<string, byte[]> store = new Dictionary<string, byte[]>();
+        public volatile int Force;
+        public volatile string ForceHeaders = "";
+        int left = 5;
+        public string Url { get; private set; }
+
+        public FakeWorker()
+        {
+            listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            Url = "http://127.0.0.1:" + ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            new System.Threading.Thread(Loop) { IsBackground = true }.Start();
+        }
+
+        public int Count { get { lock (store) return store.Count; } }
+        public byte[] Get(string id) { lock (store) return store[id]; }
+
+        void Loop()
+        {
+            while (true)
+            {
+                System.Net.Sockets.TcpClient c;
+                try { c = listener.AcceptTcpClient(); } catch { return; }
+                try { using (c) Handle(c.GetStream()); } catch { }
+            }
+        }
+
+        static string ReadLine(System.IO.Stream s)
+        {
+            var sb = new System.Text.StringBuilder();
+            int b;
+            while ((b = s.ReadByte()) >= 0 && b != '\n') if (b != '\r') sb.Append((char)b);
+            return sb.ToString();
+        }
+
+        void Handle(System.Net.Sockets.NetworkStream s)
+        {
+            string[] first = ReadLine(s).Split(' ');
+            string method = first[0], path = first.Length > 1 ? first[1] : "/";
+            int len = 0;
+            string line;
+            while ((line = ReadLine(s)).Length > 0)
+                if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) len = int.Parse(line.Substring(15).Trim());
+            var body = new byte[len];
+            for (int got = 0; got < len; ) { int n = s.Read(body, got, len - got); if (n <= 0) break; got += n; }
+
+            int status; byte[] outBody = new byte[0]; string headers = "";
+            string id = path.StartsWith("/b/") ? path.Substring(3) : null;
+            if (Force > 0) { status = Force; headers = ForceHeaders; }
+            else if (id == null) status = 404;
+            else if (method == "PUT")
+            {
+                lock (store) store[id] = body;
+                left--;
+                status = 204;
+                headers = "X-Uploads-Left: " + left + "\r\nX-Uploads-Reset: 2026-11-11T00:00:00Z\r\n";
+            }
+            else if (method == "GET")
+            {
+                byte[] b;
+                lock (store) if (!store.TryGetValue(id, out b)) b = null;
+                if (b == null) status = 404; else { status = 200; outBody = b; }
+            }
+            else if (method == "DELETE")
+            {
+                bool had;
+                lock (store) had = store.Remove(id);
+                status = had ? 204 : 404;
+            }
+            else status = 405;
+
+            string head = "HTTP/1.1 " + status + " X\r\n" + headers + "Content-Length: " + outBody.Length + "\r\nConnection: close\r\n\r\n";
+            byte[] hb = System.Text.Encoding.ASCII.GetBytes(head);
+            s.Write(hb, 0, hb.Length);
+            s.Write(outBody, 0, outBody.Length);
+            s.Flush();
+        }
+
+        public void Dispose() { try { listener.Stop(); } catch { } }
     }
 }

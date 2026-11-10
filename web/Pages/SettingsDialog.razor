@@ -1,4 +1,4 @@
-@* Settings (web): Prices, Printer, Language. Works on a copy; Save hands it back, Cancel / Esc drops it. *@
+﻿@* Settings (web): Prices, Printer, Language. Works on a copy; Save hands it back, Cancel / Esc drops it. *@
 
 <div class="overlay" @onclick="Cancel">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" @onclick:stopPropagation="true" @onkeydown="Key">
@@ -85,6 +85,27 @@
                 }
             </div>
         }
+        else if (tab == TabElectricity)
+        {
+            <div class="tab">
+                <h3>@L.S("Electricity price  (live from Energinet)", "Elpris  (live fra Energinet)")</h3>
+                <label>@L.S("Price area", "Prisområde")</label>
+                <select @bind="work.PriceArea">
+                    <option value="DK1">@L.S("DK1 – Jutland & Funen", "DK1 – Jylland og Fyn")</option>
+                    <option value="DK2">@L.S("DK2 – Zealand, Lolland & Bornholm", "DK2 – Sjælland, Lolland og Bornholm")</option>
+                </select>
+                <label>@L.S("Tariffs & fees", "Tariffer og afgifter")</label>
+                <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(addOn)" @bind="addOn" @bind:event="oninput" /><span>kr/kWh</span></div>
+                <div class="help">@L.S("Added to the spot price, excl. VAT: grid tariff, Energinet (~0,12), elafgift (0,008 in 2026) and your supplier's fee. See your bill.",
+                                       "Lægges oven i spotprisen, ekskl. moms: nettarif, Energinet (~0,12), elafgift (0,008 i 2026) og dit elselskabs gebyr. Se din elregning.")</div>
+                <label></label>
+                <label><input type="checkbox" @bind="vat" /> @L.S("Add 25 % VAT", "Læg 25 % moms til")</label>
+                <label></label>
+                <label><input type="checkbox" @bind="autoPower" /> @L.S("Fetch the live price when the page opens", "Hent den aktuelle pris, når siden åbner")</label>
+                <div class="help">@L.S("The live price comes from Energi Data Service through PrintPrice's own small relay (Cloudflare). Only the price area is sent: none of your numbers or settings. Off = the page asks only when you click Update.",
+                                       "Live-prisen kommer fra Energi Data Service gennem PrintPrices egen lille relæ-tjeneste (Cloudflare). Kun prisområdet sendes: ingen af dine tal eller indstillinger. Fra = siden spørger kun, når du klikker Opdatér.")</div>
+            </div>
+        }
         else
         {
             <div class="tab">
@@ -111,7 +132,7 @@
 </div>
 
 @code {
-    public const int TabPrices = 0, TabPrinter = 1, TabApp = 2;
+    public const int TabPrices = 0, TabPrinter = 1, TabElectricity = 2, TabApp = 3;
 
     public class Result
     {
@@ -128,10 +149,10 @@
 
     AppSettings work;
     int tab;
-    bool auto, reset;
-    string friends, others, minimum, round, failed, watts, rate, name, type, problem;
+    bool auto, reset, vat, autoPower;
+    string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem;
 
-    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Language", "Sprog") }; } }
+    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Language", "Sprog") }; } }
 
     Wear.Model Model { get { return Wear.FindModel(work.PrinterModel); } }
 
@@ -159,6 +180,7 @@
         watts = Num.Fmt(s.PrinterWatts); rate = Num.Fmt(s.MachineRatePerHour);
         name = s.PrinterName == Wear.FindModel(s.PrinterModel).Label ? "" : s.PrinterName;
         auto = s.AutoWearRate != 0;
+        addOn = Num.Fmt(s.PowerAddOn); vat = s.PowerIncludeVat != 0; autoPower = s.AutoPowerPrice != 0;
         problem = null;
     }
 
@@ -195,9 +217,9 @@
 
     async Task Save()
     {
-        double f, o, mi, ro, fa, wa, ra;
+        double f, o, mi, ro, fa, wa, ra, ad;
         if (!Ok(friends, out f) || !Ok(others, out o) || !Ok(minimum, out mi) || !Ok(round, out ro) || !Ok(failed, out fa)
-            || !Ok(watts, out wa) || (!auto && !Ok(rate, out ra)))
+            || !Ok(watts, out wa) || (!auto && !Ok(rate, out ra)) || !Ok(addOn, out ad))
         {
             problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
             return;
@@ -205,6 +227,7 @@
         if (auto) ra = work.MachineRatePerHour; else Ok(rate, out ra);
         work.FriendsMarkupPct = f; work.OthersMarkupPct = o; work.MinimumPrice = mi; work.RoundTo = ro; work.FailedPrintPct = fa;
         work.PrinterWatts = wa; work.MachineRatePerHour = ra; work.AutoWearRate = auto ? 1 : 0;
+        work.PowerAddOn = ad; work.PowerIncludeVat = vat ? 1 : 0; work.AutoPowerPrice = autoPower ? 1 : 0;
         work.PrinterName = AppSettings.CleanPrinterName(name.Trim().Length == 0 ? Model.Label : name);
         await OnClose.InvokeAsync(new Result { Settings = work, FilamentType = type, Reset = reset });
     }

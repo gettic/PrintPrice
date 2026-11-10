@@ -20,10 +20,12 @@
     <Compile Include="..\..\src\History.cs" Link="Linked\History.cs" />
     <Compile Include="..\..\src\Lang.cs" Link="Linked\Lang.cs" />
     <Compile Include="..\..\src\SliceInfo.cs" Link="Linked\SliceInfo.cs" />
+    <Compile Include="..\..\src\PowerPrice.cs" Link="Linked\PowerPrice.cs" />
     <Compile Include="..\Logic\Json.cs" Link="Web\Json.cs" />
     <Compile Include="..\Logic\WebCalc.cs" Link="Web\WebCalc.cs" />
     <Compile Include="..\Logic\ZipRanges.cs" Link="Web\ZipRanges.cs" />
     <Compile Include="..\Logic\SlicedFile.cs" Link="Web\SlicedFile.cs" />
+    <Compile Include="..\Logic\LivePower.cs" Link="Web\LivePower.cs" />
   </ItemGroup>
 
 </Project>

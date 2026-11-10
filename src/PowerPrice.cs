@@ -2,7 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+#if !WEB
 using System.Net;
+#endif
 using System.Text;
 
 namespace PrintPrice
@@ -27,6 +29,8 @@ namespace PrintPrice
             return includeVat ? net * (1 + VatRate) : net;
         }
 
+#if !WEB
+        /// Desktop only (WebClient); the website gets the same answer through the Worker's /power route (worker\).
         public static PowerQuote GetCurrent(string area)
         {
             if (area != "DK1" && area != "DK2") area = "DK1";
@@ -50,6 +54,7 @@ namespace PrintPrice
             }
             return PickCurrent(body, area, nowUtc);
         }
+#endif
 
         /// Picks the latest price slot that has started at or before nowUtc.
         public static PowerQuote PickCurrent(string json, string area, DateTime nowUtc)

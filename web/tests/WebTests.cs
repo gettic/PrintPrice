@@ -89,6 +89,9 @@ static class WebTests
         // 7. stage 2: sliced files
         FileTests.Run(True, Eq);
 
+        // 8. live electricity price
+        PowerTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }
