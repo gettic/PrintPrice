@@ -29,6 +29,39 @@ namespace PrintPrice.Web
         /// The backup text: all quotes and the settings (History.ToBackup, PcOnlyKeys left out).
         public static string FileText(List<QuoteRecord> list, AppSettings s, DateTime now) { return History.ToBackup(list, s, App, now); }
 
+        /// Data URL characters of pictures in a backup written here (newest first). Lower than the desktop's
+        /// History.FilePictureBudget (40 MB) so phones' memory copes; reading still takes MaxFileBytes.
+        public const long PictureBudget = 20L * 1024 * 1024;
+
+        /// The backup text with this browser's pictures (HistoryStore.BackupPictures).
+        public static string FileText(List<QuoteRecord> list, AppSettings s, DateTime now, List<BackupPicture> pictures)
+        {
+            return History.ToBackup(list, s, App, now, pictures);
+        }
+
+        /// The text for an online backup: the newest pictures that keep the blob within OnlineBackup.MaxBlob (Backup.FitForUpload).
+        public static string OnlineText(List<QuoteRecord> list, AppSettings s, DateTime now, List<BackupPicture> pictures)
+        {
+            return Backup.FitForUpload(list, s, App, now, pictures, OnlineBackup.MaxBlob);
+        }
+
+        /// How many pictures a backup text holds (0 for none or unreadable).
+        public static int PictureCount(string backupText)
+        {
+            BackupData d;
+            return History.ReadBackup(backupText, out d) == null ? d.Pictures.Count : 0;
+        }
+
+        /// " With the newest 12 of 40 pictures; a backup file holds them all." / " With 12 pictures." / "" (none).
+        public static string PicturesSentText(int sent, int total)
+        {
+            if (total <= 0) return "";
+            if (sent >= total) return " " + (total == 1 ? L.S("With 1 picture.", "Med 1 billede.") : L.F("With {0} pictures.", "Med {0} billeder.", total.ToString("N0", Num.Dk)));
+            return " " + L.F("With the newest {0} of {1} pictures (online backups are limited in size; a backup file holds more).",
+                             "Med de nyeste {0} af {1} billeder (online-kopier har en størrelsesgrænse; en kopi-fil kan rumme flere).",
+                             sent.ToString("N0", Num.Dk), total.ToString("N0", Num.Dk));
+        }
+
         /// A chosen / dropped file's bytes -> the backup (also a desktop history.json). null = OK, else the problem text.
         public static string ReadFile(byte[] bytes, out BackupData data)
         {
@@ -76,6 +109,9 @@ namespace PrintPrice.Web
             if (when.Length == 0 && string.IsNullOrEmpty(d.App))
                 return L.F("A price history file: {0}, {1}.", "En prishistorik-fil: {0}, {1}.", Quotes(d.Quotes.Count), set);
             string app = string.IsNullOrEmpty(d.App) ? "" : d.App == App ? L.S(" (website)", " (hjemmesiden)") : " (PrintPrice v" + d.App + ")";
+            int pics = d.Pictures != null ? d.Pictures.Count : 0;
+            if (pics > 0)
+                set += pics == 1 ? L.S(", 1 picture", ", 1 billede") : L.F(", {0} pictures", ", {0} billeder", pics.ToString("N0", Num.Dk));
             return L.F("Backup from {0}{1}: {2}, {3}.", "Kopi fra {0}{1}: {2}, {3}.", when.Length > 0 ? when : "?", app, Quotes(d.Quotes.Count), set);
         }
 
@@ -114,8 +150,18 @@ namespace PrintPrice.Web
         /// History.Combine (the desktop's merge / replace / settings rules). Never throws: null + problem.
         public static RestoreResult Combine(List<QuoteRecord> current, AppSettings s, BackupData data, bool replace, bool withSettings, out string problem)
         {
+            return Combine(current, s, data, replace, withSettings, null, out problem);
+        }
+
+        /// Combine with pictures: picturesHere = record ids that have a picture in this browser (Merge keeps those;
+        /// null = none here). RestoreResult.Pictures = what to write (HistoryStore.WritePictures).
+        public static RestoreResult Combine(List<QuoteRecord> current, AppSettings s, BackupData data, bool replace, bool withSettings,
+                                            HashSet<string> picturesHere, out string problem)
+        {
             problem = null;
-            try { return History.Combine(current, s, data, replace, withSettings && data.Settings != null); }
+            Func<string, bool> has = null;
+            if (picturesHere != null) has = id => picturesHere.Contains(id);
+            try { return History.Combine(current, s, data, replace, withSettings && data.Settings != null, has); }
             catch (Exception ex)
             {
                 problem = L.S("Backup not restored: ", "Sikkerhedskopien blev ikke gendannet: ") + ex.Message;

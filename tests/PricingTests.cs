@@ -2940,9 +2940,297 @@ namespace PrintPrice.Tests
             MoneyRoundingTests();
             GcodeTests();
             SliceXmlTests();
+            PictureTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        // ---------- record pictures (issue #4): History picture helpers, files, backups, Backup.FitForUpload ----------
+
+        // "picture" bytes for the size / backup tests: PNG magic + random rest (incompressible, like a real PNG's data)
+        static byte[] FakePng(int length, int seed)
+        {
+            var b = new byte[length];
+            new Random(seed).NextBytes(b);
+            byte[] magic = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+            Buffer.BlockCopy(magic, 0, b, 0, magic.Length);
+            return b;
+        }
+
+        static System.Drawing.Bitmap TestBitmap(int w, int h, bool transparent, bool noise)
+        {
+            var bmp = new System.Drawing.Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            var rnd = new Random(7);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    System.Drawing.Color c;
+                    if (noise) c = System.Drawing.Color.FromArgb(rnd.Next(256), rnd.Next(256), rnd.Next(256), rnd.Next(256));
+                    else if (transparent && (x < w / 4 || x >= w * 3 / 4)) c = System.Drawing.Color.Transparent;
+                    else c = System.Drawing.Color.FromArgb(255, 40 + x % 50, 120, 200 - y % 60);
+                    bmp.SetPixel(x, y, c);
+                }
+            return bmp;
+        }
+
+        static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
+        }
+
+        static void PictureTests()
+        {
+            // 1. ids
+            True("SafePictureId FromQuote Id", History.SafePictureId(HistRecord(new DateTime(2026, 11, 12, 9, 0, 0)).Id));
+            True("SafePictureId a-Z_09-", History.SafePictureId("aZ_09-x"));
+            True("SafePictureId 64 chars ok, 65 refused", History.SafePictureId(new string('a', 64)) && !History.SafePictureId(new string('a', 65)));
+            True("SafePictureId refuses empty / null / ..\\x / a/b / a b / a.b",
+                 !History.SafePictureId("") && !History.SafePictureId(null) && !History.SafePictureId(@"..\x")
+                 && !History.SafePictureId("a/b") && !History.SafePictureId("a b") && !History.SafePictureId("a.b"));
+
+            // 2. types and data URLs
+            byte[] png = FakePng(2000, 1);
+            byte[] jpg = FakePng(1500, 2); jpg[0] = 0xFF; jpg[1] = 0xD8; jpg[2] = 0xFF; jpg[3] = 0xE0;
+            byte[] webp = FakePng(1200, 3);
+            byte[] riff = System.Text.Encoding.ASCII.GetBytes("RIFF....WEBP");
+            Buffer.BlockCopy(riff, 0, webp, 0, riff.Length);
+            True("PictureMime png / jpeg / webp", History.PictureMime(png) == "image/png" && History.PictureMime(jpg) == "image/jpeg"
+                 && History.PictureMime(webp) == "image/webp");
+            True("PictureMime other / short / null -> null", History.PictureMime(new byte[20]) == null
+                 && History.PictureMime(new byte[] { 0x89, 0x50, 0x4E, 0x47 }) == null && History.PictureMime(null) == null);
+            string url = History.PictureDataUrl(png);
+            True("PictureDataUrl png prefix", url.StartsWith("data:image/png;base64,"));
+            True("data URL round trip png / jpeg / webp", SameBytes(History.PictureFromDataUrl(url), png)
+                 && SameBytes(History.PictureFromDataUrl(History.PictureDataUrl(jpg)), jpg)
+                 && SameBytes(History.PictureFromDataUrl(History.PictureDataUrl(webp)), webp));
+            True("PictureFromDataUrl bad prefix / not base64 / bad base64 / gif -> null",
+                 History.PictureFromDataUrl("image/png;base64," + Convert.ToBase64String(png)) == null
+                 && History.PictureFromDataUrl("data:image/png," + Convert.ToBase64String(png)) == null
+                 && History.PictureFromDataUrl("data:image/png;base64,@@@") == null
+                 && History.PictureFromDataUrl("data:image/gif;base64," + Convert.ToBase64String(png)) == null
+                 && History.PictureFromDataUrl(null) == null);
+            True("PictureFromDataUrl type and bytes must agree", History.PictureFromDataUrl("data:image/jpeg;base64," + Convert.ToBase64String(png)) == null);
+            byte[] tooBig = FakePng(History.MaxPictureBytes + 1, 4);
+            True("MaxPictureBytes 96 KB = 98304", History.MaxPictureBytes == 98304);
+            True("picture of exactly 96 KB ok, 1 byte more refused", History.PictureDataUrl(FakePng(History.MaxPictureBytes, 5)) != null
+                 && History.PictureDataUrl(tooBig) == null
+                 && History.PictureFromDataUrl("data:image/png;base64," + Convert.ToBase64String(tooBig)) == null);
+
+            // 3. EncodePicture: 256 px, PNG with transparency, JPEG without, too big -> null
+            using (var t = TestBitmap(512, 512, true, false))
+            {
+                byte[] e = History.EncodePicture(t);
+                True("EncodePicture transparent -> PNG <= 96 KB", e != null && History.PictureMime(e) == "image/png" && e.Length <= History.MaxPictureBytes);
+                using (var back = History.PictureImage(e))
+                    True("EncodePicture 512x512 -> 256x256", back != null && back.Width == 256 && back.Height == 256);
+            }
+            using (var o = TestBitmap(400, 300, false, false))
+            {
+                byte[] e = History.EncodePicture(o);
+                True("EncodePicture opaque -> JPEG", e != null && History.PictureMime(e) == "image/jpeg");
+                // 400 x 300: k = 256 / 400 = 0,64 -> 256 x 192
+                using (var back = History.PictureImage(e))
+                    True("EncodePicture 400x300 -> 256x192", back != null && back.Width == 256 && back.Height == 192);
+            }
+            using (var small = TestBitmap(100, 50, false, false))
+            using (var back = History.PictureImage(History.EncodePicture(small)))
+                True("EncodePicture small picture not enlarged (100x50)", back != null && back.Width == 100 && back.Height == 50);
+            using (var n = TestBitmap(256, 256, false, true))
+            {
+                byte[] at256 = History.EncodePictureAt(n, 256);
+                Console.WriteLine("INFO noise 256 px PNG " + (at256 == null ? -1 : at256.Length) + " bytes");
+                True("noise at 256 px is over 96 KB", at256 != null && at256.Length > History.MaxPictureBytes);
+                True("EncodePicture noise (over at 256 and 192) -> null", History.EncodePicture(n) == null);
+            }
+            True("EncodePicture null -> null", History.EncodePicture(null) == null);
+            True("PictureImage webp / junk / null -> null", History.PictureImage(webp) == null && History.PictureImage(png) == null
+                 && History.PictureImage(null) == null);
+
+            // 4. PicturesForBackup: newest first (by SavedAt, not list order), budget, skip what doesn't fit
+            var a = BRec("A", "2026-11-01 10:00:00"); var b = BRec("B", "2026-11-03 10:00:00");
+            var c = BRec("C", "2026-11-02 10:00:00"); var d = BRec("D", "2026-10-01 10:00:00");
+            var bad = BRec("x/y", "2026-11-04 10:00:00");
+            var pics = new Dictionary<string, byte[]> { { "A", FakePng(3000, 11) }, { "B", FakePng(3000, 12) }, { "C", FakePng(9000, 13) },
+                                                        { "D", FakePng(3000, 14) }, { "x/y", FakePng(3000, 15) } };
+            Func<string, byte[]> load = delegate(string id) { byte[] v; return pics.TryGetValue(id, out v) ? v : null; };
+            var list = new List<QuoteRecord> { a, b, c, d, bad };
+            // data URL of 3000 bytes = 22 + 4000 = 4022 chars, 9000 bytes = 22 + 12000 = 12022
+            var all = History.PicturesForBackup(list, load, long.MaxValue);
+            True("PicturesForBackup newest first B C A D, unsafe id left out", all.Count == 4 && all[0].Id == "B" && all[1].Id == "C"
+                 && all[2].Id == "A" && all[3].Id == "D");
+            True("data URL length 3000 bytes = 4022 chars", all[0].Data.Length == 4022 && all[1].Data.Length == 12022);
+            // budget 10 000: B 4022, C 12022 too big -> skipped, A 4022 (8044), D 4022 would be 12066 -> skipped
+            var some = History.PicturesForBackup(list, load, 10000);
+            True("PicturesForBackup budget 10 000 -> B, A", J(some.ConvertAll(p => p.Id)) == "B|A");
+            True("PicturesForBackup no loader / budget 0 -> none", History.PicturesForBackup(list, null, 1000).Count == 0
+                 && History.PicturesForBackup(list, load, 0).Count == 0);
+
+            // 5. backup text with pictures, both ways
+            var when = new DateTime(2026, 11, 12, 10, 0, 0);
+            var recs = new List<QuoteRecord> { b, c, a };
+            string plain = History.ToBackup(recs, new AppSettings(), "1.16.1", when);
+            True("ToBackup with no / only invalid pictures = the old text", History.ToBackup(recs, new AppSettings(), "1.16.1", when, null) == plain
+                 && History.ToBackup(recs, new AppSettings(), "1.16.1", when, new List<BackupPicture>()) == plain
+                 && History.ToBackup(recs, new AppSettings(), "1.16.1", when,
+                        new List<BackupPicture> { new BackupPicture { Id = "A", Data = "data:image/png;base64,@@" }, new BackupPicture { Id = "Z", Data = url } }) == plain);
+            True("old text has no Pictures", !plain.Contains("\"Pictures\""));
+            var given = new List<BackupPicture> {
+                new BackupPicture { Id = "B", Data = History.PictureDataUrl(pics["B"]) },
+                new BackupPicture { Id = "B", Data = History.PictureDataUrl(pics["A"]) },     // second for B: dropped
+                new BackupPicture { Id = "Z", Data = History.PictureDataUrl(pics["A"]) },     // no such record: dropped
+                new BackupPicture { Id = "C", Data = "data:image/png;base64,@@" },             // bad: dropped
+                new BackupPicture { Id = "A", Data = History.PictureDataUrl(webp) },          // website WebP: kept
+                null };
+            string withPics = History.ToBackup(recs, new AppSettings(), "1.16.1", when, given);
+            True("ToBackup with pictures: Pictures + Version 1", withPics.Contains("\"Pictures\":[") && withPics.Contains("\"Format\":\"PrintPriceBackup\",\"Version\":1,"));
+            BackupData bd;
+            True("ReadBackup with pictures OK", History.ReadBackup(withPics, out bd) == null && bd.Quotes.Count == 3);
+            True("ReadBackup pictures = B, A (bytes as written)", bd.Pictures.Count == 2 && SameBytes(bd.Pictures["B"], pics["B"])
+                 && SameBytes(bd.Pictures["A"], webp));
+            True("ReadBackup old backup -> 0 pictures", History.ReadBackup(plain, out bd) == null && bd.Pictures.Count == 0 && bd.Quotes.Count == 3);
+            var oldReader = Json.Deserialize<BackupFile>(withPics);   // = an older app's class without Pictures
+            True("old app reads a backup with pictures (all quotes)", oldReader != null && oldReader.Version == 1 && oldReader.History.Quotes.Count == 3);
+            True("plain history.json -> 0 pictures", History.ReadBackup(History.ToJson(recs), out bd) == null && bd.Pictures.Count == 0);
+            // hand-made backup: picture for a record not in it, bad data, unsafe id -> all dropped, restore still fine
+            string odd = withPics.Replace("\"Id\":\"A\",\"Data\"", "\"Id\":\"Q\",\"Data\"");
+            True("picture of an unknown record dropped", History.ReadBackup(odd, out bd) == null && bd.Pictures.Count == 1 && bd.Pictures.ContainsKey("B"));
+            // broken "Pictures" parts (tester): the records still restore, only the pictures are dropped
+            True("backup text without pictures ends with }", plain.EndsWith("}"));
+            string head = plain.Substring(0, plain.Length - 1);   // the same 3 records, then our own "Pictures" part
+            string goodB = "{\"Id\":\"B\",\"Data\":\"" + History.PictureDataUrl(pics["B"]) + "\"}";
+            string[,] shapes = {
+                { "Pictures \"x\"", "\"x\"" },
+                { "Pictures [1,2]", "[1,2]" },
+                { "Pictures {}", "{\"Id\":\"B\"}" },
+                { "Pictures null", "null" },
+                { "Data {...}", "[{\"Id\":\"B\",\"Data\":{\"a\":1}}]" },
+                { "Data [...]", "[{\"Id\":\"B\",\"Data\":[1,2]}]" },
+                { "Id 5", "[{\"Id\":5,\"Data\":\"x\"}]" },
+                { "list of strings / null / arrays", "[\"x\",null,[1],true]" } };
+            for (int i = 0; i < shapes.GetLength(0); i++)
+            {
+                string t = head + ",\"Pictures\":" + shapes[i, 1] + "}";
+                True("broken " + shapes[i, 0] + ": 3 quotes restore, 0 pictures", History.ReadBackup(t, out bd) == null
+                     && bd.Quotes.Count == 3 && bd.Pictures.Count == 0);
+            }
+            string mixed = head + ",\"Pictures\":[1,{\"Id\":\"A\",\"Data\":{}},\"s\"," + goodB + ",{\"Id\":\"C\",\"Data\":[1]}]}";
+            True("mixed Pictures list: the good B kept, the rest dropped", History.ReadBackup(mixed, out bd) == null
+                 && bd.Quotes.Count == 3 && bd.Pictures.Count == 1 && SameBytes(bd.Pictures["B"], pics["B"]));
+
+            // 6. Combine with pictures
+            var cur = new List<QuoteRecord> { BRec("A", "2026-11-01 10:00:00"), BRec("B", "2026-11-03 10:00:00") };
+            var inc = new BackupData { Quotes = new List<QuoteRecord> { BRec("A", "2026-11-01 10:00:00"), BRec("E", "2026-11-05 10:00:00") } };
+            inc.Pictures["A"] = pics["A"]; inc.Pictures["E"] = pics["D"];
+            Func<string, bool> hereA = delegate(string id) { return id == "A"; };
+            var m = History.Combine(cur, new AppSettings(), inc, false, false, hereA);
+            True("Combine merge: added E brings its picture, A keeps ours", m.Pictures.Count == 1 && m.Pictures.ContainsKey("E"));
+            m = History.Combine(cur, new AppSettings(), inc, false, false, delegate(string id) { return false; });
+            True("Combine merge: A has none here -> backup's A too", m.Pictures.Count == 2 && SameBytes(m.Pictures["A"], pics["A"]));
+            m = History.Combine(cur, new AppSettings(), inc, true, false, hereA);
+            True("Combine replace: the backup's pictures (A and E)", m.Pictures.Count == 2 && m.Pictures.ContainsKey("A"));
+            True("Combine old overload: no pictures here", History.Combine(cur, new AppSettings(), inc, false, false).Pictures.Count == 2);
+            True("Combine backup without pictures -> none", History.Combine(cur, new AppSettings(), new BackupData { Quotes = inc.Quotes }, false, false).Pictures.Count == 0);
+
+            // 7. FitForUpload: 60 jobs x 20 KB incompressible pictures, limit 512 KB
+            var many = new List<QuoteRecord>();
+            var manyPics = new Dictionary<string, byte[]>();
+            for (int i = 0; i < 60; i++)
+            {
+                var r = BRec("P" + i.ToString("00"), new DateTime(2026, 1, 1, 8, 0, 0).AddHours(i).ToString(History.TimeFormat, System.Globalization.CultureInfo.InvariantCulture));
+                many.Insert(0, r);   // newest first, as the history
+                manyPics[r.Id] = FakePng(20 * 1024, 100 + i);
+            }
+            var cands = History.PicturesForBackup(many, delegate(string id) { return manyPics[id]; }, History.FilePictureBudget);
+            True("60 pictures as candidates, newest P59 first", cands.Count == 60 && cands[0].Id == "P59");
+            string code = Backup.NewCode();
+            string fit = Backup.FitForUpload(many, new AppSettings(), "1.16.1", when, cands, OnlineBackup.MaxBlob);
+            byte[] blob = Backup.Pack(fit, code);
+            True("PackedSize = Pack length", Backup.PackedSize(fit) == blob.Length
+                 && Backup.PackedSize(plain) == Backup.Pack(plain, code).Length);
+            True("FitForUpload under 512 KB", blob.Length <= OnlineBackup.MaxBlob);
+            BackupData fd;
+            True("FitForUpload reads back", History.ReadBackup(Backup.Unpack(blob, code), out fd) == null && fd.Quotes.Count == 60);
+            bool newest = fd.Pictures.Count > 0;
+            for (int i = 0; i < fd.Pictures.Count; i++) if (!fd.Pictures.ContainsKey("P" + (59 - i).ToString("00"))) newest = false;
+            Console.WriteLine("INFO FitForUpload: " + fd.Pictures.Count + " of 60 pictures, blob " + blob.Length + " bytes");
+            // room ~ 512 - ~10 KB (60 records) - 16 = ~486 KB -> ~23 pictures of 20 KB
+            True("FitForUpload keeps the newest pictures (20-25 of 60)", newest && fd.Pictures.Count >= 20 && fd.Pictures.Count <= 25);
+            True("FitForUpload no pictures = ToBackup", Backup.FitForUpload(many, null, "1", when, null, OnlineBackup.MaxBlob) == History.ToBackup(many, null, "1", when));
+            True("FitForUpload: too small a limit -> backup without pictures", Backup.FitForUpload(many, null, "1", when, cands, 1000) == History.ToBackup(many, null, "1", when));
+
+            // 8. files: only in bin\test-pictures (test mode), never %APPDATA%
+            string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-pictures");
+            try
+            {
+                True("Pictures UseFolder test-pictures", AppSettings.UseFolder(dir));
+                if (System.IO.Directory.Exists(dir)) System.IO.Directory.Delete(dir, true);
+                System.IO.Directory.CreateDirectory(dir);
+                History.ResetBlock();
+                True("PictureDir in the test folder", string.Equals(History.PictureDir, System.IO.Path.Combine(dir, "pictures"), StringComparison.OrdinalIgnoreCase));
+                True("LoadPicture none -> null", History.LoadPicture("A") == null && !History.HasPicture("A"));
+                True("SavePicture jpeg", History.SavePicture("A", jpg) && SameBytes(History.LoadPicture("A"), jpg)
+                     && System.IO.File.Exists(System.IO.Path.Combine(History.PictureDir, "A.jpg")));
+                True("SavePicture png replaces the jpeg", History.SavePicture("A", png) && SameBytes(History.LoadPicture("A"), png)
+                     && !System.IO.File.Exists(System.IO.Path.Combine(History.PictureDir, "A.jpg")));
+                True("SavePicture unsafe id -> false, nothing written", !History.SavePicture(@"..\evil", png)
+                     && !System.IO.File.Exists(System.IO.Path.Combine(dir, "evil.png")));
+                True("SavePicture too big -> removed (= no picture)", History.SavePicture("A", tooBig) && History.LoadPicture("A") == null);
+                History.SavePicture("A", png);
+                True("SavePicture null deletes", History.SavePicture("A", null) && !History.HasPicture("A"));
+                History.SavePicture("A", png); History.SavePicture("W", webp);
+                True("webp kept as .webp", SameBytes(History.LoadPicture("W"), webp) && System.IO.File.Exists(System.IO.Path.Combine(History.PictureDir, "W.webp")));
+                True("CopyPicture A -> R", History.CopyPicture("A", "R") && SameBytes(History.LoadPicture("R"), png));
+                True("CopyPicture from none -> false", !History.CopyPicture("none", "R2") && !History.HasPicture("R2"));
+                True("DeletePicture", History.DeletePicture("R") && !History.HasPicture("R"));
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(History.PictureDir, "big.png"), tooBig);
+                True("LoadPicture over 96 KB file -> null", History.LoadPicture("big") == null);
+                True("PictureIds", J(SortedIds(History.PictureIds())) == "A|W|big");
+                // CleanPictures: keeps the list's and the newest safety copy's, removes the rest; never on empty list / blocked
+                History.SavePicture("S", png); History.SavePicture("Gone", png);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "history.before-restore-20261112-100000.json"),
+                    History.ToJson(new List<QuoteRecord> { BRec("S", "2026-11-01 10:00:00") }));
+                True("CleanPictures empty list -> 0 removed", History.CleanPictures(new List<QuoteRecord>()) == 0 && History.HasPicture("Gone"));
+                History.SetBlock();
+                True("CleanPictures while blocked -> 0", History.CleanPictures(new List<QuoteRecord> { BRec("A", "2026-11-01 10:00:00") }) == 0);
+                History.ResetBlock();
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(History.PictureDir, "X.png.tmp"), png);
+                int removed = History.CleanPictures(new List<QuoteRecord> { BRec("A", "2026-11-01 10:00:00") });
+                True("CleanPictures removed W, big, Gone; kept A and S (safety copy); .tmp gone", removed == 3
+                     && J(SortedIds(History.PictureIds())) == "A|S" && !System.IO.File.Exists(System.IO.Path.Combine(History.PictureDir, "X.png.tmp")));
+                True("OrphanPictures", J(History.OrphanPictures(new[] { "A", "B", null, "C" }, new List<QuoteRecord> { BRec("A", "2026-11-01 10:00:00") },
+                     new[] { BRec("C", "2026-11-01 10:00:00") })) == "B");
+
+                // Restore writes the pictures (merge: ours kept)
+                var here = new List<QuoteRecord> { BRec("A", "2026-11-01 10:00:00") };
+                True("Pictures test history saved", History.Save(here) == null);
+                var rb = new BackupData { Quotes = new List<QuoteRecord> { BRec("A", "2026-11-01 10:00:00"), BRec("E", "2026-11-05 10:00:00") } };
+                rb.Pictures["A"] = jpg; rb.Pictures["E"] = webp;
+                RestoreResult rr;
+                True("Restore with pictures OK", History.Restore(here, new AppSettings(), rb, false, false, when, out rr) == null);
+                True("Restore merge: E written, A kept ours", SameBytes(History.LoadPicture("E"), webp) && SameBytes(History.LoadPicture("A"), png));
+                True("BackupPictures = this PC's, newest first (E, A)", J(History.BackupPictures(rr.Quotes).ConvertAll(p => p.Id)) == "E|A");
+                // History.Add of the same quote again keeps its Id, so its picture stays matched
+                var l2 = new List<QuoteRecord>();
+                var first = HistRecord(new DateTime(2026, 11, 12, 9, 0, 0));
+                History.Add(l2, first);
+                History.Add(l2, HistRecord(new DateTime(2026, 11, 12, 9, 3, 0)));
+                True("Add same quote keeps the Id (picture key)", l2.Count == 1 && l2[0].Id == first.Id);
+            }
+            finally
+            {
+                History.ResetBlock();
+                AppSettings.ClearTestFolder();
+            }
+        }
+
+        static List<string> SortedIds(List<string> l)
+        {
+            var c = new List<string>(l);
+            c.Sort(StringComparer.Ordinal);
+            return c;
         }
 
         // ---------- online backup (OnlineBackup.cs, online): texts, size check, headers, fake Worker ----------

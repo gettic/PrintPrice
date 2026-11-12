@@ -306,7 +306,7 @@ namespace PrintPrice
             int cw = ClientSize.Width - 2 * Px(Edge);
             // box-high buttons: one width for both (text + 24 px, like Settings' Add… / Remove)
             int sw = Px(24);
-            foreach (var s in new[] { btnBrowse.Text, btnGet.Text, GettingText })
+            foreach (var s in new[] { btnBrowse.Text, btnGet.Text, GettingText, ReadingText })
                 sw = Math.Max(sw, TextRenderer.MeasureText(s, btnGet.Font).Width + Px(24));
             foreach (var b in new[] { btnShowCode, btnNewCode, btnDeleteOnline })
                 b.Size = new Size(TextRenderer.MeasureText(b.Text, b.Font).Width + Px(24), txtFile.Height);
@@ -405,6 +405,7 @@ namespace PrintPrice
         static string BackingUpText { get { return L.S("Backing up…", "Tager kopi…"); } }
         static string DeletingText { get { return L.S("Deleting…", "Sletter…"); } }
         static string GettingText { get { return L.S("Getting…", "Henter…"); } }
+        static string ReadingText { get { return L.S("Reading…", "Læser…"); } }
         static string CopiedText { get { return L.S("✓ Copied", "✓ Kopieret"); } }
 
         /// "Next online backup in 3:20:15" (the countdown in place of "Back up online" while the daily cap is reached).
@@ -521,7 +522,7 @@ namespace PrintPrice
             DateTime t;
             if (!settings.TryLastOnlineBackup(out t)) return L.S("Last online backup: none yet", "Seneste online-kopi: ingen endnu");
             return L.F("Last online backup: {0} · kept until {1}", "Seneste online-kopi: {0} · gemmes til {1}",
-                       t.ToString("dd-MM-yyyy HH:mm", Num.Dk), t.AddDays(OnlineBackup.KeptDays).ToString("dd-MM-yyyy", Num.Dk));
+                       t.ToString("dd-MM-yyyy HH:mm", Num.Dk), KeptUntil(t));
         }
 
         void Action()
@@ -541,12 +542,15 @@ namespace PrintPrice
             if (offline || busy) return;
             string old = settings.GetBackupCode();
             string code = newCode || old.Length == 0 ? Backup.NewCode() : Backup.Format(old);
-            string json = History.ToBackup(list, settings, Updater.CurrentText, DateTime.Now);
+            DateTime made = DateTime.Now;
             infoResult.Text = "";
             SetBusy(true, BackingUpText);
             UploadResult r = null;
             string error = null, deleteProblem = null;
-            try { r = await Task.Run(() => OnlineBackup.Upload(code, json)); }
+            // with the newest pictures that fit under the service's size limit (issue #4; the rest only in file backups),
+            // packed off the UI thread (pictures are read and the backup may be packed a few times)
+            try { r = await Task.Run(() => OnlineBackup.Upload(code, Backup.FitForUpload(list, settings, Updater.CurrentText, made,
+                                                                                         History.BackupPictures(list), OnlineBackup.MaxBlob))); }
             catch (OnlineBackupException ex)
             {
                 if (ex.DailyLimit)
@@ -559,7 +563,7 @@ namespace PrintPrice
             if (r != null)
             {
                 DateTime now = DateTime.Now;
-                settings.SetBackupCode(code);
+                bool stored = TryStoreCode(code);
                 settings.SetLastOnlineBackup(now);
                 settings.Save();
                 if (r.UploadsLeft == 0) limitUntilUtc = r.ResetUtc ?? NextUtcMidnight();
@@ -571,12 +575,37 @@ namespace PrintPrice
                 if (IsDisposed) return;
                 SetBusy(false, null);
                 ShowCode(code, now, true, r.UploadsLeft, deleteProblem);
+                if (!stored)
+                {
+                    infoCodeLeft.Text = (infoCodeLeft.Text.Length > 0 ? infoCodeLeft.Text + "\n" : "") + CodeNotStoredText();
+                    if (fitted) ShowPage();
+                }
                 return;
             }
             if (IsDisposed) return;
             SetBusy(false, null);
             infoResult.Kind = InfoKind.Error;
             infoResult.Text = error;
+        }
+
+        /// Remembers the code (encrypted by Windows, AppSettings.SetBackupCode). Windows can refuse (CryptographicException,
+        /// e.g. a damaged user profile): false, logged to errors.log, the code is not remembered.
+        bool TryStoreCode(string code)
+        {
+            try { settings.SetBackupCode(code); return true; }
+            catch (Exception ex) { ErrorReport.Log(ex); return false; }
+        }
+
+        static string CodeNotStoredText()
+        {
+            return L.S("Windows could not store the code on this PC, so it isn't remembered here: write it down now.",
+                       "Windows kunne ikke gemme koden på denne pc, så den huskes ikke her: skriv den ned nu.");
+        }
+
+        /// The date an online backup made at t is kept until ("?" for an impossible date near year 9999).
+        static string KeptUntil(DateTime t)
+        {
+            return t.Year < 9000 ? t.AddDays(OnlineBackup.KeptDays).ToString("dd-MM-yyyy", Num.Dk) : "?";
         }
 
         /// Show code: the remembered code on the code page (no network).
@@ -644,7 +673,7 @@ namespace PrintPrice
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 path = dlg.FileName;
             }
-            string err = History.WriteBackupFile(path, list, settings, Updater.CurrentText, now);
+            string err = History.WriteBackupFile(path, list, settings, Updater.CurrentText, now, History.BackupPictures(list));   // with the pictures
             if (err != null) { infoResult.Kind = InfoKind.Error; infoResult.Text = err; return; }
             infoResult.Kind = InfoKind.Success;
             infoResult.SetText(L.F("✓ Saved: {0}", "✓ Gemt: {0}", Path.GetFileName(path)), Path.GetDirectoryName(path));
@@ -690,7 +719,7 @@ namespace PrintPrice
                                      "Næste gang erstatter \"Tag kopi online\" denne kopi og beholder koden. Den nyeste kopi vinder altid, også hvis den ældre er lavet på en anden pc med denne kode."),
                                  when == DateTime.MinValue ? null
                                  : L.F("Last online backup: {0} · kept until {1}", "Seneste online-kopi: {0} · gemmes til {1}",
-                                       when.ToString("dd-MM-yyyy HH:mm", Num.Dk), when.AddDays(OnlineBackup.KeptDays).ToString("dd-MM-yyyy", Num.Dk)));
+                                       when.ToString("dd-MM-yyyy HH:mm", Num.Dk), KeptUntil(when)));
             codeShown = true;
             if (fitted) ShowPage();
         }
@@ -735,9 +764,12 @@ namespace PrintPrice
             SetBusy(false, null);
         }
 
-        void Browse()
+        /// Browse…: the file is read and parsed off the UI thread (a big backup with pictures can take a while); the inputs
+        /// are greyed out and the button says "Reading…" meanwhile, like Get backup.
+        async void Browse()
         {
-            if (offline) return;
+            if (offline || busy) return;
+            string path;
             using (var dlg = new OpenFileDialog
             {
                 Title = L.S("Restore backup", "Gendan sikkerhedskopi"), CheckFileExists = true,
@@ -746,12 +778,28 @@ namespace PrintPrice
             })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                BackupData d;
-                fileProblem = History.ReadBackupFile(dlg.FileName, out d);
-                fileData = d;
-                txtFile.Text = Path.GetFileName(dlg.FileName);
+                path = dlg.FileName;
             }
-            UpdateRestore();
+            fileData = null;
+            fileProblem = null;
+            txtFile.Text = Path.GetFileName(path);
+            string browseText = btnBrowse.Text;
+            SetBusy(true, null);
+            btnBrowse.Text = ReadingText;
+            string problem;
+            BackupData d = null;
+            try
+            {
+                var read = await Task.Run(() => { BackupData x; string p = History.ReadBackupFile(path, out x); return Tuple.Create(p, x); });
+                problem = read.Item1;
+                d = read.Item2;
+            }
+            catch (Exception ex) { problem = L.S("Backup could not be read: ", "Sikkerhedskopien kunne ikke læses: ") + ex.Message; }
+            if (IsDisposed) return;
+            fileProblem = problem;
+            fileData = problem == null ? d : null;
+            btnBrowse.Text = browseText;
+            SetBusy(false, null);   // UpdateRestore: the summary of the file
         }
 
         /// A typed code is wrong once it has a character that is never in a code, more than 20 characters, or 20 with
@@ -872,9 +920,12 @@ namespace PrintPrice
             // restored from a code with "Keep backing up to this code": online backups go to that code from now on
             if (!rbFromFile.Checked && chkKeep.Checked && codeLoaded.Length > 0)
             {
-                settings.SetBackupCode(codeLoaded);
-                settings.Save();
-                keptCode = true;
+                if (TryStoreCode(codeLoaded))
+                {
+                    settings.Save();
+                    keptCode = true;
+                }
+                else problem = (problem != null ? problem + "\n" : "") + CodeNotStoredText();
             }
             ShowDone(res, problem, SafetyCopy(now));
             UpdateBackup();   // the remembered code / Last online backup line

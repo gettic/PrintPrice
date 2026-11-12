@@ -4,6 +4,10 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 #if !WEB
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
 #endif
 
@@ -165,6 +169,23 @@ namespace PrintPrice
     public class BackupFileRead : BackupFile
     {
         public List<QuoteRecord> Quotes;
+        // no Pictures here on purpose: a broken "Pictures" part must never fail the records (History.ReadPictures reads it
+        // loosely in a second pass)
+    }
+
+    /// A backup with record pictures (issue #4): BackupFile + "Pictures":[{"Id":..,"Data":"data:image/png;base64,.."}].
+    /// Only written when there are pictures, so a backup without pictures is the same text as before. Older apps ignore
+    /// the extra member (Version stays 1).
+    public class BackupFileWithPictures : BackupFile
+    {
+        public List<BackupPicture> Pictures;
+    }
+
+    /// One record's small picture in a backup: the record's Id and a data URL (the string the website keeps under "pic:<Id>").
+    public class BackupPicture
+    {
+        public string Id;
+        public string Data;
     }
 
     /// A read backup (History.ReadBackup): the records (cleaned like Load does) and the settings.ini lines (null = none:
@@ -175,6 +196,8 @@ namespace PrintPrice
         public string[] Settings;
         public string CreatedAt = "";
         public string App = "";
+        /// Record Id -> picture bytes (PNG / JPEG / WebP, checked); empty = none (old backup, plain history.json).
+        public Dictionary<string, byte[]> Pictures = new Dictionary<string, byte[]>(StringComparer.Ordinal);
     }
 
     /// What a restore gives (History.Combine / Restore): the new history and settings, and counts for the message.
@@ -188,10 +211,12 @@ namespace PrintPrice
         public int Same;                  // same record here, nothing new
         public int PrintersMoved;         // printer ids moved to a new id (same id, different model)
         public List<string> InvoiceClashes = new List<string>();   // invoice codes now on 2+ different records (kept as they are)
+        /// Pictures to write (record Id -> bytes): replace = the backup's; merge = added records' and records that have none here.
+        public Dictionary<string, byte[]> Pictures = new Dictionary<string, byte[]>(StringComparer.Ordinal);
     }
 
     /// Price history: saved quotes in history.json next to settings.ini. Local only, never sent anywhere.
-    public static class History
+    public static partial class History
     {
         public const int Version = 1;
         public const int MaxQuotes = 5000;
@@ -1034,6 +1059,247 @@ namespace PrintPrice
         /// Tests only: as if history.json couldn't be read.
         internal static void SetBlock() { saveBlocked = true; }
 
+        // ---------- record pictures (issue #4) ----------
+        // One small picture per record in <Folder>\pictures\<Id>.png / .jpg (.webp only from a website backup), never in
+        // history.json. The website keeps the same pictures as data URLs under "pic:<Id>" (IndexedDB).
+
+        public const string PictureFolder = "pictures";
+        public const int PictureSize = 256;                         // px, longest side (= WebHistory.PictureSize)
+        public const int SmallPictureSize = 192;                    // second try when 256 px is over MaxPictureBytes
+        public const int MaxPictureBytes = 96 * 1024;               // per picture, on write and on read
+        public const long FilePictureBudget = 40L * 1024 * 1024;    // data URL characters in one backup file (web reads <= 64 MB)
+        static readonly string[] PictureExtensions = { ".png", ".jpg", ".webp" };
+
+        /// <Folder>\pictures (test mode: the test folder's).
+        public static string PictureDir
+        {
+            get { return Path.Combine(AppSettings.Folder, PictureFolder); }
+        }
+
+        /// An Id that can be a file name: 1-64 characters, only 0-9 A-Z a-z _ - (History.FromQuote Ids are 21 of them).
+        public static bool SafePictureId(string id)
+        {
+            if (string.IsNullOrEmpty(id) || id.Length > 64) return false;
+            foreach (char c in id)
+                if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || c == '-')) return false;
+            return true;
+        }
+
+        /// "image/png", "image/jpeg", "image/webp" by the first bytes; null = none of them.
+        public static string PictureMime(byte[] b)
+        {
+            if (b == null || b.Length < 12) return null;
+            if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47) return "image/png";
+            if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return "image/jpeg";
+            if (b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F' && b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P')
+                return "image/webp";
+            return null;
+        }
+
+        /// A usable picture: a known type and at most MaxPictureBytes.
+        public static bool ValidPicture(byte[] b)
+        {
+            return b != null && b.Length <= MaxPictureBytes && PictureMime(b) != null;
+        }
+
+        /// "data:image/png;base64,..." (the website's format); null for no / invalid picture.
+        public static string PictureDataUrl(byte[] b)
+        {
+            if (!ValidPicture(b)) return null;
+            return "data:" + PictureMime(b) + ";base64," + Convert.ToBase64String(b);
+        }
+
+        /// The bytes of a data URL from PictureDataUrl or the website; null on anything wrong (other type, bad base64,
+        /// type and bytes don't agree, too big). Never throws.
+        public static byte[] PictureFromDataUrl(string url)
+        {
+            if (url == null || !url.StartsWith("data:", StringComparison.Ordinal)) return null;
+            int comma = url.IndexOf(',');
+            if (comma < 0) return null;
+            string head = url.Substring(5, comma - 5);
+            if (!head.EndsWith(";base64", StringComparison.OrdinalIgnoreCase)) return null;
+            string mime = head.Substring(0, head.Length - 7).ToLowerInvariant();
+            if (mime != "image/png" && mime != "image/jpeg" && mime != "image/webp") return null;
+            if (url.Length - comma - 1 > (MaxPictureBytes / 3 + 1) * 4) return null;
+            byte[] b;
+            try { b = Convert.FromBase64String(url.Substring(comma + 1)); }
+            catch { return null; }
+            if (!ValidPicture(b) || PictureMime(b) != mime) return null;
+            return b;
+        }
+
+        static string PictureExtension(string mime)
+        {
+            return mime == "image/png" ? ".png" : mime == "image/jpeg" ? ".jpg" : mime == "image/webp" ? ".webp" : null;
+        }
+
+        /// Pictures for a backup, newest records first (by SavedAt), while the data URLs' total length stays within
+        /// budget (a picture that doesn't fit is skipped, smaller later ones may still go in). load(id) = bytes or null.
+        public static List<BackupPicture> PicturesForBackup(List<QuoteRecord> list, Func<string, byte[]> load, long budget)
+        {
+            var res = new List<BackupPicture>();
+            if (list == null || load == null || budget <= 0) return res;
+            var order = new List<QuoteRecord>();
+            foreach (var r in list) if (r != null && SafePictureId(r.Id)) order.Add(r);
+            var pos = new Dictionary<QuoteRecord, int>();
+            for (int i = 0; i < order.Count; i++) pos[order[i]] = i;
+            order.Sort(delegate(QuoteRecord a, QuoteRecord b)
+            {
+                DateTime ta, tb;
+                if (!TryTime(a.SavedAt, out ta)) ta = DateTime.MinValue;
+                if (!TryTime(b.SavedAt, out tb)) tb = DateTime.MinValue;
+                int c = tb.CompareTo(ta);
+                return c != 0 ? c : pos[a].CompareTo(pos[b]);
+            });
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            long used = 0;
+            foreach (var r in order)
+            {
+                if (!seen.Add(r.Id)) continue;
+                byte[] b;
+                try { b = load(r.Id); }
+                catch { b = null; }
+                string url = PictureDataUrl(b);
+                if (url == null || used + url.Length > budget) continue;
+                used += url.Length;
+                res.Add(new BackupPicture { Id = r.Id, Data = url });
+            }
+            return res;
+        }
+
+        /// Picture ids that no record in list (or in keepAlso) has: the files to remove.
+        public static List<string> OrphanPictures(IEnumerable<string> ids, List<QuoteRecord> list, IEnumerable<QuoteRecord> keepAlso)
+        {
+            var keep = new HashSet<string>(StringComparer.Ordinal);
+            if (list != null) foreach (var r in list) if (r != null && !string.IsNullOrEmpty(r.Id)) keep.Add(r.Id);
+            if (keepAlso != null) foreach (var r in keepAlso) if (r != null && !string.IsNullOrEmpty(r.Id)) keep.Add(r.Id);
+            var res = new List<string>();
+            if (ids != null) foreach (var id in ids) if (id != null && !keep.Contains(id)) res.Add(id);
+            return res;
+        }
+
+        // files
+
+        /// Keeps a record's picture (replaces an old one of any type). bytes null / invalid = removes it (a re-save without
+        /// a picture, as the website). true = done. Never throws.
+        public static bool SavePicture(string id, byte[] bytes)
+        {
+            if (!SafePictureId(id)) return false;
+            if (!ValidPicture(bytes)) return DeletePicture(id);
+            string dir = PictureDir, ext = PictureExtension(PictureMime(bytes));
+            string path = Path.Combine(dir, id + ext), tmp = path + ".tmp";
+            try
+            {
+                Directory.CreateDirectory(dir);
+                File.WriteAllBytes(tmp, bytes);
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
+                foreach (var e in PictureExtensions)
+                    if (e != ext) { string other = Path.Combine(dir, id + e); if (File.Exists(other)) File.Delete(other); }
+                return true;
+            }
+            catch
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                return false;
+            }
+        }
+
+        /// The record's picture bytes (checked: known type, <= MaxPictureBytes), null = none. Never throws.
+        public static byte[] LoadPicture(string id)
+        {
+            if (!SafePictureId(id)) return null;
+            try
+            {
+                foreach (var e in PictureExtensions)
+                {
+                    var f = new FileInfo(Path.Combine(PictureDir, id + e));
+                    if (!f.Exists) continue;
+                    if (f.Length > MaxPictureBytes) return null;
+                    byte[] b = File.ReadAllBytes(f.FullName);
+                    return ValidPicture(b) ? b : null;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static bool HasPicture(string id)
+        {
+            return LoadPicture(id) != null;
+        }
+
+        /// Removes the record's picture (all types). true = none left. Never throws.
+        public static bool DeletePicture(string id)
+        {
+            if (!SafePictureId(id)) return false;
+            bool ok = true;
+            foreach (var e in PictureExtensions)
+            {
+                try { string p = Path.Combine(PictureDir, id + e); if (File.Exists(p)) File.Delete(p); }
+                catch { ok = false; }
+            }
+            return ok;
+        }
+
+        /// Repeat print: the original's picture for the new record. false = the original has none (or it failed).
+        public static bool CopyPicture(string fromId, string toId)
+        {
+            byte[] b = LoadPicture(fromId);
+            return b != null && SavePicture(toId, b);
+        }
+
+        /// Ids that have a picture file.
+        public static List<string> PictureIds()
+        {
+            var res = new List<string>();
+            try
+            {
+                if (!Directory.Exists(PictureDir)) return res;
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var f in Directory.GetFiles(PictureDir))
+                {
+                    string ext = Path.GetExtension(f).ToLowerInvariant();
+                    string id = Path.GetFileNameWithoutExtension(f);
+                    if (Array.IndexOf(PictureExtensions, ext) >= 0 && SafePictureId(id) && seen.Add(id)) res.Add(id);
+                }
+            }
+            catch { }
+            return res;
+        }
+
+        /// Removes pictures no record has (deleted, trimmed, replaced), and leftover .tmp files. Pictures of the records in
+        /// the newest history.before-restore-*.json stay, so undoing a Replace restore keeps them. Returns how many
+        /// pictures were removed. Never throws. Call once per run after loading the history, not after every change.
+        /// Does nothing for an empty list or while history.json couldn't be read (a failed load must never cost pictures).
+        public static int CleanPictures(List<QuoteRecord> list)
+        {
+            if (list == null || list.Count == 0 || saveBlocked) return 0;
+            List<QuoteRecord> safety = null;
+            try
+            {
+                string dir = Path.GetDirectoryName(FilePath);
+                if (Directory.Exists(dir))
+                {
+                    string newest = null;
+                    foreach (var f in Directory.GetFiles(dir, "history.before-restore-*.json"))
+                        if (newest == null || File.GetLastWriteTimeUtc(f) > File.GetLastWriteTimeUtc(newest)) newest = f;
+                    if (newest != null) safety = ParseJson(File.ReadAllText(newest, Encoding.UTF8));
+                }
+            }
+            catch { safety = null; }
+            int n = 0;
+            foreach (var id in OrphanPictures(PictureIds(), list, safety))
+                if (DeletePicture(id)) n++;
+            try
+            {
+                if (Directory.Exists(PictureDir))
+                    foreach (var f in Directory.GetFiles(PictureDir, "*.tmp")) File.Delete(f);
+            }
+            catch { }
+            return n;
+        }
+
         // ---------- backup and restore (idea 27) ----------
 
         public const string BackupFormat = "PrintPriceBackup";
@@ -1052,17 +1318,40 @@ namespace PrintPrice
         /// The backup text (BackupFile JSON): all records, and the settings.ini lines without PcOnlyKeys (s null = history only).
         public static string ToBackup(List<QuoteRecord> list, AppSettings s, string app, DateTime now)
         {
+            return ToBackup(list, s, app, now, null);
+        }
+
+        /// ToBackup with record pictures (PicturesForBackup). Only pictures of records in list, each Id once, valid data
+        /// URLs; none left = exactly the text without pictures. Version stays 1 (older apps ignore "Pictures").
+        public static string ToBackup(List<QuoteRecord> list, AppSettings s, string app, DateTime now, List<BackupPicture> pictures)
+        {
             List<string> lines = null;
             if (s != null)
             {
                 lines = new List<string>();
                 foreach (var l in s.ToIni()) if (!IsPcOnly(l)) lines.Add(l);
             }
-            return Json.Serialize(new BackupFile
+            if (list == null) list = new List<QuoteRecord>();
+            var pics = new List<BackupPicture>();
+            if (pictures != null && pictures.Count > 0)
             {
-                Format = BackupFormat, Version = BackupVersion, CreatedAt = Stamp(now), App = app ?? "",
-                History = new HistoryFile { Version = Version, Quotes = list ?? new List<QuoteRecord>() },
-                Settings = lines
+                var ids = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var r in list) if (r != null && SafePictureId(r.Id)) ids.Add(r.Id);
+                var done = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var p in pictures)
+                    if (p != null && p.Id != null && ids.Contains(p.Id) && PictureFromDataUrl(p.Data) != null && done.Add(p.Id))
+                        pics.Add(new BackupPicture { Id = p.Id, Data = p.Data });
+            }
+            var hf = new HistoryFile { Version = Version, Quotes = list };
+            if (pics.Count == 0)
+                return Json.Serialize(new BackupFile
+                {
+                    Format = BackupFormat, Version = BackupVersion, CreatedAt = Stamp(now), App = app ?? "", History = hf, Settings = lines
+                });
+            return Json.Serialize(new BackupFileWithPictures
+            {
+                Format = BackupFormat, Version = BackupVersion, CreatedAt = Stamp(now), App = app ?? "", History = hf, Settings = lines,
+                Pictures = pics
             });
         }
 
@@ -1106,6 +1395,7 @@ namespace PrintPrice
                     foreach (var x in b.Settings) if (!IsPcOnly(x)) l.Add(x);
                     data.Settings = l.ToArray();
                 }
+                ReadPictures(text, data);
                 return null;
             }
             if (b.Format != null) return notBackup;
@@ -1114,6 +1404,44 @@ namespace PrintPrice
             if (b.Version > Version) return newer;
             if (b.Version != Version) return notBackup;
             data = new BackupData { Quotes = CleanQuotes(b.Quotes) };
+            return null;
+        }
+
+        // a backup's pictures into data.Pictures, read loosely in a second, untyped parse (Dictionary / ArrayList / string
+        // shapes on both the desktop and the website Json): only for its records (safe Id), first one per Id, valid data
+        // URLs; any other shape ("Pictures":"x", [1,2], "Data":{..}) is dropped quietly, the records always restore
+        static void ReadPictures(string text, BackupData data)
+        {
+            if (text == null || text.IndexOf("\"Pictures\"", StringComparison.OrdinalIgnoreCase) < 0) return;
+            object list;
+            try
+            {
+                var top = Json.Deserialize<Dictionary<string, object>>(text);
+                list = Member(top, "Pictures");
+            }
+            catch { return; }
+            var items = list as System.Collections.IEnumerable;
+            if (items == null || list is string) return;
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var r in data.Quotes) if (r != null && SafePictureId(r.Id)) ids.Add(r.Id);
+            foreach (var item in items)
+            {
+                var d = item as IDictionary<string, object>;
+                if (d == null) continue;
+                string id = Member(d, "Id") as string, url = Member(d, "Data") as string;
+                if (id == null || url == null || !ids.Contains(id) || data.Pictures.ContainsKey(id)) continue;
+                byte[] b = PictureFromDataUrl(url);
+                if (b != null) data.Pictures[id] = b;
+            }
+        }
+
+        // a JSON object's member by name (exact, else ignoring case); null when missing or not an object
+        static object Member(IDictionary<string, object> d, string name)
+        {
+            if (d == null) return null;
+            object v;
+            if (d.TryGetValue(name, out v)) return v;
+            foreach (var kv in d) if (string.Equals(kv.Key, name, StringComparison.OrdinalIgnoreCase)) return kv.Value;
             return null;
         }
 
@@ -1232,6 +1560,14 @@ namespace PrintPrice
         public static RestoreResult Combine(List<QuoteRecord> current, AppSettings currentSettings, BackupData backup,
                                             bool replace, bool withSettings)
         {
+            return Combine(current, currentSettings, backup, replace, withSettings, null);
+        }
+
+        /// Combine with pictures: RestoreResult.Pictures = the backup's pictures of records in the result; replace: all of
+        /// them; merge: added records', and a same record's only when hasPicture(id) says this PC has none (null = none here).
+        public static RestoreResult Combine(List<QuoteRecord> current, AppSettings currentSettings, BackupData backup,
+                                            bool replace, bool withSettings, Func<string, bool> hasPicture)
+        {
             if (backup == null) throw new ArgumentNullException("backup");
             if (currentSettings == null) currentSettings = new AppSettings();
             var res = new RestoreResult();
@@ -1256,6 +1592,7 @@ namespace PrintPrice
 
             // merge
             var index = new Dictionary<string, QuoteRecord>(StringComparer.Ordinal);
+            var addedIds = new HashSet<string>(StringComparer.Ordinal);
             var all = new List<QuoteRecord>(cur.Count + inc.Count);
             foreach (var r in cur)
             {
@@ -1275,6 +1612,7 @@ namespace PrintPrice
                 index[k] = r;
                 all.Add(r);
                 res.Added++;
+                if (!string.IsNullOrEmpty(r.Id)) addedIds.Add(r.Id);
             }
             var order = new Dictionary<QuoteRecord, int>();
             for (int i = 0; i < all.Count; i++) order[all[i]] = i;
@@ -1308,6 +1646,23 @@ namespace PrintPrice
                 if (n + 1 == 2) res.InvoiceClashes.Add(c);
             }
 
+            // pictures
+            if (backup.Pictures != null && backup.Pictures.Count > 0)
+            {
+                var kept = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var r in all) if (!string.IsNullOrEmpty(r.Id)) kept.Add(r.Id);
+                foreach (var p in backup.Pictures)
+                {
+                    if (!kept.Contains(p.Key) || !SafePictureId(p.Key) || !ValidPicture(p.Value)) continue;
+                    bool here = false;
+                    if (!replace && !addedIds.Contains(p.Key) && hasPicture != null)
+                    {
+                        try { here = hasPicture(p.Key); } catch { here = false; }
+                    }
+                    if (!here) res.Pictures[p.Key] = p.Value;
+                }
+            }
+
             res.Quotes = all;
             res.Settings = rs;
             return res;
@@ -1326,7 +1681,7 @@ namespace PrintPrice
                 return L.S("Backup not restored: the price history file could not be read.",
                            "Sikkerhedskopien blev ikke gendannet: prishistorik-filen kunne ikke læses.");
             RestoreResult r;
-            try { r = Combine(current, settings, backup, replace, withSettings); }
+            try { r = Combine(current, settings, backup, replace, withSettings, HasPicture); }
             catch (Exception ex) { return L.S("Backup not restored: ", "Sikkerhedskopien blev ikke gendannet: ") + ex.Message; }
             string hist = FilePath, ini = AppSettings.FilePath;
             try
@@ -1343,6 +1698,7 @@ namespace PrintPrice
             string problem = Save(r.Quotes);
             if (problem != null) return problem;
             result = r;
+            foreach (var p in r.Pictures) SavePicture(p.Key, p.Value);   // quiet: a missing picture never fails a restore
             try { File.WriteAllLines(ini, r.Settings.ToIni()); }
             catch (Exception ex)
             {
@@ -1355,9 +1711,16 @@ namespace PrintPrice
         /// Writes a backup file (ToBackup). null = OK, else the problem text. Never throws.
         public static string WriteBackupFile(string path, List<QuoteRecord> list, AppSettings s, string app, DateTime now)
         {
+            return WriteBackupFile(path, list, s, app, now, null);
+        }
+
+        /// WriteBackupFile with pictures (e.g. BackupPictures(list)).
+        public static string WriteBackupFile(string path, List<QuoteRecord> list, AppSettings s, string app, DateTime now,
+                                             List<BackupPicture> pictures)
+        {
             try
             {
-                File.WriteAllText(path, ToBackup(list, s, app, now), new UTF8Encoding(false));
+                File.WriteAllText(path, ToBackup(list, s, app, now, pictures), new UTF8Encoding(false));
                 return null;
             }
             catch (Exception ex)
@@ -1375,7 +1738,102 @@ namespace PrintPrice
             catch (Exception ex) { return L.S("Backup could not be read: ", "Sikkerhedskopien kunne ikke læses: ") + ex.Message; }
             return ReadBackup(text, out data);
         }
+
+        /// This PC's pictures for a backup file: newest first within FilePictureBudget (= PicturesForBackup with LoadPicture).
+        public static List<BackupPicture> BackupPictures(List<QuoteRecord> list)
+        {
+            return PicturesForBackup(list, LoadPicture, FilePictureBudget);
+        }
     }
+
+#if !WEB
+    public static partial class History
+    {
+        /// The small picture kept with a record (issue #4): longest side PictureSize (256 px), PNG when it has transparent
+        /// pixels (Bambu plate pictures), else JPEG quality 85 (photos); over MaxPictureBytes -> again at 192 px; still
+        /// over -> null. null image -> null. Never throws. Doesn't change or dispose img.
+        public static byte[] EncodePicture(Image img)
+        {
+            if (img == null) return null;
+            try
+            {
+                foreach (int size in new[] { PictureSize, SmallPictureSize })
+                {
+                    byte[] b = EncodePictureAt(img, size);
+                    if (b != null && b.Length <= MaxPictureBytes) return b;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        internal static byte[] EncodePictureAt(Image img, int max)
+        {
+            int iw = img.Width, ih = img.Height;
+            if (iw <= 0 || ih <= 0) return null;
+            double k = Math.Min(1.0, max / (double)Math.Max(iw, ih));
+            int w = Math.Max(1, (int)Math.Round(iw * k)), h = Math.Max(1, (int)Math.Round(ih * k));
+            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                using (var ia = new ImageAttributes())
+                {
+                    g.Clear(Color.Transparent);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.CompositingQuality = CompositingQuality.HighQuality;
+                    ia.SetWrapMode(WrapMode.TileFlipXY);   // no half-transparent edge on opaque pictures
+                    g.DrawImage(img, new Rectangle(0, 0, w, h), 0, 0, iw, ih, GraphicsUnit.Pixel, ia);
+                }
+                using (var ms = new MemoryStream())
+                {
+                    if (HasTransparency(bmp)) bmp.Save(ms, ImageFormat.Png);
+                    else
+                    {
+                        ImageCodecInfo jpeg = null;
+                        foreach (var c in ImageCodecInfo.GetImageEncoders()) if (c.MimeType == "image/jpeg") jpeg = c;
+                        using (var ep = new EncoderParameters(1))
+                        {
+                            ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 85L);
+                            bmp.Save(ms, jpeg, ep);
+                        }
+                    }
+                    return ms.ToArray();
+                }
+            }
+        }
+
+        static bool HasTransparency(Bitmap bmp)
+        {
+            var rect = new Rectangle(0, 0, bmp.Width, bmp.Height);
+            BitmapData d = bmp.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            try
+            {
+                var row = new byte[bmp.Width * 4];
+                for (int y = 0; y < bmp.Height; y++)
+                {
+                    Marshal.Copy(new IntPtr(d.Scan0.ToInt64() + (long)y * d.Stride), row, 0, row.Length);
+                    for (int i = 3; i < row.Length; i += 4) if (row[i] != 255) return true;
+                }
+                return false;
+            }
+            finally { bmp.UnlockBits(d); }
+        }
+
+        /// A stored picture as an Image (caller disposes), null = none or not readable here (WebP: GDI+ can't). Never throws.
+        public static Image PictureImage(byte[] bytes)
+        {
+            if (!ValidPicture(bytes) || PictureMime(bytes) == "image/webp") return null;
+            try
+            {
+                using (var ms = new MemoryStream(bytes))
+                using (var img = Image.FromStream(ms))
+                    return new Bitmap(img);   // a copy that doesn't need the stream
+            }
+            catch { return null; }
+        }
+    }
+#endif
 
 #if !WEB
     /// All JSON goes through here (History.ToJson / ParseJson). Desktop: JavaScriptSerializer (System.Web.Extensions).

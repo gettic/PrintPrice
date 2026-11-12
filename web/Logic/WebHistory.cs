@@ -10,9 +10,12 @@ namespace PrintPrice.Web
     public static class WebHistory
     {
         public const string HistoryKey = "history";      // IndexedDB key: the history.json text
-        public const string PicturePrefix = "pic:";      // + record Id: the small model picture (data URL), never in backups
+        public const string PicturePrefix = "pic:";      // + record Id: the small model picture (data URL; in backups as BackupFile Pictures)
         public const string BadPrefix = "history.bad-";  // + time: an unreadable history kept as it was
-        public const int PictureSize = 256;              // px, longest side of a kept picture
+        public const int PictureSize = History.PictureSize;            // px, longest side of a kept picture (= the desktop)
+        public const int SmallPictureSize = History.SmallPictureSize;  // second try when PictureSize is too big
+        /// Most base64 characters after the comma of a kept picture's data URL (= History.MaxPictureBytes).
+        public const int MaxPictureChars = (History.MaxPictureBytes + 2) / 3 * 4;
         public const int ShowStep = 200;                 // rows shown at once ("Show more" adds as many again)
         public const int MaxNote = 200;                  // as HistoryForm's Note column
 
@@ -52,6 +55,78 @@ namespace PrintPrice.Web
             foreach (var k in keys)
                 if (k != null && k.StartsWith(PicturePrefix, StringComparison.Ordinal) && !ids.Contains(k.Substring(PicturePrefix.Length)))
                     res.Add(k);
+            return res;
+        }
+
+        // ---------- pictures in backups (issue #4) ----------
+
+        /// The record Id of a "pic:<Id>" key, or null for other keys.
+        public static string PictureId(string key)
+        {
+            return key != null && key.StartsWith(PicturePrefix, StringComparison.Ordinal) && key.Length > PicturePrefix.Length
+                ? key.Substring(PicturePrefix.Length) : null;
+        }
+
+        /// The record ids that have a picture, from IndexedDB's "pic:" keys.
+        public static HashSet<string> PictureIds(IEnumerable<string> keys)
+        {
+            var res = new HashSet<string>(StringComparer.Ordinal);
+            if (keys != null) foreach (var k in keys) { string id = PictureId(k); if (id != null) res.Add(id); }
+            return res;
+        }
+
+        /// A kept picture that should be made again before it goes into a backup: WebP (the desktop can't show it; made
+        /// by the website before v1.17) or anything History.PictureFromDataUrl refuses (other type, too big).
+        public static bool NeedsConvert(string dataUrl)
+        {
+            if (string.IsNullOrEmpty(dataUrl)) return false;
+            if (dataUrl.StartsWith("data:image/webp", StringComparison.OrdinalIgnoreCase)) return true;
+            return History.PictureFromDataUrl(dataUrl) == null;
+        }
+
+        /// The ids of list's records that may have a picture, in History.PicturesForBackup's order (newest SavedAt first,
+        /// unreadable times last, list order on ties), each once; only ids in have (null = all).
+        public static List<string> NewestPictureIds(List<QuoteRecord> list, HashSet<string> have)
+        {
+            var order = new List<QuoteRecord>();
+            if (list != null) foreach (var r in list) if (r != null && History.SafePictureId(r.Id) && (have == null || have.Contains(r.Id))) order.Add(r);
+            var pos = new Dictionary<QuoteRecord, int>();
+            for (int i = 0; i < order.Count; i++) pos[order[i]] = i;
+            order.Sort(delegate (QuoteRecord a, QuoteRecord b)
+            {
+                DateTime ta, tb;
+                if (!History.TryTime(a.SavedAt, out ta)) ta = DateTime.MinValue;
+                if (!History.TryTime(b.SavedAt, out tb)) tb = DateTime.MinValue;
+                int c = tb.CompareTo(ta);
+                return c != 0 ? c : pos[a].CompareTo(pos[b]);
+            });
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var res = new List<string>();
+            foreach (var r in order) if (seen.Add(r.Id)) res.Add(r.Id);
+            return res;
+        }
+
+        /// The backup's pictures from the loaded data URLs (id -> data URL): History.PicturesForBackup within budget.
+        public static List<BackupPicture> BackupPictures(List<QuoteRecord> list, Dictionary<string, string> urls, long budget)
+        {
+            return History.PicturesForBackup(list, id =>
+            {
+                string u;
+                return urls != null && urls.TryGetValue(id, out u) ? History.PictureFromDataUrl(u) : null;
+            }, budget);
+        }
+
+        /// A restore's pictures as IndexedDB writes ("pic:<Id>" -> data URL); invalid ones are left out.
+        public static List<KeyValuePair<string, string>> PictureWrites(RestoreResult r)
+        {
+            var res = new List<KeyValuePair<string, string>>();
+            if (r == null || r.Pictures == null) return res;
+            foreach (var p in r.Pictures)
+            {
+                if (!History.SafePictureId(p.Key)) continue;
+                string url = History.PictureDataUrl(p.Value);
+                if (url != null) res.Add(new KeyValuePair<string, string>(PictureKey(p.Key), url));
+            }
             return res;
         }
 

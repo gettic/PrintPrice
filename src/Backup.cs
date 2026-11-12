@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -229,6 +230,49 @@ namespace PrintPrice
         public static string Damaged()
         {
             return L.S("Wrong code, or the backup is damaged.", "Forkert kode, eller sikkerhedskopien er beskadiget.");
+        }
+
+        // ---------- online backup with pictures (issue #4) ----------
+
+        public const int UploadMargin = 16 * 1024;   // room kept free under the limit when adding pictures
+
+        /// The length Pack(json, code) gives, for any code (the IV is random but fixed-length): "PPB1" + IV + the AES-CBC/
+        /// PKCS7 blocks of the gzipped text + HMAC.
+        public static int PackedSize(string backupJson)
+        {
+            int gz = Gzip(Encoding.UTF8.GetBytes(backupJson ?? "")).Length;
+            return Magic.Length + IvLength + (gz / 16 + 1) * 16 + MacLength;
+        }
+
+        /// The backup text for an online upload: History.ToBackup with as many of the newest pictures as fit, so the packed
+        /// blob stays <= maxBlob (OnlineBackup.MaxBlob). pictures = newest first (History.BackupPictures / PicturesForBackup).
+        /// Room = maxBlob - the size without pictures - UploadMargin; pictures are taken newest first while their bytes fit
+        /// (a data URL gzips back to about its picture's bytes), then halved (newest half kept) while the packed size is
+        /// still over. When even the backup without pictures is too big, that one is returned (Upload reports the size).
+        public static string FitForUpload(List<QuoteRecord> list, AppSettings s, string app, DateTime now,
+                                          List<BackupPicture> pictures, int maxBlob)
+        {
+            string plain = History.ToBackup(list, s, app, now);
+            if (pictures == null || pictures.Count == 0) return plain;
+            long room = (long)maxBlob - PackedSize(plain) - UploadMargin;
+            if (room <= 0) return plain;
+            var take = new List<BackupPicture>();
+            long used = 0;
+            foreach (var p in pictures)
+            {
+                if (p == null || p.Data == null) continue;
+                long cost = (long)p.Data.Length * 3 / 4;
+                if (used + cost > room) continue;
+                used += cost;
+                take.Add(p);
+            }
+            for (int attempt = 0; attempt < 8 && take.Count > 0; attempt++)
+            {
+                string json = History.ToBackup(list, s, app, now, take);
+                if (PackedSize(json) <= maxBlob) return json;
+                take = take.GetRange(0, take.Count / 2);
+            }
+            return plain;
         }
 
         public static byte[] Gzip(byte[] data)

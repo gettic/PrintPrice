@@ -36,11 +36,13 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 **History:** the **History** tab is the price history of the Windows app in the browser.
 - **Save to history** on the calculator saves the quote. The tab has the search, the **Month**, **Show** and **Printer** filters and the month cards. In the list you can change **For**, **Note**, **Printed** and **Failed**, **Delete**, **Open again** and **Repeat print**. Failed prints pay themselves back, like in the app.
 - On the site there is no slicing, so **Repeat print** uses the saved time and grams with today's prices. Drop the sliced file again to update them.
+- Each saved job keeps a small picture (256 px), shown in Open again, Repeat print, Quote… and Invoice…. Deleting the job deletes its picture.
 - The history is kept in this browser only, in the same `history.json` format as the desktop app. Clearing the browser's site data deletes it. Safari can delete a site's storage after 7 days without a visit.
 
 **Backup and restore:** **Backup…** on the History tab opens the Backup window, like the app's.
 - **Back up** saves a `.printprice-backup` file that the Windows app can restore too. It is not locked with a code and holds customer names and payment details, so keep it private. Or back up **online** with the same 20-character code as in the app. The code is typed each time and the site never remembers it. The backup is locked in your browser before it is sent.
 - **Restore** takes a `.printprice-backup` (from the site or the app), the app's `history.json`, or an online code. Choose **Merge** or **Replace**, and optionally **Also restore the settings**. A safety copy of what was there is kept first, and you can download it afterwards.
+- Backups hold each job's small picture too, both ways with the app. A file backup takes the newest pictures first, up to 20 MB, and an online backup the newest that fit. **Merge** keeps pictures already in the browser, **Replace** uses the backup's. The safety copy includes the pictures, and Restore shows how many pictures a backup has.
 - A **Last backup** line under the list reminds you to back up. It turns into a warning if you never backed up or the last backup is over 30 days old.
 
 **Quote and invoice:** **Show quote…** on the calculator, and **Quote…** and **Invoice…** on the History tab, open the A4 page, like the app's.
@@ -115,6 +117,7 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Invoice…** makes a bill: the title is Invoice, with a random invoice code (for example 2026-K7Q4), the invoice date and a due date. A customer name is required ("Bill to"). A **Payment** block with MobilePay and/or bank details shows only if you set them in Settings. Making an invoice ticks **Printed**. The code shows in the **Invoice** column. The due date and payment details are kept with the invoice.
   - **Repeat print** prices the same print again with today's filament and electricity prices and slices the saved link or file again. If that isn't possible, the saved time and weight are used, with a note. The info box shows "Was … → now …". A repeat is never merged with its original.
   - **Open again** (or double-click, or Enter) puts the inputs back, including the filament name and colour, and recalculates with today's settings. The model box shows the saved price next to today's. Open again and **Repeat print** switch back to the quote's printer, if you still have it.
+  - **Picture:** each saved job keeps a small picture (256 px) of the model in `%APPDATA%\PrintPrice\pictures`. **Open again**, **Repeat print** and a saved job's **Quote…** / **Invoice…** show it. Deleting a job in History deletes its picture.
   - All actions are also in the right-click menu.
   - The same quote saved again within 10 minutes replaces the last one. The newest 5000 quotes are kept.
   - Saved quote and invoice files are named `<date> <model> - <name>`.
@@ -125,11 +128,13 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
 - **Backup and restore:** the Backup window has two tabs.
   - **Back up** saves the price history and your settings to a `.printprice-backup` file. The file is not locked with a code, and it holds customer names and payment details, so keep it somewhere private.
   - **Restore** reads a backup file or a `history.json`. **Merge** adds the backup's quotes to the ones on this PC. **Replace** swaps this PC's history for the backup's, and asks first. **Also restore the settings** is possible when the file has settings; the Bambu Studio path stays as it is.
+  - File backups include all the pictures of the saved jobs. Online backups take only the newest pictures that fit the service's size limit. A backup from the website restores its pictures too.
   - A safety copy of the current history and settings is saved first, next to them (`history.before-restore-<date>-<time>.json`).
   - **Online, with a code** sends the encrypted history and settings to the backup service and shows a 20-character code (**Copy**). Keep the code safe: it is the only way to get the backup back, it can't be reset, and anyone who has it can read the backup. This PC remembers the code (**Show code**, **New code…**, **Delete online backup…**) and shows "Last online backup: … · kept until …". A backup is kept 400 days after the last upload. The newest upload replaces the older one, also when it comes from another PC with the same code.
   - **Restore from an online code:** choose **An online code**, type the code and click **Get backup**. **Keep backing up to this code** makes later online backups go to that code.
   - **5 online backups a day.** With 1 or 2 left, a note says so. When the limit is reached, the button counts down to the next one ("Next online backup in 3:20:15").
 - **Windows:** every window can be dragged by any empty spot. All text (labels, info boxes, prices, status line) can be marked with the mouse and copied with Ctrl+C or right-click Copy. Double-click marks a word.
+- **If something goes wrong:** an unexpected error shows the app's own dark "Something went wrong" window instead of Windows' crash dialog, and the app stays open. **Continue** goes on, **Copy details** copies the error (paste it into an issue; there is a link to report it on GitHub), and **Close PrintPrice** closes the app. Each error is also written to `errors.log` in `%APPDATA%\PrintPrice`, without your user name or profile path.
 - **Auto-update:** at startup, and then every 10 minutes while the program is open, the app checks this repo's latest release. If there is a newer version, a red **Update to vX** button appears under the Friends & family price. Click it to see what's new in every version since yours (it scrolls if long), then choose **Update now** or **Later**. The download is verified against GitHub's SHA-256 checksum before it's installed. You can switch the check off in Settings (**Check for new versions automatically**); that switches off the 10-minute check too. Opening Settings also checks once (if the automatic check is on). Next to the version number in Settings, **check now** looks once when you click it. A newer version shows there and as the red update button.
 
 ## How prices are calculated
@@ -198,9 +203,9 @@ The website sends nothing about you either. Your settings, price history and fil
 
 Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer, and reads its printer and filament profiles (for slicing and the material drop-down) and the printer pictures from its install folder. This stays on your PC and is never sent anywhere.
 
-Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\history.json` and are never sent anywhere. Delete that file to clear the history. If the file is damaged, the app keeps it as `history.bad-<date>-<time>.json` in the same folder and starts with an empty history.
+Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\history.json` and are never sent anywhere. Their small pictures are in `%APPDATA%\PrintPrice\pictures`, also only on this PC unless you put them in a backup. On the website they stay in the browser. Errors are written to `errors.log` in the same folder and are never sent; **Copy details** puts them on the clipboard only when you click it. Delete `history.json` to clear the history. If the file is damaged, the app keeps it as `history.bad-<date>-<time>.json` in the same folder and starts with an empty history.
 
-A backup file holds your price history (customer names) and your settings (including MobilePay and bank details). A backup file is written only where you choose to save it and is not locked with a code, so keep it private. An online backup is locked with its code on your PC before it is sent, and nothing is sent unless you click an online button. A restore also leaves safety copies (`history.before-restore-*.json`, `settings.before-restore-*.ini`) in `%APPDATA%\PrintPrice`.
+A backup file holds your price history (customer names), the jobs' pictures and your settings (including MobilePay and bank details). A backup file is written only where you choose to save it and is not locked with a code, so keep it private. An online backup is locked with its code on your PC before it is sent, and nothing is sent unless you click an online button. A restore also leaves safety copies (`history.before-restore-*.json`, `settings.before-restore-*.ini`) in `%APPDATA%\PrintPrice`.
 
 **Open in Studio** starts the Bambu Studio program on your PC with a copy of the sliced file. The copy is kept in `%TEMP%\PrintPrice\studio\` (older copies are deleted) and is never sent anywhere. Bambu Studio may add it to its own list of recent projects.
 
@@ -237,6 +242,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/PrinterPickerForm.cs` | The Choose printer window |
 | `src/QuotePage.cs`, `src/QuoteForm.cs` | The quote and invoice page (picture, PDF) and its window |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |
+| `src/ErrorForm.cs` | The "Something went wrong" window and `errors.log` |
 | `src/Lang.cs` | English and Danish texts |
 | `src/Screenshots.cs` | Hidden `--screenshots` picture mode |
 | `tests/PricingTests.cs` | Unit tests |

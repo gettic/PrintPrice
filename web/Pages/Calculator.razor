@@ -964,7 +964,8 @@ else
         var a = new WebBackup.Applied();
         if (Histories.Available)
         {
-            string err = await Histories.SaveSafety(safetyKey, WebBackup.FileText(history, settings, DateTime.Now));
+            var pictures = await Histories.BackupPictures(history, WebBackup.PictureBudget);   // a Replace drops pictures: the safety copy keeps them
+            string err = await Histories.SaveSafety(safetyKey, WebBackup.FileText(history, settings, DateTime.Now, pictures));
             if (err != null) { a.Problem = err; return a; }
             a.SafetyKept = true;
         }
@@ -983,6 +984,7 @@ else
         historyProblem = a.Problem;
         await SaveSettings();
         await Store.SetPageLanguage(L.Danish, Title);
+        if (a.Problem == null) await Histories.WritePictures(WebHistory.PictureWrites(res));   // the backup's pictures (Merge keeps ours)
         _ = Histories.CleanPictures(history);
         StateHasChanged();   // the History page behind the dialog shows the restored list at once
         return a;

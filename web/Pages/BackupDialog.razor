@@ -58,7 +58,7 @@
                 }
                 else
                 {
-                    <button class="accent" @onclick="SaveFile">@L.S("Save file…", "Gem fil…")</button>
+                    <button class="accent" disabled="@busy" @onclick="SaveFile">@L.S("Save file…", "Gem fil…")</button>
                 }
                 <button @onclick="Close">@L.S("Close", "Luk")</button>
             </div>
@@ -218,11 +218,18 @@
 
     async Task SaveFile()
     {
-        var now = DateTime.Now;
-        bool ok = await Store.Download(History.BackupFileName(now), WebBackup.FileText(Quotes, Settings, now));
-        if (!ok) { SetStatus(L.S("The browser didn't save the file.", "Browseren gemte ikke filen."), 2); return; }
-        SetStatus(L.F("✓ Saved: {0} (in the browser's downloads).", "✓ Gemt: {0} (i browserens overførsler).", History.BackupFileName(now)), 1);
-        await BackedUp.InvokeAsync(false);
+        if (busy) return;
+        busy = true;
+        try
+        {
+            var now = DateTime.Now;
+            var pictures = await Histories.BackupPictures(Quotes, WebBackup.PictureBudget);
+            bool ok = await Store.Download(History.BackupFileName(now), WebBackup.FileText(Quotes, Settings, now, pictures));
+            if (!ok) { SetStatus(L.S("The browser didn't save the file.", "Browseren gemte ikke filen."), 2); return; }
+            SetStatus(L.F("✓ Saved: {0} (in the browser's downloads).", "✓ Gemt: {0} (i browserens overførsler).", History.BackupFileName(now)), 1);
+            await BackedUp.InvokeAsync(false);
+        }
+        finally { busy = false; }
     }
 
     async Task<string> Url(string c)
@@ -244,15 +251,18 @@
             var now = DateTime.Now;
             string url = await Url(c);
             if (url == null) return;
+            var pictures = await Histories.BackupPictures(Quotes, WebBackup.PictureBudget);
+            string text = WebBackup.OnlineText(Quotes, Settings, now, pictures);
+            int sent = pictures.Count == 0 ? 0 : WebBackup.PictureCount(text);
             byte[] blob;
-            try { blob = await BackupCrypto.Pack(WebBackup.FileText(Quotes, Settings, now), c, Store.Aes); }
+            try { blob = await BackupCrypto.Pack(text, c, Store.Aes); }
             catch (Exception) { SetStatus(L.S("This browser couldn't lock the backup (no encryption available).", "Denne browser kunne ikke låse kopien (ingen kryptering)."), 2); return; }
             string tooBig = OnlineBackup.SizeProblem(blob.Length);
             if (tooBig != null) { SetStatus(tooBig, 2); return; }
             var r = await Store.BackupFetch("PUT", url, blob);
             if (r.Status < 200 || r.Status > 299) { SetStatus(WebBackup.FailureText(r, false, DateTime.UtcNow), 2); return; }
             var info = OnlineBackup.ParseLimitHeaders(r.Left, r.Reset, r.RetryAfter, DateTime.UtcNow);
-            SetStatus(WebBackup.UploadedText(Quotes.Count, now, info, DateTime.UtcNow), 1);
+            SetStatus(WebBackup.UploadedText(Quotes.Count, now, info, DateTime.UtcNow) + WebBackup.PicturesSentText(sent, pictures.Count), 1);
             await BackedUp.InvokeAsync(true);
         }
         finally { busy = false; }
@@ -322,7 +332,8 @@
         try
         {
             string problem;
-            var res = WebBackup.Combine(Quotes, Settings, data, replace, withSettings, out problem);
+            var here = data.Pictures.Count > 0 && !replace ? await Histories.PictureIds() : null;
+            var res = WebBackup.Combine(Quotes, Settings, data, replace, withSettings, here, out problem);
             if (res == null) { SetStatus(problem, 2); return; }
             var now = DateTime.Now;
             string key = WebBackup.SafetyKey(now);

@@ -50,6 +50,7 @@ namespace PrintPrice
         System.Windows.Forms.Timer deleteTimer;
         bool deleteArmed, filling, refillingMonths;
         string saveError;
+        string listError;   // building the list failed (Load / after a restore): shown in the info box, details in the error window
 
         /// The quote to open again (set when the window closes with OK).
         public QuoteRecord Selected;
@@ -425,8 +426,7 @@ namespace PrintPrice
             {
                 btnQuote.Visible = btnInvoice.Visible = QuoteRequested != null;
                 btnBackup.Visible = BackupRequested != null;
-                SetupPrinters();
-                FitLayout(); Fill(); ShowInfo(); UpdateMonthButtons();
+                BuildList(false);
             };
             FormClosed += delegate { if (deleteTimer != null) { deleteTimer.Stop(); deleteTimer.Dispose(); deleteTimer = null; } };
             ActiveControl = grid;
@@ -858,6 +858,7 @@ namespace PrintPrice
                               "med dagens priser; Åbn igen (eller dobbeltklik) henter det som gemt. Højreklik for det hele.\n" +
                               "Klik på Til, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Sikkerhedskopi… gemmer eller gendanner historikken og indstillingerne.");
             if (saveError != null) { info.Text = saveError; info.Kind = InfoKind.Error; }
+            else if (listError != null) { info.Text = listError; info.Kind = InfoKind.Error; }
             else if (!string.IsNullOrEmpty(problem)) { info.Text = problem + "\n" + help; info.Kind = InfoKind.Warning; }
             else { info.Text = help; info.Kind = InfoKind.Info; }
         }
@@ -880,8 +881,31 @@ namespace PrintPrice
                 cmbMonth.SelectedIndex = cmbMonth.Items.Count > 1 ? 1 : 0;
             }
             finally { refillingMonths = false; }
-            SetupPrinters();
-            FitLayout(); Fill(); ShowInfo(); UpdateMonthButtons();
+            BuildList(true);
+        }
+
+        /// Printers, layout, list, info and ‹ › (Load, and again after a restore). An unexpected error (e.g. odd old data)
+        /// doesn't leave a half-built window: the info box says so, the error window (Copy details, errors.log) follows.
+        void BuildList(bool afterRestore)
+        {
+            listError = null;
+            try
+            {
+                SetupPrinters();
+                FitLayout(); Fill(); UpdateMonthButtons();
+            }
+            catch (Exception ex)
+            {
+                filling = false;
+                try { grid.ResumeLayout(); } catch { }   // Fill may have stopped between Suspend and Resume
+                listError = afterRestore
+                    ? L.S("The backup was restored, but the list could not be shown. Close this window and open History again.",
+                          "Kopien er gendannet, men listen kunne ikke vises. Luk vinduet, og åbn Historik igen.")
+                    : L.S("Part of the price history could not be shown. Your saved quotes are not changed.",
+                          "En del af prishistorikken kunne ikke vises. Dine gemte tilbud er ikke ændret.");
+                BeginInvoke((MethodInvoker)delegate { ErrorReport.Show(ex); });   // after the window shows, over it
+            }
+            ShowInfo();
         }
 
         void UpdateButtons()
@@ -959,6 +983,8 @@ namespace PrintPrice
             int index = grid.CurrentRow != null ? grid.CurrentRow.Index : 0;
             History.Remove(list, r.Id);
             SaveList();
+            // its picture (issue #4) goes once the list without it is saved
+            if (!offline && saveError == null && !string.IsNullOrEmpty(r.Id)) History.DeletePicture(r.Id);
             Fill();
             if (grid.Rows.Count > 0)
             {

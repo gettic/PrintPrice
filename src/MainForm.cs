@@ -478,6 +478,8 @@ namespace PrintPrice
             if (!offline && !AppSettings.TestMode) Shown += delegate { StartupUpdateCheck(); };
             // sliced files kept for "Open in Studio" by an earlier run (off the UI thread; files Studio still has open stay)
             if (!offline) Shown += delegate { Task.Run(() => BambuSlicer.CleanStudioFiles(null)); };
+            // leftover record pictures (issue #4): history.json read in the background, cleaned once it read fine
+            if (!offline) Shown += delegate { StartupPictureClean(); };
             // read Bambu Studio's profile index once in the background (Settings' lists and the first slice are quicker)
             if (!offline) Shown += delegate
             {
@@ -2839,10 +2841,13 @@ namespace PrintPrice
             return f;
         }
 
-        /// The record's picture: the model on screen when it is the same link/file, else a local .3mf's own picture.
+        /// The record's picture: the one saved with it (issue #4), else the model on screen when it is the same link/file,
+        /// else a local .3mf's own picture.
         Image RecordPicture(QuoteRecord r, out bool owned)
         {
             owned = false;
+            var stored = StoredPicture(r);
+            if (stored != null) { owned = true; return stored; }
             string src = (r.Source ?? "").Trim();
             if (src.Length > 0 && jobLoaded && modelImage != null && string.Equals(src, LinkSource().Trim(), StringComparison.OrdinalIgnoreCase))
                 return modelImage;
@@ -3076,6 +3081,31 @@ namespace PrintPrice
             if (offline) { history = new List<QuoteRecord>(); return; }
             history = History.Load(out historyProblem);
             History.ReservePrinterIds(history, settings);   // a new printer never reuses an id from the history
+            if (historyProblem == null && !picturesCleaned) { picturesCleaned = true; History.CleanPictures(history); }   // once per run
+        }
+
+        bool picturesCleaned;   // History.CleanPictures ran this run (StartupPictureClean or EnsureHistory)
+
+        /// At start (Shown): reads and parses history.json off the UI thread (no Load: that renames bad files and blocks
+        /// saving), then cleans leftover pictures on the UI thread, only when the file read fine and the history hasn't been
+        /// loaded meanwhile (a save loads it first, so a just-saved picture is never in danger; EnsureHistory cleans then).
+        async void StartupPictureClean()
+        {
+            if (offline || picturesCleaned) return;
+            List<QuoteRecord> list = null;
+            try
+            {
+                list = await Task.Run(() =>
+                {
+                    string path = History.FilePath;
+                    if (!File.Exists(path)) return new List<QuoteRecord>();
+                    return History.ParseJson(File.ReadAllText(path, System.Text.Encoding.UTF8));   // null = not readable: skip
+                });
+            }
+            catch { return; }   // locked / unreadable: EnsureHistory decides later
+            if (list == null || IsDisposed || history != null || picturesCleaned) return;
+            picturesCleaned = true;
+            try { History.CleanPictures(list); } catch { }
         }
 
         /// Adds the quote on screen to the history and writes the file. null = OK, else the error text.
@@ -3121,12 +3151,139 @@ namespace PrintPrice
             }
             savedId = saved.Id;   // left out of the payback debt from now on (same price when saved again)
             if (offline) return null;   // picture mode never writes
-            return History.Save(history);
+            string err = History.Save(history);
+            if (err == null) SaveRecordPicture(saved);
+            return err;
+        }
+
+        /// Issue #4: the picture on screen goes with the record (pictures\<Id>.png/.jpg, 256 px). No picture on screen but the
+        /// job came from a record that has one (Open again / Repeat print; e.g. a website WebP the app can't show): that one
+        /// is copied (same Id = kept). Otherwise nothing = the record's old picture is deleted.
+        void SaveRecordPicture(QuoteRecord rec)
+        {
+            if (offline || rec == null || string.IsNullOrEmpty(rec.Id)) return;
+            byte[] bytes = jobLoaded && modelImage != null ? History.EncodePicture(modelImage) : null;
+            var from = repeatOf ?? reopened;
+            if (bytes == null && from != null && !string.IsNullOrEmpty(from.Id) && History.HasPicture(from.Id))
+            {
+                if (from.Id != rec.Id) History.CopyPicture(from.Id, rec.Id);
+                return;
+            }
+            History.SavePicture(rec.Id, bytes);
+        }
+
+        /// The picture saved with a record (History.LoadPicture) as a Bitmap; null = none, not decodable (WebP) or picture mode.
+        Bitmap StoredPicture(QuoteRecord r)
+        {
+            if (offline || r == null || string.IsNullOrEmpty(r.Id)) return null;
+            var img = History.PictureImage(History.LoadPicture(r.Id));
+            if (img == null) return null;
+            var bmp = img as Bitmap;
+            if (bmp != null) return bmp;
+            using (img) return new Bitmap(img);
+        }
+
+        /// Test run "--settings <folder> --hidden --test-pictures" (issue #4), only in test mode: a job with a picture
+        /// (<folder>\model.png, else a drawn one) is saved, cleared, opened again, its quote and invoice drawn, backed up
+        /// to a file, its picture deleted and the backup restored (Merge), then opened again. Results in
+        /// <folder>\test_pictures.txt (PASS / FAIL lines) and test_*.png; exit code 0 = all passed, 4 = a FAIL.
+        internal void TestPictureFlow()
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            string dir = AppSettings.Folder;
+            var log = new List<string>();
+            bool ok = true;
+            Action<bool, string> check = (pass, what) => { log.Add((pass ? "PASS " : "FAIL ") + what); if (!pass) ok = false; };
+            try
+            {
+                var one = new SliceResult { Seconds = 38 * 60, Grams = 11.8, Plates = 1 };
+                one.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#F07850", Type = "PLA", Profile = "Bambu PLA Matte @BBL A1", Grams = 11.8 });
+                SetColours(one);
+                txtUrl.Text = SingleBenchyLink;
+                txtHours.Text = "0";
+                txtMinutes.Text = "38";
+                txtGrams.Text = "11,8";
+                rowPrice[0].Text = "200";
+                txtElecPrice.Text = "3,65";
+                jobModel = "3D Benchy";
+                SetJobLoaded(true);
+                string png = Path.Combine(dir, "model.png");
+                SetModelPicture(File.Exists(png) ? PrepareModelPicture(File.ReadAllBytes(png)) : TestPicture());
+                Recalculate();
+                QuoteRecord rec;
+                string err = SaveToHistory(0, null, out rec);
+                check(err == null && rec != null, "saved to history" + (err != null ? ": " + err : ""));
+                check(rec != null && History.HasPicture(rec.Id), "picture saved with the record (pictures\\<Id>)");
+                Screenshots.Snap(this, dir, "test_1_saved.png");
+
+                ClearJob();
+                check(modelImage == null, "cleared: no picture on screen");
+                Reopen(rec);
+                check(modelImage != null, "Open again shows the saved picture");
+                Screenshots.Snap(this, dir, "test_2_reopened.png");
+
+                bool owned;
+                var pic = RecordPicture(rec, out owned);
+                check(pic != null && owned, "quote / invoice picture comes from the saved picture");
+                foreach (bool invoice in new[] { false, true })
+                    using (var page = QuotePage.Render(BuildRecordQuote(rec, false, "Test Customer", invoice, pic), false))
+                        page.Save(Path.Combine(dir, invoice ? "test_4_invoice.png" : "test_3_quote.png"), System.Drawing.Imaging.ImageFormat.Png);
+                if (owned && pic != null) pic.Dispose();
+
+                DateTime now = DateTime.Now;
+                var pics = History.BackupPictures(history);
+                check(pics.Count == 1, "BackupPictures: " + pics.Count + " picture(s)");
+                string file = Path.Combine(dir, "test.printprice-backup");
+                err = History.WriteBackupFile(file, history, settings, Updater.CurrentText, now, pics);
+                check(err == null && File.ReadAllText(file).Contains("\"Pictures\""), "file backup written with its pictures" + (err != null ? ": " + err : ""));
+                string online = Backup.FitForUpload(history, settings, Updater.CurrentText, now, pics, OnlineBackup.MaxBlob);
+                check(online != null && online.Contains("\"Pictures\""), "online backup text keeps the picture (" + (online ?? "").Length + " chars)");
+
+                History.DeletePicture(rec.Id);
+                check(!History.HasPicture(rec.Id), "picture deleted before the restore");
+                BackupData data;
+                string problem = History.ReadBackupFile(file, out data);
+                check(problem == null && data != null && data.Pictures.Count == 1, "backup read: " + (problem ?? (data.Pictures.Count + " picture(s)")));
+                RestoreResult res = null;
+                if (data != null) problem = History.Restore(history, settings, data, false, false, now, out res);
+                check(res != null, "restored (Merge)" + (problem != null ? ": " + problem : ""));
+                if (res != null) AdoptRestore(res);
+                check(History.HasPicture(rec.Id), "restore wrote the picture back");
+                ClearJob();
+                Reopen(history.Find(x => x.Id == rec.Id));
+                check(modelImage != null, "Open again after the restore shows the picture");
+                Screenshots.Snap(this, dir, "test_5_restored_reopened.png");
+                check(History.CleanPictures(history) == 0, "CleanPictures keeps the record's picture");
+                check(History.HasPicture(rec.Id), "picture still there after CleanPictures");
+            }
+            catch (Exception ex) { check(false, "exception: " + ex); }
+            try { File.WriteAllLines(Path.Combine(dir, "test_pictures.txt"), log); } catch { }
+            Environment.Exit(ok ? 0 : 4);
+        }
+
+        // a made-up model picture for TestPictureFlow (transparent, orange shape)
+        static Bitmap TestPicture()
+        {
+            var b = new Bitmap(320, 240, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(b))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var br = new SolidBrush(Color.FromArgb(240, 120, 80))) g.FillEllipse(br, 40, 60, 240, 140);
+                using (var br = new SolidBrush(Color.FromArgb(200, 90, 60))) g.FillRectangle(br, 140, 20, 50, 80);
+            }
+            return b;
         }
 
         void OpenHistory()
         {
             if (cts != null) return;
+            // an unexpected error building the window: the dark error window, the main window carries on
+            try { ShowHistory(); }
+            catch (Exception ex) { ErrorReport.Show(ex); }
+        }
+
+        void ShowHistory()
+        {
             EnsureHistory();
             string problem = historyProblem;
             historyProblem = null;   // shown once
@@ -3154,19 +3311,23 @@ namespace PrintPrice
         /// true = a restore saved a new history and settings (already taken over here by AdoptRestore).
         bool OpenBackup(IWin32Window owner, int tab)
         {
-            EnsureHistory();
             bool restored = false;
-            using (var dlg = new BackupForm(history, settings, tab, offline))
+            try
             {
-                dlg.Restored = res => { AdoptRestore(res); restored = true; };
-                dlg.ShowDialog(owner);
-                if (dlg.RestartRequested && !offline)
+                EnsureHistory();
+                using (var dlg = new BackupForm(history, settings, tab, offline))
                 {
-                    // restored settings in another language: they are saved; Restart closes the windows and starts anew
-                    if (cts != null) cts.Cancel();
-                    BeginInvoke((MethodInvoker)Program.Restart);
+                    dlg.Restored = res => { AdoptRestore(res); restored = true; };
+                    dlg.ShowDialog(owner);
+                    if (dlg.RestartRequested && !offline)
+                    {
+                        // restored settings in another language: they are saved; Restart closes the windows and starts anew
+                        if (cts != null) cts.Cancel();
+                        BeginInvoke((MethodInvoker)Program.Restart);
+                    }
                 }
             }
+            catch (Exception ex) { ErrorReport.Show(ex); }   // the History / Settings window that asked stays open
             return restored;
         }
 
@@ -3180,15 +3341,20 @@ namespace PrintPrice
             historyProblem = null;
             var old = settings;
             if (res.Settings != null) settings = res.Settings;
-            History.ReservePrinterIds(history, settings);
-            SyncUpdateTimer();
-            if (SlicingChanged(old, settings) || old.FilamentPreset != settings.FilamentPreset || old.SlicerPath != settings.SlicerPath)
-                SetStudioFile(null);
-            RefreshSettingsLabels();
-            foreach (var cb in rowCombo) cb.Tag = null;
-            if (!jobLoaded && cts == null) SetColours(null);
-            Recalculate();
-            if (cts == null) ShowAutoIdle();
+            // the restore is saved and taken over by now: an error in the follow-ups below must not look like a failed restore
+            try
+            {
+                History.ReservePrinterIds(history, settings);
+                SyncUpdateTimer();
+                if (SlicingChanged(old, settings) || old.FilamentPreset != settings.FilamentPreset || old.SlicerPath != settings.SlicerPath)
+                    SetStudioFile(null);
+                RefreshSettingsLabels();
+                foreach (var cb in rowCombo) cb.Tag = null;
+                if (!jobLoaded && cts == null) SetColours(null);
+                Recalculate();
+                if (cts == null) ShowAutoIdle();
+            }
+            catch (Exception ex) { ErrorReport.Show(ex); }
         }
 
         /// "Open again": puts a saved quote's inputs back (time, grams, colour rows with their kr/kg, filament and
@@ -3269,7 +3435,9 @@ namespace PrintPrice
             ResetModelPicture();
             SetJobLoaded(true);   // no picture (Printables link, missing file) = logo without "No model yet"
             string src = (r.Source ?? "").Trim().Trim('"');
-            if (!offline && src.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase) && File.Exists(src))
+            var stored = StoredPicture(r);   // the picture saved with the record (issue #4) comes first
+            if (stored != null) SetModelPicture(stored);
+            else if (!offline && src.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase) && File.Exists(src))
                 LoadModelPicture(() => BambuSlicer.FromProject(src), true);   // a local project still has its own picture
             else if (!offline && BambuSlicer.IsGcodeFile(src) && File.Exists(src))
                 LoadModelPicture(() => BambuSlicer.ReadGcodeFile(src).Picture, true);   // a G-code's thumbnail (errors = none)

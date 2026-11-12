@@ -118,6 +118,12 @@ namespace PrintPrice
                     }
                     using (var ask = BackupForm.NewReplaceAsk(312))
                         SnapForm(ask, folder, "restore_ask.png");     // the question before Replace
+                    // the dark error window (issue #2) with a made-up error: first time, keeps happening
+                    var sampleError = ErrorReport.SampleError();
+                    using (var err = new ErrorForm(sampleError, ErrorReport.Details(sampleError, false), false, false))
+                        SnapForm(err, folder, "error_window.png");
+                    using (var err = new ErrorForm(sampleError, ErrorReport.Details(sampleError, false), false, true))
+                        SnapForm(err, folder, "error_repeated.png");
                     main.SetSampleJob();   // back to the single-colour example for the update picture
                     main.SetSamplePicture(sample);
                     main.ShowUpdateButton(fake);
@@ -266,8 +272,8 @@ namespace PrintPrice
             f.Location = new Point(all.Left - 4000, all.Top);
         }
 
-        /// Shows a form off-screen, takes its picture and hides it again.
-        static void SnapForm(Form f, string folder, string name)
+        /// Shows a form off-screen, takes its picture and hides it again (also ErrorReport's --hidden test runs).
+        internal static void SnapForm(Form f, string folder, string name)
         {
             Place(f);
             f.Show();
@@ -280,7 +286,7 @@ namespace PrintPrice
             for (int i = 0; i < 8; i++) { Application.DoEvents(); Thread.Sleep(40); }
         }
 
-        static void Snap(Form f, string folder, string name)
+        internal static void Snap(Form f, string folder, string name)
         {
             Snap(f, folder, name, null);
         }

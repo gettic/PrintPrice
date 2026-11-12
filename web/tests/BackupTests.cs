@@ -21,6 +21,156 @@ static class BackupTests
         }
     }
 
+    // a picture's bytes with the right magic (History.PictureMime only checks those), filled with seeded noise
+    static byte[] Pic(string kind, int size, int seed)
+    {
+        var b = new byte[size];
+        new Random(seed).NextBytes(b);
+        byte[] head = kind == "png" ? new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }
+                    : kind == "jpeg" ? new byte[] { 0xFF, 0xD8, 0xFF, 0xE0 }
+                    : kind == "webp" ? Encoding.ASCII.GetBytes("RIFF\0\0\0\0WEBP")
+                    : Encoding.ASCII.GetBytes("GIF89a");
+        Array.Copy(head, b, head.Length);
+        return b;
+    }
+
+    static string Url(string kind, byte[] b) { return "data:image/" + kind + ";base64," + Convert.ToBase64String(b); }
+
+    // issue #4: pictures in the website's backups, both ways with the desktop
+    static void Pictures(Action<string, bool> True, string code)
+    {
+        var now = new DateTime(2026, 11, 12, 12, 0, 0);
+        var list = HistoryTests.Samples();
+        var s = new AppSettings();
+        var png = Pic("png", 3000, 1);
+        var jpg = Pic("jpeg", 2000, 2);
+        var webp = Pic("webp", 1500, 3);
+
+        // limits agree with the desktop
+        True("max picture chars = base64 of MaxPictureBytes", WebHistory.MaxPictureChars == Convert.ToBase64String(new byte[History.MaxPictureBytes]).Length);
+        True("picture sizes = desktop", WebHistory.PictureSize == 256 && WebHistory.SmallPictureSize == 192);
+        True("web budget 20 MB, reads stay 64 MB", WebBackup.PictureBudget == 20L * 1024 * 1024 && WebBackup.MaxFileBytes == 64 * 1024 * 1024);
+
+        // which kept pictures are made again before a backup
+        True("webp needs converting", WebHistory.NeedsConvert(Url("webp", webp)));
+        True("png / jpeg don't", !WebHistory.NeedsConvert(Url("png", png)) && !WebHistory.NeedsConvert(Url("jpeg", jpg)));
+        True("gif / too big / mismatched do", WebHistory.NeedsConvert(Url("gif", Pic("gif", 500, 4)))
+             && WebHistory.NeedsConvert(Url("png", Pic("png", History.MaxPictureBytes + 1, 5)))
+             && WebHistory.NeedsConvert(Url("jpeg", png)));
+        True("none: nothing to convert", !WebHistory.NeedsConvert(null) && !WebHistory.NeedsConvert(""));
+
+        // keys and order
+        var ids = WebHistory.PictureIds(new[] { "pic:sample1", "history", "pic:", "before-restore-1", "pic:sample3" });
+        True("picture ids from keys", ids.Count == 2 && ids.Contains("sample1") && ids.Contains("sample3"));
+        var all = new Dictionary<string, string>();
+        foreach (var r in list) all[r.Id] = Url("png", Pic("png", 1000, r.Id.GetHashCode()));
+        var desk = History.PicturesForBackup(list, id => History.PictureFromDataUrl(all[id]), long.MaxValue);
+        var order = WebHistory.NewestPictureIds(list, null);
+        bool sameOrder = desk.Count == order.Count;
+        for (int i = 0; sameOrder && i < order.Count; i++) sameOrder = desk[i].Id == order[i];
+        True("newest-first order = History.PicturesForBackup", sameOrder && order.Count == 8);
+        True("only ids that have a picture", WebHistory.NewestPictureIds(list, ids).Count == 2);
+
+        // collecting: budget, odd ones left out, webp kept as is
+        var urls = new Dictionary<string, string> { { "sample1", Url("png", png) }, { "sample2", Url("jpeg", jpg) }, { "sample3", Url("webp", webp) },
+                                                    { "sample4", Url("gif", Pic("gif", 500, 6)) }, { "gone", Url("png", png) } };
+        var pics = WebHistory.BackupPictures(list, urls, WebBackup.PictureBudget);
+        True("3 valid pictures collected (gif / unknown id left out)", pics.Count == 3 && !pics.Exists(p => p.Id == "sample4" || p.Id == "gone"));
+        True("webp goes in as it is", pics.Exists(p => p.Id == "sample3" && p.Data == Url("webp", webp)));
+        var tight = WebHistory.BackupPictures(list, urls, Url("png", png).Length + 10);
+        True("budget respected", tight.Count >= 1 && tight.Count < 3);
+
+        // the file both ways
+        string withPics = WebBackup.FileText(list, s, now, pics);
+        True("no pictures = the old text", WebBackup.FileText(list, s, now, new List<BackupPicture>()) == WebBackup.FileText(list, s, now)
+             && WebBackup.FileText(list, s, now, null) == WebBackup.FileText(list, s, now));
+        True("web Json writes Pictures with Id / Data", withPics.Contains("\"Pictures\":[{\"Id\":\"") && withPics.Contains("\"Data\":\"data:image/"));
+        BackupData d;
+        True("web reads its own pictures", WebBackup.ReadFile(Encoding.UTF8.GetBytes(withPics), out d) == null && d.Quotes.Count == 8
+             && d.Pictures.Count == 3 && Convert.ToBase64String(d.Pictures["sample1"]) == Convert.ToBase64String(png));
+        True("summary counts pictures: " + WebBackup.Summary(d), WebBackup.Summary(d) == "Backup from 12-11-2026 12:00 (website): 8 quotes, with settings, 3 pictures.");
+        True("picture count", WebBackup.PictureCount(withPics) == 3 && WebBackup.PictureCount(WebBackup.FileText(list, s, now)) == 0 && WebBackup.PictureCount("x") == 0);
+        var oldApp = Json.Deserialize<BackupFile>(withPics);
+        True("an older website (no Pictures member) still reads all quotes", oldApp != null && oldApp.History != null && oldApp.History.Quotes.Count == 8);
+
+        // a desktop-made text (written by hand, the desktop's member order and a jpeg)
+        string deskText = "{\"Format\":\"PrintPriceBackup\",\"Version\":1,\"CreatedAt\":\"2026-11-12 10:00:00\",\"App\":\"1.17.0\",\"History\":"
+            + History.ToJson(list) + ",\"Settings\":null,\"Pictures\":[{\"Id\":\"sample2\",\"Data\":\"" + Url("jpeg", jpg) + "\"}]}";
+        True("desktop backup with pictures read", WebBackup.ReadFile(Encoding.UTF8.GetBytes(deskText), out d) == null && d.Pictures.Count == 1
+             && Convert.ToBase64String(d.Pictures["sample2"]) == Convert.ToBase64String(jpg));
+
+        // broken Pictures parts are dropped, the quotes still restore
+        string[] broken = {
+            "\"x\"", "[1,2]", "{\"Id\":\"sample1\"}", "[{\"Id\":\"sample1\",\"Data\":{\"a\":1}}]", "[{\"Id\":5,\"Data\":\"x\"}]", "null",
+            "[{\"Id\":\"sample1\",\"Data\":\"data:image/png;base64,!!!\"}]", "[{\"Id\":\"..\\\\x\",\"Data\":\"" + Url("png", png) + "\"}]",
+            "[null,{\"Id\":\"sample1\",\"Data\":\"" + Url("gif", Pic("gif", 500, 7)) + "\"}]"
+        };
+        bool allOk = true;
+        foreach (var b in broken)
+        {
+            string t = deskText.Substring(0, deskText.IndexOf(",\"Pictures\":")) + ",\"Pictures\":" + b + "}";
+            BackupData bd;
+            string problem = WebBackup.ReadFile(Encoding.UTF8.GetBytes(t), out bd);
+            if (problem != null || bd == null || bd.Quotes.Count != 8 || bd.Pictures.Count != 0) { allOk = false; True("broken Pictures: " + b, false); }
+        }
+        True("broken Pictures parts dropped, quotes restore (" + broken.Length + " shapes)", allOk);
+        string mixed = deskText.Replace("\"Pictures\":[", "\"Pictures\":[{\"Id\":\"sample1\",\"Data\":7},");
+        True("one bad picture, the good one kept", WebBackup.ReadFile(Encoding.UTF8.GetBytes(mixed), out d) == null && d.Pictures.Count == 1 && d.Pictures.ContainsKey("sample2"));
+
+        // restore: merge keeps ours, fills missing, added records bring theirs; replace = theirs
+        string problem2;
+        var backupPics = new Dictionary<string, string> { { "sample1", Url("png", png) }, { "sample2", Url("jpeg", jpg) }, { "sample6", Url("png", Pic("png", 900, 8)) } };
+        WebBackup.ReadFile(Encoding.UTF8.GetBytes(WebBackup.FileText(list, s, now, WebHistory.BackupPictures(list, backupPics, WebBackup.PictureBudget))), out d);
+        var three = HistoryTests.Samples().GetRange(0, 3);
+        var hereIds = new HashSet<string>();
+        foreach (var r in three) hereIds.Add(r.Id);
+        string ownId = null;
+        int added = 0, missing = 0;
+        foreach (var id in backupPics.Keys) { if (!hereIds.Contains(id)) added++; else if (ownId == null) ownId = id; else missing++; }
+        True("merge sample covers ours / missing / added (" + added + "/" + missing + ")", ownId != null && added > 0 && missing > 0);
+        var havePic = new HashSet<string> { ownId };
+        var m = WebBackup.Combine(three, s, d, false, false, havePic, out problem2);
+        bool mergeOk = m != null;
+        foreach (var id in backupPics.Keys)
+        {
+            bool expect = id != ownId;   // every backup picture except the one this browser already has
+            if (m.Pictures.ContainsKey(id) != expect) mergeOk = false;
+        }
+        True("merge: ours kept, missing filled, added records' pictures written", mergeOk);
+        var rp = WebBackup.Combine(three, s, d, true, false, havePic, out problem2);
+        True("replace: all the backup's pictures", rp.Pictures.Count == 3);
+        var noInfo = WebBackup.Combine(three, s, d, false, false, out problem2);
+        True("old overload: no pictures here", noInfo.Pictures.Count == 3);
+        var writes = WebHistory.PictureWrites(m);
+        True("writes as pic:<Id> data URLs", writes.Count == m.Pictures.Count && writes.TrueForAll(w => w.Key.StartsWith("pic:") && History.PictureFromDataUrl(w.Value) != null));
+        True("no pictures: no writes", WebHistory.PictureWrites(new RestoreResult()).Count == 0 && WebHistory.PictureWrites(null).Count == 0);
+
+        // online: the newest pictures that fit in 512 KB
+        var many = new List<QuoteRecord>();
+        var manyPics = new List<BackupPicture>();
+        var start = new DateTime(2026, 1, 1, 9, 0, 0);
+        for (int i = 0; i < 60; i++)
+        {
+            var r = History.ParseJson(History.ToJson(new List<QuoteRecord> { list[i % 8] }))[0];
+            r.Id = "rec" + i.ToString("00");
+            r.SavedAt = start.AddHours(i).ToString("yyyy-MM-dd HH:mm:ss");
+            many.Insert(0, r);
+        }
+        var manyUrls = new Dictionary<string, string>();
+        foreach (var r in many) manyUrls[r.Id] = Url("png", Pic("png", 20 * 1024, r.Id.GetHashCode()));
+        manyPics = WebHistory.BackupPictures(many, manyUrls, WebBackup.PictureBudget);
+        string online = WebBackup.OnlineText(many, s, now, manyPics);
+        var blob = BackupCrypto.Pack(online, code, NetAes).Result;
+        int sent = WebBackup.PictureCount(online);
+        True("online blob <= 512 KB with pictures (" + sent + " of 60, " + blob.Length / 1024 + " KB)", blob.Length <= OnlineBackup.MaxBlob && sent > 0 && sent < 60);
+        WebBackup.ReadFile(Encoding.UTF8.GetBytes(online), out d);
+        True("online keeps the newest", d.Pictures.ContainsKey("rec59") && !d.Pictures.ContainsKey("rec00"));
+        True("online without pictures = the file text", WebBackup.OnlineText(list, s, now, new List<BackupPicture>()) == WebBackup.FileText(list, s, now));
+        True("desktop opens the web blob with pictures", Backup.Unpack(blob, code) == online);
+        True("sent text: all", WebBackup.PicturesSentText(3, 3) == " With 3 pictures." && WebBackup.PicturesSentText(1, 1) == " With 1 picture." && WebBackup.PicturesSentText(0, 0) == "");
+        True("sent text: some", WebBackup.PicturesSentText(12, 40).StartsWith(" With the newest 12 of 40 pictures"));
+    }
+
     static string Hex(byte[] b) { var sb = new StringBuilder(); foreach (var x in b) sb.Append(x.ToString("x2")); return sb.ToString(); }
 
     public static void Run(Action<string, bool> True, Action<string, double, double> Eq)
@@ -142,6 +292,8 @@ static class BackupTests
              && WebBackup.CodeProblem("01234-56789-ABCDE-FGHJG").Contains("typo") && WebBackup.CodeProblem("U") .Contains("typo"));
         var up = WebBackup.UploadedText(8, t0, new UploadResult { UploadsLeft = 2 }, t0);
         True("uploaded text: " + up, up == "✓ Backed up online: 8 quotes and your settings, kept until 15-12-2027. 2 online backups left today.");
+
+        Pictures(True, code);
 
         L.Danish = true;
         True("DA last backup", WebBackup.LastBackupText(WebBackup.LastBackupValue(t0.AddDays(-1), false), t0, 3, out warn) == "Seneste sikkerhedskopi: i går (fil)");
