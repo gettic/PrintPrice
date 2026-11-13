@@ -2199,9 +2199,29 @@ namespace PrintPrice.Tests
             string plate = PlateXml("3600", "11.25", fil1, fil2);
             var cases = new List<KeyValuePair<string, string>>();
             Action<string, string> add = (n, x) => cases.Add(new KeyValuePair<string, string>(n, x));
-            foreach (var real in RealSliceInfos()) add("real " + real.Key, real.Value);
-            if (cases.Count == 0) Console.WriteLine("NOTE no real .gcode.3mf under plans\\: real-file parity skipped");
-            True("SliceXml: real samples found (" + cases.Count + ")", cases.Count >= 0);
+            // the committed real Bambu Studio 2.09 files (tests\multipart-samples): always there, so a missing one fails
+            int committed = 0;
+            var known = new Dictionary<string, string> {
+                // t4: 5316 s, weight 29,65 g, 1 plate; slot 1 #C12E1F PLA 8,03 g 2,65 m; slot 3 #F2F2F2 PLA 21,62 g 6,81 m
+                { "t4_three.slice_info.config", "5316|29.65|1;1,#C12E1F,PLA,8.03,2.65;3,#F2F2F2,PLA,21.62,6.81" },
+                // t5: 5207 s, weight 26,04 g, 1 plate; slots 1-3: 0,28 g 0,09 m / 7,72 g 2,55 m / 18,32 g 5,77 m
+                { "t5_edited.slice_info.config", "5207|26.04|1;1,#C12E1F,PLA,0.28,0.09;2,#1F5FC1,PLA,7.72,2.55;3,#F2F2F2,PLA,18.32,5.77" } };
+            foreach (var k in known)
+            {
+                string xml = null;
+                try { xml = MultipartSample(k.Key); } catch (Exception) { }
+                if (xml == null) continue;
+                committed++;
+                add("real " + k.Key, xml);
+                string got;
+                try { got = DescribeSlice(BambuSlicer.ParseSliceInfo(xml)); } catch (Exception ex) { got = ex.GetType().Name; }
+                True("SliceXml known values: " + k.Key + (got == k.Value ? "" : " (got " + got + ")"), got == k.Value);
+            }
+            True("SliceXml: committed real samples found (" + committed + " of 2)", committed == 2);
+            // extra local samples: any .3mf under plans\ (not in the repo, so none on a fresh clone)
+            int extra = 0;
+            foreach (var real in RealSliceInfos()) { add("real " + real.Key, real.Value); extra++; }
+            if (extra == 0) Console.WriteLine("SKIP: no extra .3mf under plans\\ (local-only real-file parity)");
             add("builder", SliceInfo(plate));
             add("two plates, one unsliced", SliceInfo(plate, "<plate><metadata key=\"index\" value=\"2\"/></plate>", PlateXml("60", "0", Fil(3, "#00FF00", "1", "2"))));
             add("CRLF, indent, comment, PI", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<!-- made by hand -->\r\n<config>\r\n  <?pi data?>\r\n  <plate>\r\n    <metadata key=\"prediction\" value=\"100\" />\r\n    <metadata key=\"weight\" value=\"2.5\"/>\r\n    " + fil1 + "\r\n  </plate>\r\n</config>\r\n<!-- end -->\r\n");

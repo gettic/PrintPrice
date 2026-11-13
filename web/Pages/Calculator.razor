@@ -596,7 +596,8 @@ else
         if (job.Result == null)
         {
             fileError = true;
-            fileText = job.Error + more;
+            fileText = "\"" + job.FileName + "\": " + job.Error + more;   // the refused file's name, as the desktop's box
+            jobModel = jobSource = job.FileName;   // a hand-typed price saved afterwards keeps the file's name (as the desktop)
             ClearNumbers();   // no old time / grams / price under an error (as the desktop)
             return;
         }

@@ -3631,7 +3631,7 @@ namespace PrintPrice
             Program.EndTestRun(ok ? 0 : 4);
         }
 
-        // ---------- test hooks for idea 21 (test mode + --hidden only; plans\idea21-multipart\test-hook.md) ----------
+        // ---------- test hooks for idea 21 (test mode + --hidden only) ----------
         /// The last finished job's slice (set by ShowJobResult), for the test hooks.
         SliceResult lastJobResult;
 

@@ -51,7 +51,7 @@ namespace PrintPrice
             // draws its quote / invoice, backs up and restores, writes test_pictures.txt + PNGs in the folder, exits 0 / 4.
             // --test-slice "<spec file>" / --test-repeat (idea 21, test mode + --hidden only): MainForm.TestSliceFlow slices the
             // spec's files with a colour each and saves the job; TestRepeatFlow repeats the newest history record. Both write
-            // a txt in the settings folder and exit 0 / 4 (see plans\idea21-multipart\test-hook.md).
+            // a txt in the settings folder and exit 0 / 4 (spec format: MainForm.TestSliceFlow).
             // --test-history "<spec file>" (idea 22, test mode + --hidden only): MainForm.TestHistoryFlow plays the spec in the
             // History window (delete, undo, Clear all, restore...) with the app's own handlers; test_history.txt, exit 0 / 4.
             bool testError = Array.IndexOf(args, "--test-error") >= 0;
