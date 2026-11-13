@@ -2,11 +2,11 @@
 
 # Gettic's 3D Print Price Calculator
 
-> [!TIP]
-> **Try it in your browser, no install:** [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/)
-
 > [!NOTE]
 > **AI disclaimer:** This app, including its code, logo and documentation, was made with the help of AI. It has been tested, but it may still contain mistakes. The prices it calculates are estimates, so check them before you send a quote.
+
+> [!TIP]
+> **Try it in your browser, no install:** [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/)
 
 A small dark-mode Windows app that turns a 3D print job into two price quotes: one for **friends & family** and one for **customers**. It's made for the **Bambu Lab A1**, **A1 mini** and **P1S**, and Danish prices (DKK).
 
