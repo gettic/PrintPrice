@@ -3733,13 +3733,36 @@ namespace PrintPrice
                     if (restored) dlg.Settings = settings;
                     return restored;
                 };
-                if (dlg.ShowDialog(this) == DialogResult.OK && dlg.Selected != null)
+                // Undo of Clear all restores its safety copy: taken over like a Backup restore
+                dlg.Restored = res => { AdoptRestore(res); dlg.Settings = settings; };
+                var result = dlg.ShowDialog(this);
+                ForgetDeletedRecords();   // idea 22: deleted (or cleared) quotes may have been open here
+                if (result == DialogResult.OK && dlg.Selected != null)
                 {
                     if (dlg.RepeatSelected) Repeat(dlg.Selected);
                     else Reopen(dlg.Selected);
                 }
                 else Recalculate();   // Failed / For / Delete in the list change the payback debt
             }
+        }
+
+        /// After the History window (idea 22: delete several, Clear all, undo): the opened / repeated quote points at the
+        /// record now in the history with the same Id (an undone Clear all brings back copies), or at nothing when it
+        /// was deleted, so saving never links to a deleted quote (RepeatOf) or copies its For.
+        void ForgetDeletedRecords()
+        {
+            reopened = InHistory(reopened);
+            repeatOf = InHistory(repeatOf);
+            repeatLine = InHistory(repeatLine);
+        }
+
+        QuoteRecord InHistory(QuoteRecord r)
+        {
+            if (r == null || history == null) return null;
+            if (history.Contains(r)) return r;
+            if (string.IsNullOrEmpty(r.Id)) return null;
+            foreach (var h in history) if (h != null && h.Id == r.Id) return h;
+            return null;
         }
 
         /// The Backup window (idea 27) from History or Settings > App, on tab BackupForm.TabBackup / TabRestore.

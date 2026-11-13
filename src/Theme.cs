@@ -28,6 +28,7 @@ namespace PrintPrice
         public static readonly Color HotBorder = Color.FromArgb(110, 110, 116);  // hover / focus frame (combos, cards, tiles)
         public static readonly Color ScrollTrack = Color.FromArgb(34, 36, 41);   // slim red scroll bar's track (thumb InfoAccent, Others when hot)
         public static readonly Color ArtDark = Color.FromArgb(105, 105, 108);    // darker parts of the drawn printers (PrinterArt)
+        public static readonly Color AccentBorder = Color.FromArgb(190, 55, 60); // frame of an accent button and of a selected History card
 
         /// Customer-facing quote page (QuotePage), light look: printed / sent, so it is NOT the app's dark theme.
         /// The dark quote look uses the app colours above (Back, InfoBack, Border, Text, Muted, InfoAccent, Others, Friends).
@@ -727,7 +728,7 @@ namespace PrintPrice
         {
             if (grid != null) { Controls.Remove(grid); grid.Dispose(); grid = null; }
             if (note != null) { Controls.Remove(note); note.Dispose(); note = null; }
-            if (link != null) { Controls.Remove(link); link.Dispose(); link = null; }
+            RemoveLinks();
             noteMuted = false;
         }
 
@@ -745,7 +746,7 @@ namespace PrintPrice
         {
             if (label == null || string.IsNullOrEmpty(text)) return;
             SuspendLayout();
-            if (link != null) { Controls.Remove(link); link.Dispose(); }
+            RemoveLinks();
             link = new Theme.LinkText { Text = text, AutoSize = true, Margin = new Padding(0, 3, 0, 0), UseMnemonic = false,
                                         MaximumSize = new Size(InnerWidth, 0) };
             link.Font = SharedFont(fontSize, FontStyle.Underline);
@@ -754,6 +755,41 @@ namespace PrintPrice
             Visible = true;
             ApplyTheme();
             ResumeLayout(true);
+        }
+
+        FlowLayoutPanel linkRow;   // SetLinks with 2+ links: one line of links, 16 px apart (LinkControl = the first)
+
+        /// Several clickable links on one line under the text (e.g. History "Undo" + "Open folder"), in the order given;
+        /// each a Tab stop like SetLink's. Setting Text, SetText or SetTable removes them.
+        public void SetLinks(string[] texts, Action[] clicks)
+        {
+            if (label == null || texts == null || texts.Length == 0) return;
+            if (texts.Length == 1) { SetLink(texts[0], clicks != null && clicks.Length > 0 ? clicks[0] : null); return; }
+            SuspendLayout();
+            RemoveLinks();
+            linkRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
+                                            Margin = new Padding(0, 3, 0, 0), Padding = Padding.Empty };
+            int gap = (int)Math.Round(16 * DeviceDpi / 96f);
+            for (int i = 0; i < texts.Length; i++)
+            {
+                var l = new Theme.LinkText { Text = texts[i], AutoSize = true, UseMnemonic = false,
+                                             Margin = new Padding(0, 0, i < texts.Length - 1 ? gap : 0, 0) };
+                l.Font = SharedFont(fontSize, FontStyle.Underline);
+                Action click = clicks != null && i < clicks.Length ? clicks[i] : null;
+                if (click != null) l.Click += delegate { click(); };
+                linkRow.Controls.Add(l);
+                if (i == 0) link = l;
+            }
+            Controls.Add(linkRow, 0, 3);
+            Visible = true;
+            ApplyTheme();
+            ResumeLayout(true);
+        }
+
+        void RemoveLinks()
+        {
+            if (linkRow != null) { Controls.Remove(linkRow); linkRow.Dispose(); linkRow = null; link = null; }
+            if (link != null) { Controls.Remove(link); link.Dispose(); link = null; }
         }
 
         bool noteMuted;   // the note is a muted second line (SetText), not a table note
@@ -883,6 +919,7 @@ namespace PrintPrice
             if (note != null && noteMuted) note.ForeColor = Theme.Muted;
             else if (note != null && kind != InfoKind.Info) note.ForeColor = Accent;   // warnings stand out under the table
             if (link != null) link.ForeColor = Theme.Text;
+            if (linkRow != null) foreach (Control c in linkRow.Controls) c.ForeColor = Theme.Text;
             Invalidate();
         }
 

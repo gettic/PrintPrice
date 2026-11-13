@@ -3275,6 +3275,7 @@ namespace PrintPrice.Tests
             MultipartTests();
             SliceXmlTests();
             PictureTests();
+            HistoryDeleteTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
@@ -3552,6 +3553,183 @@ namespace PrintPrice.Tests
                 History.Add(l2, first);
                 History.Add(l2, HistRecord(new DateTime(2026, 11, 12, 9, 3, 0)));
                 True("Add same quote keeps the Id (picture key)", l2.Count == 1 && l2[0].Id == first.Id);
+            }
+            finally
+            {
+                History.ResetBlock();
+                AppSettings.ClearTestFolder();
+            }
+        }
+
+        // ---------- idea 22 (issue #5): delete several, undo, Clear all, list pictures, HistoryView ----------
+
+        static List<string> IdsOf(List<QuoteRecord> l)
+        {
+            var res = new List<string>();
+            foreach (var r in l) res.Add(r == null ? "~" : r.Id);
+            return res;
+        }
+
+        static void HistoryDeleteTests()
+        {
+            // 1. RemoveMany / PutBack (pure)
+            var l = new List<QuoteRecord> { BRec("A", "2026-11-05 10:00:00"), BRec("B", "2026-11-04 10:00:00"), BRec("C", "2026-11-03 10:00:00"),
+                                            BRec("D", "2026-11-02 10:00:00"), BRec("E", "2026-11-01 10:00:00") };
+            var rm = History.RemoveMany(l, new[] { "B", "D", "X", null, "", "B" });
+            True("RemoveMany: B, D gone, rest in order", J(IdsOf(l)) == "A|C|E");
+            True("RemoveMany: removed B, D with indexes 1, 3", J(rm.Ids()) == "B|D" && rm.Indexes[0] == 1 && rm.Indexes[1] == 3 && rm.Count == 2);
+            True("PutBack: old order back", History.PutBack(l, rm) == 2 && J(IdsOf(l)) == "A|B|C|D|E");
+            True("PutBack again: already there -> 0", History.PutBack(l, rm) == 0 && l.Count == 5);
+            var rmAE = History.RemoveMany(l, new[] { "E", "A" });
+            True("RemoveMany first + last", J(IdsOf(l)) == "B|C|D" && J(rmAE.Ids()) == "A|E");
+            l.Insert(0, BRec("A", "2026-11-05 10:00:00"));   // an A came back some other way
+            True("PutBack skips an Id already there, appends past the end", History.PutBack(l, rmAE) == 1 && J(IdsOf(l)) == "A|B|C|D|E");
+            True("RemoveMany null ids / no match / null list", History.RemoveMany(l, null).Count == 0
+                 && History.RemoveMany(l, new[] { "Q" }).Count == 0 && l.Count == 5 && History.RemoveMany(null, new[] { "A" }).Count == 0);
+            True("PutBack null -> 0", History.PutBack(l, null) == 0 && History.PutBack(null, rm) == 0);
+
+            // 2. debt and the summary. Failed F (2026-11-01): material 20 + power 10, no wear (0 h) -> FailedCost 30.
+            // Paying quote P (2026-11-05, customer, PaybackCost 10) -> debt 30 - 10 = 20.
+            Func<List<QuoteRecord>> debtList = delegate
+            {
+                var f = BRec("F", "2026-11-01 10:00:00");
+                f.Hours = 0; f.Minutes = 0; f.MaterialCost = 20; f.PowerCost = 10; f.Failed = true; f.FailedAt = "2026-11-01 12:00:00"; f.PaidBack = 0;
+                var p = BRec("P", "2026-11-05 10:00:00");
+                p.Failed = false; p.FailedAt = ""; p.PaybackCost = 10; p.For = History.ForCustomer; p.FailedPaybackWho = 2; p.InvoiceNo = "2026-ABCD";
+                var o = BRec("O", "2026-11-06 10:00:00");
+                o.Failed = false; o.PaybackCost = 0;
+                return new List<QuoteRecord> { o, p, f };
+            };
+            var dl = debtList();
+            True("debt 30 - 10 = 20", Math.Abs(History.FailedDebt(dl, null) - 20) < 1e-9);
+            var sp = History.SummarizeDelete(dl, new[] { "P", "nope" });
+            True("summary delete P: 1, invoice 1, paying 1, debt 20 -> 30", sp.Count == 1 && sp.Invoices == 1 && sp.PayingBack == 1
+                 && sp.Failed == 0 && sp.FailedOpen == 0 && Math.Abs(sp.DebtBefore - 20) < 1e-9 && Math.Abs(sp.DebtAfter - 30) < 1e-9);
+            var sf = History.SummarizeDelete(dl, new[] { "F" });
+            True("summary delete F: failed open 1 (20 left), debt 20 -> 0", sf.Count == 1 && sf.Failed == 1 && sf.FailedOpen == 1
+                 && Math.Abs(sf.FailedOpenAmount - 20) < 1e-9 && Math.Abs(sf.DebtAfter) < 1e-9);
+            True("FailedNotEarnedBack(F, P, O) = 1", History.FailedNotEarnedBack(dl, new[] { "F", "P", "O" }) == 1);
+            True("SummarizeClear: 3, debt after 0", History.SummarizeClear(dl).Count == 3 && History.SummarizeClear(dl).DebtAfter == 0
+                 && History.SummarizeClear(dl).FailedOpen == 1);
+            True("summary of nothing / null", History.SummarizeDelete(dl, new string[0]).Count == 0
+                 && Math.Abs(History.SummarizeDelete(dl, new string[0]).DebtAfter - 20) < 1e-9 && History.SummarizeDelete(null, null).Count == 0);
+            // RemoveMany = Remove one by one (no PaidBack moved): deleting P brings the debt back to 30
+            var one = debtList(); History.Remove(one, "P");
+            var many = debtList(); History.RemoveMany(many, new[] { "P" });
+            True("RemoveMany = Remove: debt back to 30", J(IdsOf(one)) == J(IdsOf(many)) && Math.Abs(History.FailedDebt(many, null) - 30) < 1e-9
+                 && many[1].PaidBack == 0);
+            var fl = debtList();
+            var srm = History.RemoveMany(fl, new[] { "F" });
+            True("delete F: debt 0, PutBack: 20 again", Math.Abs(History.FailedDebt(fl, null)) < 1e-9
+                 && History.PutBack(fl, srm) == 1 && Math.Abs(History.FailedDebt(fl, null) - 20) < 1e-9);
+
+            // 3. HistoryView setting (INI "HistoryView", default 0 list; 1 medium, 2 large; other values -> 0)
+            var hs = new AppSettings();
+            True("HistoryView default 0 (list)", hs.HistoryView == AppSettings.HistoryViewList && AppSettings.HistoryViewList == 0
+                 && AppSettings.HistoryViewMedium == 1 && AppSettings.HistoryViewLarge == 2);
+            hs.HistoryView = 2;
+            True("HistoryView 2 saved and read back", AppSettings.FromIni(hs.ToIni()).HistoryView == 2
+                 && Array.IndexOf(hs.ToIni(), "HistoryView=2") >= 0);
+            True("HistoryView 1 read", AppSettings.FromIni(new[] { "HistoryView=1" }).HistoryView == 1);
+            True("HistoryView 5 / -1 / 1,5 -> 0", AppSettings.FromIni(new[] { "HistoryView=5" }).HistoryView == 0
+                 && AppSettings.FromIni(new[] { "HistoryView=-1" }).HistoryView == 0 && AppSettings.FromIni(new[] { "HistoryView=1.5" }).HistoryView == 0);
+
+            // 4. PictureThumbnail (desktop)
+            byte[] real;
+            using (var bmp = new System.Drawing.Bitmap(256, 128))
+            {
+                using (var g = System.Drawing.Graphics.FromImage(bmp)) g.Clear(System.Drawing.Color.SteelBlue);
+                real = History.EncodePicture(bmp);
+            }
+            using (var th = History.PictureThumbnail(real, 48))
+                True("PictureThumbnail 256x128 -> 48x24", th != null && th.Width == 48 && th.Height == 24);
+            using (var th = History.PictureThumbnail(real, 1000))
+                True("PictureThumbnail never enlarges", th != null && th.Width == 256 && th.Height == 128);
+            byte[] webp = FakePng(1200, 3);
+            byte[] riff = System.Text.Encoding.ASCII.GetBytes("RIFF....WEBP");
+            Buffer.BlockCopy(riff, 0, webp, 0, riff.Length);
+            True("PictureThumbnail webp / junk / null / size 0 -> null", History.PictureThumbnail(webp, 48) == null
+                 && History.PictureThumbnail(FakePng(500, 9), 48) == null && History.PictureThumbnail(null, 48) == null
+                 && History.PictureThumbnail(real, 0) == null);
+
+            // 5. files: only in bin\test-delete (test mode), never %APPDATA%
+            string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-delete");
+            byte[] png = FakePng(2000, 11), png2 = FakePng(1800, 12);
+            DateTime when = new DateTime(2026, 11, 13, 10, 0, 0);
+            try
+            {
+                True("Delete UseFolder test-delete", AppSettings.UseFolder(dir));
+                if (System.IO.Directory.Exists(dir)) System.IO.Directory.Delete(dir, true);
+                System.IO.Directory.CreateDirectory(dir);
+                History.ResetBlock();
+                var list = new List<QuoteRecord> { BRec("A", "2026-11-04 10:00:00"), BRec("B", "2026-11-03 10:00:00"),
+                                                   BRec("C", "2026-11-02 10:00:00"), BRec("D", "2026-11-01 10:00:00") };
+                True("delete test history saved", History.Save(list) == null);
+                foreach (var id in new[] { "A", "B", "C" }) History.SavePicture(id, png);
+                History.SavePicture("D", real);
+                True("PictureIdSet = the 4 ids", History.PictureIdSet().Count == 4 && History.PictureIdSet().Contains("D"));
+                True("PicturePath: file / none / unsafe", History.PicturePath("D") == System.IO.Path.Combine(History.PictureDir, "D.jpg")
+                     && History.PicturePath("Z") == null && History.PicturePath(@"..\x") == null);
+
+                RemovedRecords removed;
+                string problem;
+                True("DeleteRecords B, C", History.DeleteRecords(list, new[] { "B", "C" }, out removed) == null && removed.Count == 2
+                     && J(IdsOf(list)) == "A|D");
+                True("one save: file has A, D, no .tmp", J(IdsOf(History.Load(out problem))) == "A|D" && problem == null
+                     && !System.IO.File.Exists(History.FilePath + ".tmp"));
+                True("pictures kept for the undo", History.HasPicture("B") && History.HasPicture("C"));
+                True("UndoDelete: A, B, C, D in list and file", History.UndoDelete(list, removed) == null && J(IdsOf(list)) == "A|B|C|D"
+                     && J(IdsOf(History.Load(out problem))) == "A|B|C|D");
+                True("DropRemoved after undo: nothing deleted", History.DropRemoved(list, removed) == 0 && History.HasPicture("B") && History.HasPicture("C"));
+                True("DeleteRecords B, C again", History.DeleteRecords(list, new[] { "C", "B" }, out removed) == null && J(IdsOf(list)) == "A|D");
+                True("DropRemoved: B, C pictures gone, A, D kept", History.DropRemoved(list, removed) == 2
+                     && !History.HasPicture("B") && !History.HasPicture("C") && History.HasPicture("A") && History.HasPicture("D"));
+                True("DeleteRecords no match: null, nothing removed", History.DeleteRecords(list, new[] { "Q" }, out removed) == null
+                     && removed.Count == 0 && list.Count == 2);
+                History.SetBlock();
+                True("DeleteRecords while blocked: refused, list unchanged", History.DeleteRecords(list, new[] { "A" }, out removed) != null
+                     && removed.Count == 0 && J(IdsOf(list)) == "A|D");
+                string cp;
+                True("ClearAll while blocked: refused", History.ClearAll(list, "test", when, out cp) != null && cp == null && list.Count == 2);
+                History.ResetBlock();
+                using (new System.IO.FileStream(History.FilePath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.None))
+                    True("DeleteRecords when the save fails: list as before", History.DeleteRecords(list, new[] { "A" }, out removed) != null
+                         && removed.Count == 0 && J(IdsOf(list)) == "A|D" && History.HasPicture("A"));
+
+                // Clear all
+                string empty;
+                True("ClearAll empty list: nothing", History.ClearAll(new List<QuoteRecord>(), "test", when, out empty) == null && empty == null
+                     && History.NewestClearCopy() == null);
+                True("ClearAll OK", History.ClearAll(list, "test", when, out cp) == null && cp != null && System.IO.File.Exists(cp)
+                     && System.IO.Path.GetFileName(cp) == "history.before-clear-20261113-100000.printprice-backup" && list.Count == 0);
+                True("after ClearAll: file empty, no pictures", History.Load(out problem).Count == 0 && History.PictureIds().Count == 0);
+                True("NewestClearCopy = the copy", string.Equals(History.NewestClearCopy(), cp, StringComparison.OrdinalIgnoreCase));
+                BackupData bd;
+                True("safety copy has A, D and their pictures", History.ReadBackupFile(cp, out bd) == null && J(SortedIds(IdsOf(bd.Quotes))) == "A|D"
+                     && SameBytes(bd.Pictures["A"], png) && SameBytes(bd.Pictures["D"], real) && (bd.Settings == null || bd.Settings.Length == 0));
+                RestoreResult rr;
+                var now = new List<QuoteRecord>();
+                True("get it back: Restore replace", History.Restore(now, new AppSettings(), bd, true, false, when, out rr) == null
+                     && J(SortedIds(IdsOf(rr.Quotes))) == "A|D" && SameBytes(History.LoadPicture("A"), png) && SameBytes(History.LoadPicture("D"), real));
+                // CleanPictures with an empty list (test report finding 1): cleans only when history.json reads fine as empty
+                History.SavePicture("K", png);
+                System.IO.File.Delete(History.FilePath);
+                True("CleanPictures empty list, no history.json -> keeps", History.CleanPictures(new List<QuoteRecord>()) == 0 && History.HasPicture("K"));
+                System.IO.File.WriteAllText(History.FilePath, "not json");
+                True("CleanPictures empty list, unreadable history.json -> keeps", History.CleanPictures(new List<QuoteRecord>()) == 0 && History.HasPicture("K"));
+                True("Save the restored history", History.Save(rr.Quotes) == null);
+                True("CleanPictures empty list, history.json not empty -> keeps", History.CleanPictures(new List<QuoteRecord>()) == 0 && History.HasPicture("K"));
+                True("Save empty history", History.Save(new List<QuoteRecord>()) == null);
+                History.SetBlock();
+                True("CleanPictures empty list while blocked -> keeps", History.CleanPictures(new List<QuoteRecord>()) == 0 && History.HasPicture("K"));
+                History.ResetBlock();
+                int cleaned = History.CleanPictures(new List<QuoteRecord>());
+                True("CleanPictures empty list, history.json empty -> removes all (K, A, D)", cleaned == 3 && History.PictureIds().Count == 0);
+                True("Save the restored history again", History.Save(rr.Quotes) == null);
+                var again = History.Load(out problem);
+                string cp2;
+                True("second ClearAll same second: -2 copy, both kept", History.ClearAll(again, "test", when, out cp2) == null
+                     && System.IO.Path.GetFileName(cp2) == "history.before-clear-20261113-100000-2.printprice-backup" && System.IO.File.Exists(cp));
             }
             finally
             {

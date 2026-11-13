@@ -37,6 +37,82 @@ static class HistoryTests
         return l;
     }
 
+    // idea 22: delete several / Clear all / Undo, ticks, picture keys, views, confirm texts EN/DA
+    static void Idea22(Action<string, bool> True)
+    {
+        L.Danish = false;
+        var list = Samples();
+        var keep = new List<QuoteRecord>(list);
+        var b = list[1]; var d = list[3]; var f = list[5];
+        var removed = WebHistory.RemoveRecords(list, new[] { f, b, d });
+        True("delete several: 3 out, order kept", removed.Count == 3 && list.Count == 5 && list[0] == keep[0] && list[1] == keep[2] && list[2] == keep[4]);
+        True("removed in list order", removed.Records[0] == b && removed.Records[1] == d && removed.Records[2] == f);
+        int back = History.PutBack(list, removed);
+        bool same = back == 3 && list.Count == keep.Count;
+        for (int i = 0; same && i < keep.Count; i++) same = list[i] == keep[i];
+        True("undo puts them back in their places", same);
+
+        // an old record without an Id goes by reference, and comes back
+        list[2].Id = "";
+        var noId = list[2];
+        removed = WebHistory.RemoveRecords(list, new[] { noId, list[6] });
+        True("record without Id deleted by reference", removed.Count == 2 && !list.Contains(noId) && list.Count == 6 && removed.Indexes[0] == 2 && removed.Indexes[1] == 6);
+        History.PutBack(list, removed);
+        True("record without Id back in place", list.Count == 8 && list[2] == noId && list[6] == keep[6]);
+        list[2].Id = "sample2";
+
+        // Clear all and its undo
+        removed = WebHistory.RemoveRecords(list, new List<QuoteRecord>(list));
+        True("clear all empties the list", list.Count == 0 && removed.Count == 8);
+        True("cleared pictures go when the undo is dropped", WebHistory.DroppedPictureKeys(list, removed).Count == 8
+             && WebHistory.DroppedPictureKeys(list, removed)[0] == "pic:sample0");
+        History.PutBack(list, removed);
+        True("undo of clear all", list.Count == 8 && list[0] == keep[0] && list[7] == keep[7]);
+        True("no picture keys dropped for records that are back", WebHistory.DroppedPictureKeys(list, removed).Count == 0);
+
+        // ticks: only shown rows stay; a reloaded list keeps them by Id
+        var ticked = new HashSet<QuoteRecord> { list[0], list[3], list[5] };
+        var oct = WebHistory.Apply(list, new WebHistory.Filter { Month = new DateTime(2026, 10, 1) }, null);
+        var kept = WebHistory.KeepTicks(ticked, oct);
+        True("filter keeps only shown ticks", kept.Count == 2 && kept.Contains(list[3]) && kept.Contains(list[5]) && !kept.Contains(list[0]));
+        var reloaded = History.ParseJson(History.ToJson(list));
+        kept = WebHistory.KeepTicks(ticked, reloaded);
+        True("reloaded list keeps ticks by Id", kept.Count == 3 && kept.Contains(reloaded[0]) && kept.Contains(reloaded[3]) && kept.Contains(reloaded[5]));
+        True("ticked total", Math.Abs(WebHistory.Total(new[] { list[0], list[1] }) - (History.PriceFor(list[0]) + History.PriceFor(list[1]))) < 1e-9);
+
+        // views (Settings.HistoryView)
+        var s = new AppSettings();
+        True("view: list by default", WebHistory.View(s) == WebHistory.ViewList);
+        s.HistoryView = 2; True("view: large", WebHistory.View(s) == WebHistory.ViewLarge);
+        s.HistoryView = 7; True("view: unknown = list", WebHistory.View(s) == WebHistory.ViewList);
+        s.HistoryView = 1;
+        True("view kept in the settings text", WebHistory.View(WebCalc.SettingsFromText(WebCalc.SettingsToText(s), out _)) == WebHistory.ViewMedium);
+
+        // confirm texts
+        var three = new List<QuoteRecord> { list[0], list[2], list[5] };
+        var ids = new List<string>(); foreach (var r in three) ids.Add(r.Id);
+        var sum = History.SummarizeDelete(list, ids);
+        List<string> warn;
+        var lines = WebHistory.ConfirmLines(sum, three, false, out warn);
+        True("names line", lines[0] == "3D BENCHY, Phone stand (adjustable) and Headphone hook, with their pictures.");
+        True("invoice line", lines.Count == 2 && lines[1] == "1 has an invoice; its number is never used again.");
+        True("titles EN", WebHistory.ConfirmTitle(3, false) == "Delete 3 quotes?" && WebHistory.ConfirmTitle(8, true) == "Clear all 8 quotes?"
+             && WebHistory.ConfirmButton(8, true) == "Clear all 8" && WebHistory.DeleteTickedText(3) == "Delete 3 ticked…");
+        True("names: 5 -> 3 and 2 more", WebHistory.NamesText(list.GetRange(0, 5)) == "3D BENCHY, Four-Color Multicolor Test benchy, Phone stand (adjustable) and 2 more");
+        var clear = History.SummarizeClear(list);
+        lines = WebHistory.ConfirmLines(clear, list, true, out warn);
+        True("clear all: 2 invoices", clear.Count == 8 && lines.Count == 2 && lines[1].StartsWith("2 have an invoice"));
+        True("failed print open -> warning", (clear.FailedOpen > 0) == (warn.Count > 0));
+        True("done texts EN", WebHistory.DeletedText(1, false) == "1 quote deleted." && WebHistory.DeletedText(8, true) == "8 quotes cleared."
+             && WebHistory.UndoneText(3) == "3 quotes are back.");
+        L.Danish = true;
+        True("texts DA", WebHistory.ConfirmTitle(3, false) == "Slet 3 tilbud?" && WebHistory.ConfirmTitle(8, true) == "Ryd alle 8 tilbud?"
+             && WebHistory.TickedText(2) == "2 markerede" && WebHistory.TickedText(1) == "1 markeret"
+             && WebHistory.DeleteTickedText(1) == "Slet 1 markeret…" && WebHistory.DeleteTickedText(3) == "Slet 3 markerede…" &&WebHistory.DeletedText(8, true) == "8 tilbud ryddet."
+             && WebHistory.NamesText(list.GetRange(0, 2)) == "3D BENCHY og Four-Color Multicolor Test benchy");
+        L.Danish = false;
+    }
+
     public static void Run(Action<string, bool> True, Action<string, double, double> Eq)
     {
         bool wasDanish = L.Danish;
@@ -172,7 +248,7 @@ static class HistoryTests
         True("DA month", WebHistory.MonthText(oct) == "Oktober 2026");
         True("DA count", WebHistory.CountText(6, 8) == "6 af 8 tilbud");
         True("DA short date", WebHistory.ShortDate(list[2]) == "30. okt. 10:05");
-        True("DA card prints sub", WebHistory.Cards(WebHistory.Totals(list, oct, null))[0].Sub == "+ 1 fejlede");
+        True("DA card prints sub", WebHistory.Cards(WebHistory.Totals(list, oct, null))[0].Sub == "+ 1 fejlet");
         L.Danish = false;
 
         // src\QuoteRows.cs compiles with WEB and gives the desktop's texts
@@ -183,6 +259,7 @@ static class HistoryTests
         var qrows = QuoteRows.Build(qb, null, -1, 5, 30, "");
         True("QuoteRows.Build rows", qrows.Count > 2 && qrows[0].Label == "Material");
 
+        Idea22(True);
         L.Danish = wasDanish;
     }
 }

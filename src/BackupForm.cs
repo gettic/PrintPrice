@@ -780,6 +780,18 @@ namespace PrintPrice
                          L.S("All files", "Alle filer") + " (*.*)|*.*"
             })
             {
+                // idea 22: after a Clear all the way back is its safety copy in the (hidden) settings folder: start there,
+                // with the newest copy already picked while the history is empty
+                string clearCopy = History.NewestClearCopy();
+                if (clearCopy != null)
+                {
+                    try
+                    {
+                        dlg.InitialDirectory = Path.GetDirectoryName(clearCopy);
+                        if (list.Count == 0) dlg.FileName = Path.GetFileName(clearCopy);
+                    }
+                    catch { }
+                }
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 path = dlg.FileName;
             }

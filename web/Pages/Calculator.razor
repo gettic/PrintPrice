@@ -29,7 +29,10 @@ else
             <HistoryPage Quotes="history" Settings="settings" Problem="@historyProblem" Changed="HistoryChanged"
                          OpenAgain="r => FromHistory(r, false)" Repeat="r => FromHistory(r, true)"
                          Quote="r => OpenRecordQuote(r, false)" Invoice="r => OpenRecordQuote(r, true)"
-                         LastBackup="@lastBackup" OpenBackup="() => OpenBackup(history.Count == 0 ? BackupDialog.TabRestore : BackupDialog.TabBackup)" />
+                         LastBackup="@lastBackup" OpenBackup="() => OpenBackup(history.Count == 0 ? BackupDialog.TabRestore : BackupDialog.TabBackup)"
+                         DeleteMany="DeleteRecords" ClearAll="ClearHistory" Undo="UndoDelete" DismissDone="DismissDone"
+                         DoneText="@(doneText == null ? null : doneText())" DoneError="doneError" CanUndo="@(undo != null)" SafetyCopy="@safetyCopyKey"
+                         DownloadSafety="DownloadClearSafety" StorageAvailable="@Histories.Available" SettingsChanged="SaveSettings" />
         }
 
         <div class="calc" hidden="@InHistory">
@@ -712,6 +715,116 @@ else
         Recalculate();
     }
 
+    // ---------- idea 22: delete several, Clear all, Undo (until the page is reloaded or the next delete) ----------
+
+    RemovedRecords undo;          // what the last delete / Clear all took out (null = nothing to undo)
+    Func<string> doneText;        // the History page's done bar (null = none); a function, so a language switch changes it too
+    bool doneError;
+    string safetyCopyKey;         // the Clear all safety copy to download (null = none)
+
+    /// The undo is no longer possible: the removed quotes' pictures go now (History.DropRemoved on the desktop).
+    async Task DropUndo()
+    {
+        if (undo == null) return;
+        var keys = WebHistory.DroppedPictureKeys(history, undo);
+        undo = null;
+        await Histories.DeletePictures(keys);
+    }
+
+    async Task DeleteRecords(List<QuoteRecord> records)
+    {
+        await DropUndo();
+        safetyCopyKey = null;
+        var removed = WebHistory.RemoveRecords(history, records);
+        if (removed.Count == 0) { doneText = null; return; }
+        await AfterRemove(removed, false);
+    }
+
+    /// Clear all: a safety copy first (with pictures, kept in this browser; the newest 3 stay), then every quote goes.
+    /// If the copy can't be saved, nothing is cleared.
+    async Task ClearHistory(bool keepCopy)
+    {
+        await DropUndo();
+        safetyCopyKey = null;
+        if (history.Count == 0) return;
+        if (keepCopy && Histories.Available)
+        {
+            var now = DateTime.Now;
+            var pictures = await Histories.BackupPictures(history, WebBackup.PictureBudget);
+            string key = WebBackup.ClearSafetyKey(now);
+            string err = await Histories.SaveSafety(key, WebBackup.FileText(history, settings, now, pictures));
+            if (err != null) { doneText = () => err; doneError = true; return; }
+            safetyCopyKey = key;
+        }
+        var removed = WebHistory.RemoveRecords(history, new List<QuoteRecord>(history));
+        if (removed.Count == 0) return;
+        await AfterRemove(removed, true);
+    }
+
+    /// One save for the whole delete; on a problem the quotes go back (list = storage).
+    async Task AfterRemove(RemovedRecords removed, bool clear)
+    {
+        string err = await Histories.Save(history);
+        if (err != null)
+        {
+            History.PutBack(history, removed);
+            historyProblem = err;
+            doneText = () => err;
+            doneError = true;
+            safetyCopyKey = null;
+        }
+        else
+        {
+            undo = removed;
+            int n = removed.Count; doneText = () => WebHistory.DeletedText(n, clear);
+            doneError = false;
+        }
+        if (reopened != null && !history.Exists(r => r.Id == reopened.Id)) reopened = null;
+        if (repeatOf != null && !history.Exists(r => r.Id == repeatOf.Id)) repeatOf = null;
+        Recalculate();   // the payback debt may have changed
+    }
+
+    async Task UndoDelete()
+    {
+        if (undo == null) return;
+        var removed = undo;
+        undo = null;
+        var before = new HashSet<QuoteRecord>(history);
+        int n = History.PutBack(history, removed);
+        string err = await Histories.Save(history);
+        if (err != null)
+        {
+            var back = new List<QuoteRecord>();
+            foreach (var r in history) if (!before.Contains(r)) back.Add(r);
+            WebHistory.RemoveRecords(history, back);
+            undo = removed;   // still possible later
+            historyProblem = err;
+            doneText = () => err;
+            doneError = true;
+        }
+        else
+        {
+            doneText = () => WebHistory.UndoneText(n);
+            doneError = false;
+            safetyCopyKey = null;
+        }
+        Recalculate();
+    }
+
+    async Task DismissDone()
+    {
+        doneText = null;
+        safetyCopyKey = null;
+        await DropUndo();
+    }
+
+    async Task DownloadClearSafety()
+    {
+        if (safetyCopyKey == null) return;
+        var text = await Histories.Safety(safetyCopyKey);
+        if (text != null) await Store.Download(WebBackup.SafetyFileName(safetyCopyKey), text);
+    }
+
     async Task SaveClicked()
     {
         if (last == null || input == null)
@@ -982,6 +1095,9 @@ else
     async Task<WebBackup.Applied> ApplyRestore(RestoreResult res, string safetyKey)
     {
         var a = new WebBackup.Applied();
+        await DropUndo();   // a restore replaces the list: no undo across it
+        doneText = null;
+        safetyCopyKey = null;
         if (Histories.Available)
         {
             var pictures = await Histories.BackupPictures(history, WebBackup.PictureBudget);   // a Replace drops pictures: the safety copy keeps them

@@ -15,6 +15,7 @@
     --accent: #961e23;      /* Theme.InfoAccent */
     --hot-back: #34373c;    /* Theme.HotBack */
     --hot-border: #6e6e74;  /* Theme.HotBorder */
+    --warning: #f0b446;     /* Theme.Warning */
 }
 
 * { box-sizing: border-box; }
@@ -293,18 +294,108 @@ tr.picked .tick { border-color: var(--text); }
     .qrow .d.red { color: var(--others); }
     .qrow .d.wide { grid-column: 1 / span 2; }
     .qrow .chips { grid-column: 1 / span 2; display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
-    .chip { font-size: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 1px 9px; color: var(--muted); background: transparent; }
-    .chip:hover { background: var(--hot-back); }
-    .chip.on { color: var(--friends); border-color: #3d6f55; }
-    .chip.bad { color: var(--error); border-color: #7a2a2e; }
-    .qrow .sheet { grid-column: 1 / span 2; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
-    .qrow .sheet label { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); }
-    .qrow .sheet label:nth-child(2) { grid-column: 1 / span 2; }
-    .qrow .sheet select { width: 100%; }
-    .qrow .sheet select.green { color: var(--friends); }
-    .qrow .sheet select.red { color: var(--others); }
-    .qrow .sheet button { padding: 7px 4px; }
+    .sheet { grid-column: 1 / span 2; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+    .sheet label { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--muted); }
+    .sheet label:nth-child(2) { grid-column: 1 / span 2; }
+    .sheet select { width: 100%; }
+    .sheet select.green { color: var(--friends); }
+    .sheet select.red { color: var(--others); }
+    .sheet button { padding: 7px 4px; }
     .actions { display: none; }
+    /* idea 22 on a phone: picture at the left of each row; cards 2 (medium) or 1 (large) per row; an opened card spans the row */
+    .qrow { grid-template-columns: auto minmax(0, 1fr) auto; }
+    .qrow .qpic { grid-row: span 2; position: relative; }
+    .qrow .qpic .sel { position: absolute; top: 2px; left: 2px; }
+    .qrow .d.wide, .qrow .chips { grid-column: 2 / span 2; }
+    .qrow .sheet { grid-column: 1 / -1; }
+    .qrow.ticked { background: var(--info); box-shadow: inset 4px 0 0 var(--accent); }
+}
+
+/* idea 22 (issue #5): tick boxes, pictures, List / Medium / Large, Clear all, Undo. Only Theme colours (the vars at the
+   top); the softer chip lines and see-through backs are mixed from them. */
+.chip { font-size: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 1px 9px; color: var(--muted); background: transparent; }
+.chip:hover { background: var(--hot-back); }
+.chip.on { color: var(--friends); border-color: color-mix(in srgb, var(--friends) 45%, var(--back)); }
+.chip.bad { color: var(--error); border-color: color-mix(in srgb, var(--error) 40%, var(--back)); }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+input.sel { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; vertical-align: middle; cursor: pointer; }
+.views { display: inline-flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; flex: none; }
+.views button { border: 0; border-radius: 0; padding: 3px 10px; height: 28px; background: var(--input); color: var(--muted); font-size: 13px; white-space: nowrap; }
+.views button:hover { color: var(--text); }
+.views button.on { background: var(--accent); color: #fff; }
+.selbar { display: flex; align-items: center; gap: 10px; background: var(--info); border: 1px solid var(--border); padding: 5px 10px; margin-bottom: 8px; min-height: 38px; }
+.selbar.on { border-left: 4px solid var(--accent); }
+.selbar .grow { flex: 1; }
+.selbar .tickall { align-items: center; font-size: 13px; color: var(--muted); }
+.selbar .tickall input { margin: 0; }
+.hinfo.done { display: flex; align-items: center; gap: 10px; margin: 0 0 10px; font-size: 14px; }
+.hinfo.done > span { flex: 1; }
+.views .vt { margin-left: .35em; }
+.hinfo.done button.x { border: 0; background: transparent; padding: 2px 8px; }
+.hinfo.done button.x:hover { background: var(--button-hover); }
+table.hist th.selcol, table.hist td.selcol { width: 28px; padding-right: 0; }
+table.hist th.piccol, table.hist td.piccol { width: 50px; padding: 2px 4px; }
+table.hist tr.ticked td { background: var(--info); }
+table.hist tr.ticked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+table.hist tr.picked.ticked td { background: var(--accent); }
+/* a picture box (the desktop's well: Back with a Border frame), empty until HistoryPage.razor.js sets the img's src;
+   no picture = the desktop's muted cube outline */
+.hpic { display: block; position: relative; background: var(--back); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+.hpic img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.hpic img:not([src]) { visibility: hidden; }
+.hpic .cube { position: absolute; inset: 0; width: 100%; height: 100%; fill: none; stroke: var(--muted); stroke-width: 1.4px; stroke-linejoin: round; }
+.hpic.s { width: 38px; height: 38px; }
+.hpic.m { width: 48px; height: 48px; }
+.hpic.t, .hpic.l { width: 100%; aspect-ratio: 1 / 1; }
+/* wide screens with a mouse: a list picture shows bigger (160 px, as the desktop) while hovered */
+@media (hover: hover) and (min-width: 721px) {
+    table.hist td.piccol .hpic.s { overflow: visible; }
+    table.hist td.piccol .hpic.s img { border-radius: 3px; }
+    table.hist td.piccol .hpic.s:hover img[src] {
+        position: absolute; left: 44px; top: 50%; width: 160px; height: 160px; transform: translateY(-50%); z-index: 6;
+        background: var(--input); border: 1px solid var(--hot-border); box-shadow: 0 6px 20px rgba(0, 0, 0, .6);
+    }
+}
+.tiles { display: grid; gap: 10px; }
+.tiles.medium { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.tiles.large { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.tile { background: var(--info); border: 1px solid var(--border); border-radius: 6px; padding: 8px; min-width: 0; cursor: default; }
+.tile:hover { background: var(--hot-back); }
+.tile:focus-visible { outline: 1px solid var(--hot-border); outline-offset: 1px; }
+.tile.ticked { box-shadow: inset 0 3px 0 var(--accent); }
+.tile.picked { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.tile.picked.ticked { box-shadow: 0 0 0 1px var(--accent), inset 0 3px 0 var(--accent); }
+.tile .tpic { position: relative; }
+.tile .tsel { position: absolute; top: 4px; left: 4px; background: color-mix(in srgb, var(--back) 75%, transparent); border-radius: 3px; padding: 3px; line-height: 0; opacity: 0; }
+.tile:hover .tsel, .tile:focus-within .tsel, .tile.selecting .tsel, .tile.ticked .tsel { opacity: 1; }
+@media (hover: none) { .tile .tsel { opacity: 1; } }
+.tile .flags { position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; }
+.flag { font-size: 12px; padding: 0 6px; border-radius: 8px; background: color-mix(in srgb, var(--back) 80%, transparent); }
+.flag.on { color: var(--friends); }
+.flag.bad { color: var(--error); }
+.tile .m { font-weight: 600; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .row { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; font-size: 13px; }
+.tile .p { font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tiles.large .tile .p { font-size: 18px; }
+.tile .d { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .chips { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.dialog.confirm { max-width: 480px; margin-top: 10vh; }
+.dialog.confirm .cbody { padding: 12px 14px 0; }
+.dialog.confirm .cbody p { margin: 0 0 8px; }
+.dialog.confirm .warntext { color: var(--warning); }
+.dialog.confirm .check { margin: 4px 0 10px; }
+/* phone: an opened card stays in its place; its actions come full width after its row */
+.tile-sheet { grid-column: 1 / -1; background: var(--info); border: 1px solid var(--accent); border-radius: 6px; padding: 0 8px 8px; }
+.tile-sheet .tsname { font-weight: 600; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 720px) {
+    .views .vt { display: none; }
+    .tiles.medium { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .tiles.large { grid-template-columns: minmax(0, 1fr); }
+    .tile { cursor: pointer; }
+    .tile.open { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .tile .tsel { opacity: 1; }
+    .tile:not(.selecting) .tsel { display: none; }   /* phone: Select turns the boxes on */
+    .selbar { flex-wrap: wrap; }
 }
 
 /* loading screen and error bar */

@@ -84,10 +84,28 @@ namespace PrintPrice
                     {
                         hist.QuoteRequested = (owner, rec, isInvoice) => { };   // shows Quote… / Invoice… (never clicked here)
                         hist.BackupRequested = owner => false;                  // shows Backup… (never clicked here)
+                        hist.SamplePicturesForMode = HistoryForm.SamplePictures();   // made-up pictures (one quote without)
                         Place(hist);
                         hist.Show();
                         hist.SelectMonth(new DateTime(2026, 10, 1));   // October: billed, failed and not-printed quotes
                         Snap(hist, folder, "history.png");
+                        // idea 22: all months, three selected, in each view; the delete question; the ✓ line with Undo
+                        hist.SelectMonth(DateTime.MinValue);
+                        hist.SampleSelect(new[] { 2, 4, 5 });
+                        Snap(hist, folder, "history_selected.png");
+                        hist.SampleView(HistoryForm.ViewMedium);
+                        Snap(hist, folder, "history_medium.png");
+                        hist.SampleView(HistoryForm.ViewLarge);
+                        Snap(hist, folder, "history_large.png");
+                        hist.SampleView(HistoryForm.ViewList);
+                        using (var ask = hist.NewDeleteAsk(hist.SampleSelected()))
+                            SnapForm(ask, folder, "history_delete_ask.png");
+                        using (var ask = hist.NewClearAsk())
+                            SnapForm(ask, folder, "history_clear_ask.png");
+                        hist.DoDelete(hist.SampleSelected());   // in memory only (picture mode)
+                        Snap(hist, folder, "history_deleted.png");
+                        hist.UndoClicked();
+                        Snap(hist, folder, "history_undone.png");
                         hist.Hide();
                     }
                     // the Backup window (idea 27) with made-up states: nothing is read, written or sent

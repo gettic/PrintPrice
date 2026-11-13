@@ -284,8 +284,8 @@ namespace PrintPrice.Web
             return new List<Card>
             {
                 new Card { Caption = L.S("Prints", "Print"), Value = t.Prints.ToString(Num.Dk),
-                           Sub = t.FailedPrints > 0 ? L.F("+ {0} failed", "+ {0} fejlede", t.FailedPrints) : L.S("no failed prints", "ingen fejlprint"),
-                           ShortSub = t.FailedPrints > 0 ? L.F("+ {0} failed", "+ {0} fejlede", t.FailedPrints) : L.S("none failed", "ingen fejl") },
+                           Sub = t.FailedPrints > 0 ? L.F("+ {0} failed", t.FailedPrints == 1 ? "+ {0} fejlet" : "+ {0} fejlede", t.FailedPrints) : L.S("no failed prints", "ingen fejlprint"),
+                           ShortSub = t.FailedPrints > 0 ? L.F("+ {0} failed", t.FailedPrints == 1 ? "+ {0} fejlet" : "+ {0} fejlede", t.FailedPrints) : L.S("none failed", "ingen fejl") },
                 new Card { Caption = L.S("Print time", "Printtid"), Value = time, Sub = grams + L.S(" filament", " filament"), ShortSub = grams },
                 new Card { Caption = L.S("Customers", "Kunder"), Value = Num.Kr(t.CustomerIncome), ShortValue = plain(t.CustomerIncome),
                            Sub = prints(t.CustomerCount), Css = "red" },
@@ -347,6 +347,146 @@ namespace PrintPrice.Web
 
         /// Deletes a record; true when it was there.
         public static bool Delete(List<QuoteRecord> list, string id) { return History.Remove(list, id); }
+
+        // ---------- delete several / Clear all / Undo / views (idea 22, issue #5) ----------
+
+        public const int ViewList = AppSettings.HistoryViewList, ViewMedium = AppSettings.HistoryViewMedium, ViewLarge = AppSettings.HistoryViewLarge;
+
+        /// Settings' HistoryView as a known view (anything else = the list).
+        public static int View(AppSettings s)
+        {
+            int v = s == null ? ViewList : (int)s.HistoryView;
+            return v == ViewMedium || v == ViewLarge ? v : ViewList;
+        }
+
+        /// Takes these records out of the list (History.RemoveMany by Id; old records without an Id by reference) and
+        /// returns them with their places, for History.PutBack (Undo). Never null.
+        public static RemovedRecords RemoveRecords(List<QuoteRecord> list, IEnumerable<QuoteRecord> records)
+        {
+            var ids = new List<string>();
+            var loose = new HashSet<QuoteRecord>();
+            if (list == null || records == null) return new RemovedRecords();
+            foreach (var r in records)
+            {
+                if (r == null) continue;
+                if (!string.IsNullOrEmpty(r.Id)) ids.Add(r.Id); else loose.Add(r);
+            }
+            var looseAt = new List<KeyValuePair<int, QuoteRecord>>();
+            if (loose.Count > 0)
+                for (int i = 0; i < list.Count; i++)
+                    if (list[i] != null && loose.Contains(list[i])) looseAt.Add(new KeyValuePair<int, QuoteRecord>(i, list[i]));
+            var res = History.RemoveMany(list, ids);
+            if (looseAt.Count == 0) return res;
+            foreach (var p in looseAt) list.Remove(p.Value);
+            // one list of (old index, record), lowest index first
+            var all = new List<KeyValuePair<int, QuoteRecord>>(looseAt);
+            for (int k = 0; k < res.Records.Count; k++) all.Add(new KeyValuePair<int, QuoteRecord>(res.Indexes[k], res.Records[k]));
+            all.Sort((a, b) => a.Key.CompareTo(b.Key));
+            var merged = new RemovedRecords();
+            foreach (var p in all) { merged.Records.Add(p.Value); merged.Indexes.Add(p.Key); }
+            return merged;
+        }
+
+        /// The ticked records that are still among rows (the filter's list): a record from a reloaded list (another tab
+        /// saved) keeps its tick by Id. A filter change drops ticks of rows no longer shown, so a delete only takes
+        /// what the user can see.
+        public static HashSet<QuoteRecord> KeepTicks(ICollection<QuoteRecord> ticked, List<QuoteRecord> rows)
+        {
+            var res = new HashSet<QuoteRecord>();
+            if (ticked == null || ticked.Count == 0 || rows == null) return res;
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var t in ticked) if (t != null && !string.IsNullOrEmpty(t.Id)) ids.Add(t.Id);
+            foreach (var r in rows)
+                if (r != null && (ticked.Contains(r) || (!string.IsNullOrEmpty(r.Id) && ids.Contains(r.Id)))) res.Add(r);
+            return res;
+        }
+
+        /// The picture keys to delete once an Undo is no longer possible: removed records not back in the list.
+        public static List<string> DroppedPictureKeys(List<QuoteRecord> list, RemovedRecords removed)
+        {
+            var res = new List<string>();
+            if (removed == null) return res;
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            if (list != null) foreach (var r in list) if (r != null && !string.IsNullOrEmpty(r.Id)) have.Add(r.Id);
+            foreach (var id in removed.Ids()) if (History.SafePictureId(id) && !have.Contains(id)) res.Add(PictureKey(id));
+            return res;
+        }
+
+        /// The total list price of some records (History.PriceFor each).
+        public static double Total(IEnumerable<QuoteRecord> records)
+        {
+            double sum = 0;
+            if (records != null) foreach (var r in records) if (r != null) sum += History.PriceFor(r);
+            return sum;
+        }
+
+        /// "3 ticked" / "3 markeret".
+        public static string TickedText(int n) { return L.F("{0} ticked", n == 1 ? "{0} markeret" : "{0} markerede", n); }
+
+        /// "Delete 3 ticked…" / "Slet 3 markerede…", "Slet 1 markeret…".
+        public static string DeleteTickedText(int n) { return L.F("Delete {0} ticked…", n == 1 ? "Slet {0} markeret…" : "Slet {0} markerede…", n); }
+
+        /// "Benchy", "Benchy and Plant pot", "Benchy, Plant pot and Dragon", "Benchy, Plant pot, Dragon and 5 more".
+        public static string NamesText(IList<QuoteRecord> records)
+        {
+            var names = new List<string>();
+            if (records != null) foreach (var r in records) if (r != null) names.Add(History.ModelText(r));
+            if (names.Count == 0) return "";
+            string and = L.S(" and ", " og ");
+            if (names.Count == 1) return names[0];
+            if (names.Count <= 3) return string.Join(", ", names.GetRange(0, names.Count - 1)) + and + names[names.Count - 1];
+            return string.Join(", ", names.GetRange(0, 3)) + and + L.F("{0} more", "{0} mere", names.Count - 3);
+        }
+
+        /// The confirm dialog's title: "Delete 3 quotes?" / "Clear all 48 quotes?".
+        public static string ConfirmTitle(int n, bool clear)
+        {
+            if (clear) return n == 1 ? L.S("Clear all: 1 quote?", "Ryd alt: 1 tilbud?") : L.F("Clear all {0} quotes?", "Ryd alle {0} tilbud?", n);
+            return n == 1 ? L.S("Delete 1 quote?", "Slet 1 tilbud?") : L.F("Delete {0} quotes?", "Slet {0} tilbud?", n);
+        }
+
+        /// The confirm button: "Delete 3" / "Clear all 48".
+        public static string ConfirmButton(int n, bool clear)
+        {
+            return clear ? L.F("Clear all {0}", "Ryd alle {0}", n) : L.F("Delete {0}", "Slet {0}", n);
+        }
+
+        /// The dialog's lines (plain, then the warning ones) from History.SummarizeDelete / SummarizeClear.
+        public static List<string> ConfirmLines(DeleteSummary s, IList<QuoteRecord> records, bool clear, out List<string> warnings)
+        {
+            var lines = new List<string>();
+            warnings = new List<string>();
+            if (s == null) return lines;
+            if (clear)
+                lines.Add(L.S("Every saved quote and picture in this browser is deleted, not only the ones the filter shows. Settings stay.",
+                              "Alle gemte tilbud og billeder i denne browser slettes, ikke kun dem filteret viser. Indstillingerne bliver."));
+            else
+                lines.Add(L.F("{0}, with their pictures.", "{0} med deres billeder.", NamesText(records)));
+            if (s.Invoices > 0)
+                lines.Add(s.Invoices == 1 ? L.S("1 has an invoice; its number is never used again.", "1 har en faktura; dens nummer bruges aldrig igen.")
+                                          : L.F("{0} have an invoice; their numbers are never used again.", "{0} har en faktura; deres numre bruges aldrig igen.", s.Invoices));
+            if (s.FailedOpen > 0)
+                warnings.Add(s.FailedOpen == 1
+                    ? L.F("1 failed print is not paid back yet ({0}): deleting it drops that debt.", "1 fejlet print er ikke betalt tilbage endnu ({0}): sletter du det, forsvinder den gæld.", Num.Kr(s.FailedOpenAmount))
+                    : L.F("{0} failed prints are not paid back yet ({1}): deleting them drops that debt.", "{0} fejlede print er ikke betalt tilbage endnu ({1}): sletter du dem, forsvinder den gæld.", s.FailedOpen, Num.Kr(s.FailedOpenAmount)));
+            if (!clear && s.DebtAfter > s.DebtBefore + 0.005)
+                warnings.Add(L.F("Some of these quotes paid back failed prints: the failed-print debt goes up from {0} to {1}.",
+                                 "Nogle af disse tilbud betalte fejlede print tilbage: gælden for fejlede print stiger fra {0} til {1}.", Num.Kr(s.DebtBefore), Num.Kr(s.DebtAfter)));
+            return lines;
+        }
+
+        /// The done bar after a delete / Clear all.
+        public static string DeletedText(int n, bool clear)
+        {
+            if (clear) return n == 1 ? L.S("1 quote cleared.", "1 tilbud ryddet.") : L.F("{0} quotes cleared.", "{0} tilbud ryddet.", n);
+            return n == 1 ? L.S("1 quote deleted.", "1 tilbud slettet.") : L.F("{0} quotes deleted.", "{0} tilbud slettet.", n);
+        }
+
+        /// The done bar after Undo.
+        public static string UndoneText(int n)
+        {
+            return n == 1 ? L.S("1 quote is back.", "1 tilbud er tilbage.") : L.F("{0} quotes are back.", "{0} tilbud er tilbage.", n);
+        }
 
         // ---------- Open again / Repeat print (MainForm.FillFromRecord) ----------
 

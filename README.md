@@ -36,8 +36,10 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 
 **History:** the **History** tab is the price history of the Windows app in the browser.
 - **Save to history** on the calculator saves the quote. The tab has the search, the **Month**, **Show** and **Printer** filters and the month cards. In the list you can change **For**, **Note**, **Printed** and **Failed**, **Delete**, **Open again** and **Repeat print**. Failed prints pay themselves back, like in the app.
+- **Delete several:** tick quotes (or **Tick all shown**) and click **Delete 3 ticked…** (with your number). On a phone, **Select** turns on the tick boxes. **Clear all…** (next to **Backup…**) deletes every quote. It keeps a safety copy in the browser first, with the pictures (the newest 3 are kept), and offers **Download**. Both ask first, and **Undo** brings the quotes back until the page is reloaded.
+- **Views:** **List**, **Medium** or **Large** pictures, remembered in the settings.
 - On the site there is no slicing, so **Repeat print** uses the saved time and grams with today's prices. Drop the sliced file again to update them.
-- Each saved job keeps a small picture (256 px), shown in Open again, Repeat print, Quote… and Invoice…. Deleting the job deletes its picture.
+- Each saved job keeps a small picture (256 px). The list shows it (bigger when you point at it), and so do Open again, Repeat print, Quote… and Invoice…. A job without a picture shows a cube.
 - The history is kept in this browser only, in the same `history.json` format as the desktop app. Clearing the browser's site data deletes it. Safari can delete a site's storage after 7 days without a visit.
 
 **Backup and restore:** **Backup…** on the History tab opens the Backup window, like the app's.
@@ -118,14 +120,19 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Month** picker (all months or one month, ‹ › to step) with six cards for that month: prints and failed prints, print time and filament, customers, friends & family, costs (material + power + wear) and profit with % of income.
   - **Printer:** every saved quote keeps its printer. Quotes saved before there were several printers count as your first printer. With 2 or more printers, the list gets a **Printer** column and a **Printer** filter. With one printer picked, the cards show that printer's totals (**All months** = all time). With **All printers**, the Profit card's tooltip lists the profit per printer. A removed printer is shown as "(removed)".
   - Profit per printer = price − material − power − that printer's wear. A failed print counts as a loss on its own printer.
-  - You can search and filter the list. One **Price** column shows the friends & family or the customer price, following each row's **For** choice (Customer by default).
-  - **For** and **Note** can be edited in the list and are saved at once. **Delete** asks for a second click.
+  - You can search and filter the list. One **Price** column shows the friends & family or the customer price, following each row's **For** choice (Customer by default). **Esc** in the search box clears it.
+  - **For** and **Note** can be edited in the list and are saved at once.
   - **Printed** and **Failed** are tick columns. Click to tick. Quotes saved before **Printed** existed count as printed. Failed quotes feed the payback (see Failed prints payback above).
+  - **Views:** the switch top right shows a **List**, **Medium pictures** or **Large pictures**. Ctrl+1, 2, 3 or Ctrl+mouse wheel switch too. The view is remembered. **For** and **Note** are edited in the list view.
+  - **Select several:** Ctrl+click, Shift+click or Ctrl+A. **Delete** (or the Delete key) deletes the selected quotes. In the right-click menu, **For**, **Printed** and **Failed** change all selected quotes.
+  - **Clear all…** deletes every quote, also the ones the filters hide. It first saves a safety copy with all pictures: `%APPDATA%\PrintPrice\history.before-clear-<date>-<time>.printprice-backup`. Every copy is kept. Later, **Backup…** › **Restore** › **Browse…** opens at the newest copy.
+  - Delete and Clear all ask first. Afterwards a line says what was deleted (for example "✓ 3 quotes deleted."), with **Undo**. Undo brings back the last delete while the window is open (a new delete or **Backup…** ends it). After Clear all, **Open folder** shows the safety copy.
+  - Deleting a failed print that isn't earned back yet stops the payback for it. Deleting a quote that paid back part of a failed print makes that amount owed again.
   - **Quote…** opens the quote page of a saved quote with its saved prices.
   - **Invoice…** makes a bill: the title is Invoice, with a random invoice code (for example 2026-K7Q4), the invoice date and a due date. A customer name is required ("Bill to"). A **Payment** block with MobilePay and/or bank details shows only if you set them in Settings. Making an invoice ticks **Printed**. The code shows in the **Invoice** column. The due date and payment details are kept with the invoice.
   - **Repeat print** prices the same print again with today's filament and electricity prices and slices the saved link or file again. If that isn't possible, the saved time and weight are used, with a note. The info box shows "Was … → now …". A repeat is never merged with its original. A job with several files slices each file again with its saved filament and colour, and together on one plate if it was before. The plates link comes back too.
   - **Open again** (or double-click, or Enter) puts the inputs back, including the filament name and colour, and recalculates with today's settings. The model box shows the saved price next to today's. Open again and **Repeat print** switch back to the quote's printer, if you still have it.
-  - **Picture:** each saved job keeps a small picture (256 px) of the model in `%APPDATA%\PrintPrice\pictures`. **Open again**, **Repeat print** and a saved job's **Quote…** / **Invoice…** show it. Deleting a job in History deletes its picture.
+  - **Picture:** each saved job keeps a small picture (256 px) of the model in `%APPDATA%\PrintPrice\pictures`. The list shows it (point at it for a bigger one), and so do **Open again**, **Repeat print** and a saved job's **Quote…** / **Invoice…**. A job without a picture shows a cube. A deleted job's picture goes once the delete can't be undone any more.
   - All actions are also in the right-click menu.
   - The same quote saved again within 10 minutes replaces the last one. The newest 5000 quotes are kept.
   - Saved quote and invoice files are named `<date> <model> - <name>`.
@@ -135,7 +142,7 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
 
 - **Backup and restore:** the Backup window has two tabs.
   - **Back up** saves the price history and your settings to a `.printprice-backup` file. The file is not locked with a code, and it holds customer names and payment details, so keep it somewhere private.
-  - **Restore** reads a backup file or a `history.json`. **Merge** adds the backup's quotes to the ones on this PC. **Replace** swaps this PC's history for the backup's, and asks first. **Also restore the settings** is possible when the file has settings; the Bambu Studio path stays as it is.
+  - **Restore** reads a backup file or a `history.json`. **Merge** adds the backup's quotes to the ones on this PC. **Replace** swaps this PC's history for the backup's, and asks first. **Also restore the settings** is possible when the file has settings; the Bambu Studio path stays as it is. **Merge** with an older backup also brings back quotes deleted since.
   - File backups include all the pictures of the saved jobs. Online backups take only the newest pictures that fit the service's size limit. A backup from the website restores its pictures too.
   - A safety copy of the current history and settings is saved first, next to them (`history.before-restore-<date>-<time>.json`).
   - **Online, with a code** sends the encrypted history and settings to the backup service and shows a 20-character code (**Copy**). Keep the code safe: it is the only way to get the backup back, it can't be reset, and anyone who has it can read the backup. This PC remembers the code (**Show code**, **New code…**, **Delete online backup…**) and shows "Last online backup: … · kept until …". A backup is kept 400 days after the last upload. The newest upload replaces the older one, also when it comes from another PC with the same code.
@@ -186,6 +193,7 @@ The default setup is a 0.4 stainless nozzle, PLA and the smooth PEI plate. All o
 | Failed prints payback | On; 10 % per quote; paid by customers only |
 | Quote | Name "Gettic", valid 14 days, customer price, dark picture |
 | Invoice | Due after 14 days; MobilePay and bank empty |
+| History | List view |
 | Language | Automatic (Danish if Windows is Danish, otherwise English) |
 | Slicing | 0.4 mm nozzle, 0.16mm Optimal, Bambu PLA Matte, Smooth PEI plate |
 | Electricity | DK1, 0,55 kr/kWh fees on top of spot, 25 % VAT |
@@ -211,9 +219,9 @@ The website sends nothing about you either. Your settings, price history and fil
 
 Like any web request, these show your IP address to the service. Local `.3mf` files and sliced results use the picture stored inside the file, with no network. Bambu Studio runs on your own PC; the app only starts its command-line slicer, and reads its printer and filament profiles (for slicing and the material drop-down) and the printer pictures from its install folder. This stays on your PC and is never sent anywhere.
 
-Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\history.json` and are never sent anywhere. Their small pictures are in `%APPDATA%\PrintPrice\pictures`, also only on this PC unless you put them in a backup. On the website they stay in the browser. Errors are written to `errors.log` in the same folder and are never sent; **Copy details** puts them on the clipboard only when you click it. Delete `history.json` to clear the history. If the file is damaged, the app keeps it as `history.bad-<date>-<time>.json` in the same folder and starts with an empty history.
+Saved quotes (price history) are kept only on this PC in `%APPDATA%\PrintPrice\history.json` and are never sent anywhere. Their small pictures are in `%APPDATA%\PrintPrice\pictures`, also only on this PC unless you put them in a backup. On the website they stay in the browser. Errors are written to `errors.log` in the same folder and are never sent; **Copy details** puts them on the clipboard only when you click it. **Clear all…** in History clears it, after a safety copy. If the file is damaged, the app keeps it as `history.bad-<date>-<time>.json` in the same folder and starts with an empty history.
 
-A backup file holds your price history (customer names), the jobs' pictures and your settings (including MobilePay and bank details). A backup file is written only where you choose to save it and is not locked with a code, so keep it private. An online backup is locked with its code on your PC before it is sent, and nothing is sent unless you click an online button. A restore also leaves safety copies (`history.before-restore-*.json`, `settings.before-restore-*.ini`) in `%APPDATA%\PrintPrice`.
+A backup file holds your price history (customer names), the jobs' pictures and your settings (including MobilePay and bank details). A backup file is written only where you choose to save it and is not locked with a code, so keep it private. An online backup is locked with its code on your PC before it is sent, and nothing is sent unless you click an online button. A restore also leaves safety copies (`history.before-restore-*.json`, `settings.before-restore-*.ini`) in `%APPDATA%\PrintPrice`, and **Clear all…** leaves `history.before-clear-*.printprice-backup` there, with customer names and pictures. Clear all copies are kept until you delete them.
 
 **Open in Studio** starts the Bambu Studio program on your PC with a copy of the sliced file. The copy is kept in `%TEMP%\PrintPrice\studio\` (older copies are deleted) and is never sent anywhere. Bambu Studio may add it to its own list of recent projects.
 
@@ -243,7 +251,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/PowerPrice.cs` | Energi Data Service spot prices |
 | `src/Updater.cs` | Update check and install from GitHub releases |
 | `src/History.cs` | Saved quotes (price history) |
-| `src/HistoryForm.cs` | The History window |
+| `src/HistoryForm.cs`, `src/HistoryViews.cs` | The History window; its pictures and List / Medium / Large views |
 | `src/Backup.cs`, `src/BackupForm.cs` | Backup codes and the Backup window |
 | `src/OnlineBackup.cs` | Online backup: encrypt, upload, download, delete |
 | `worker/` | The Cloudflare relay: online backup and the website's live electricity price |

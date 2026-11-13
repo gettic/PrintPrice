@@ -280,6 +280,12 @@ static class BackupTests
              && WebBackup.ReadText("{\"Version\":99,\"Quotes\":[]}", out nd) == WebBackup.NewerText() && WebBackup.ReadText("{\"x\":1}", out nd) == History.NotBackupText());
         var old = WebBackup.OldSafetyKeys(new[] { "before-restore-20261110-140509", "history", "before-restore-20261101-090000", "before-restore-20261105-090000", "before-restore-20261109-090000", "pic:a" });
         True("keep the newest 3 safety copies", old.Count == 1 && old[0] == "before-restore-20261101-090000");
+        True("clear-all safety key / file name", WebBackup.ClearSafetyKey(t0) == "before-clear-20261110-140509"
+             && WebBackup.SafetyFileName("before-clear-20261110-140509") == "PrintPrice before-clear 2026-11-10 14.05.09.printprice-backup"
+             && WebBackup.ClearSafetyKey(t0).StartsWith(WebBackup.AnySafetyPrefix) && WebBackup.SafetyKey(t0).StartsWith(WebBackup.AnySafetyPrefix));
+        var mixed = WebBackup.OldSafetyKeys(new[] { "before-clear-20261101-090000", "before-restore-20261110-140509", "before-clear-20261105-090000",
+            "before-clear-20261109-090000", "before-restore-20261101-090000", "before-clear-20261110-090000" });
+        True("newest 3 clear copies kept apart from restore ones", mixed.Count == 1 && mixed[0] == "before-clear-20261101-090000");
         bool warn;
         True("never (with quotes) warns", WebBackup.LastBackupText("", t0, 3, out warn) == "Last backup: never" && warn);
         WebBackup.LastBackupText(null, t0, 0, out warn);

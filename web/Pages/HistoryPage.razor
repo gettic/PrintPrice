@@ -1,8 +1,11 @@
 @* Price history (desktop HistoryForm on the web): search, month, Show and Printer filters, six month cards, the list
    (a table on wide screens, cards on a phone) with For / Note / Printed / Failed changed in place, Delete, Open again and
-   Repeat print. The list is the Calculator's; every change is saved at once by its Changed callback. *@
+   Repeat print. The list is the Calculator's; every change is saved at once by its Changed callback.
+   Idea 22: tick boxes (delete several, Calculator's DeleteMany), Clear all (ClearAll, safety copy), Undo bar, a picture per
+   quote (filled by HistoryPage.razor.js from IndexedDB) and List / Medium / Large views (Settings.HistoryView). *@
 
 @inject IJSRuntime JS
+@inject HistoryStore Histories
 @implements IAsyncDisposable
 
 @{
@@ -16,6 +19,9 @@
     int monthIndex = filter.Month == DateTime.MinValue ? -1 : months.IndexOf(filter.Month);
     if (selected != null && !rows.Contains(selected)) selected = null;
     if (selected == null && rows.Count > 0) selected = rows[0];
+    int view = WebHistory.View(Settings);
+    bool listView = view == WebHistory.ViewList || printing;   // printing always uses the list
+    bool allTicked = rows.Count > 0 && ticked.Count == rows.Count;
 }
 
 <div class="filters">
@@ -55,6 +61,18 @@
         </select>
     }
     <span class="count" role="status">@WebHistory.CountText(rows.Count, Quotes.Count)</span>
+    @if (Quotes.Count > 0)
+    {
+        @if (narrow == true)
+        {
+            <button class="@(selectMode ? "small accent" : "small")" aria-pressed="@selectMode" @onclick="ToggleSelectMode">@(selectMode ? L.S("Done", "Færdig") : L.S("Select", "Vælg"))</button>
+        }
+        <span class="views" role="group" aria-label="@L.S("View", "Visning")">
+            <button class="@(view == WebHistory.ViewList ? "on" : "")" aria-pressed="@(view == WebHistory.ViewList)" title="@L.S("List", "Liste")" @onclick="() => SetView(WebHistory.ViewList)">☰<span class="vt"> @L.S("List", "Liste")</span></button>
+            <button class="@(view == WebHistory.ViewMedium ? "on" : "")" aria-pressed="@(view == WebHistory.ViewMedium)" title="@L.S("Medium pictures", "Mellemstore billeder")" @onclick="() => SetView(WebHistory.ViewMedium)">▦<span class="vt"> @L.S("Medium", "Mellem")</span></button>
+            <button class="@(view == WebHistory.ViewLarge ? "on" : "")" aria-pressed="@(view == WebHistory.ViewLarge)" title="@L.S("Large pictures", "Store billeder")" @onclick="() => SetView(WebHistory.ViewLarge)">▣<span class="vt"> @L.S("Large", "Store")</span></button>
+        </span>
+    }
 </div>
 
 <div class="cards">
@@ -69,6 +87,16 @@
     }
 </div>
 
+@if (DoneText != null)
+{
+    <div class="@(DoneError ? "hinfo done error" : "hinfo done ok")" role="status">
+        <span>@DoneText@if (SafetyCopy != null) { <span class="muted">@(" " + L.S("Safety copy:", "Sikkerhedskopi:") + " " + WebBackup.SafetyFileName(SafetyCopy))</span> }</span>
+        @if (SafetyCopy != null) { <button class="small" @onclick="() => DownloadSafety.InvokeAsync()">@L.S("Download", "Hent")</button> }
+        @if (CanUndo) { <button class="small" @onclick="UndoClicked">@L.S("Undo", "Fortryd")</button> }
+        <button class="small x" aria-label="@L.S("Close", "Luk")" title="@L.S("Close", "Luk")" @onclick="() => DismissDone.InvokeAsync()">✕</button>
+    </div>
+}
+
 @if (Quotes.Count == 0)
 {
     <div class="empty">@L.S("No saved quotes yet. On the Calculator page, Save to history keeps the quote on screen here; Backup… below restores a backup.",
@@ -76,6 +104,28 @@
 }
 else
 {
+    @* idea 22: the ticked quotes' bar, and "Tick all" where the list has no header box (cards, phone select mode) *@
+    @if (ticked.Count > 0 || (selectMode && narrow == true) || (!listView && narrow != true))
+    {
+        <div class="@(ticked.Count > 0 ? "selbar on" : "selbar")">
+            @if (!listView || narrow == true)
+            {
+                <label class="check tickall"><input type="checkbox" class="sel" checked="@allTicked" @onchange="() => TickAll(rows, allTicked)" />
+                    <span>@L.S("Tick all shown", "Markér alle viste")</span></label>
+            }
+            @if (ticked.Count > 0)
+            {
+                <b>@WebHistory.TickedText(ticked.Count)</b>
+                <span class="muted">· @Num.Kr(WebHistory.Total(ticked))</span>
+                <span class="grow"></span>
+                <button class="small" @onclick="ClearTicks">@L.S("Clear selection", "Fjern markering")</button>
+                <button class="small accent" @onclick="() => AskDelete(rows)">@WebHistory.DeleteTickedText(ticked.Count)</button>
+            }
+        </div>
+    }
+
+    @if (listView)
+    {
     @* app.css shows the table on wide screens and the cards on a phone: only the shown one is built (both until the
        page knows which, and while printing) *@
     @if (narrow != true || printing)
@@ -83,6 +133,9 @@ else
     <table class="hist">
         <thead>
             <tr>
+                <th class="c selcol"><input type="checkbox" class="sel" checked="@allTicked" aria-label="@L.S("Tick all shown", "Markér alle viste")"
+                                           title="@L.S("Tick all shown", "Markér alle viste")" @onchange="() => TickAll(rows, allTicked)" /></th>
+                <th class="piccol"><span class="vh">@L.S("Picture", "Billede")</span></th>
                 <th>@L.S("Date", "Dato")</th><th>@L.S("Model", "Model")</th><th class="n">@L.S("Time", "Tid")</th>
                 <th class="n">@L.S("Grams", "Gram")</th><th class="n">@L.S("Price", "Pris")</th><th>@L.S("For", "Til")</th>
                 @if (printerMode) { <th>@L.S("Printer", "Printer")</th> }
@@ -95,8 +148,13 @@ else
             {
                 var rec = r;
                 bool friends = WebHistory.IsFriends(rec);
-                <tr class="@(rec == selected ? "picked" : "")" tabindex="0" @key="rec"
+                bool isTicked = ticked.Contains(rec);
+                <tr class="@(rec == selected ? "picked" : isTicked ? "ticked" : "")" tabindex="0" @key="rec"
                     @onclick="() => Select(rec)" @ondblclick="() => OpenAgain.InvokeAsync(rec)" @onkeydown="e => RowKey(e, rec)">
+                    <td class="c selcol" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+                        <input type="checkbox" class="sel" checked="@isTicked" aria-label="@L.F("Tick {0}", "Markér {0}", WebHistory.ModelText(rec))"
+                               @onchange="() => Tick(rec)" @onkeydown:stopPropagation="true" /></td>
+                    <td class="piccol">@Pic(rec, "s")</td>
                     <td>@WebHistory.DateText(rec)</td>
                     <td class="model" title="@WebHistory.ModelText(rec)">@WebHistory.ModelText(rec)</td>
                     <td class="n">@WebHistory.TimeText(rec)</td>
@@ -128,9 +186,17 @@ else
         {
             var rec = r;
             bool friends = WebHistory.IsFriends(rec);
-            bool open = rec == opened;
+            bool open = rec == opened && !selectMode;
+            bool isTicked = ticked.Contains(rec);
             string extra = (printerMode ? WebHistory.PrinterText(rec, names) : "") + (printerMode && rec.Note.Length > 0 ? " · " : "") + rec.Note;
-            <div class="@(open ? "qrow open" : "qrow")" @key="rec" @onclick="() => ToggleOpen(rec)">
+            <div class="@("qrow" + (open ? " open" : "") + (isTicked ? " ticked" : ""))" @key="rec" @onclick="() => PhoneTap(rec)">
+                <div class="qpic">@Pic(rec, "m")
+                    @if (selectMode)
+                    {
+                        <input type="checkbox" class="sel" checked="@isTicked" aria-label="@L.F("Tick {0}", "Markér {0}", WebHistory.ModelText(rec))"
+                               @onclick:stopPropagation="true" @onchange="() => Tick(rec)" />
+                    }
+                </div>
                 <div class="m">@WebHistory.ModelText(rec)</div>
                 <div class="p @(friends ? "green" : "red")">@Num.Kr(History.PriceFor(rec))</div>
                 <div class="d">@WebHistory.ShortDate(rec) · @WebHistory.TimeText(rec) · @WebHistory.GramsText(rec) g</div>
@@ -141,26 +207,78 @@ else
                     <button class="@(rec.Failed ? "chip bad" : "chip")" aria-pressed="@rec.Failed" @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true">@(rec.Failed ? "✗ " : "")@L.S("Failed", "Fejlet")</button>
                     @if (rec.InvoiceNo.Length > 0) { <span class="chip">@rec.InvoiceNo</span> }
                 </div>
-                @if (open)
-                {
-                    <div class="sheet" @onclick:stopPropagation="true">
-                        <label>@L.S("For", "Til")
-                            <select class="@(friends ? "green" : "red")" @onchange="e => ForChosen(rec, e)">
-                                <option value="1" selected="@friends">@WebHistory.ForText(History.ForFriends)</option>
-                                <option value="2" selected="@(!friends)">@WebHistory.ForText(History.ForCustomer)</option>
-                            </select></label>
-                        <label>@L.S("Note", "Note")
-                            <input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" @onchange="e => NoteChanged(rec, e)" /></label>
-                        <button class="accent" @onclick="() => OpenAgain.InvokeAsync(rec)">@L.S("Open again", "Åbn igen")</button>
-                        <button @onclick="() => Repeat.InvokeAsync(rec)">@L.S("Repeat print", "Print igen")</button>
-                        <button @onclick="() => Quote.InvokeAsync(rec)">@L.S("Quote…", "Tilbud…")</button>
-                        <button @onclick="() => Invoice.InvokeAsync(rec)">@L.S("Invoice…", "Faktura…")</button>
-                        <button class="@(armed == rec ? "accent" : "")" @onclick="() => DeleteClicked(rec, rows)">@(armed == rec ? ConfirmText : L.S("Delete", "Slet"))</button>
-                    </div>
-                }
+                @if (open) { @Sheet(rec, rows) }
             </div>
         }
     </div>
+    }
+    }
+    else
+    {
+        @* idea 22: medium / large picture cards (wide screens and phones); a click picks, a tap on a phone opens the actions *@
+        bool large = view == WebHistory.ViewLarge;
+        // phone: the opened card's actions come full width after its row (Medium = 2 a row, Large = 1), cards keep their order
+        int shownCount = Math.Min(shown, rows.Count);
+        int openAt = opened != null && narrow == true && !selectMode ? rows.IndexOf(opened) : -1;
+        if (openAt >= shownCount) openAt = -1;
+        int sheetAfter = openAt < 0 ? -1 : Math.Min(large ? openAt : (openAt | 1), shownCount - 1);
+        int tileIndex = -1;
+        <div class="@(large ? "tiles large" : "tiles medium")">
+            @foreach (var r in Shown(rows))
+            {
+                var rec = r;
+                tileIndex++;
+                bool friends = WebHistory.IsFriends(rec);
+                bool isTicked = ticked.Contains(rec);
+                bool open = rec == opened && narrow == true && !selectMode;
+                string css = "tile" + (rec == selected && narrow != true ? " picked" : "") + (isTicked ? " ticked" : "") + (open ? " open" : "")
+                             + (ticked.Count > 0 || selectMode ? " selecting" : "");
+                <div class="@css" @key="rec" tabindex="0" @onclick="() => TileTap(rec)" @ondblclick="() => OpenAgain.InvokeAsync(rec)" @onkeydown="e => TileKey(e, rec)">
+                    <div class="tpic">
+                        @Pic(rec, large ? "l" : "t")
+                        <span class="tsel" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+                            <input type="checkbox" class="sel" checked="@isTicked" aria-label="@L.F("Tick {0}", "Markér {0}", WebHistory.ModelText(rec))"
+                                   @onchange="() => Tick(rec)" @onkeydown:stopPropagation="true" /></span>
+                        @if (!large && (rec.Printed || rec.Failed))
+                        {
+                            <span class="flags">
+                                @if (rec.Printed) { <span class="flag on" title="@L.S("Printed", "Printet")">✓</span> }
+                                @if (rec.Failed) { <span class="flag bad" title="@L.S("Failed", "Fejlet")">✗</span> }
+                            </span>
+                        }
+                    </div>
+                    <div class="m" title="@WebHistory.ModelText(rec)">@WebHistory.ModelText(rec)</div>
+                    @if (large)
+                    {
+                        string extra = (printerMode ? WebHistory.PrinterText(rec, names) : "");
+                        if (rec.Note.Length > 0) extra += (extra.Length > 0 ? " · " : "") + rec.Note;
+                        if (rec.InvoiceNo.Length > 0) extra += (extra.Length > 0 ? " · " : "") + rec.InvoiceNo;
+                        <div class="row"><span class="p @(friends ? "green" : "red")">@Num.Kr(History.PriceFor(rec))</span>
+                            <span class="@(friends ? "green" : "red")">@WebHistory.ForText(rec.For)</span></div>
+                        <div class="d">@WebHistory.DateText(rec) · @WebHistory.TimeText(rec) · @WebHistory.GramsText(rec) g</div>
+                        <div class="d" title="@extra">@(extra.Length > 0 ? extra : " ")</div>
+                        <div class="chips">
+                            <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
+                            <button class="@(rec.Failed ? "chip bad" : "chip")" aria-pressed="@rec.Failed" @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@(rec.Failed ? "✗ " : "")@L.S("Failed", "Fejlet")</button>
+                        </div>
+                    }
+                    else
+                    {
+                        string sub = rec.Note.Length > 0 ? rec.Note : (rec.Customer ?? "");
+                        <div class="row"><span class="p @(friends ? "green" : "red")">@Num.Kr(History.PriceFor(rec))</span>
+                            <span class="d">@WebHistory.GramsText(rec) g</span></div>
+                        <div class="d" title="@(sub.Length > 0 ? sub : null)">@WebHistory.ShortDate(rec) · @WebHistory.TimeText(rec)</div>
+                    }
+                </div>
+                @if (tileIndex == sheetAfter)
+                {
+                    <div class="tile-sheet" @key="@("sheet")">
+                        <div class="tsname">@WebHistory.ModelText(opened)</div>
+                        @Sheet(opened, rows)
+                    </div>
+                }
+            }
+        </div>
     }
 
     @if (rows.Count > shown)
@@ -186,14 +304,63 @@ else
 <div class="@(warnBackup ? "lastbackup warn" : "lastbackup")">
     <span>@lastText@(warnBackup ? L.S(" – this browser may delete its storage (Safari after 7 days without a visit), so back up now and then.",
                                        " – denne browser kan slette sit lager (Safari efter 7 dage uden besøg), så tag en kopi en gang imellem.") : "")</span>
+    @if (Quotes.Count > 0) { <button @onclick="AskClear">@L.S("Clear all…", "Ryd alt…")</button> }
     <button @onclick="() => OpenBackup.InvokeAsync()">@L.S("Backup…", "Sikkerhedskopi…")</button>
 </div>
+
+@* idea 22: Delete N ticked… / Clear all… ask first *@
+@if (confirm != null)
+{
+    List<string> warnings;
+    var lines = WebHistory.ConfirmLines(confirm.Summary, confirm.Records, confirm.Clear, out warnings);
+    @* HistoryPage.razor.js holdDialog: focus on Cancel, Tab stays inside, Esc anywhere = Cancel (data-cancel) *@
+    <div class="overlay" @onclick="CancelConfirm" @onkeydown="ConfirmKey">
+        <div class="dialog confirm" role="alertdialog" aria-modal="true" aria-labelledby="hc-title" @ref="dialogRef" @onclick:stopPropagation="true">
+            <div class="title">
+                <span id="hc-title">@WebHistory.ConfirmTitle(confirm.Summary.Count, confirm.Clear)</span>
+                <button @onclick="CancelConfirm" aria-label="@L.S("Close", "Luk")">✕</button>
+            </div>
+            <div class="cbody">
+                @foreach (var line in lines) { <p>@line</p> }
+                @foreach (var w in warnings) { <p class="warntext">@w</p> }
+                @if (confirm.Clear)
+                {
+                    @if (StorageAvailable)
+                    {
+                        <label class="check"><input type="checkbox" checked="@keepCopy" @onchange="e => keepCopy = (bool)e.Value" />
+                            <span>@L.S("Keep a safety copy first (in this browser, with the pictures; you can download it afterwards)",
+                                       "Gem en sikkerhedskopi først (i denne browser, med billederne; du kan hente den bagefter)")</span></label>
+                    }
+                    else
+                    {
+                        <p class="warntext">@L.S("This browser keeps no storage, so no safety copy can be made. Use Backup… first if you want one.",
+                                                 "Denne browser gemmer intet, så der kan ikke laves en sikkerhedskopi. Brug Sikkerhedskopi… først, hvis du vil have en.")</p>
+                    }
+                }
+                <p class="muted">@L.S("You can undo it until the page is reloaded.", "Du kan fortryde, indtil siden genindlæses.")</p>
+            </div>
+            <div class="buttons">
+                <button data-cancel="1" @onclick="CancelConfirm">@L.S("Cancel", "Annullér")</button>
+                <button class="accent" disabled="@busy" @onclick="ConfirmClicked">@WebHistory.ConfirmButton(confirm.Summary.Count, confirm.Clear)</button>
+            </div>
+        </div>
+    </div>
+}
 @if (Problem != null)
 {
     <div class="hinfo warn" role="alert">@Problem</div>
 }
-<div class="hinfo">@L.S("Quote… makes a quote page for the selected print, Invoice… a bill (it ticks Printed). Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them).",
-                       "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (den sætter Printet). Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem).")</div>
+@if (Quotes.Count > 0 && narrow == true)
+{
+    @* phone: tap wording, no click / double-click *@
+    <div class="hinfo">@L.S("Tap a quote for its actions: Open again loads it as saved, Repeat print with today's prices (time and grams as saved), Quote… makes a quote page and Invoice… a bill (it ticks Printed). Printed and Failed change with a tap; changes are saved at once. Select ticks quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
+                           "Tryk på et tilbud for at se dets handlinger: Åbn igen henter det som gemt, Print igen med dagens priser (tid og gram som gemt), Tilbud… laver et tilbud og Faktura… en regning (den sætter Printet). Printet og Fejlet ændres med et tryk; ændringer gemmes med det samme. Vælg markerer tilbud, så du kan slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
+}
+else if (Quotes.Count > 0)
+{
+<div class="hinfo">@L.S("Quote… makes a quote page for the selected print, Invoice… a bill (it ticks Printed). Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them). Tick quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
+                       "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (den sætter Printet). Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem). Markér tilbud for at slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
+}
 <div class="note">@L.S("Your history is kept in this browser only (about 1 KB per quote). Clearing the browser's site data deletes it.",
                        "Din historik gemmes kun i denne browser (ca. 1 KB pr. tilbud). Sletter du browserens webstedsdata, slettes den.")</div>
 
@@ -211,6 +378,24 @@ else
     /// WebBackup.LastBackupValue of the newest backup ("" = never) and Backup… (the Backup dialog).
     [Parameter] public string LastBackup { get; set; }
     [Parameter] public EventCallback OpenBackup { get; set; }
+
+    // idea 22: delete several / Clear all / Undo are the Calculator's (the undo lasts while the page is open, also on the
+    // Calculator tab); its done bar comes back here as DoneText.
+    [Parameter] public EventCallback<List<QuoteRecord>> DeleteMany { get; set; }
+    /// Clear all; true = keep a safety copy first.
+    [Parameter] public EventCallback<bool> ClearAll { get; set; }
+    [Parameter] public EventCallback Undo { get; set; }
+    [Parameter] public EventCallback DismissDone { get; set; }
+    [Parameter] public string DoneText { get; set; }
+    [Parameter] public bool DoneError { get; set; }
+    [Parameter] public bool CanUndo { get; set; }
+    /// The Clear all safety copy's key (null = none) and its Download.
+    [Parameter] public string SafetyCopy { get; set; }
+    [Parameter] public EventCallback DownloadSafety { get; set; }
+    /// false = this browser keeps no storage (no pictures, no safety copy).
+    [Parameter] public bool StorageAvailable { get; set; } = true;
+    /// After Settings.HistoryView changed (the Calculator saves the settings).
+    [Parameter] public EventCallback SettingsChanged { get; set; }
 
     readonly WebHistory.Filter filter = new WebHistory.Filter();
     QuoteRecord selected, opened, armed;
@@ -301,7 +486,11 @@ else
         bool printerMode = cAllPrinters.Count >= 2;
         if (!printerMode) filter.PrinterId = null;
         if (data || cRows == null || filter.Month != seenMonth || filter.Show != seenShow || filter.PrinterId != seenPrinterId || filter.Query != seenQuery)
+        {
             cRows = WebHistory.Apply(Quotes, filter, printerMode ? cNames : null);
+            ticked = WebHistory.KeepTicks(ticked, cRows);   // only shown rows stay ticked; a reloaded list keeps them by Id
+        }
+        if (data) picturesStale = true;
         if (data || cCards == null || filter.Month != cardsMonth || filter.PrinterId != cardsPrinterId)
         {
             cCards = WebHistory.Cards(WebHistory.Totals(Quotes, filter.Month, filter.PrinterId));
@@ -326,16 +515,187 @@ else
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (!firstRender) return;
+        if (firstRender)
+        {
+            try
+            {
+                self = DotNetObjectReference.Create(this);
+                module = await JS.InvokeAsync<IJSObjectReference>("import", "./Pages/HistoryPage.razor.js");
+                narrow = await module.InvokeAsync<bool>("watchNarrow", self, watchKey);
+                if (disposed) { await module.InvokeVoidAsync("stopNarrow", watchKey); return; }   // the page closed meanwhile
+                if (StorageAvailable) { await module.InvokeVoidAsync("watchPictures"); watchingPictures = true; }
+                StateHasChanged();
+            }
+            catch (Exception) { narrow = null; }   // no module: both lists, as always
+        }
+        // the confirm dialog: focus on Cancel, Tab kept inside, Esc anywhere (W2); let go when it closed
+        if (module != null && !disposed)
+        {
+            try
+            {
+                if (confirm != null && holdPending) { holdPending = false; dialogHeld = true; await module.InvokeVoidAsync("holdDialog", dialogRef); }
+                else if (confirm == null && dialogHeld) { dialogHeld = false; await module.InvokeVoidAsync("releaseDialog"); }
+            }
+            catch (Exception) { }
+        }
+        if (picturesStale && !loadingPictures && !disposed)
+        {
+            // which quotes have a picture (keys only); the pictures themselves are read by HistoryPage.razor.js
+            picturesStale = false;
+            loadingPictures = true;
+            var ids = StorageAvailable ? await Histories.PictureIds() : new HashSet<string>(StringComparer.Ordinal);
+            loadingPictures = false;
+            if (disposed) return;
+            if (pictureIds == null || !pictureIds.SetEquals(ids)) { pictureIds = ids; StateHasChanged(); }
+        }
+    }
+
+    // ---------- idea 22: pictures, views, ticks, delete several / Clear all ----------
+
+    HashSet<string> pictureIds;      // record ids with a picture here (null = not known yet: the picture boxes wait)
+    bool picturesStale = true, loadingPictures, watchingPictures;
+    HashSet<QuoteRecord> ticked = new HashSet<QuoteRecord>();
+    bool selectMode;                 // phone: a tap ticks instead of opening
+
+    bool HasPicture(QuoteRecord r)
+    {
+        if (!StorageAvailable || r == null || !History.SafePictureId(r.Id)) return false;
+        return pictureIds == null || pictureIds.Contains(r.Id);
+    }
+
+    /// The quote's picture box: s = list (38 px, bigger on hover), m = phone list, t = medium card, l = large card.
+    /// The img has no src here: HistoryPage.razor.js fills it from IndexedDB when it comes near the screen.
+    RenderFragment Pic(QuoteRecord r, string size) =>
+        @<span class="@("hpic " + size)">@if (HasPicture(r)) { <img data-pic="@r.Id" alt="" decoding="async" draggable="false" /> }
+                                       else if (pictureIds != null || !StorageAvailable)
+                                       {
+                                           @* the desktop's placeholder (HistoryViews.DrawWell): an isometric cube outline, half the box *@
+                                           <svg class="cube" viewBox="0 0 100 100" role="img" aria-label="@L.S("No picture", "Intet billede")"><path vector-effect="non-scaling-stroke" d="M50 25 L71.65 37.5 L71.65 62.5 L50 75 L28.35 62.5 L28.35 37.5 Z M28.35 37.5 L50 50 L71.65 37.5 M50 50 L50 75" /></svg>
+                                       }</span>;
+
+    /// A quote's actions on a phone (list row or card tapped).
+    RenderFragment Sheet(QuoteRecord rec, List<QuoteRecord> rows)
+    {
+        bool friends = WebHistory.IsFriends(rec);
+        return @<div class="sheet" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+            <label>@L.S("For", "Til")
+                <select class="@(friends ? "green" : "red")" @onchange="e => ForChosen(rec, e)">
+                    <option value="1" selected="@friends">@WebHistory.ForText(History.ForFriends)</option>
+                    <option value="2" selected="@(!friends)">@WebHistory.ForText(History.ForCustomer)</option>
+                </select></label>
+            <label>@L.S("Note", "Note")
+                <input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" @onchange="e => NoteChanged(rec, e)" /></label>
+            <button class="accent" @onclick="() => OpenAgain.InvokeAsync(rec)">@L.S("Open again", "Åbn igen")</button>
+            <button @onclick="() => Repeat.InvokeAsync(rec)">@L.S("Repeat print", "Print igen")</button>
+            <button @onclick="() => Quote.InvokeAsync(rec)">@L.S("Quote…", "Tilbud…")</button>
+            <button @onclick="() => Invoice.InvokeAsync(rec)">@L.S("Invoice…", "Faktura…")</button>
+            <button class="@(armed == rec ? "accent" : "")" @onclick="() => DeleteClicked(rec, rows)">@(armed == rec ? ConfirmText : L.S("Delete", "Slet"))</button>
+        </div>;
+    }
+
+    async Task SetView(int v)
+    {
+        if (WebHistory.View(Settings) == v) return;
+        Settings.HistoryView = v;
+        opened = null;
+        await SettingsChanged.InvokeAsync();
+    }
+
+    void ToggleSelectMode()
+    {
+        selectMode = !selectMode;
+        if (selectMode) opened = null;
+        else ticked.Clear();
+    }
+
+    void Tick(QuoteRecord r)
+    {
+        if (!ticked.Remove(r)) ticked.Add(r);
+    }
+
+    void TickAll(List<QuoteRecord> rows, bool allTicked)
+    {
+        ticked.Clear();
+        if (!allTicked) foreach (var r in rows) ticked.Add(r);
+    }
+
+    void ClearTicks() { ticked.Clear(); }
+
+    void PhoneTap(QuoteRecord r)
+    {
+        if (selectMode) Tick(r); else ToggleOpen(r);
+    }
+
+    void TileTap(QuoteRecord r)
+    {
+        if (narrow == true) PhoneTap(r);
+        else Select(r);
+    }
+
+    async Task TileKey(KeyboardEventArgs e, QuoteRecord r)
+    {
+        if (e.Key == "Enter") await OpenAgain.InvokeAsync(r);
+        else if (e.Key == " ") Tick(r);
+    }
+
+    // the confirm dialog
+    sealed class Confirm
+    {
+        public bool Clear;
+        public List<QuoteRecord> Records;
+        public DeleteSummary Summary;
+    }
+
+    Confirm confirm;
+    bool keepCopy = true, busy;
+    ElementReference dialogRef;
+    bool holdPending, dialogHeld;
+
+    void AskDelete(List<QuoteRecord> rows)
+    {
+        var recs = new List<QuoteRecord>();
+        foreach (var r in rows) if (ticked.Contains(r)) recs.Add(r);   // list order (newest first) for the names
+        if (recs.Count == 0) return;
+        var ids = new List<string>();
+        foreach (var r in recs) ids.Add(r.Id);
+        var s = History.SummarizeDelete(Quotes, ids);
+        s.Count = recs.Count;   // old records without an Id go too (by reference)
+        confirm = new Confirm { Clear = false, Records = recs, Summary = s };
+        holdPending = true;
+    }
+
+    void AskClear()
+    {
+        if (Quotes.Count == 0) return;
+        keepCopy = true;
+        confirm = new Confirm { Clear = true, Records = new List<QuoteRecord>(Quotes), Summary = History.SummarizeClear(Quotes) };
+        holdPending = true;
+    }
+
+    void CancelConfirm() { if (!busy) confirm = null; }
+
+    void ConfirmKey(KeyboardEventArgs e) { if (e.Key == "Escape") CancelConfirm(); }
+
+    async Task ConfirmClicked()
+    {
+        if (confirm == null || busy) return;
+        busy = true;
         try
         {
-            self = DotNetObjectReference.Create(this);
-            module = await JS.InvokeAsync<IJSObjectReference>("import", "./Pages/HistoryPage.razor.js");
-            narrow = await module.InvokeAsync<bool>("watchNarrow", self, watchKey);
-            if (disposed) { await module.InvokeVoidAsync("stopNarrow", watchKey); return; }   // the page closed meanwhile
-            StateHasChanged();
+            var c = confirm;
+            Disarm();
+            if (c.Clear) await ClearAll.InvokeAsync(keepCopy && StorageAvailable);
+            else await DeleteMany.InvokeAsync(c.Records);
+            ticked.Clear();
+            if (opened != null && !Quotes.Contains(opened)) opened = null;
+            confirm = null;
         }
-        catch (Exception) { narrow = null; }   // no module: both lists, as always
+        finally { busy = false; }
+    }
+
+    async Task UndoClicked()
+    {
+        await Undo.InvokeAsync();
     }
 
     [JSInvokable]
@@ -364,6 +724,8 @@ else
             if (module != null)
             {
                 await module.InvokeVoidAsync("stopNarrow", watchKey);
+                if (watchingPictures) await module.InvokeVoidAsync("stopPictures");
+                if (dialogHeld) await module.InvokeVoidAsync("releaseDialog");
                 await module.DisposeAsync();
             }
         }
@@ -462,11 +824,12 @@ else
         }
         Disarm();
         int index = rows.IndexOf(r);
-        WebHistory.Delete(Quotes, r.Id);
+        await DeleteMany.InvokeAsync(new List<QuoteRecord> { r });   // one Save, and Undo as for several
+        if (Quotes.Contains(r)) return;   // not saved: it's back
         rows.Remove(r);
+        ticked.Remove(r);
         selected = rows.Count == 0 ? null : rows[Math.Max(0, Math.Min(index, rows.Count - 1))];
         if (opened == r) opened = null;
-        await Changed.InvokeAsync();
     }
 
     async Task DisarmLater(int mine)

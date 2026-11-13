@@ -156,6 +156,13 @@ namespace PrintPrice.Web
             return n;
         }
 
+        /// Deletes these picture keys (idea 22: once an Undo is no longer possible). Quietly skipped on any problem.
+        public async Task DeletePictures(List<string> keys)
+        {
+            if (!Available || keys == null) return;
+            foreach (var k in keys) await Call("printPrice.idbDelete", k);
+        }
+
         /// The record's kept picture (data URL) or null.
         public async Task<string> Picture(string id)
         {
@@ -170,9 +177,11 @@ namespace PrintPrice.Web
         {
             if (!Available) return null;
             var a = await Call("printPrice.idbPut", key, backupText);
+            if (!a.Ok && key != null && key.StartsWith(WebBackup.ClearSafetyPrefix, StringComparison.Ordinal))
+                return L.S("Nothing was cleared: the safety copy could not be saved: ", "Intet blev ryddet: sikkerhedskopien kunne ikke gemmes: ") + (a.Error ?? "");
             if (!a.Ok) return L.S("Backup not restored, the safety copy failed: ", "Sikkerhedskopien blev ikke gendannet, sikkerhedskopien af det nuværende fejlede: ")
                               + (a.Error ?? "");
-            var keys = await Call("printPrice.idbKeys", WebBackup.SafetyPrefix);
+            var keys = await Call("printPrice.idbKeys", WebBackup.AnySafetyPrefix);
             if (keys.Ok && !string.IsNullOrEmpty(keys.Value))
                 foreach (var k in WebBackup.OldSafetyKeys(keys.Value.Split('\n')))
                     await Call("printPrice.idbDelete", k);

@@ -240,6 +240,11 @@ namespace PrintPrice
         public string QuotePrice = QuotePriceCustomer;   // which price the quote shows: "customer" or "friends"
         public double QuoteDark = 1;            // 1 = quote picture in the dark look (default), 0 = light; saved as "QuoteLook" (the old "QuoteDark" key is ignored so the dark default reaches everyone once)
 
+        // History list look (idea 22): 0 = list (default), 1 = medium pictures, 2 = large pictures; INI "HistoryView"
+        // (the website uses the same key). Other values read as 0.
+        public const int HistoryViewList = 0, HistoryViewMedium = 1, HistoryViewLarge = 2;
+        public double HistoryView = HistoryViewList;
+
         // Invoice: days to pay (1-365), and how to pay (shown on the invoice only when not empty)
         public double InvoiceDueDays = 14;
         public string PayMobilePay = "";
@@ -482,6 +487,7 @@ namespace PrintPrice
             d["PowerIncludeVat"] = PowerIncludeVat;
             d["QuoteValidDays"] = QuoteValidDays;
             d["QuoteLook"] = QuoteDark;
+            d["HistoryView"] = HistoryView;
             d["InvoiceDueDays"] = InvoiceDueDays;
             d["SettingsVersion"] = SettingsVersion;
             d["LastPrinterId"] = LastPrinterId;
@@ -534,6 +540,7 @@ namespace PrintPrice
                 case "PowerIncludeVat": PowerIncludeVat = v; break;
                 case "QuoteValidDays": if (v >= 1 && v <= 3650) QuoteValidDays = Math.Round(v); break;
                 case "QuoteLook": QuoteDark = v != 0 ? 1 : 0; break;
+                case "HistoryView": HistoryView = (v == HistoryViewMedium || v == HistoryViewLarge) ? v : HistoryViewList; break;
                 case "InvoiceDueDays": if (v >= 1 && v <= 365) InvoiceDueDays = Math.Round(v); break;
                 case "SettingsVersion": SettingsVersion = Math.Floor(v); break;
                 case "LastPrinterId": if (v >= 1 && v < 1e9) LastPrinterId = Math.Floor(v); break;

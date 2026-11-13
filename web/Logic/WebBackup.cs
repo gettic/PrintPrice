@@ -214,23 +214,37 @@ namespace PrintPrice.Web
 
         public static string SafetyKey(DateTime now) { return SafetyPrefix + now.ToString("yyyyMMdd-HHmmss", Inv); }
 
-        /// "PrintPrice before-restore 2026-11-10 14.05.09.printprice-backup" for a safety copy's key (seconds: two in one minute differ).
+        /// Idea 22: the safety copy made before Clear all (its own newest SafetyKept are kept, apart from the restore ones).
+        public const string ClearSafetyPrefix = "before-clear-";
+        /// What both kinds of safety copy start with (HistoryStore.SaveSafety lists these keys to prune them).
+        public const string AnySafetyPrefix = "before-";
+
+        public static string ClearSafetyKey(DateTime now) { return ClearSafetyPrefix + now.ToString("yyyyMMdd-HHmmss", Inv); }
+
+        /// "PrintPrice before-restore 2026-11-10 14.05.09.printprice-backup" (or "before-clear") for a safety copy's key
+        /// (seconds: two in one minute differ).
         public static string SafetyFileName(string key)
         {
+            string prefix = key != null && key.StartsWith(ClearSafetyPrefix, StringComparison.Ordinal) ? ClearSafetyPrefix : SafetyPrefix;
             DateTime t;
-            string stamp = key != null && key.StartsWith(SafetyPrefix, StringComparison.Ordinal)
-                && DateTime.TryParseExact(key.Substring(SafetyPrefix.Length), "yyyyMMdd-HHmmss", Inv, DateTimeStyles.None, out t)
+            string stamp = key != null && key.StartsWith(prefix, StringComparison.Ordinal)
+                && DateTime.TryParseExact(key.Substring(prefix.Length), "yyyyMMdd-HHmmss", Inv, DateTimeStyles.None, out t)
                 ? t.ToString("yyyy-MM-dd HH.mm.ss", Inv) : "copy";
-            return "PrintPrice before-restore " + stamp + History.BackupExtension;
+            return "PrintPrice " + prefix.TrimEnd('-') + " " + stamp + History.BackupExtension;
         }
 
-        /// The safety copies to delete so only the newest SafetyKept stay (keys sort by time).
+        /// The safety copies to delete so only the newest SafetyKept of each kind (restore / clear) stay (keys sort by time).
         public static List<string> OldSafetyKeys(IEnumerable<string> keys)
         {
-            var mine = new List<string>();
-            if (keys != null) foreach (var k in keys) if (k != null && k.StartsWith(SafetyPrefix, StringComparison.Ordinal)) mine.Add(k);
-            mine.Sort(StringComparer.Ordinal);
-            return mine.Count <= SafetyKept ? new List<string>() : mine.GetRange(0, mine.Count - SafetyKept);
+            var res = new List<string>();
+            foreach (string prefix in new[] { SafetyPrefix, ClearSafetyPrefix })
+            {
+                var mine = new List<string>();
+                if (keys != null) foreach (var k in keys) if (k != null && k.StartsWith(prefix, StringComparison.Ordinal)) mine.Add(k);
+                mine.Sort(StringComparer.Ordinal);
+                if (mine.Count > SafetyKept) res.AddRange(mine.GetRange(0, mine.Count - SafetyKept));
+            }
+            return res;
         }
 
         // ---------- "Last backup" reminder ----------

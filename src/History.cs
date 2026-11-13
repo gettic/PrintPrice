@@ -249,6 +249,36 @@ namespace PrintPrice
         public Dictionary<string, byte[]> Pictures = new Dictionary<string, byte[]>(StringComparer.Ordinal);
     }
 
+    /// Idea 22: records taken out by History.RemoveMany, with the index each had (for PutBack / Undo).
+    public class RemovedRecords
+    {
+        public List<QuoteRecord> Records = new List<QuoteRecord>();
+        public List<int> Indexes = new List<int>();   // same order as Records (ascending list positions)
+        public int Count { get { return Records.Count; } }
+
+        public List<string> Ids()
+        {
+            var res = new List<string>();
+            foreach (var r in Records) if (r != null && !string.IsNullOrEmpty(r.Id)) res.Add(r.Id);
+            return res;
+        }
+
+        internal int IndexOf(int k) { return k < Indexes.Count ? Indexes[k] : int.MaxValue; }
+    }
+
+    /// Idea 22: what deleting some records (or Clear all) means, for the confirm text. Amounts in kr.
+    public class DeleteSummary
+    {
+        public int Count;              // records that would go
+        public int Invoices;           // of them with an invoice number (the numbers stay used: never given again)
+        public int Failed;             // failed prints
+        public int FailedOpen;         // failed prints not fully earned back yet
+        public double FailedOpenAmount;   // what those still had open
+        public int PayingBack;         // quotes whose payback counted against failed prints (deleting them = owed again)
+        public double DebtBefore;      // History.FailedDebt now
+        public double DebtAfter;       // History.FailedDebt after the delete
+    }
+
     /// Price history: saved quotes in history.json next to settings.ini. Local only, never sent anywhere.
     public static partial class History
     {
@@ -1037,6 +1067,110 @@ namespace PrintPrice
             r.FailedAt = failed ? Stamp(now) : "";
         }
 
+        // ---------- delete several / undo (idea 22, issue #5) ----------
+        // Pure (the website uses them too). Deleting never moves a deleted quote's payback into PaidBack: a deleted
+        // failed job's debt is gone, a deleted paying quote's payback is owed again (same as deleting one by one).
+
+        /// Removes every record whose Id is in ids (one pass; unknown / null / "" / repeated ids ignored). The rest keep
+        /// their order. Returns what was removed with the index each had (ascending), for PutBack. Never null.
+        public static RemovedRecords RemoveMany(List<QuoteRecord> list, IEnumerable<string> ids)
+        {
+            var res = new RemovedRecords();
+            if (list == null || ids == null) return res;
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var id in ids) if (!string.IsNullOrEmpty(id)) set.Add(id);
+            if (set.Count == 0) return res;
+            var keep = new List<QuoteRecord>(list.Count);
+            for (int i = 0; i < list.Count; i++)
+            {
+                var r = list[i];
+                if (r != null && !string.IsNullOrEmpty(r.Id) && set.Contains(r.Id))
+                {
+                    res.Records.Add(r);
+                    res.Indexes.Add(i);
+                }
+                else keep.Add(r);
+            }
+            if (res.Records.Count > 0) { list.Clear(); list.AddRange(keep); }
+            return res;
+        }
+
+        /// Undo of RemoveMany: puts the records back at their old places (lowest index first, so the old order comes back;
+        /// an index past the end appends). Records whose Id (or the record itself) is already in the list are skipped.
+        /// Returns how many went back.
+        public static int PutBack(List<QuoteRecord> list, RemovedRecords removed)
+        {
+            if (list == null || removed == null) return 0;
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var r in list) if (r != null && !string.IsNullOrEmpty(r.Id)) have.Add(r.Id);
+            var order = new List<int>();
+            for (int k = 0; k < removed.Records.Count; k++) order.Add(k);
+            order.Sort(delegate(int a, int b)
+            {
+                int c = removed.IndexOf(a).CompareTo(removed.IndexOf(b));
+                return c != 0 ? c : a.CompareTo(b);
+            });
+            int n = 0;
+            foreach (int k in order)
+            {
+                var r = removed.Records[k];
+                if (r == null || list.Contains(r)) continue;
+                if (!string.IsNullOrEmpty(r.Id) && !have.Add(r.Id)) continue;
+                int at = removed.IndexOf(k);
+                if (at < 0) at = 0;   // int.MaxValue (no index) -> appended below
+                if (at > list.Count) at = list.Count;
+                list.Insert(at, r);
+                n++;
+            }
+            return n;
+        }
+
+        /// How many of ids are failed prints not fully earned back yet (FailedDebt's timeline: something still open).
+        public static int FailedNotEarnedBack(List<QuoteRecord> list, IEnumerable<string> ids)
+        {
+            return SummarizeDelete(list, ids).FailedOpen;
+        }
+
+        /// What deleting ids would mean, for the confirm text (History window and website). Ids not in the list are ignored.
+        public static DeleteSummary SummarizeDelete(List<QuoteRecord> list, IEnumerable<string> ids)
+        {
+            if (list == null || ids == null) return new DeleteSummary();
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var id in ids) if (!string.IsNullOrEmpty(id)) set.Add(id);
+            return Summarize(list, delegate(QuoteRecord r) { return !string.IsNullOrEmpty(r.Id) && set.Contains(r.Id); });
+        }
+
+        /// SummarizeDelete for every record (Clear all): DebtAfter 0.
+        public static DeleteSummary SummarizeClear(List<QuoteRecord> list)
+        {
+            if (list == null) return new DeleteSummary();
+            return Summarize(list, delegate(QuoteRecord r) { return true; });
+        }
+
+        static DeleteSummary Summarize(List<QuoteRecord> list, Func<QuoteRecord, bool> gone)
+        {
+            var s = new DeleteSummary();
+            var remaining = new double[list.Count];
+            s.DebtBefore = RunDebt(list, null, int.MaxValue, remaining, new double[list.Count]);
+            var after = new List<QuoteRecord>(list.Count);
+            for (int i = 0; i < list.Count; i++)
+            {
+                var r = list[i];
+                if (r == null) continue;
+                if (!gone(r)) { after.Add(r); continue; }
+                s.Count++;
+                if (!string.IsNullOrEmpty(r.InvoiceNo)) s.Invoices++;
+                if (r.Failed)
+                {
+                    s.Failed++;
+                    if (remaining[i] > 1e-9) { s.FailedOpen++; s.FailedOpenAmount += remaining[i]; }
+                }
+                else if (PaysBack(r)) s.PayingBack++;
+            }
+            s.DebtAfter = s.Count == 0 ? s.DebtBefore : FailedDebt(after, null);
+            return s;
+        }
+
         public static string ToJson(List<QuoteRecord> list)
         {
             return Json.Serialize(new HistoryFile { Version = Version, Quotes = list ?? new List<QuoteRecord>() });
@@ -1388,13 +1522,28 @@ namespace PrintPrice
             return res;
         }
 
+        /// True only when history.json exists and reads fine as a history with no records (every job deleted): then an
+        /// empty list may clean pictures. Missing / unreadable / not empty -> false (a failed load never costs pictures).
+        static bool SavedEmpty()
+        {
+            try
+            {
+                if (!File.Exists(FilePath)) return false;
+                var l = ParseJson(File.ReadAllText(FilePath, Encoding.UTF8));
+                return l != null && l.Count == 0;
+            }
+            catch { return false; }
+        }
+
         /// Removes pictures no record has (deleted, trimmed, replaced), and leftover .tmp files. Pictures of the records in
         /// the newest history.before-restore-*.json stay, so undoing a Replace restore keeps them. Returns how many
         /// pictures were removed. Never throws. Call once per run after loading the history, not after every change.
-        /// Does nothing for an empty list or while history.json couldn't be read (a failed load must never cost pictures).
+        /// Does nothing while history.json couldn't be read, nor for an empty list unless history.json exists and reads
+        /// fine as empty (SavedEmpty: every job deleted). A failed load must never cost pictures.
         public static int CleanPictures(List<QuoteRecord> list)
         {
-            if (list == null || list.Count == 0 || saveBlocked) return 0;
+            if (list == null || saveBlocked) return 0;
+            if (list.Count == 0 && !SavedEmpty()) return 0;
             List<QuoteRecord> safety = null;
             try
             {
@@ -1951,6 +2100,163 @@ namespace PrintPrice
                 using (var ms = new MemoryStream(bytes))
                 using (var img = Image.FromStream(ms))
                     return new Bitmap(img);   // a copy that doesn't need the stream
+            }
+            catch { return null; }
+        }
+
+        /// A small copy for the History list (longest side maxSide, aspect kept, never enlarged; caller disposes).
+        /// null = none / WebP / bad bytes / maxSide < 1. Never throws.
+        public static Image PictureThumbnail(byte[] bytes, int maxSide)
+        {
+            if (maxSide < 1) return null;
+            Image src = PictureImage(bytes);
+            if (src == null) return null;
+            try
+            {
+                int iw = src.Width, ih = src.Height;
+                double k = Math.Min(1.0, maxSide / (double)Math.Max(iw, ih));
+                int w = Math.Max(1, (int)Math.Round(iw * k)), h = Math.Max(1, (int)Math.Round(ih * k));
+                var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(bmp))
+                using (var ia = new ImageAttributes())
+                {
+                    g.Clear(Color.Transparent);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    ia.SetWrapMode(WrapMode.TileFlipXY);
+                    g.DrawImage(src, new Rectangle(0, 0, w, h), 0, 0, iw, ih, GraphicsUnit.Pixel, ia);
+                }
+                return bmp;
+            }
+            catch { return null; }
+            finally { src.Dispose(); }
+        }
+
+        // ---------- delete several, undo, Clear all: files (idea 22, issue #5) ----------
+        // Undo design: DeleteRecords saves the list without the records but keeps their picture files. UndoDelete puts
+        // the records back and saves (the pictures are still there). DropRemoved deletes the pictures of records that
+        // stayed deleted: call it when the History window closes or the undo is dropped (a new delete, Clear all).
+        // If the app stops before that, CleanPictures at the next start removes them (they are orphans by then).
+
+        /// The ids that have a picture file (one folder scan, no file read): which list rows can show a picture.
+        public static HashSet<string> PictureIdSet()
+        {
+            return new HashSet<string>(PictureIds(), StringComparer.Ordinal);
+        }
+
+        /// The record's picture file (full path) or null. No read, no size check (LoadPicture checks).
+        public static string PicturePath(string id)
+        {
+            if (!SafePictureId(id)) return null;
+            try
+            {
+                foreach (var e in PictureExtensions)
+                {
+                    string p = Path.Combine(PictureDir, id + e);
+                    if (File.Exists(p)) return p;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// Deletes the records with these ids: RemoveMany, then one Save. Pictures stay until DropRemoved (undo).
+        /// null = OK (also when nothing matched: no save then). On a problem the list is as before and removed is empty.
+        /// Refused while history.json couldn't be read. Never throws.
+        public static string DeleteRecords(List<QuoteRecord> list, IEnumerable<string> ids, out RemovedRecords removed)
+        {
+            removed = new RemovedRecords();
+            if (saveBlocked)
+                return L.S("Not deleted: the price history file could not be read.", "Ikke slettet: prishistorik-filen kunne ikke læses.");
+            if (list == null) return null;
+            var r = RemoveMany(list, ids);
+            if (r.Count == 0) return null;
+            string problem = Save(list);
+            if (problem != null) { PutBack(list, r); return problem; }
+            removed = r;
+            return null;
+        }
+
+        /// Undo of DeleteRecords: PutBack, then one Save. null = OK; on a problem the records are out of the list again
+        /// (list = file). Never throws.
+        public static string UndoDelete(List<QuoteRecord> list, RemovedRecords removed)
+        {
+            if (list == null || removed == null || removed.Count == 0) return null;
+            if (saveBlocked)
+                return L.S("Not undone: the price history file could not be read.", "Ikke fortrudt: prishistorik-filen kunne ikke læses.");
+            var back = new List<string>();
+            var before = new HashSet<QuoteRecord>(list);
+            if (PutBack(list, removed) == 0) return null;
+            foreach (var r in list) if (!before.Contains(r) && r != null) back.Add(r.Id);
+            string problem = Save(list);
+            if (problem != null) RemoveMany(list, back);
+            return problem;
+        }
+
+        /// The undo is gone: deletes the pictures of removed records that aren't in list (again). Returns how many.
+        /// Never throws.
+        public static int DropRemoved(List<QuoteRecord> list, RemovedRecords removed)
+        {
+            if (removed == null || saveBlocked) return 0;
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            if (list != null) foreach (var r in list) if (r != null && !string.IsNullOrEmpty(r.Id)) have.Add(r.Id);
+            int n = 0;
+            foreach (var id in removed.Ids())
+                if (!have.Contains(id) && PicturePath(id) != null && DeletePicture(id)) n++;
+            return n;
+        }
+
+        public const string ClearCopyPrefix = "history.before-clear-";
+
+        /// Clear all: first a safety copy <Folder>\history.before-clear-yyyyMMdd-HHmmss.printprice-backup (every record +
+        /// BackupPictures, no settings; all copies are kept), then saves an empty history, then removes every picture
+        /// file (also ones kept for an undo: drop it first). null = OK (empty list: nothing done, safetyPath null).
+        /// A failed copy or save changes nothing. Refused while history.json couldn't be read. Never throws.
+        /// Get it back: ReadBackupFile(NewestClearCopy()) + Restore(replace: true, withSettings: false).
+        public static string ClearAll(List<QuoteRecord> list, string app, DateTime now, out string safetyPath)
+        {
+            safetyPath = null;
+            if (saveBlocked)
+                return L.S("Not cleared: the price history file could not be read.", "Ikke ryddet: prishistorik-filen kunne ikke læses.");
+            if (list == null || list.Count == 0) return null;
+            string path;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                path = BackupName(FilePath, ClearCopyPrefix, BackupExtension, now);
+                File.WriteAllText(path, ToBackup(list, null, app, now, BackupPictures(list)), new UTF8Encoding(false));
+            }
+            catch (Exception ex)
+            {
+                return L.S("Not cleared, the safety copy failed: ", "Ikke ryddet, sikkerhedskopien fejlede: ") + ex.Message;
+            }
+            string problem = Save(new List<QuoteRecord>());
+            if (problem != null) return problem;
+            safetyPath = path;
+            list.Clear();
+            foreach (var id in PictureIds()) DeletePicture(id);
+            try
+            {
+                if (Directory.Exists(PictureDir))
+                    foreach (var f in Directory.GetFiles(PictureDir, "*.tmp")) File.Delete(f);
+            }
+            catch { }
+            return null;
+        }
+
+        /// The newest history.before-clear-*.printprice-backup next to history.json, or null.
+        public static string NewestClearCopy()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(FilePath);
+                if (!Directory.Exists(dir)) return null;
+                string newest = null;
+                foreach (var f in Directory.GetFiles(dir, ClearCopyPrefix + "*" + BackupExtension))
+                    if (newest == null || File.GetLastWriteTimeUtc(f) > File.GetLastWriteTimeUtc(newest)
+                        || (File.GetLastWriteTimeUtc(f) == File.GetLastWriteTimeUtc(newest) && string.CompareOrdinal(f, newest) > 0))
+                        newest = f;
+                return newest;
             }
             catch { return null; }
         }
