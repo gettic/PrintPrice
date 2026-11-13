@@ -733,6 +733,12 @@ namespace PrintPrice
 
         Theme.LinkText link;   // optional clickable line under the text (SetLink)
 
+        /// The SetLink line (null = none), e.g. to open a menu under it.
+        public Control LinkControl { get { return link; } }
+
+        /// The muted line of SetText (null = none), e.g. for a tooltip with more detail.
+        public Control NoteControl { get { return noteMuted ? note : null; } }
+
         /// Adds a clickable, underlined line under the text (e.g. a web address in an error), in Theme.Text also in
         /// an error box. Setting Text, SetText or SetTable removes it again.
         public void SetLink(string text, Action click)
@@ -920,6 +926,70 @@ namespace PrintPrice
             var r = new Rectangle(8, 0, sz.Width + 2, sz.Height);
             using (var b = new SolidBrush(BackColor)) g.FillRectangle(b, r);
             TextRenderer.DrawText(g, Text, Font, r, ForeColor, flags);
+        }
+    }
+
+    /// Small colour square with a thin Border frame; several colours = equal vertical stripes; unknown colour = empty
+    /// Input box. Main window material rows (not clickable) and the file picker's colour per file (Clickable = true:
+    /// Tab stop, hand cursor, HotBorder frame on hover / focus, Enter / Space = Click).
+    public sealed class Swatch : Control
+    {
+        Color[] colours = new Color[0];
+        bool clickable, hot;
+
+        public Swatch()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
+        }
+
+        public Color[] Colours { get { return colours; } set { colours = value ?? new Color[0]; Invalidate(); } }
+
+        public bool Clickable
+        {
+            get { return clickable; }
+            set
+            {
+                clickable = value;
+                SetStyle(ControlStyles.Selectable, value);
+                TabStop = value;
+                Cursor = value ? Cursors.Hand : Cursors.Default;
+                AccessibleRole = value ? AccessibleRole.PushButton : AccessibleRole.Graphic;
+            }
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            return clickable && (keyData == Keys.Enter || keyData == Keys.Space) || base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (clickable && (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space)) { e.Handled = e.SuppressKeyPress = true; OnClick(EventArgs.Empty); return; }
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); hot = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); hot = false; Invalidate(); }
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var r = ClientRectangle;
+            using (var b = new SolidBrush(Theme.Input)) e.Graphics.FillRectangle(b, r);
+            var known = new List<Color>();
+            foreach (var c in colours) if (!c.IsEmpty) known.Add(c);
+            for (int i = 0; i < known.Count; i++)
+            {
+                int x0 = r.Width * i / known.Count, x1 = r.Width * (i + 1) / known.Count;
+                using (var b = new SolidBrush(known[i])) e.Graphics.FillRectangle(b, x0, 0, x1 - x0, r.Height);
+            }
+            bool lit = clickable && Enabled && (hot || Focused);
+            using (var p = new Pen(lit ? Theme.HotBorder : Theme.Border)) e.Graphics.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
+            if (lit && Focused && ShowFocusCues)   // a second inner ring so keyboard focus shows on light colours too
+                using (var p = new Pen(Theme.HotBorder)) e.Graphics.DrawRectangle(p, 1, 1, r.Width - 3, r.Height - 3);
         }
     }
 

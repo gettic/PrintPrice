@@ -99,6 +99,9 @@ body.dragging .zone { border: 2px solid var(--others); background: var(--hot-bac
 .file-msg { border-left: 4px solid var(--accent); padding-left: 8px; overflow-wrap: anywhere; }
 .file-msg.error { color: var(--error); }
 .file-msg.muted { color: var(--muted); font-size: 13px; border-left: 0; padding-left: 0; }
+.plates { margin: 0; padding: 0 0 0 12px; list-style: none; color: var(--muted); font-size: 13px; }   /* idea 21 */
+.plates li { overflow-wrap: anywhere; padding: 1px 0; }
+.plates .pn { color: var(--text); }
 .file-warn { color: #f0b446; font-size: 13px; }   /* Theme.Warning */
 .file-warn a { color: #f0b446; }
 .colours {

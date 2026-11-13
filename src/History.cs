@@ -26,6 +26,36 @@ namespace PrintPrice
         internal object MemberwiseCopy() { return MemberwiseClone(); }   // History.CopyQuotes
     }
 
+    /// Idea 21: one model file of a job sliced from several plain model files, with the filament and colour the user
+    /// picked for it (the file picker's ColourChoice), so Open again / Repeat print can slice it the same way.
+    public class HistoryPart
+    {
+        public string File = "";       // the file as given to the slicer (path or name)
+        public string Filament = "";   // short preset name as in Settings, "" = Settings' filament
+        public string Colour = "";     // "#RRGGBB", "" = the profile's own colour
+        public int Slot = 1;           // filament slot (1-based); files with the same slot share one colour line;
+                                       // 0 = a .3mf project that keeps the file's own colours (no colour line of its own)
+    }
+
+    /// Idea 21: the files of a several-files job (QuoteRecord.Parts; null = a normal job, old records).
+    public class HistoryParts
+    {
+        public bool Together;                  // "together on one plate" was ticked
+        public List<HistoryPart> Files;        // in the picker's order; never empty after History.CleanQuotes
+
+        internal HistoryParts Copy()
+        {
+            var c = new HistoryParts { Together = Together };
+            if (Files != null)
+            {
+                c.Files = new List<HistoryPart>(Files.Count);
+                foreach (var f in Files)
+                    c.Files.Add(f == null ? null : new HistoryPart { File = f.File, Filament = f.Filament, Colour = f.Colour, Slot = f.Slot });
+            }
+            return c;
+        }
+    }
+
     /// One saved quote: inputs, the settings used, the result as shown, and the user's own notes.
     public class QuoteRecord
     {
@@ -104,6 +134,10 @@ namespace PrintPrice
         public string InvoicePayMobilePay = "";
         public string InvoicePayBank = "";
         public string InvoiceFromName = "";        // AppSettings.QuoteName at the time
+
+        // idea 21: several model files with a filament / colour each (History.SetParts / PartsOf); null = none (old records,
+        // one file, links, typed jobs). Older app versions ignore the key.
+        public HistoryParts Parts;
 
         internal object MemberwiseCopy() { return MemberwiseClone(); }   // History.CopyQuotes
     }
@@ -420,6 +454,91 @@ namespace PrintPrice
             var kept = Add(list, r);
             kept.For = forWho == ForFriends ? ForFriends : ForCustomer;
             return kept;
+        }
+
+        // ---------- several model files with a colour each (idea 21) ----------
+
+        /// Highest filament slot a part may have (larger ones are read as this).
+        public const int MaxPartSlot = 64;
+
+        /// Stores the files of a several-files job on r (own copies, cleaned like a read file: blank file names dropped,
+        /// null texts "", Colour "#RRGGBB" upper case or "", Slot 0..MaxPartSlot). null / no files left = r.Parts null.
+        public static void SetParts(QuoteRecord r, IList<HistoryPart> files, bool together)
+        {
+            if (r == null) return;
+            if (files == null) { r.Parts = null; return; }
+            var p = new HistoryParts { Together = together, Files = new List<HistoryPart>(files.Count) };
+            foreach (var f in files)
+                if (f != null) p.Files.Add(new HistoryPart { File = f.File, Filament = f.Filament, Colour = f.Colour, Slot = f.Slot });
+            r.Parts = CleanParts(p);
+        }
+
+        /// The files of a several-files job (copies, picker order), or null for a normal job (old records too).
+        public static List<HistoryPart> PartsOf(QuoteRecord r)
+        {
+            if (r == null || r.Parts == null || r.Parts.Files == null || r.Parts.Files.Count == 0) return null;
+            return r.Parts.Copy().Files;
+        }
+
+        /// True when the job's files were sliced together on one plate (false for a normal job).
+        public static bool PartsTogether(QuoteRecord r)
+        {
+            return PartsOf(r) != null && r.Parts.Together;
+        }
+
+        /// The colour choice per slot: index i = slot i+1 (Filament / Colour of the first file with that slot, File "";
+        /// a slot no file uses = "" / ""), up to the highest slot used. null for a normal job. ui maps it to ColourChoice.
+        /// Files in slot 0 (a .3mf project keeping its own colours) have no colour line and are skipped.
+        public static List<HistoryPart> PartSlots(QuoteRecord r)
+        {
+            var files = PartsOf(r);
+            if (files == null) return null;
+            int max = 1;
+            foreach (var f in files) if (f.Slot > max) max = f.Slot;
+            var res = new List<HistoryPart>(max);
+            var seen = new bool[max];
+            for (int i = 0; i < max; i++) res.Add(new HistoryPart { Slot = i + 1 });
+            foreach (var f in files)
+            {
+                if (f.Slot < 1) continue;   // slot 0: the project's own colours
+                int i = f.Slot - 1;
+                if (seen[i]) continue;
+                seen[i] = true;
+                res[i].Filament = f.Filament; res[i].Colour = f.Colour;
+            }
+            return res;
+        }
+
+        // a read or set Parts: null, no Files or no file with a name left -> null
+        static HistoryParts CleanParts(HistoryParts p)
+        {
+            if (p == null || p.Files == null) return null;
+            var files = new List<HistoryPart>(p.Files.Count);
+            foreach (var f in p.Files)
+            {
+                if (f == null || f.File == null || f.File.Trim().Length == 0) continue;
+                f.Filament = f.Filament == null ? "" : f.Filament.Trim();
+                f.Colour = CleanPartColour(f.Colour);
+                // Slot 0 = a .3mf project part that keeps the file's own colours (idea 21): kept as 0.
+                // Negative = damaged -> 1; a stored part without "Slot" reads as the field's default 1.
+                if (f.Slot < 0) f.Slot = 1;
+                if (f.Slot > MaxPartSlot) f.Slot = MaxPartSlot;
+                files.Add(f);
+            }
+            if (files.Count == 0) return null;
+            p.Files = files;
+            return p;
+        }
+
+        // "#RRGGBB" (any case, spaces around) -> upper case; anything else -> ""
+        static string CleanPartColour(string c)
+        {
+            if (c == null) return "";
+            c = c.Trim();
+            if (c.Length != 7 || c[0] != '#') return "";
+            for (int i = 1; i < 7; i++)
+                if (!Uri.IsHexDigit(c[i])) return "";
+            return c.ToUpperInvariant();
         }
 
         /// Quote number from the saved time: "yyMMdd-HHmm" (2026-11-04 14:05:33 -> "261104-1405"); "" if SavedAt is bad.
@@ -971,6 +1090,7 @@ namespace PrintPrice
                     }
                     if (r.Filaments.Count == 0) r.Filaments = null;   // 1 line = a one-colour quote (name/colour kept)
                 }
+                r.Parts = CleanParts(r.Parts);
                 list.Add(r);
             }
             return list;
@@ -1473,6 +1593,7 @@ namespace PrintPrice
                 foreach (var f in r.Filaments)
                     c.Filaments.Add(f == null ? null : (HistoryFilament)f.MemberwiseCopy());
             }
+            c.Parts = r.Parts == null ? null : r.Parts.Copy();
             return c;
         }
 
@@ -1495,6 +1616,7 @@ namespace PrintPrice
             }
             if (keep.Note.Trim().Length == 0 && other.Note.Trim().Length > 0) { keep.Note = other.Note; changed = true; }
             if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
+            if (keep.Parts == null && other.Parts != null) { keep.Parts = other.Parts.Copy(); changed = true; }   // idea 21
             return changed;
         }
 

@@ -82,6 +82,8 @@ namespace PrintPrice.Web
             foreach (var f in res.Filaments)
                 if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
             SetPrinter(res, BambuSlicer.ProjectPrinterFrom(parsed, xml));
+            // plate names (idea 21): missing / unreadable file = no names, never an error
+            BambuSlicer.ApplyPlateNames(res, await zip.ReadText("Metadata/model_settings.config", MaxSettingsBytes));
             string pic = BambuSlicer.PickPictureEntry(zip.Names);
             if (pic != null)
             {

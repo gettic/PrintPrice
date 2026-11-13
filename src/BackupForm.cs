@@ -493,6 +493,9 @@ namespace PrintPrice
             infoContents.Text = list.Count == 0
                 ? L.S("The backup holds your settings (prices, printers, invoice details; no quotes yet), so it includes payment details.",
                       "Kopien indeholder dine indstillinger (priser, printere, fakturaoplysninger; ingen tilbud endnu), så betalingsoplysninger er med.")
+                : list.Count == 1
+                ? L.S("The backup holds your 1 quote and your settings (prices, printers, invoice details), so it includes customer names and payment details.",
+                      "Kopien indeholder dit ene tilbud og dine indstillinger (priser, printere, fakturaoplysninger), så kundenavne og betalingsoplysninger er med.")
                 : L.F("The backup holds all {0} and your settings (prices, printers, invoice details), so it includes customer names and payment details.",
                                     "Kopien indeholder alle {0} og dine indstillinger (priser, printere, fakturaoplysninger), så kundenavne og betalingsoplysninger er med.",
                                     Quotes(list.Count));

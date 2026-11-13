@@ -40,6 +40,33 @@ namespace PrintPrice
         // a G-code that gave only one of the two (Seconds or Grams = 0): show BambuSlicer.MissingValueText so the user types it
         public bool MissingTime;
         public bool MissingGrams;
+        // idea 21: every plate (ParseSliceInfo, GcodeResult = 1; AddResult appends a file's plates with its name). Never null.
+        // Show the list when it has 2+ entries (BambuSlicer.PlateTitle / PlateNumbers / PlateLine).
+        public List<PlateInfo> PlateList = new List<PlateInfo>();
+        // idea 21 stage B (BambuSlicer.SliceColours): true = all files were sliced together on one plate with several colours
+        public bool Together;
+        // idea 21: null = fine / not asked; else a short text why "together" fell back to separate plates
+        public string TogetherProblem;
+    }
+
+    /// One plate of a sliced print (idea 21): from slice_info.config (+ names from model_settings.config); G-code = one plate.
+    public sealed class PlateInfo
+    {
+        public int Index;                 // slice_info "index" (1-based); G-code / unknown = 1
+        public string Name = "";          // model_settings.config plater_name, "" = not named
+        public string File = "";          // display name of the model file it came from ("" = the one file)
+        public int FilePlates;            // plates that file had (AddResult); 0-1 = its only plate (PlateTitle shows just the file)
+        public double Seconds;            // plate "prediction"
+        public double Grams;              // plate "weight" (else the sum of its filaments)
+        public List<string> Objects = new List<string>();   // <object name=…> in file order, skipped="true" left out
+        public List<FilamentUse> Filaments = new List<FilamentUse>();   // this plate's slots (Slot, Colour, Type, Grams, Metres)
+    }
+
+    /// The user's choice for one colour (idea 21; item i of the list = filament slot i+1).
+    public sealed class ColourChoice
+    {
+        public string Filament = "";   // short preset name as in Settings ("Bambu PLA Basic"); "" = Settings' filament
+        public string Colour = "";     // "#RRGGBB"; "" = the profile's own colour
     }
 
     /// What a sliced G-code file says (BambuSlicer.ParseGcode): Bambu Studio, OrcaSlicer, PrusaSlicer (and SuperSlicer),
@@ -337,6 +364,8 @@ namespace PrintPrice
                 if (seconds <= 0) continue;
                 double grams = Meta(plate, "weight");
                 bool sumFilaments = grams <= 0;
+                var info = new PlateInfo { Index = (int)Meta(plate, "index"), Seconds = seconds };
+                if (info.Index <= 0) info.Index = res.Plates + 1;
                 foreach (var f in plate.Children("filament"))
                 {
                     double g = Attr(f, "used_g");
@@ -344,20 +373,158 @@ namespace PrintPrice
                     int slot = (int)Attr(f, "id");
                     if (g <= 0 || slot <= 0) continue;
                     FilamentUse u;
+                    string colour = NormColour(AttrText(f, "color")), type = AttrText(f, "type");
                     if (!slots.TryGetValue(slot, out u))
                     {
-                        u = new FilamentUse { Slot = slot, Colour = NormColour(AttrText(f, "color")), Type = AttrText(f, "type") };
+                        u = new FilamentUse { Slot = slot, Colour = colour, Type = type };
                         slots[slot] = u;
                     }
                     u.Grams += g;
                     u.Metres += Attr(f, "used_m");
+                    info.Filaments.Add(new FilamentUse { Slot = slot, Colour = colour, Type = type, Grams = g, Metres = Attr(f, "used_m") });
                 }
+                foreach (var o in plate.Children("object"))
+                {
+                    if (string.Equals(AttrText(o, "skipped"), "true", StringComparison.OrdinalIgnoreCase)) continue;
+                    info.Objects.Add(AttrText(o, "name"));
+                }
+                info.Grams = grams;
+                res.PlateList.Add(info);
                 res.Seconds += seconds;
                 res.Grams += grams;
                 res.Plates++;
             }
             res.Filaments = slots.Values.ToList();
             return res.Plates > 0 ? res : null;
+        }
+
+        // ---------- plates list (idea 21) ----------
+
+        /// Plate names from Metadata/model_settings.config (`<plate>` with plater_id / plater_name) into res.PlateList
+        /// (matched by Index). Null/empty/bad xml or no PlateList = nothing happens; never throws.
+        public static void ApplyPlateNames(SliceResult res, string modelSettingsXml)
+        {
+            if (res == null || res.PlateList == null || res.PlateList.Count == 0 || string.IsNullOrEmpty(modelSettingsXml)) return;
+            try
+            {
+                var root = SliceXml.Parse(modelSettingsXml);
+                foreach (var plate in Plates(root))
+                {
+                    var idNode = PlateMeta(plate, "plater_id");
+                    var nameNode = PlateMeta(plate, "plater_name");
+                    if (idNode == null || nameNode == null) continue;
+                    int id = (int)Attr(idNode, "value");
+                    string name = AttrText(nameNode, "value");
+                    if (id <= 0 || name.Length == 0) continue;
+                    foreach (var p in res.PlateList)
+                        if (p != null && p.Index == id) p.Name = name;
+                }
+            }
+            catch (Exception) { }
+        }
+
+        /// Adds one slice to a running total (several model files): time, grams, plates, per-slot filaments (summed by
+        /// slot, `slotOffset` added to r's slots first, so a project's colour 1 can go after the user's colours), known
+        /// purge / colour-change values, the first picture and Studio file, and r's plates (copies) with File = fileName
+        /// when they have none. r isn't changed. Null total or r = nothing.
+        public static void AddResult(SliceResult total, SliceResult r, string fileName, int slotOffset)
+        {
+            if (total == null || r == null) return;
+            if (slotOffset < 0) slotOffset = 0;
+            total.Seconds += r.Seconds;
+            total.Grams += r.Grams;
+            total.Plates += r.Plates;
+            if (total.Picture == null) total.Picture = r.Picture;
+            if (total.StudioFile == null) total.StudioFile = r.StudioFile;
+            foreach (var f in r.Filaments)
+            {
+                if (f == null) continue;
+                int slot = f.Slot + slotOffset;
+                var t = total.Filaments.FirstOrDefault(x => x.Slot == slot);
+                if (t == null)
+                {
+                    total.Filaments.Add(new FilamentUse { Slot = slot, Colour = f.Colour ?? "", Type = f.Type ?? "", Profile = f.Profile ?? "",
+                                                          Grams = f.Grams, ModelGrams = f.ModelGrams, Metres = f.Metres, KeepProfile = f.KeepProfile });
+                    continue;
+                }
+                t.Grams += f.Grams;
+                t.Metres += f.Metres;
+                t.ModelGrams = t.ModelGrams >= 0 && f.ModelGrams >= 0 ? t.ModelGrams + f.ModelGrams : -1;
+                if (string.IsNullOrEmpty(t.Colour)) t.Colour = f.Colour ?? "";
+                if (string.IsNullOrEmpty(t.Type)) t.Type = f.Type ?? "";
+                if (string.IsNullOrEmpty(t.Profile)) t.Profile = f.Profile ?? "";
+            }
+            total.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+            if (r.PurgeGrams >= 0) total.PurgeGrams = Math.Max(0, total.PurgeGrams) + r.PurgeGrams;
+            if (r.ColourChangeHours >= 0) total.ColourChangeHours = Math.Max(0, total.ColourChangeHours) + r.ColourChangeHours;
+            if (r.PlateList == null) return;
+            foreach (var p in r.PlateList)
+            {
+                if (p == null) continue;
+                var c = new PlateInfo { Index = p.Index, Name = p.Name ?? "", File = string.IsNullOrEmpty(p.File) ? (fileName ?? "") : p.File,
+                                        FilePlates = p.FilePlates > 0 ? p.FilePlates : r.PlateList.Count,
+                                        Seconds = p.Seconds, Grams = p.Grams, Objects = new List<string>(p.Objects ?? new List<string>()) };
+                if (p.Filaments != null)
+                    foreach (var f in p.Filaments)
+                        if (f != null)
+                            c.Filaments.Add(new FilamentUse { Slot = f.Slot + slotOffset, Colour = f.Colour ?? "", Type = f.Type ?? "",
+                                                              Profile = f.Profile ?? "", Grams = f.Grams, ModelGrams = f.ModelGrams, Metres = f.Metres,
+                                                              KeepProfile = f.KeepProfile });
+                total.PlateList.Add(c);
+            }
+        }
+
+        /// AddResult without a slot offset.
+        public static void AddResult(SliceResult total, SliceResult r, string fileName)
+        {
+            AddResult(total, r, fileName, 0);
+        }
+
+        public const int MaxPlateNameChars = 40;
+
+        /// text cut to `max` characters with "…" at the end (trimmed; null = "").
+        public static string CutName(string text, int max)
+        {
+            string t = (text ?? "").Trim();
+            if (max < 2 || t.Length <= max) return t;
+            return t.Substring(0, max - 1).TrimEnd() + "…";
+        }
+
+        /// "Plate 2 'Wheels'" (DA "Plade 2 'Wheels'"). showFile and the plate has a file name: the file's only plate =
+        /// "body.stl"; one of several = "multi.3mf, plate 2 'Wheels'" (DA "plade"). Names are cut at MaxPlateNameChars.
+        public static string PlateTitle(PlateInfo p, bool showFile)
+        {
+            if (p == null) return "";
+            string file = showFile ? CutName(p.File, MaxPlateNameChars) : "";
+            if (file.Length > 0 && p.FilePlates <= 1) return file;
+            string s = file.Length > 0 ? file + ", " + L.F("plate {0}", "plade {0}", p.Index > 0 ? p.Index : 1)
+                                       : L.F("Plate {0}", "Plade {0}", p.Index > 0 ? p.Index : 1);
+            string name = CutName(p.Name, MaxPlateNameChars);
+            if (name.Length > 0) s += " '" + name + "'";
+            return s;
+        }
+
+        /// "1 h 20 m, 34,1 g, 3 objects" (DA "1 t 20 m, 34,1 g, 3 objekter"; time as the window's ✓ line = QuoteRows.Time,
+        /// whole minutes, at least 1 m when > 0 s); objects left out when none.
+        public static string PlateNumbers(PlateInfo p)
+        {
+            if (p == null) return "";
+            long minutes = (long)Math.Round(Math.Max(0, p.Seconds) / 60.0);
+            if (minutes == 0 && p.Seconds > 0) minutes = 1;
+            string time = QuoteRows.Time((int)(minutes / 60), (int)(minutes % 60));
+            // grams like the window's one-colour ✓ line (MainForm: 1 decimal, "0.#": 34 g, 81,4 g)
+            string s = time + ", " + Math.Round(Math.Max(0, p.Grams), 1).ToString("0.#", Num.Dk) + " g";
+            int n = p.Objects == null ? 0 : p.Objects.Count;
+            if (n == 1) s += L.S(", 1 object", ", 1 objekt");
+            else if (n > 1) s += L.F(", {0} objects", ", {0} objekter", n);
+            return s;
+        }
+
+        /// PlateTitle + " – " + PlateNumbers ("Plate 2 'Wheels' – 1 h 20 m, 34 g, 3 objects").
+        public static string PlateLine(PlateInfo p, bool showFile)
+        {
+            if (p == null) return "";
+            return PlateTitle(p, showFile) + " – " + PlateNumbers(p);
         }
 
         // XPath "/config/plate" (root config, its plate children)
@@ -698,6 +865,10 @@ namespace PrintPrice
                 });
             }
             res.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+            var plate = new PlateInfo { Index = 1, Seconds = res.Seconds, Grams = res.Grams };
+            foreach (var f in res.Filaments)
+                plate.Filaments.Add(new FilamentUse { Slot = f.Slot, Colour = f.Colour, Type = f.Type, Profile = f.Profile, Grams = f.Grams });
+            res.PlateList.Add(plate);
             bool other = res.SlicerName.Length > 0 && res.SlicerName != SlicerBambu;
             // idea 17's "Generic PLA = no filament chosen" rule is about Bambu Studio projects; in other slicers a named
             // profile is the user's pick, so it stays (an empty name still gets the Settings filament)

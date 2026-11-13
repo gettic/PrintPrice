@@ -331,6 +331,133 @@ namespace PrintPrice.Tests
             return r;
         }
 
+        // ---------- idea 21: several model files with a colour each (QuoteRecord.Parts) ----------
+        // an older app's record and file: no Parts key (set only by the JSON reader, hence the initial values)
+        public class OldQuoteRecord { public string Id = ""; public int Hours = 0; }
+        public class OldHistoryFile { public int Version = 0; public List<OldQuoteRecord> Quotes = null; }
+
+        static List<HistoryPart> ThreeParts()
+        {
+            return new List<HistoryPart> {
+                new HistoryPart { File = @"C:\Models\body.stl", Filament = "Bambu PLA Basic", Colour = "#ff0000", Slot = 2 },
+                new HistoryPart { File = @"C:\Models\wheel.stl", Filament = "", Colour = "", Slot = 1 },
+                new HistoryPart { File = @"C:\Models\lid.stl", Filament = "Bambu PLA Basic", Colour = "#FF0000", Slot = 2 } };
+        }
+
+        static string PartsText(QuoteRecord r)
+        {
+            var l = History.PartsOf(r);
+            if (l == null) return "NULL";
+            var s = new List<string>();
+            foreach (var f in l) s.Add(f.File + "," + f.Filament + "," + f.Colour + "," + f.Slot);
+            return (History.PartsTogether(r) ? "T:" : "S:") + J(s);
+        }
+
+        static void HistoryPartsTests()
+        {
+            const string Three = @"T:C:\Models\body.stl,Bambu PLA Basic,#FF0000,2|C:\Models\wheel.stl,,,1|C:\Models\lid.stl,Bambu PLA Basic,#FF0000,2";
+            var t = new DateTime(2026, 11, 12, 12, 0, 0);
+
+            // set: own copies, colour upper case
+            var r = BRec("P1", "2026-11-12 10:00:00");
+            True("Parts: new record has none", r.Parts == null && History.PartsOf(r) == null && !History.PartsTogether(r) && History.PartSlots(r) == null);
+            var input = ThreeParts();
+            History.SetParts(r, input, true);
+            input[0].File = "changed"; input.Add(new HistoryPart { File = "x.stl" });
+            True("Parts: set + read back (own copy)", PartsText(r) == Three);
+            History.PartsOf(r)[0].Colour = "#000000";
+            True("Parts: PartsOf gives a copy", r.Parts.Files[0].Colour == "#FF0000");
+
+            // slots: index i = slot i+1, the first file with the slot gives its choice
+            var slots = History.PartSlots(r);
+            True("Parts: 2 slots, slot 1 = Settings' filament, slot 2 = red PLA Basic", slots.Count == 2
+                 && slots[0].Filament == "" && slots[0].Colour == "" && slots[0].Slot == 1
+                 && slots[1].Filament == "Bambu PLA Basic" && slots[1].Colour == "#FF0000" && slots[1].Slot == 2 && slots[1].File == "");
+            var gap = BRec("P2", "2026-11-12 10:00:00");
+            History.SetParts(gap, new List<HistoryPart> { new HistoryPart { File = "a.stl", Colour = "#00FF00", Slot = 3 } }, false);
+            slots = History.PartSlots(gap);
+            True("Parts: unused slots 1-2 empty, slot 3 green", slots.Count == 3 && slots[0].Colour == "" && slots[1].Filament == ""
+                 && slots[2].Colour == "#00FF00" && !History.PartsTogether(gap));
+
+            // cleaning (SetParts and reading): null entries and blank file names dropped, bad colour "", slot 0..64 (negative -> 1)
+            var odd = BRec("P3", "2026-11-12 10:00:00");
+            History.SetParts(odd, new List<HistoryPart> { null, new HistoryPart { File = "  " },
+                new HistoryPart { File = "a.stl", Filament = null, Colour = "red", Slot = 0 },
+                new HistoryPart { File = "b.stl", Filament = " Bambu PETG HF ", Colour = " #12abEF ", Slot = 99 },
+                new HistoryPart { File = "c.stl", Colour = "#12345G", Slot = -5 } }, false);
+            True("Parts: cleaned", PartsText(odd) == "S:a.stl,,,0|b.stl,Bambu PETG HF,#12ABEF,64|c.stl,,,1");
+
+            // slot 0 = a .3mf project keeping its own colours: kept through JSON, no colour line, the STL after it keeps slot 1
+            var proj = BRec("P4", "2026-11-12 10:00:00");
+            History.SetParts(proj, new List<HistoryPart> {
+                new HistoryPart { File = "robot.3mf", Filament = "Bambu PETG HF", Colour = "#0000FF", Slot = 0 },
+                new HistoryPart { File = "stand.stl", Filament = "Bambu PLA Basic", Colour = "#ff0000", Slot = 1 } }, true);
+            const string Proj = "T:robot.3mf,Bambu PETG HF,#0000FF,0|stand.stl,Bambu PLA Basic,#FF0000,1";
+            True("Parts: slot 0 kept", PartsText(proj) == Proj);
+            var projBack = History.ParseJson(History.ToJson(new List<QuoteRecord> { proj }));
+            True("Parts: slot 0 JSON round trip", projBack != null && projBack.Count == 1 && PartsText(projBack[0]) == Proj);
+            slots = History.PartSlots(projBack[0]);
+            True("Parts: PartSlots skips slot 0, STL in slot 1 not hidden", slots.Count == 1 && slots[0].Slot == 1
+                 && slots[0].Filament == "Bambu PLA Basic" && slots[0].Colour == "#FF0000");
+            var onlyProj = BRec("P5", "2026-11-12 10:00:00");
+            History.SetParts(onlyProj, new List<HistoryPart> { new HistoryPart { File = "robot.3mf", Colour = "#0000FF", Slot = 0 } }, false);
+            slots = History.PartSlots(onlyProj);
+            True("Parts: only a slot-0 project -> one empty slot 1", slots.Count == 1 && slots[0].Slot == 1 && slots[0].Filament == "" && slots[0].Colour == "");
+            var neg = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"n\",\"Parts\":{\"Files\":[{\"File\":\"p.3mf\",\"Slot\":0},{\"File\":\"q.stl\",\"Slot\":-2},{\"File\":\"r.stl\"}]}}]}");
+            True("Parts: read slot 0 kept, negative -> 1, no Slot key -> 1", neg != null && neg.Count == 1 && PartsText(neg[0]) == "S:p.3mf,,,0|q.stl,,,1|r.stl,,,1");
+            History.SetParts(odd, new List<HistoryPart> { null, new HistoryPart { File = "" } }, true);
+            True("Parts: no files left -> none", odd.Parts == null && !History.PartsTogether(odd));
+            History.SetParts(r, ThreeParts(), true);
+            History.SetParts(odd, ThreeParts(), true); History.SetParts(odd, null, true);
+            True("Parts: SetParts null clears", odd.Parts == null);
+
+            // history.json round trip (save -> load)
+            var plain = BRec("P0", "2026-11-11 10:00:00");
+            var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { r, plain }));
+            True("Parts: JSON round trip keeps files + together", back != null && back.Count == 2 && PartsText(back[0]) == Three);
+            True("Parts: JSON round trip, normal record stays none", back[1].Parts == null && History.ToJson(back) == History.ToJson(new List<QuoteRecord> { r, plain }));
+
+            // old file without the key; odd stored shapes
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"old\",\"SavedAt\":\"2025-05-01 10:00:00\",\"Hours\":2,\"Grams\":50}]}");
+            True("Parts: old history.json loads, no parts", old != null && old.Count == 1 && old[0].Parts == null && History.PartsOf(old[0]) == null
+                 && History.PartSlots(old[0]) == null && old[0].Hours == 2);
+            var shapes = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Parts\":null},{\"Id\":\"b\",\"Parts\":{\"Together\":true}},"
+                + "{\"Id\":\"c\",\"Parts\":{\"Together\":true,\"Files\":[]}},{\"Id\":\"d\",\"Parts\":{\"Files\":[null,{\"File\":\"x.stl\",\"Colour\":\"#abcdef\"}]}}]}");
+            True("Parts: null / no Files / empty Files -> none", shapes != null && shapes.Count == 4 && shapes[0].Parts == null
+                 && shapes[1].Parts == null && shapes[2].Parts == null);
+            True("Parts: read file cleaned (null dropped, missing texts, slot 1)", PartsText(shapes[3]) == "S:x.stl,,#ABCDEF,1");
+
+            // an older app version reads a new file: the extra key is ignored
+            var older = Json.Deserialize<OldHistoryFile>(History.ToJson(new List<QuoteRecord> { r }));
+            True("Parts: older app reads the new file", older != null && older.Version == 1 && older.Quotes.Count == 1 && older.Quotes[0].Id == "P1");
+
+            // deep copy (Combine's CopyQuotes) = the JSON round trip
+            var copied = History.CopyQuotes(new List<QuoteRecord> { r });
+            True("Parts: CopyQuotes = JSON round trip", History.ToJson(copied) == History.ToJson(History.ParseJson(History.ToJson(new List<QuoteRecord> { r }))));
+            True("Parts: CopyQuotes own objects", !ReferenceEquals(copied[0].Parts, r.Parts) && !ReferenceEquals(copied[0].Parts.Files[0], r.Parts.Files[0]));
+
+            // backup file round trip
+            BackupData data;
+            True("Parts: backup round trip", History.ReadBackup(History.ToBackup(new List<QuoteRecord> { r, plain }, null, "1.18.0", t), out data) == null
+                 && data.Quotes.Count == 2 && PartsText(data.Quotes[0]) == Three && data.Quotes[1].Parts == null);
+
+            // merge: a new record comes in with its parts; the same record without parts here gets them; parts here are kept
+            var res = History.Combine(new List<QuoteRecord> { plain }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { r } }, false, false);
+            True("Parts: merge adds record with parts", res.Added == 1 && res.Quotes.Count == 2 && PartsText(res.Quotes[0]) == Three);
+            var mine = BRec("P1", "2026-11-12 10:00:00");
+            res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { r } }, false, false);
+            True("Parts: merge fills a record without parts", res.Updated == 1 && res.Quotes.Count == 1 && PartsText(res.Quotes[0]) == Three
+                 && mine.Parts == null && !ReferenceEquals(res.Quotes[0].Parts, r.Parts));
+            var theirs = BRec("P1", "2026-11-12 10:00:00");
+            History.SetParts(theirs, new List<HistoryPart> { new HistoryPart { File = "other.stl", Slot = 1 } }, false);
+            res = History.Combine(new List<QuoteRecord> { r }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Parts: merge keeps this PC's parts", res.Same == 1 && res.Updated == 0 && PartsText(res.Quotes[0]) == Three);
+            res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, true, false);
+            True("Parts: replace takes the backup's", res.Quotes.Count == 1 && PartsText(res.Quotes[0]) == @"S:other.stl,,,1");
+            res = History.Combine(new List<QuoteRecord> { r }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { mine } }, false, false);
+            True("Parts: merge from an old backup (no parts) keeps them", res.Same == 1 && PartsText(res.Quotes[0]) == Three);
+        }
+
         static string Hex(byte[] b)
         {
             var sb = new System.Text.StringBuilder();
@@ -2104,6 +2231,211 @@ namespace PrintPrice.Tests
             }
         }
 
+        // ---------- several files with a colour each (idea 21, SliceInfo.cs / Slicer.cs): samples in tests\multipart-samples ----------
+        static string MultipartSample(string name)
+        {
+            string b = AppDomain.CurrentDomain.BaseDirectory;
+            string[] tries = { System.IO.Path.Combine(b, @"..\tests\multipart-samples"), System.IO.Path.Combine(b, @"tests\multipart-samples"), @"tests\multipart-samples" };
+            string dir = tries[0];
+            foreach (var t in tries) if (System.IO.Directory.Exists(t)) { dir = t; break; }
+            return System.IO.File.ReadAllText(System.IO.Path.Combine(dir, name));
+        }
+
+        static string Objs(PlateInfo p) { return J(p.Objects); }
+
+        static string Slots(List<FilamentUse> l)
+        {
+            var s = new List<string>();
+            foreach (var f in l) s.Add(f.Slot.ToString() + ":" + f.Grams.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
+            return J(s);
+        }
+
+        static void MultipartTests()
+        {
+            bool wasDanish = L.Danish;
+            L.Danish = false;
+            try
+            {
+                // PlateList from the samples: t4 = 3 files on one plate, slots 1 and 3, prediction 5316 s, weight 29,65 g
+                var t4 = BambuSlicer.ParseSliceInfo(MultipartSample("t4_three.slice_info.config"));
+                True("Plates t4: 1 plate", t4 != null && t4.Plates == 1 && t4.PlateList.Count == 1);
+                var p4 = t4.PlateList[0];
+                True("Plates t4: index 1, 5316 s, 29,65 g, no name/file", p4.Index == 1 && p4.Seconds == 5316 && Math.Abs(p4.Grams - 29.65) < 1e-9
+                     && p4.Name == "" && p4.File == "");
+                True("Plates t4: 3 objects in file order", Objs(p4) == "partB.stl|partA.stl|test-cube.stl");
+                True("Plates t4: plate slots 1 (8,03 g) and 3 (21,62 g)", Slots(p4.Filaments) == "1:8.03|3:21.62"
+                     && p4.Filaments[0].Colour == "#C12E1F" && p4.Filaments[1].Type == "PLA");
+                True("Plates t4: totals unchanged", t4.Seconds == 5316 && Math.Abs(t4.Grams - 29.65) < 1e-9 && Slots(t4.Filaments) == "1:8.03|3:21.62");
+                var t5 = BambuSlicer.ParseSliceInfo(MultipartSample("t5_edited.slice_info.config"));
+                True("Plates t5: 1 plate, 1 object 'Assembly', slots 1-3", t5 != null && t5.PlateList.Count == 1 && Objs(t5.PlateList[0]) == "Assembly"
+                     && Slots(t5.PlateList[0].Filaments) == "1:0.28|2:7.72|3:18.32" && t5.PlateList[0].Seconds == 5207);
+
+                // several plates: one without a time skipped, skipped objects left out, no weight = sum of its filaments (2 + 3 = 5)
+                const string Three = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><config>"
+                    + "<plate><metadata key=\"index\" value=\"1\"/><metadata key=\"prediction\" value=\"3600\"/><metadata key=\"weight\" value=\"10.5\"/>"
+                    + "<object identify_id=\"1\" name=\"Wheel\" skipped=\"false\"/><object identify_id=\"2\" name=\"Gone\" skipped=\"true\"/>"
+                    + "<filament id=\"2\" type=\"PETG\" color=\"#00FF00\" used_m=\"3.5\" used_g=\"10.5\"/></plate>"
+                    + "<plate><metadata key=\"index\" value=\"2\"/><metadata key=\"prediction\" value=\"0\"/><metadata key=\"weight\" value=\"9\"/></plate>"
+                    + "<plate><metadata key=\"index\" value=\"3\"/><metadata key=\"prediction\" value=\"1200\"/><metadata key=\"weight\" value=\"0\"/>"
+                    + "<filament id=\"1\" type=\"PLA\" color=\"#FF0000\" used_m=\"0.7\" used_g=\"2\"/><filament id=\"2\" type=\"PETG\" color=\"#00FF00\" used_m=\"1\" used_g=\"3\"/></plate>"
+                    + "</config>";
+                var mp = BambuSlicer.ParseSliceInfo(Three);
+                True("Plates: 2 of 3 counted (index 1 and 3)", mp != null && mp.Plates == 2 && mp.PlateList.Count == 2
+                     && mp.PlateList[0].Index == 1 && mp.PlateList[1].Index == 3);
+                True("Plates: skipped object left out", Objs(mp.PlateList[0]) == "Wheel" && mp.PlateList[1].Objects.Count == 0);
+                True("Plates: no weight = 2 + 3 = 5 g; totals 4800 s, 10,5 + 5 = 15,5 g", mp.PlateList[1].Grams == 5 && mp.PlateList[0].Grams == 10.5
+                     && mp.Seconds == 4800 && mp.Grams == 15.5);
+                True("Plates: per-plate slots; total slot 2 = 10,5 + 3 = 13,5", Slots(mp.PlateList[1].Filaments) == "1:2.00|2:3.00"
+                     && Slots(mp.Filaments) == "1:2.00|2:13.50");
+
+                // ApplyPlateNames: plate 1 named, plate 3 empty name, plate 2 named but not in the list
+                const string Names = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><config><object id=\"2\"><metadata key=\"name\" value=\"x\"/></object>"
+                    + "<plate><metadata key=\"plater_id\" value=\"1\"/><metadata key=\"plater_name\" value=\"Wheels\"/></plate>"
+                    + "<plate><metadata key=\"plater_id\" value=\"2\"/><metadata key=\"plater_name\" value=\"Ghost\"/></plate>"
+                    + "<plate><metadata key=\"plater_id\" value=\"3\"/><metadata key=\"plater_name\" value=\"\"/></plate></config>";
+                BambuSlicer.ApplyPlateNames(mp, Names);
+                True("Plate names: named plate", mp.PlateList[0].Name == "Wheels");
+                True("Plate names: empty name stays \"\", unknown plate ignored", mp.PlateList[1].Name == "" && mp.PlateList.Count == 2);
+                BambuSlicer.ApplyPlateNames(t4, MultipartSample("t4_three.model_settings.config"));
+                True("Plate names: t4 sample has an empty name", t4.PlateList[0].Name == "");
+                var keep = BambuSlicer.ParseSliceInfo(Three);
+                keep.PlateList[0].Name = "Mine";
+                bool threw = false;
+                try
+                {
+                    BambuSlicer.ApplyPlateNames(keep, null);
+                    BambuSlicer.ApplyPlateNames(keep, "");
+                    BambuSlicer.ApplyPlateNames(keep, "<config><plate><metadata key=\"plater_id\" value=\"1\"/>");   // broken: never closed
+                    BambuSlicer.ApplyPlateNames(keep, "not xml at all <<<");
+                    BambuSlicer.ApplyPlateNames(null, Names);
+                    BambuSlicer.ApplyPlateNames(new SliceResult(), Names);
+                }
+                catch (Exception) { threw = true; }
+                True("Plate names: missing / broken xml never throw, names unchanged", !threw && keep.PlateList[0].Name == "Mine" && keep.PlateList[1].Name == "");
+
+                // AddResult: first file, no purge / colour-change info (-1 stays -1), plate gets the file name
+                var total = new SliceResult();
+                var r1 = new SliceResult { Seconds = 3600, Grams = 10, Plates = 1, Picture = new byte[] { 1 }, StudioFile = "a.3mf" };
+                r1.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#FF0000", Type = "PLA", Grams = 10, ModelGrams = 9, Metres = 3 });
+                var r1p = new PlateInfo { Index = 1, Seconds = 3600, Grams = 10 };
+                r1p.Objects.Add("a"); r1p.Filaments.Add(new FilamentUse { Slot = 1, Grams = 10 });
+                r1.PlateList.Add(r1p);
+                BambuSlicer.AddResult(total, r1, "a.stl");
+                True("AddResult 1st: totals", total.Seconds == 3600 && total.Grams == 10 && total.Plates == 1 && Slots(total.Filaments) == "1:10.00");
+                True("AddResult 1st: purge / colour change unknown stay -1", total.PurgeGrams == -1 && total.ColourChangeHours == -1);
+                True("AddResult 1st: plate copied with File", total.PlateList.Count == 1 && total.PlateList[0].File == "a.stl"
+                     && Objs(total.PlateList[0]) == "a" && !ReferenceEquals(total.PlateList[0], r1p) && r1p.File == "");
+
+                // second file with slotOffset 1: its slots 1, 2 -> 2, 3 (never merged into slot 1); purge 1,5 g and 0,25 h known
+                var r2 = new SliceResult { Seconds = 1800, Grams = 6, Plates = 1, Picture = new byte[] { 2 }, StudioFile = "b.3mf", PurgeGrams = 1.5, ColourChangeHours = 0.25 };
+                r2.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#00FF00", Type = "PETG", Grams = 4, Metres = 1 });
+                r2.Filaments.Add(new FilamentUse { Slot = 2, Colour = "#0000FF", Type = "PETG", Grams = 2, ModelGrams = 2 });
+                var r2p = new PlateInfo { Index = 1, Name = "Top", Seconds = 1800, Grams = 6 };
+                r2p.Filaments.Add(new FilamentUse { Slot = 1, Grams = 4 }); r2p.Filaments.Add(new FilamentUse { Slot = 2, Grams = 2 });
+                r2.PlateList.Add(r2p);
+                BambuSlicer.AddResult(total, r2, "b.stl", 1);
+                True("AddResult offset 1: slots kept apart 1 | 2 | 3", Slots(total.Filaments) == "1:10.00|2:4.00|3:2.00"
+                     && total.Filaments[0].Colour == "#FF0000" && total.Filaments[1].Colour == "#00FF00" && total.Filaments[2].Colour == "#0000FF");
+                True("AddResult offset 1: 3600 + 1800 = 5400 s, 10 + 6 = 16 g, 2 plates", total.Seconds == 5400 && total.Grams == 16 && total.Plates == 2);
+                True("AddResult offset 1: -1 + 1,5 -> 1,5 g purge, -1 + 0,25 -> 0,25 h", total.PurgeGrams == 1.5 && total.ColourChangeHours == 0.25);
+                True("AddResult offset 1: plate 2 = b.stl 'Top', slots 2 and 3", total.PlateList.Count == 2 && total.PlateList[1].File == "b.stl"
+                     && total.PlateList[1].Name == "Top" && Slots(total.PlateList[1].Filaments) == "2:4.00|3:2.00");
+                True("AddResult: r not changed", r2.Filaments[0].Slot == 1 && r2p.Filaments[0].Slot == 1 && r2p.File == "");
+                True("AddResult: first picture and Studio file kept", total.Picture[0] == 1 && total.StudioFile == "a.3mf");
+                True("AddResult: model grams 9 kept, unknown (-1) copied as -1", total.Filaments[0].ModelGrams == 9 && total.Filaments[1].ModelGrams == -1
+                     && total.Filaments[2].ModelGrams == 2);
+
+                // third file without offset: summed into slot 1 (10 + 5 = 15 g, model 9 + 4 = 13 g); unknown purge keeps the sum
+                var r3 = new SliceResult { Seconds = 600, Grams = 5, Plates = 1 };
+                r3.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#FFFFFF", Grams = 5, ModelGrams = 4 });
+                r3.PlateList.Add(new PlateInfo { Index = 1, File = "own.stl", Seconds = 600, Grams = 5 });
+                BambuSlicer.AddResult(total, r3, "c.stl");
+                True("AddResult no offset: slot 1 = 10 + 5 = 15 g, model 9 + 4 = 13, first colour kept", Slots(total.Filaments) == "1:15.00|2:4.00|3:2.00"
+                     && total.Filaments[0].ModelGrams == 13 && total.Filaments[0].Colour == "#FF0000");
+                True("AddResult no offset: purge 1,5 and 0,25 h stay (r3 unknown)", total.PurgeGrams == 1.5 && total.ColourChangeHours == 0.25);
+                True("AddResult: a plate's own File is kept", total.PlateList.Count == 3 && total.PlateList[2].File == "own.stl");
+                var r4 = new SliceResult { Seconds = 60, Grams = 1, Plates = 1, PurgeGrams = 0.5 };
+                r4.Filaments.Add(new FilamentUse { Slot = 3, Grams = 1 });   // model grams unknown (-1)
+                BambuSlicer.AddResult(total, r4, "d.stl", 0);
+                True("AddResult: purge 1,5 + 0,5 = 2,0; slot 3 model 2 + unknown = -1", total.PurgeGrams == 2.0 && total.Filaments[2].ModelGrams == -1
+                     && Slots(total.Filaments) == "1:15.00|2:4.00|3:3.00");
+                threw = false;
+                try { BambuSlicer.AddResult(null, r1, "x"); BambuSlicer.AddResult(total, null, "x"); }
+                catch (Exception) { threw = true; }
+                True("AddResult: null total / r = nothing", !threw && total.PlateList.Count == 3 && total.Seconds == 6060);
+                // FilePlates: a file with 1 plate -> 1, a file with 2 plates -> 2 on both; a value already set is kept
+                True("AddResult: FilePlates 1 for one-plate files", total.PlateList[0].FilePlates == 1 && total.PlateList[1].FilePlates == 1);
+                var r5 = new SliceResult { Seconds = 120, Grams = 2, Plates = 2 };
+                r5.PlateList.Add(new PlateInfo { Index = 1, Seconds = 60, Grams = 1 });
+                r5.PlateList.Add(new PlateInfo { Index = 2, Name = "Wheels", Seconds = 60, Grams = 1 });
+                var t5total = new SliceResult();
+                BambuSlicer.AddResult(t5total, r5, "multi.3mf", 1);
+                True("AddResult: FilePlates 2 on both plates of a 2-plate file", t5total.PlateList.Count == 2 && t5total.PlateList[0].FilePlates == 2
+                     && t5total.PlateList[1].FilePlates == 2 && t5total.PlateList[1].File == "multi.3mf" && r5.PlateList[0].FilePlates == 0);
+                var again = new SliceResult();
+                BambuSlicer.AddResult(again, t5total, "other");
+                True("AddResult: FilePlates and File already set are kept", again.PlateList.Count == 2 && again.PlateList[0].FilePlates == 2
+                     && again.PlateList[0].File == "multi.3mf");
+
+                // TogetherArgs: ids in file order, mix-temp only when the types differ
+                True("TogetherArgs: same type", J(BambuSlicer.TogetherArgs(new List<int> { 2, 1, 2 }, new List<string> { "PLA", "pla " }))
+                     == "--load-filament-ids|2,1,2|--allow-multicolor-oneplate");
+                True("TogetherArgs: PLA + PETG -> --allow-mix-temp", J(BambuSlicer.TogetherArgs(new List<int> { 1, 2 }, new List<string> { "PLA", "PETG" }))
+                     == "--load-filament-ids|1,2|--allow-multicolor-oneplate|--allow-mix-temp");
+                True("TogetherArgs: empty type ignored, null types", J(BambuSlicer.TogetherArgs(new List<int> { 3, 1 }, new List<string> { "PLA", "" }))
+                     == "--load-filament-ids|3,1|--allow-multicolor-oneplate"
+                     && J(BambuSlicer.TogetherArgs(new List<int> { 1, 2 }, null)) == "--load-filament-ids|1,2|--allow-multicolor-oneplate");
+
+                // plate texts: 4800 s = 80 min = 1 h 20 min
+                var pt = new PlateInfo { Index = 2, Name = "Wheels", File = "partA.stl", Seconds = 4800, Grams = 34.12 };
+                pt.Objects.AddRange(new[] { "a", "b", "c" });
+                // time = QuoteRows.Time ("1 h 20 m", "0 h 25 m"; at least 1 m when > 0 s); grams Math.Round(g, 1) as "0.#"
+                // (34,12 -> 34,1; 5 -> 5; 0 -> 0); line = title + " – " + numbers. showFile: the file's only plate = the file name,
+                // one of several (FilePlates 2+) = "file, plate N 'Name'"
+                True("PlateNumbers 1 h 20 m, 34,12 -> 34,1 g, 3 objects", BambuSlicer.PlateNumbers(pt) == "1 h 20 m, 34,1 g, 3 objects");
+                True("PlateLine without file", BambuSlicer.PlateLine(pt, false) == "Plate 2 'Wheels' – 1 h 20 m, 34,1 g, 3 objects");
+                True("PlateTitle showFile, only plate of its file = file name", BambuSlicer.PlateTitle(pt, true) == "partA.stl");
+                pt.File = "multi.3mf"; pt.FilePlates = 2;
+                True("PlateLine showFile, one of several plates", BambuSlicer.PlateLine(pt, true) == "multi.3mf, plate 2 'Wheels' – 1 h 20 m, 34,1 g, 3 objects"
+                     && BambuSlicer.PlateLine(pt, false) == "Plate 2 'Wheels' – 1 h 20 m, 34,1 g, 3 objects");
+                var p0 = new PlateInfo { Index = 0, File = "body.stl", Seconds = 1500, Grams = 5 };   // 25 min, no objects, no name
+                True("PlateNumbers under an hour, 0 objects", BambuSlicer.PlateNumbers(p0) == "0 h 25 m, 5 g");
+                True("PlateLine showFile, file's only plate", BambuSlicer.PlateLine(p0, true) == "body.stl – 0 h 25 m, 5 g");
+                True("PlateTitle index 0 -> 1, no name", BambuSlicer.PlateTitle(p0, false) == "Plate 1");
+                var p1 = new PlateInfo { Index = 1, Seconds = 89, Grams = 0 };   // 1,48 min -> 1 m
+                p1.Objects.Add("x");
+                True("PlateLine 1 object, 89 s = 0 h 1 m, 0 g", BambuSlicer.PlateLine(p1, true) == "Plate 1 – 0 h 1 m, 0 g, 1 object");
+                p1.Seconds = 20;   // 0,33 min rounds to 0, but > 0 s -> 1 m
+                True("PlateNumbers 20 s -> at least 1 m", BambuSlicer.PlateNumbers(p1).StartsWith("0 h 1 m,"));
+                p1.Seconds = 0;
+                True("PlateNumbers 0 s -> 0 h 0 m", BambuSlicer.PlateNumbers(p1).StartsWith("0 h 0 m,"));
+                p1.Seconds = 3600 - 29;   // 59,52 min -> 60 = 1 h 0 m
+                True("PlateNumbers 3571 s -> 1 h 0 m", BambuSlicer.PlateNumbers(p1).StartsWith("1 h 0 m,"));
+                p1.Seconds = 89;
+                True("Plate texts null", BambuSlicer.PlateTitle(null, true) == "" && BambuSlicer.PlateNumbers(null) == "" && BambuSlicer.PlateLine(null, true) == "");
+                L.Danish = true;
+                True("Plate texts Danish", BambuSlicer.PlateLine(pt, false) == "Plade 2 'Wheels' – 1 t 20 m, 34,1 g, 3 objekter"
+                     && BambuSlicer.PlateLine(pt, true) == "multi.3mf, plade 2 'Wheels' – 1 t 20 m, 34,1 g, 3 objekter"
+                     && BambuSlicer.PlateLine(p0, true) == "body.stl – 0 t 25 m, 5 g"
+                     && BambuSlicer.PlateLine(p1, false) == "Plade 1 – 0 t 1 m, 0 g, 1 objekt");
+                L.Danish = false;
+
+                // CutName: 40 characters stay, 41 -> 39 + "…" (40), trimmed, null = ""
+                string forty = new string('a', 40), fortyOne = new string('b', 41);
+                True("CutName 40 stays", BambuSlicer.CutName(forty, 40) == forty);
+                True("CutName 41 -> 39 + …", BambuSlicer.CutName(fortyOne, 40) == new string('b', 39) + "…" && BambuSlicer.CutName(fortyOne, 40).Length == 40);
+                True("CutName trims, also before …", BambuSlicer.CutName("  Wheels  ", 40) == "Wheels"
+                     && BambuSlicer.CutName(new string('c', 38) + "  defg", 40) == new string('c', 38) + "…" && BambuSlicer.CutName(null, 40) == "");
+                var longName = new PlateInfo { Index = 1, Name = new string('n', 45), File = new string('f', 45) + ".stl" };
+                True("PlateTitle cuts name at 40", BambuSlicer.PlateTitle(longName, false) == "Plate 1 '" + new string('n', 39) + "…'");
+                True("PlateTitle cuts file at 40 (only plate)", BambuSlicer.PlateTitle(longName, true) == new string('f', 39) + "…");
+                longName.FilePlates = 3;
+                True("PlateTitle cuts file and name at 40 (one of several)", BambuSlicer.PlateTitle(longName, true)
+                     == new string('f', 39) + "…, plate 1 '" + new string('n', 39) + "…'");
+            }
+            finally { L.Danish = wasDanish; }
+        }
+
         // ---------- G-code from other slicers (idea 14, SliceInfo.cs): samples in tests\gcode-samples ----------
         static string GcodeDir()
         {
@@ -2936,9 +3268,11 @@ namespace PrintPrice.Tests
             SlicerPrinterTests();
             SlicedProjectTests();
             BackupTests();
+            HistoryPartsTests();
             OnlineBackupTests();
             MoneyRoundingTests();
             GcodeTests();
+            MultipartTests();
             SliceXmlTests();
             PictureTests();
 

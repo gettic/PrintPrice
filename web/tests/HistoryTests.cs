@@ -109,8 +109,11 @@ static class HistoryTests
                                                new HistoryFilament { Colour = "#00FF00", Type = "PETG", Name = "Bambu PETG HF @BBL A1" } };
         var mr = WebHistory.MakeRecord(two, Pricing.Calculate(two, s), s, "two.gcode.3mf", new DateTime(2026, 11, 10, 13, 0, 0), mats, 3.5, null, null);
         var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { mr }));
+        var matte = WebHistory.MakeRecord(input, res, s, "m.gcode.3mf", new DateTime(2026, 11, 10, 13, 30, 0),
+                                          new List<HistoryFilament> { new HistoryFilament { Colour = "#808080", Type = "PLA", Name = "Bambu PLA Matte @BBL A1" } }, -1, null, null);
+        True("saved filament name has no printer suffix", matte.Filaments.Count == 1 && matte.Filaments[0].Name == "Bambu PLA Matte");
         True("multi-colour record round trip", back != null && back[0].Filaments.Count == 2 && back[0].Filaments[1].Colour == "#00FF00"
-             && back[0].Filaments[1].Name == "Bambu PETG HF @BBL A1" && back[0].PurgeGrams == 3.5 && back[0].Filaments[0].PricePerKg == 200);
+             && back[0].Filaments[1].Name == "Bambu PETG HF" && back[0].PurgeGrams == 3.5 && back[0].Filaments[0].PricePerKg == 200);
 
         // Open again / Repeat print values (MainForm.FillFromRecord)
         var today = new AppSettings { LastFilamentPrice = 190 };
@@ -139,7 +142,7 @@ static class HistoryTests
         slice.Filaments.Add(new FilamentUse { Slot = 1, Profile = "Generic PLA", Type = "PLA" });
         slice.Filaments.Add(new FilamentUse { Slot = 2, Profile = "Generic PLA", Type = "PLA" });
         WebHistory.KeepSavedMaterials(slice, back[0]);
-        True("repeat file keeps saved materials", slice.Filaments[0].Profile == "Bambu PLA Basic @BBL A1" && slice.Filaments[1].Type == "PETG");
+        True("repeat file keeps saved materials", slice.Filaments[0].Profile == "Bambu PLA Basic" && slice.Filaments[1].Type == "PETG");
         var sm = WebHistory.SingleMaterial(new FilamentUse { Colour = "#123456", Profile = "", Type = "" }, "Bambu PLA Matte", "PLA");
         True("one colour from a file without a profile: Settings' filament", sm.Name == "Bambu PLA Matte" && sm.Colour == "#123456" && sm.Type == "PLA");
 

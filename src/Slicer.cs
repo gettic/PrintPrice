@@ -461,11 +461,25 @@ namespace PrintPrice
             string filaments = null;
             if (!string.IsNullOrEmpty(nozzleSize) && !string.IsNullOrEmpty(defaultFilament))
                 filaments = SlotFilaments(exe, model, printer, nozzleSize, defaultFilament, outDir);
-            var args = new[] {
+            return RunSlice(exe, new[] { model }, workDir, printer, filaments, filaments ?? Path.Combine(workDir, "filament.json"),
+                            null, outDir, Path.GetFileName(model), ct);
+        }
+
+        /// Runs the slicer CLI on `models` (one call) with the given --load-filaments value and extra options, in outDir
+        /// (working folder and --outputdir); reads out.3mf + result.json. slotFiles = the per-slot list for the
+        /// plate-clash check (null = filament.json). Errors as SliceFile's.
+        static SliceResult RunSlice(string exe, IList<string> models, string workDir, string printer, string slotFiles,
+                                    string loadFilaments, IList<string> extra, string outDir, string shownName, CancellationToken ct)
+        {
+            string filaments = slotFiles;
+            var list = new List<string> {
                 "--slice", "0", "--arrange", "1", "--orient", "0",
                 "--load-settings", Path.Combine(workDir, "machine.json") + ";" + Path.Combine(workDir, "process.json"),
-                "--load-filaments", filaments ?? Path.Combine(workDir, "filament.json"),
-                "--outputdir", outDir, "--export-3mf", "out.3mf", model };
+                "--load-filaments", loadFilaments,
+                "--outputdir", outDir, "--export-3mf", "out.3mf" };
+            if (extra != null) list.AddRange(extra);
+            list.AddRange(models);
+            var args = list.ToArray();
             var psi = new ProcessStartInfo(exe, string.Join(" ", args.Select(Quote)))
             {
                 UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = outDir
@@ -507,12 +521,12 @@ namespace PrintPrice
             {
                 string bed = "";
                 var clash = IsPlateError(exit, error) ? ClashingFilaments(workDir, filaments, out bed) : null;
-                throw new SliceException(SliceErrorText(exit, Path.GetFileName(model), error, printer, bed, clash));
+                throw new SliceException(SliceErrorText(exit, shownName, error, printer, bed, clash));
             }
 
             var res = ReadSliceInfo(out3mf);
             if (res == null) throw new SliceException(L.F("Bambu Studio returned no print estimate for {0}.",
-                "Bambu Studio gav intet printestimat for {0}.", Path.GetFileName(model)));
+                "Bambu Studio gav intet printestimat for {0}.", shownName));
             ApplySliceStats(res, ParseSliceResult(resultText));
             return res;
         }
@@ -584,17 +598,19 @@ namespace PrintPrice
         public static SliceResult ReadSliceInfo(string path3mf)
         {
             if (IsGcodeFile(path3mf)) return ReadGcodeFile(path3mf);
-            string xml, settings;
+            string xml, settings, modelSettings;
             using (var zip = ZipFile.OpenRead(path3mf))
             {
                 var entry = zip.GetEntry("Metadata/slice_info.config");
                 if (entry == null) return null;
                 using (var sr = new StreamReader(entry.Open())) xml = sr.ReadToEnd();
                 settings = ProjectSettings(zip);
+                modelSettings = EntryText(zip, "Metadata/model_settings.config");
             }
             var res = ParseSliceInfo(xml);
             if (res != null)
             {
+                ApplyPlateNames(res, modelSettings);   // idea 21: plate names for the plates list
                 res.Picture = FromProject(path3mf);
                 res.StudioFile = path3mf;
                 var parsed = ParseSettings(settings);   // once for the slots and the printer
@@ -616,9 +632,18 @@ namespace PrintPrice
         /// Metadata/project_settings.config of an open 3MF as text, null if missing, too big (64 MB) or unreadable.
         static string ProjectSettings(ZipArchive zip)
         {
-            var ps = zip.GetEntry("Metadata/project_settings.config");
-            if (ps == null || ps.Length <= 0 || ps.Length >= 64 * 1048576) return null;
-            try { using (var sr = new StreamReader(ps.Open())) return sr.ReadToEnd(); }
+            return EntryText(zip, "Metadata/project_settings.config");
+        }
+
+        /// A zip entry of an open 3MF as text, null if missing, empty, too big (64 MB) or unreadable.
+        static string EntryText(ZipArchive zip, string name)
+        {
+            try
+            {
+                var e = zip.GetEntry(name);
+                if (e == null || e.Length <= 0 || e.Length >= 64 * 1048576) return null;
+                using (var sr = new StreamReader(e.Open())) return sr.ReadToEnd();
+            }
             catch { return null; }
         }
 
@@ -687,6 +712,191 @@ namespace PrintPrice
             if (res != null && res.UnsupportedPrinter) throw new SliceException(UnsupportedPrinterText(res.PrinterName));
             if (res != null) ApplyDefaultFilament(res.Filaments, defaultFilament);
             return res;
+        }
+
+        // ---------- a colour per file (idea 21) ----------
+
+        /// Most colours for "together" (one plate): the AMS lite has 4 slots.
+        public const int MaxTogetherColours = 4;
+
+        /// Writes one flattened filament profile per colour choice into workDir (colour<N>.json, N = slot; "from" kept,
+        /// filament_colour = the chosen colour when set) and returns their paths (index i = slot i+1). An empty
+        /// Filament = defaultFilament. Call after PrepareProfiles. Profiles missing -> SliceException.
+        public static List<string> PrepareColours(string exe, string printer, string nozzleSize, IList<ColourChoice> colours,
+                                                  string defaultFilament, string workDir)
+        {
+            var paths = new List<string>();
+            if (colours == null || colours.Count == 0) return paths;
+            var roots = Roots(exe);
+            if (roots.Count == 0) throw new SliceException(L.S("Could not find Bambu Studio's printer profiles.", "Kunne ikke finde Bambu Studios printerprofiler."));
+            printer = FindPrinter(printer).Key;
+            Directory.CreateDirectory(workDir);
+            var json = Serializer();
+            for (int i = 0; i < colours.Count; i++)
+            {
+                var c = colours[i] ?? new ColourChoice();
+                string shortName = string.IsNullOrEmpty(c.Filament) ? defaultFilament : c.Filament;
+                var f = new Dictionary<string, object>(Flatten(roots, "filament", Resolve(roots, "filament", printer, nozzleSize, shortName), 0));
+                string colour = NormColour(c.Colour);
+                if (colour.Length > 0) f["filament_colour"] = new[] { colour };
+                string path = Path.Combine(workDir, "colour" + (i + 1) + ".json");
+                File.WriteAllText(path, json.Serialize(f));
+                paths.Add(path);
+            }
+            return paths;
+        }
+
+        /// The extra CLI options for slicing plain files together on one plate: --load-filament-ids (slots in file order,
+        /// 1-based), --allow-multicolor-oneplate, and --allow-mix-temp when the colours' filament types differ (types =
+        /// per colour, "" ignored). Pure (tests).
+        internal static List<string> TogetherArgs(IList<int> slots, IList<string> types)
+        {
+            var args = new List<string> { "--load-filament-ids", string.Join(",", slots.Select(s => s.ToString(CultureInfo.InvariantCulture))),
+                                          "--allow-multicolor-oneplate" };
+            if (types != null && types.Where(t => !string.IsNullOrEmpty(t)).Select(t => t.Trim().ToUpperInvariant()).Distinct().Count() > 1)
+                args.Add("--allow-mix-temp");
+            return args;
+        }
+
+        /// The one call for several files with a colour each (idea 21). models = (display name, path); slots[i] = the
+        /// 1-based colour (index into `colours`) of a plain model file (stl/obj/step/stp/amf). A .3mf project or G-code
+        /// among them is handled as today (sliced with its own colours, or read when already sliced; slots[i] ignored)
+        /// and its colours go on the slots after the user's (slot offset colours.Count), so they never merge with them.
+        /// together (and 2+ plain files, 2+ different colours, colours.Count <= MaxTogetherColours): the plain files are
+        /// sliced in one run on one plate (Together = true); if that fails (anything but cancel) TogetherProblem gets the
+        /// reason and they're sliced separately. Separately: one run per file in its colour, summed per colour.
+        /// Call PrepareProfiles(…, workDir) first. Plates: PlateList has every plate, with File = the display name
+        /// (the together run's plate has File ""). StudioFile = the together slice, else the first file's (still in
+        /// workDir: copy it out with KeepForStudio).
+        public static SliceResult SliceColours(string exe, IList<KeyValuePair<string, string>> models, IList<int> slots,
+                                               IList<ColourChoice> colours, bool together, string workDir, string printer,
+                                               string nozzleSize, string defaultFilament, IProgress<string> progress, CancellationToken ct)
+        {
+            if (models == null || models.Count == 0) throw new SliceException(L.S("No model file to slice.", "Ingen modelfil at slice."));
+            colours = colours ?? new List<ColourChoice>();
+            printer = string.IsNullOrEmpty(printer) ? WorkDirPrinter(workDir) : FindPrinter(printer).Key;
+            var colourFiles = PrepareColours(exe, printer, nozzleSize, colours, defaultFilament, workDir);
+            var total = new SliceResult();
+            var plain = new List<int>();     // indexes of plain model files
+            for (int i = 0; i < models.Count; i++)
+                if (!IsProjectOrSliced(models[i].Value)) plain.Add(i);
+            Func<int, int> slotOf = i =>
+            {
+                int s = slots != null && i < slots.Count ? slots[i] : 1;
+                return s >= 1 && s <= colourFiles.Count ? s : 1;
+            };
+            if (colourFiles.Count == 0 && plain.Count > 0)
+                throw new SliceException(L.S("Pick a colour for each model file.", "Vælg en farve til hver modelfil."));
+
+            var separate = new List<int>(plain);
+            if (together && plain.Count >= 2 && plain.Select(slotOf).Distinct().Count() >= 2)
+            {
+                if (colourFiles.Count > MaxTogetherColours)
+                    total.TogetherProblem = L.F("More than {0} colours can't share one plate on the AMS lite, so the files were sliced separately.",
+                                                "Mere end {0} farver kan ikke dele én plade med AMS lite, så filerne blev slicet hver for sig.", MaxTogetherColours);
+                else
+                {
+                    try
+                    {
+                        if (progress != null) progress.Report(L.F("Slicing {0} files together in Bambu Studio…", "Slicer {0} filer samlet i Bambu Studio…", plain.Count));
+                        var types = new List<string>();
+                        foreach (var p in colourFiles) types.Add(FilamentTypeOf(p));
+                        string outDir = NewOutDir(workDir);
+                        string load = string.Join(";", colourFiles);
+                        var r = RunSlice(exe, plain.Select(i => models[i].Value).ToList(), workDir, printer, load, load,
+                                         TogetherArgs(plain.Select(slotOf).ToList(), types), outDir,
+                                         string.Join(", ", plain.Select(i => models[i].Key)), ct);
+                        // too big for one plate: the CLI makes 2+ plates and puts plate 2 on filament 1 (wrong colours),
+                        // so that counts as a failure
+                        if (r.Plates > 1 || r.PlateList.Count > 1) throw new TogetherDoesNotFit();
+                        AddResult(total, r, "");
+                        total.Together = true;
+                        separate.Clear();
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (TogetherDoesNotFit)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        total = new SliceResult();
+                        total.TogetherProblem = L.S("The files don't fit on one plate together, so they were sliced separately.",
+                                                    "Filerne kan ikke være på én plade sammen, så de blev slicet hver for sig.");
+                    }
+                    catch (Exception ex)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        total = new SliceResult();
+                        total.TogetherProblem = L.F("Slicing the files together on one plate didn't work ({0}), so they were sliced separately.",
+                                                    "Det lykkedes ikke at slice filerne samlet på én plade ({0}), så de blev slicet hver for sig.",
+                                                    ex.Message.TrimEnd('.'));
+                    }
+                }
+            }
+
+            for (int i = 0; i < models.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                bool isPlain = plain.Contains(i);
+                if (isPlain && !separate.Contains(i)) continue;
+                string name = models[i].Key, path = models[i].Value;
+                SliceResult r;
+                int offset;
+                if (isPlain)
+                {
+                    int slot = slotOf(i);
+                    Report(progress, name, i, models.Count);
+                    string cf = colourFiles[slot - 1];
+                    r = RunSlice(exe, new[] { path }, workDir, printer, cf, cf, null, NewOutDir(workDir), Path.GetFileName(path), ct);
+                    offset = slot - 1;   // the run's slot 1 = this colour
+                }
+                else
+                {
+                    if (IsSlicedProject(path)) { r = ReadSliceInfo(path, defaultFilament); r.FromSlicedFile = true; }
+                    else { Report(progress, name, i, models.Count); r = SliceFile(exe, path, workDir, printer, nozzleSize, defaultFilament, ct); }
+                    offset = colourFiles.Count;
+                }
+                AddResult(total, r, name, offset);
+            }
+            return total;
+        }
+
+        /// A together run that came back with 2+ plates (SliceColours falls back to separate).
+        sealed class TogetherDoesNotFit : Exception { }
+
+        static void Report(IProgress<string> progress, string name, int i, int count)
+        {
+            if (progress == null) return;
+            progress.Report(L.S("Slicing ", "Slicer ") + name + (count > 1 ? " (" + (i + 1) + "/" + count + ")" : "") +
+                            L.S(" in Bambu Studio…", " i Bambu Studio…"));
+        }
+
+        static string NewOutDir(string workDir)
+        {
+            string outDir = Path.Combine(workDir, "out_" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(outDir);
+            return outDir;
+        }
+
+        /// A .3mf (project or sliced) or a G-code: sliced/read with its own colours, not a user colour.
+        static bool IsProjectOrSliced(string path)
+        {
+            return IsGcodeFile(path) || (path ?? "").EndsWith(".3mf", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// filament_type of a written filament profile ("" when unreadable).
+        static string FilamentTypeOf(string profilePath)
+        {
+            try
+            {
+                var d = Serializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(profilePath));
+                object t;
+                if (d == null || !d.TryGetValue("filament_type", out t) || t == null) return "";
+                var s = t as string;
+                if (s != null) return s.Trim();
+                var list = t as System.Collections.IEnumerable;
+                if (list != null) foreach (var o in list) return (o as string ?? "").Trim();
+                return "";
+            }
+            catch { return ""; }
         }
 
         /// Per-filament model/total grams and model/total time from the CLI's result.json, summed over plates.

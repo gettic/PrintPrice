@@ -328,7 +328,7 @@ namespace PrintPrice.Web
                     if (m == null) continue;
                     r.Filaments[k].Colour = m.Colour ?? "";
                     r.Filaments[k].Type = m.Type ?? "";
-                    r.Filaments[k].Name = m.Name ?? "";
+                    r.Filaments[k].Name = BambuSlicer.FilamentBaseName(m.Name ?? ""); // no "@BBL A1" (old records kept as they are)
                 }
                 if (materials.Count >= 2) r.PurgeGrams = purge;
             }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -9,7 +10,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, backup*.png / restore*.png (Backup window), ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, backup*.png / restore*.png (Backup window), ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; idea 21: main_parts.png, main_plates.png, main_plates_menu.png, main_makerworld.png, picker.png, picker_colour_menu.png; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -236,6 +237,31 @@ namespace PrintPrice
                     main.SetSamplePicture(sample);
                     main.SampleSwitchPrinter(Wear.ModelA1Mini);   // card + warning stripe: sliced for the printer used before
                     Snap(main, folder, "main_printer_changed.png");
+                    main.SampleSwitchPrinter(Wear.ModelA1);   // back to the A1 for the idea 21 pictures
+
+                    // idea 21: a colour per file. The worst height: 4 colour rows + the "together" fallback note + plates link
+                    main.SetSamplePartsJob();
+                    Snap(main, folder, "main_parts.png");
+                    // a sliced 3MF with 3 plates (one named): the link, then its menu drawn where it opens
+                    main.SetSamplePlatesJob();
+                    Snap(main, folder, "main_plates.png");
+                    Snap(main, folder, "main_plates_menu.png", main.SamplePlatesMenu);
+                    // a MakerWorld link: the sign-in message with "Open the page"
+                    main.SampleMakerWorld();
+                    Snap(main, folder, "main_makerworld.png");
+                    // the "Choose files and colours" window: 5 files (one 3MF with its own colours), colours picked,
+                    // "together on one plate" ticked with its note; then the same with row 2's colour menu drawn open
+                    var pickNames = new List<string> { "body.stl", "wheel_front.stl", "wheel_rear.stl", "spoiler_with_a_rather_long_file_name_v2_final.stl", "body.3mf" };
+                    using (var picker = new FilePickerForm("RC car wheel set", pickNames, FilePickerForm.DefaultTicks(pickNames), true, "Bambu PLA Basic", null))
+                    {
+                        Place(picker);
+                        picker.Show();
+                        picker.SampleChoices(new[] { "Bambu PLA Basic", "Bambu PLA Matte", "Bambu PLA Matte", "Bambu PETG HF", null },
+                                             new[] { "#000000", "#C12E1F", "#C12E1F", "#F4EE2A", null }, null, true);
+                        Snap(picker, folder, "picker.png");
+                        Snap(picker, folder, "picker_colour_menu.png", (g, o) => picker.SampleColourMenu(0, g, o));
+                        picker.Hide();
+                    }
                     main.Hide();
                 }
                 return 0;

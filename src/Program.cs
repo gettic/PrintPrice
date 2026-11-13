@@ -38,12 +38,32 @@ namespace PrintPrice
             // the error window / errors.log (with --hidden: error_window.png next to errors.log, then exit 3).
             // --test-pictures (test mode + --hidden only): MainForm.TestPictureFlow saves a job with a picture, reopens it,
             // draws its quote / invoice, backs up and restores, writes test_pictures.txt + PNGs in the folder, exits 0 / 4.
+            // --test-slice "<spec file>" / --test-repeat (idea 21, test mode + --hidden only): MainForm.TestSliceFlow slices the
+            // spec's files with a colour each and saves the job; TestRepeatFlow repeats the newest history record. Both write
+            // a txt in the settings folder and exit 0 / 4 (see plans\idea21-multipart\test-hook.md).
             bool testError = Array.IndexOf(args, "--test-error") >= 0;
             bool testPictures = Array.IndexOf(args, "--test-pictures") >= 0;
-            var opt = StartOptions.Parse(Array.FindAll(args, a => a != "--test-error" && a != "--test-pictures"));
+            bool testRepeat = Array.IndexOf(args, "--test-repeat") >= 0;
+            string testSlice = null;
+            var rest = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i] == "--test-slice")
+                {
+                    if (i + 1 >= args.Length || testSlice != null) return Fail("--test-slice needs one spec file");
+                    testSlice = args[++i];
+                    continue;
+                }
+                if (args[i] != "--test-error" && args[i] != "--test-pictures" && args[i] != "--test-repeat") rest.Add(args[i]);
+            }
+            var opt = StartOptions.Parse(rest.ToArray());
             if (opt.Error != null) return Fail(opt.Error);
             if (testError && opt.SettingsFolder == null) return Fail("--test-error needs --settings");
             if (testPictures && (opt.SettingsFolder == null || !opt.Hidden)) return Fail("--test-pictures needs --settings and --hidden");
+            if ((testSlice != null || testRepeat) && (opt.SettingsFolder == null || !opt.Hidden))
+                return Fail("--test-slice / --test-repeat need --settings and --hidden");
+            if (testSlice != null && testRepeat) return Fail("--test-slice and --test-repeat can't be used together");
+            if (testSlice != null && !File.Exists(testSlice)) return Fail("--test-slice spec file not found: " + testSlice);
             if (opt.SettingsFolder != null)
             {
                 if (!AppSettings.UseFolder(opt.SettingsFolder)) return Fail("--settings folder refused: " + opt.SettingsFolder);
@@ -79,6 +99,13 @@ namespace PrintPrice
                 };
             if (testPictures)
                 main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestPictureFlow); };
+            if (testSlice != null)
+            {
+                string spec = Path.GetFullPath(testSlice);
+                main.Shown += delegate { main.BeginInvoke((MethodInvoker)delegate { main.TestSliceFlow(spec); }); };
+            }
+            if (testRepeat)
+                main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestRepeatFlow); };
             Application.Run(main);
             return 0;
         }

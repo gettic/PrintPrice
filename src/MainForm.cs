@@ -158,7 +158,7 @@ namespace PrintPrice
             {
                 if (linkFile != null && !LinkShowsFile()) { linkFile = null; if (printerTip != null) printerTip.SetToolTip(txtUrl, null); }
             };
-            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; fromExample = false; SetStudioFile(null); repeatOf = null; };
+            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; jobParts = null; fromExample = false; SetStudioFile(null); repeatOf = null; };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
@@ -477,7 +477,8 @@ namespace PrintPrice
             ShowAutoIdle();
             if (!offline && !AppSettings.TestMode) Shown += delegate { StartupUpdateCheck(); };
             // sliced files kept for "Open in Studio" by an earlier run (off the UI thread; files Studio still has open stay)
-            if (!offline) Shown += delegate { Task.Run(() => BambuSlicer.CleanStudioFiles(null)); };
+            // (not in test mode: it uses its own temp folder, see JobTempRoot, and never touches the user's)
+            if (!offline && !AppSettings.TestMode) Shown += delegate { Task.Run(() => BambuSlicer.CleanStudioFiles(null)); };
             // leftover record pictures (issue #4): history.json read in the background, cleaned once it read fine
             if (!offline) Shown += delegate { StartupPictureClean(); };
             // read Bambu Studio's profile index once in the background (Settings' lists and the first slice are quicker)
@@ -802,12 +803,29 @@ namespace PrintPrice
             if (id != null) { Analyze(id, null); return; }
 
             string lower = src.ToLowerInvariant();
-            if (lower.Contains("makerworld.com") || lower.Contains("thingiverse.com") || lower.Contains("cults3d.com") || lower.Contains("myminifactory.com"))
+            string makerWorld = MakerWorldPage(src);
+            if (makerWorld != null) ShowMakerWorld(makerWorld);
+            else if (lower.Contains("makerworld.com") || lower.Contains("thingiverse.com") || lower.Contains("cults3d.com") || lower.Contains("myminifactory.com"))
                 SetAuto(L.S("This site blocks automatic downloads. Download the model (STL/3MF) from the page and drop the file on this window.",
                             "Siden blokerer automatisk download. Hent modellen (STL/3MF) fra siden, og træk filen ind i vinduet."), true);
             else
                 SetAuto(L.S("Paste a Printables link (printables.com/model/…) or load a model file.",
                             "Indsæt et Printables-link (printables.com/model/…) eller åbn en modelfil."), true);
+        }
+
+        /// A makerworld.com page as an https:// address to open (a missing "https://" is added), else null (other sites,
+        /// other schemes, odd text: never handed to the shell).
+        internal static string MakerWorldPage(string text)
+        {
+            string t = (text ?? "").Trim().Trim('"');
+            if (t.Length == 0 || t.IndexOfAny(new[] { ' ', '\t', '"', '<', '>' }) >= 0) return null;
+            if (!t.StartsWith("https://", StringComparison.OrdinalIgnoreCase) && !t.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                t = "https://" + t;
+            Uri u;
+            if (!Uri.TryCreate(t, UriKind.Absolute, out u)) return null;
+            string host = u.Host.ToLowerInvariant();
+            if (host != "makerworld.com" && !host.EndsWith(".makerworld.com")) return null;
+            return "https://" + u.Host + u.PathAndQuery;
         }
 
         static string AnalyzeText { get { return L.S("Get time && weight", "Hent tid og vægt"); } }
@@ -967,6 +985,14 @@ namespace PrintPrice
         /// adjust the slice before the colour rows are filled (Repeat print keeps the saved materials).
         async Task<bool> AnalyzeAsync(string printablesId, List<string> localFiles, Action<SliceResult> beforeFill)
         {
+            return await AnalyzeAsync(printablesId, localFiles, beforeFill, null, false);
+        }
+
+        /// savedParts (Repeat print of a job with a colour per file, idea 21): the files and their filament / colour, so
+        /// the file picker is skipped; Printables files are found by name, local ones are the saved paths (= localFiles).
+        async Task<bool> AnalyzeAsync(string printablesId, List<string> localFiles, Action<SliceResult> beforeFill,
+                                      List<HistoryPart> savedParts, bool savedTogether)
+        {
             if (offline || cts != null) return false;
             bool ok = false;
             SetStudioFile(null);   // a new job: back to "Get time & weight" until it has sliced
@@ -1002,6 +1028,8 @@ namespace PrintPrice
             try
             {
                 List<RemoteFile> chosen = null;
+                ColourPlan plan = null;   // a colour per file (idea 21); null = one file, or files that keep their own colours
+                jobParts = null;
                 if (printablesId != null)
                 {
                     progress.Report(L.S("Looking up the model on Printables…", "Finder modellen på Printables…"));
@@ -1016,19 +1044,58 @@ namespace PrintPrice
                     var sliceable = model.Files.Where(f => BambuSlicer.IsModelFile(f.Name)).ToList();
                     if (sliceable.Count == 0) throw new SliceException(L.F("\"{0}\" has no STL, 3MF or STEP files to slice.",
                                                                            "\"{0}\" har ingen STL-, 3MF- eller STEP-filer at slice.", model.Name));
-                    if (sliceable.Count == 1) chosen = sliceable;
+                    if (savedParts != null)
+                    {
+                        // Repeat print: the same files by name, with their saved filament and colour (no picker)
+                        chosen = new List<RemoteFile>();
+                        foreach (var p in savedParts)
+                        {
+                            var f = sliceable.FirstOrDefault(x => string.Equals(x.Name, p.File, StringComparison.OrdinalIgnoreCase));
+                            if (f == null) throw new SliceException(L.F("\"{0}\" isn't in the model on Printables any more.",
+                                                                        "\"{0}\" findes ikke længere i modellen på Printables.", p.File));
+                            chosen.Add(f);
+                        }
+                        plan = ColourPlan.Build(savedParts, savedTogether);
+                    }
+                    else if (sliceable.Count == 1) chosen = sliceable;
                     else if (fromExample && ExampleFile(sliceable) != null) chosen = new List<RemoteFile> { ExampleFile(sliceable) };
                     else
                     {
-                        using (var picker = new FilePickerForm(model.Name, sliceable))
+                        var names = sliceable.Select(f => f.Name).ToList();
+                        var picked = PickFiles(model.Name, names, FilePickerForm.DefaultTicks(names), true);
+                        if (picked == null) throw new OperationCanceledException();
+                        chosen = picked.SelectedIndexes.Select(i => sliceable[i]).ToList();
+                        plan = picked.Plan;
+                    }
+                }
+                else if (localFiles.Count >= 2 || savedParts != null)
+                {
+                    if (savedParts != null) plan = ColourPlan.Build(savedParts, savedTogether);   // localFiles = the saved paths
+                    else if (localFiles.Any(f => !ColourPlan.OwnColours(f)))
+                    {
+                        // several local files, at least one plain model: a filament and colour per file (idea 21)
+                        var picked = PickFiles(L.F("{0} files", "{0} filer", localFiles.Count), localFiles.Select(Path.GetFileName).ToList(), null, false);
+                        if (picked == null) throw new OperationCanceledException();
+                        var paths = picked.SelectedIndexes.Select(i => localFiles[i]).ToList();
+                        plan = picked.Plan;
+                        for (int k = 0; k < paths.Count; k++) plan.Parts[k].File = paths[k];   // the full path, for Repeat print
+                        if (paths.Count != localFiles.Count)
                         {
-                            if (picker.ShowDialog(this) != DialogResult.OK) throw new OperationCanceledException();
-                            chosen = picker.Selected;
+                            if (paths.Count == 1) ShowLinkFile(paths[0]);
+                            else txtUrl.Text = L.F("{0} files: ", "{0} filer: ", paths.Count) + string.Join(", ", paths.Select(Path.GetFileName));
                         }
+                        localFiles = paths;
                     }
                 }
 
-                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, localFiles, printer, nozzle, process, filament, bed, progress, token));
+                var files = localFiles;
+                var colourPlan = plan;
+                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token));
+                if (plan != null)
+                {
+                    jobParts = plan.Parts;   // saved with the quote (History.SetParts), so Repeat print slices it the same way
+                    jobTogether = plan.Together;
+                }
                 if (result.Picture != null)
                 {
                     byte[] render = result.Picture;
@@ -1065,6 +1132,7 @@ namespace PrintPrice
         void ShowJobResult(SliceResult result, string modelName, List<string> localFiles, int parts, string process, string filament,
                            Action<SliceResult> beforeFill)
         {
+            lastJobResult = result;   // read by the test hooks (TestSliceFlow / TestRepeatFlow)
             int totalMinutes = (int)Math.Round(result.Seconds / 60.0);
             if (totalMinutes == 0 && result.Seconds > 0) totalMinutes = 1;
             // a G-code with only one of the two (idea 14): the missing box stays empty (not 0), gets the focus and a warning note
@@ -1085,7 +1153,8 @@ namespace PrintPrice
             if (!noTime) said.Add((totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m");
             if (!noGrams) said.Add((result.GramsEstimated ? "≈ " : "") + gramsText + " g");
             string summary = string.Join(", ", said);
-            string colourCount = multi ? L.F("{0} colours", "{0} farver", filaments.Count) : null;
+            // a no-break space keeps a number on the same line as its word ("4 colours" never splits over two lines)
+            string colourCount = multi ? L.F("{0} colours", "{0} farver", filaments.Count) : null;
             // another slicer's file: its muted note (or the printer warning) already says where the numbers come from,
             // so the first line keeps short (the window must stay <= ~760 px with 4 colours and every note)
             string slicerNote = BambuSlicer.OtherSlicerNote(result);   // null for Bambu Studio's own files
@@ -1094,8 +1163,11 @@ namespace PrintPrice
                 : result.FromSlicedFile
                 ? L.S("from the sliced file", "fra den slicede fil") + (multi ? " · " + colourCount : "")
                 : BambuSlicer.ShortName(process) + " · " + (multi ? colourCount : BambuSlicer.ShortName(filament));
-            string extra = (parts > 1 ? L.F(", {0} files", ", {0} filer", parts) : "") +
-                           (result.Plates > parts ? L.F(", {0} plates", ", {0} plader", result.Plates) : "");
+            // ", N plates" only without the plates link (2+ plates: the link under the line says it)
+            bool platesLink = result.PlateList != null && result.PlateList.Count >= 2;
+            string extra = (parts > 1 ? (result.Together ? L.F(", {0} files on one plate", ", {0} filer på én plade", parts)
+                                                         : L.F(", {0} files", ", {0} filer", parts)) : "") +
+                           (result.Plates > parts && !platesLink ? L.F(", {0} plates", ", {0} plader", result.Plates) : "");
             if (string.IsNullOrEmpty(how) && extra.Length > 0) extra = extra.Substring(2);
             string tail = (how ?? "") + extra;
             // name for the history (after the link box was filled, whose TextChanged clears it)
@@ -1120,7 +1192,17 @@ namespace PrintPrice
                 autoWarning = true;
             }
             else if (slicerNote != null) notes.Add(slicerNote);
-            if (studioFile != null && parts > 1)   // several files: Studio gets the first one only
+            bool fellBack = !string.IsNullOrEmpty(result.TogetherProblem);   // "together on one plate" didn't work
+            bool studioFirst = studioFile != null && parts > 1 && !result.Together;   // several files: Studio gets the first one only
+            if (fellBack)
+            {
+                // one short line (the window must stay <= ~760 px); the reason is in the line's dark tooltip
+                notes.Add(studioFirst
+                    ? L.F("Sliced one by one instead (Studio opens file 1 of {0}).", "Slicet hver for sig i stedet (Studio åbner fil 1 af {0}).", parts)
+                    : L.S("Sliced one by one instead.", "Slicet hver for sig i stedet."));
+                autoWarning = true;
+            }
+            else if (studioFirst)
                 notes.Add(L.F("\"Open in Studio\" opens only the first file (1 of {0}).",
                               "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", parts));
             // a sliced file made for another of our printers: its time and weight are that printer's (warning stripe)
@@ -1133,9 +1215,214 @@ namespace PrintPrice
                 autoWarning = true;
             }
             if (notes.Count > 0) lblAuto.SetText(lblAuto.Text, string.Join("\n", notes));
+            if (fellBack && lblAuto.NoteControl != null && printerTip != null)
+                printerTip.SetToolTip(lblAuto.NoteControl, WrapTip(result.TogetherProblem, 45));
+            ShowPlatesLink(result.PlateList);
+            platesProblem = fellBack ? result.TogetherProblem : null;   // a Repeat print shows them in the link's tooltip
+            platesStudioOf = studioFirst ? parts : 0;
             SetAutoColor();
             if (noTime) txtHours.Focus();
             else if (noGrams && !txtGrams.ReadOnly) txtGrams.Focus();
+        }
+
+        // ---------- a colour per file and plates (idea 21) ----------
+        /// The files of the job with the filament / colour picked for each (null = a normal job); saved with the quote
+        /// (History.SetParts), set again by Open again / Repeat print, cleared by a new job, a link edit and Clear.
+        List<HistoryPart> jobParts;
+        bool jobTogether;
+
+        /// Text broken into lines of about `width` characters at spaces (dark tooltips keep lines short).
+        static string WrapTip(string text, int width)
+        {
+            var lines = new List<string>();
+            string line = "";
+            foreach (var w in (text ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (line.Length > 0 && line.Length + 1 + w.Length > width) { lines.Add(line); line = w; }
+                else line = line.Length == 0 ? w : line + " " + w;
+            }
+            if (line.Length > 0) lines.Add(line);
+            return string.Join("\n", lines);
+        }
+
+        /// 2+ plates (also one per separately sliced file): a link line under the result that says the price is for all of
+        /// them ("The price is for all 3 plates – show them"); it opens a dark menu with one line per plate
+        /// (BambuSlicer.PlateLine), the object names in each line's dark tooltip.
+        void ShowPlatesLink(List<PlateInfo> plates)
+        {
+            shownPlates = null;
+            if (plates == null || plates.Count < 2) return;
+            var list = plates.Where(p => p != null).ToList();
+            shownPlates = list;
+            lblAuto.SetLink(PlatesLinkText(list.Count, false), () => ShowPlatesMenu(list));
+        }
+
+        /// "The price is for both plates – show them" (2) / "… all N plates …" (3+); fellBack = "together" didn't work
+        /// (Repeat print folds the "Sliced one by one" note into the link to keep the box at 3 lines).
+        static string PlatesLinkText(int count, bool fellBack)
+        {
+            if (fellBack)
+                return count == 2 ? L.S("Sliced one by one: the price is for both plates – show them", "Slicet hver for sig: prisen gælder begge plader – vis dem")
+                                  : L.F("Sliced one by one: the price is for all {0} plates – show them", "Slicet hver for sig: prisen gælder alle {0} plader – vis dem", count);
+            return count == 2 ? L.S("The price is for both plates – show them", "Prisen gælder begge plader – vis dem")
+                              : L.F("The price is for all {0} plates – show them", "Prisen gælder alle {0} plader – vis dem", count);
+        }
+
+        void ShowPlatesMenu(List<PlateInfo> plates)
+        {
+            var at = lblAuto.LinkControl;
+            if (at == null) return;
+            var tip = new ToolTip { OwnerDraw = true, InitialDelay = 300 };
+            tip.Draw += DrawDarkTip;
+            var menu = PlatesMenu(plates, tip);
+            menu.Closed += delegate { tip.Hide(menu); BeginInvoke((MethodInvoker)delegate { menu.Dispose(); tip.Dispose(); }); };
+            menu.Show(at, new Point(0, at.Height));
+        }
+
+        /// tip (may be null): shows a plate's object names beside its line while the mouse is on it.
+        ContextMenuStrip PlatesMenu(List<PlateInfo> plates, ToolTip tip)
+        {
+            bool showFile = plates.Select(p => p.File ?? "").Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
+            var menu = new ContextMenuStrip { ShowImageMargin = false, Renderer = new QuoteMenuRenderer(), ShowItemToolTips = false,
+                                              BackColor = Theme.Input, ForeColor = Theme.Text };
+            menu.Items.Add(new ToolStripMenuItem(L.S("Plates in this job:", "Plader i dette job:")) { Enabled = false });
+            menu.Items.Add(new ToolStripSeparator());
+            foreach (var p in plates)
+            {
+                var mi = new ToolStripMenuItem(BambuSlicer.PlateLine(p, showFile).Replace("&", "&&")) { ForeColor = Theme.Text };
+                var objects = p.Objects ?? new List<string>();
+                if (objects.Count > 0 && tip != null)
+                {
+                    const int MaxShown = 12;
+                    var names = objects.Take(objects.Count > MaxShown ? MaxShown - 1 : MaxShown)
+                                       .Select(o => BambuSlicer.CutName(o, BambuSlicer.MaxPlateNameChars)).ToList();
+                    if (objects.Count > MaxShown) names.Add(L.F("+{0} more", "+{0} flere", objects.Count - (MaxShown - 1)));
+                    string text = string.Join("\n", names);
+                    var item = mi;
+                    mi.Tag = text;   // the object names (KeyUp below; the renderer only uses a Color Tag)
+                    mi.MouseEnter += delegate
+                    {
+                        var b = item.Bounds;
+                        tip.Show(text, menu, b.Right + 4, b.Top);
+                    };
+                    mi.MouseLeave += delegate { tip.Hide(menu); };
+                }
+                menu.Items.Add(mi);
+            }
+            if (tip != null)
+                menu.KeyUp += delegate   // keyboard (arrow keys): the highlighted plate's object names too
+                {
+                    var sel = menu.Items.Cast<ToolStripItem>().FirstOrDefault(i => i.Selected);
+                    var names = sel != null ? sel.Tag as string : null;
+                    if (names == null) { tip.Hide(menu); return; }
+                    tip.Show(names, menu, sel.Bounds.Right + 4, sel.Bounds.Top);
+                };
+            return menu;
+        }
+
+        List<PlateInfo> shownPlates;   // the plates behind the link (picture mode draws their menu)
+        string platesProblem;          // the last slice's TogetherProblem when "together" fell back (null = didn't)
+        int platesStudioOf;            // the last slice's file count when Studio opens only the first file (0 = not)
+
+        /// Forgets the last slice's plates (a reopened / repeated / cleared job must not show an earlier job's plates).
+        void ForgetPlates()
+        {
+            shownPlates = null;
+            platesProblem = null;
+            platesStudioOf = 0;
+        }
+
+        /// Picture mode: the worst-height result (idea 21): 4 colour rows, a "together" fallback note and the plates link.
+        internal void SetSamplePartsJob()
+        {
+            if (!offline) return;
+            txtUrl.Text = L.F("{0} files: ", "{0} filer: ", 4) + "body.stl, wheel_front.stl, wheel_rear.stl, spoiler.stl";
+            var r = new SliceResult { Seconds = 4 * 3600 + 25 * 60, Grams = 128.4, Plates = 4, PurgeGrams = -1, ColourChangeHours = -1 };
+            string[] colours = { "#000000", "#C12E1F", "#F4EE2A", "#0086D6" };
+            string[] profiles = { "Bambu PLA Basic", "Bambu PLA Matte", "Bambu PETG HF", "Bambu PLA Basic" };
+            double[] grams = { 62.1, 30.2, 21.6, 14.5 };
+            for (int i = 0; i < 4; i++)
+                r.Filaments.Add(new FilamentUse { Slot = i + 1, Colour = colours[i], Type = i == 2 ? "PETG" : "PLA", Profile = profiles[i],
+                                                  Grams = grams[i], ModelGrams = -1 });
+            string[] files = { "body.stl", "wheel_front.stl", "wheel_rear.stl", "spoiler.stl" };
+            double[] secs = { 7200, 2700, 2400, 3600 + 600 };
+            for (int i = 0; i < 4; i++)
+                r.PlateList.Add(new PlateInfo { Index = 1, File = files[i], Name = i == 0 ? "Chassis" : "", Seconds = secs[i], Grams = grams[i],
+                                                Objects = i == 0 ? new List<string> { "body", "battery lid", "bumper" } : new List<string> { files[i].Replace(".stl", "") } });
+            r.TogetherProblem = L.S("The files don't fit on one plate together, so they were sliced separately.",
+                                    "Filerne kan ikke være på én plade sammen, så de blev slicet hver for sig.");   // (sample text)
+            txtElecPrice.Text = "3,65";
+            // a kept slice, so the "Studio opens file 1 of 4" part shows too (the real fallback has it); never opened here
+            r.StudioFile = Path.Combine(BambuSlicer.StudioRoot, "sample", "body.3mf");
+            ShowJobResult(r, "RC car wheel set", new List<string>(), 4, settings.ProcessPreset, settings.FilamentPreset, null);
+            SetSampleRowPrices("200");
+            Recalculate();
+        }
+
+        /// Picture mode: a sliced 3MF with 3 plates (one named): the "Show the 3 plates" link.
+        internal void SetSamplePlatesJob()
+        {
+            if (!offline) return;
+            ShowLinkFile(@"C:\Models\Desk organiser.3mf");
+            var r = new SliceResult { Seconds = 5 * 3600 + 2 * 60, Grams = 151.3, Plates = 3, PurgeGrams = -1, ColourChangeHours = -1, FromSlicedFile = true };
+            r.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#8E9089", Type = "PLA", Profile = "Bambu PLA Basic", Grams = 151.3, ModelGrams = -1 });
+            r.PlateList.Add(new PlateInfo { Index = 1, Name = "", Seconds = 2 * 3600 + 5 * 60, Grams = 64.2, Objects = new List<string> { "Tray", "Pen cup" } });
+            r.PlateList.Add(new PlateInfo { Index = 2, Name = "Wheels", Seconds = 3600 + 20 * 60, Grams = 34.0, Objects = new List<string> { "Wheel A", "Wheel B", "Axle" } });
+            r.PlateList.Add(new PlateInfo { Index = 3, Name = "", Seconds = 3600 + 37 * 60, Grams = 53.1, Objects = new List<string> { "Drawer" } });
+            ShowJobResult(r, null, new List<string> { @"C:\Models\Desk organiser.3mf" }, 1, settings.ProcessPreset, settings.FilamentPreset, null);
+            SetSampleRowPrices("200");
+            Recalculate();
+        }
+
+        /// Picture mode: draws the plates menu (never shown on screen there) under its link, as it opens.
+        internal void SamplePlatesMenu(Graphics g, Point origin)
+        {
+            var at = lblAuto.LinkControl;
+            if (at == null || shownPlates == null) return;
+            using (var menu = PlatesMenu(shownPlates, null))
+            {
+                menu.PerformLayout();
+                var size = menu.GetPreferredSize(Size.Empty);
+                menu.Size = size;
+                using (var bmp = new Bitmap(size.Width, size.Height))
+                {
+                    menu.DrawToBitmap(bmp, new Rectangle(Point.Empty, size));
+                    var p = at.PointToScreen(new Point(0, at.Height));
+                    int x = p.X - origin.X, y = p.Y - origin.Y;
+                    g.DrawImage(bmp, x, y);
+                    // the dark object-names tooltip of the second plate, where it shows beside its line
+                    int k = shownPlates.Count > 1 ? 1 : 0;
+                    var item = menu.Items[2 + k];
+                    var objs = shownPlates[k].Objects ?? new List<string>();
+                    if (objs.Count == 0) return;
+                    string text = string.Join("\n", objs);
+                    var font = SystemFonts.StatusFont;
+                    var ts = TextRenderer.MeasureText(text, font);
+                    var box = new Rectangle(x + item.Bounds.Right + 4, y + item.Bounds.Top, ts.Width + 12, ts.Height + 8);
+                    using (var b = new SolidBrush(Theme.InfoBack)) g.FillRectangle(b, box);
+                    using (var pen = new Pen(Theme.Border)) g.DrawRectangle(pen, box.X, box.Y, box.Width - 1, box.Height - 1);
+                    TextRenderer.DrawText(g, text, font, box, Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                }
+            }
+        }
+
+        /// Picture mode: the MakerWorld message for a made-up link.
+        internal void SampleMakerWorld()
+        {
+            if (!offline) return;
+            ClearJobNumbers();
+            ResetModelPicture();
+            txtUrl.Text = "https://makerworld.com/en/models/123456-sample-model";
+            ShowMakerWorld(MakerWorldPage(txtUrl.Text));
+            Recalculate();
+        }
+
+        void ShowMakerWorld(string page)
+        {
+            // MakerWorld needs a sign-in to download (idea 21): say how, with a link that opens the page
+            SetAuto(L.S("MakerWorld needs you to sign in to download. Open the page, click Download (3MF), then drop the file here or use Load file… – colours and plates are read automatically.",
+                        "MakerWorld kræver, at du logger ind for at hente. Åbn siden, klik Download (3MF), og træk filen herind eller brug Åbn fil… – farver og plader læses automatisk."), false);
+            lblAuto.SetLink(L.S("Open the page", "Åbn siden"), () => { if (!offline) try { Process.Start(page); } catch { } });
         }
 
         /// Picture mode: reads a sliced file (e.g. a sample .gcode) as a dropped one would be, without slicing or saving.
@@ -1161,10 +1448,47 @@ namespace PrintPrice
             Recalculate();
         }
 
-        static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
-                                  string nozzle, string process, string filament, string bed, IProgress<string> progress, CancellationToken ct)
+        /// Where slicing jobs work: %TEMP%\PrintPrice, or in test mode `<test folder>\temp` (never the user's temp files).
+        static string JobTempRoot()
         {
-            string work = Path.Combine(Path.GetTempPath(), "PrintPrice", Guid.NewGuid().ToString("N"));
+            return AppSettings.TestMode ? Path.Combine(AppSettings.Folder, "temp") : Path.Combine(Path.GetTempPath(), "PrintPrice");
+        }
+
+        /// Test mode's KeepForStudio: copies the slice to `<test folder>\temp\studio\<guid>\<name>.3mf` (BambuSlicer.StudioRoot
+        /// and its clean-up are the user's %TEMP%); null on failure.
+        static string KeepForStudioTest(string sliced, string modelName)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(sliced) || !File.Exists(sliced)) return null;
+                string dir = Path.Combine(JobTempRoot(), "studio", Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(dir);
+                string stem = Path.GetFileNameWithoutExtension(Printables.SafeFileName(modelName ?? "model"));
+                string target = Path.Combine(dir, (stem.Length > 0 ? stem : "model") + ".3mf");
+                File.Copy(sliced, target, true);
+                return target;
+            }
+            catch { return null; }
+        }
+
+        /// The file picker (idea 21: a filament and colour per file); null = cancelled.
+        FilePickerForm PickFiles(string title, List<string> names, List<bool> ticked, bool printables)
+        {
+            var picker = new FilePickerForm(title, names, ticked, printables, BambuSlicer.ShortName(settings.FilamentPreset), FilamentNames);
+            using (picker)
+            {
+                if (picker.ShowDialog(this) != DialogResult.OK) return null;
+                return picker;   // read after Dispose: only its plain fields (SelectedIndexes, Plan)
+            }
+        }
+
+        /// plan (idea 21) = several files with a filament / colour each (BambuSlicer.SliceColours, also "together on one
+        /// plate"); null = one file, or files that keep their own colours (sliced one by one, summed).
+        static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
+                                  string nozzle, string process, string filament, string bed, ColourPlan plan,
+                                  IProgress<string> progress, CancellationToken ct)
+        {
+            string work = Path.Combine(JobTempRoot(), Guid.NewGuid().ToString("N"));
             try
             {
                 Directory.CreateDirectory(work);
@@ -1197,53 +1521,42 @@ namespace PrintPrice
                 progress.Report(L.F("Preparing {0} profiles…", "Klargør {0}-profiler…", label));
                 BambuSlicer.PrepareProfiles(exe, printer, nozzle, process, filament, bed, work);
 
-                var total = new SliceResult();
-                for (int i = 0; i < models.Count; i++)
+                SliceResult total;
+                if (plan != null)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    progress.Report(L.S("Slicing ", "Slicer ") + models[i].Key + (models.Count > 1 ? " (" + (i + 1) + "/" + models.Count + ")" : "") +
-                                    L.S(" in Bambu Studio…", " i Bambu Studio…"));
-                    var r = BambuSlicer.SliceFile(exe, models[i].Value, work, printer, nozzle, filament, ct);
-                    total.Seconds += r.Seconds;
-                    total.Grams += r.Grams;
-                    total.Plates += r.Plates;
-                    if (total.Picture == null) total.Picture = r.Picture;   // first model's plate picture
-                    if (i == 0) total.StudioFile = r.StudioFile;            // "Open in Studio" opens the first model's slice
-                    MergeFilaments(total, r);
+                    total = BambuSlicer.SliceColours(exe, models, plan.Slots, plan.Colours, plan.Together, work, printer, nozzle,
+                                                     BambuSlicer.ShortName(filament), progress, ct);
+                    // the user's colours: the material and colour they picked (a file with its own colours keeps them)
+                    foreach (var f in total.Filaments)
+                    {
+                        if (f == null || f.Slot < 1 || f.Slot > plan.Colours.Count) continue;
+                        var c = plan.Colours[f.Slot - 1];
+                        f.Profile = string.IsNullOrEmpty(c.Filament) ? BambuSlicer.ShortName(filament) : c.Filament;
+                        if (!string.IsNullOrEmpty(c.Colour)) f.Colour = c.Colour;
+                    }
                 }
-                total.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+                else
+                {
+                    total = new SliceResult();
+                    for (int i = 0; i < models.Count; i++)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        progress.Report(L.S("Slicing ", "Slicer ") + models[i].Key + (models.Count > 1 ? " (" + (i + 1) + "/" + models.Count + ")" : "") +
+                                        L.S(" in Bambu Studio…", " i Bambu Studio…"));
+                        var r = BambuSlicer.SliceFile(exe, models[i].Value, work, printer, nozzle, filament, ct);
+                        // time, grams, plates (with the file's name), filaments per slot, the first picture and Studio file
+                        BambuSlicer.AddResult(total, r, models.Count > 1 ? models[i].Key : "");
+                    }
+                }
                 // copy the slice out of the work folder before the finally below deletes it (null = nothing to open)
-                total.StudioFile = BambuSlicer.KeepForStudio(total.StudioFile, models[0].Key);
+                total.StudioFile = AppSettings.TestMode ? KeepForStudioTest(total.StudioFile, models[0].Key)
+                                                        : BambuSlicer.KeepForStudio(total.StudioFile, models[0].Key);
                 return total;
             }
             finally
             {
                 try { Directory.Delete(work, true); } catch { }
             }
-        }
-
-        /// Several model files: adds one slice's filaments to the total per slot, and sums the known purge / colour-change values.
-        static void MergeFilaments(SliceResult total, SliceResult r)
-        {
-            foreach (var f in r.Filaments)
-            {
-                if (f == null) continue;
-                var t = total.Filaments.FirstOrDefault(x => x.Slot == f.Slot);
-                if (t == null)
-                {
-                    total.Filaments.Add(new FilamentUse { Slot = f.Slot, Colour = f.Colour ?? "", Type = f.Type ?? "", Profile = f.Profile ?? "",
-                                                          Grams = f.Grams, ModelGrams = f.ModelGrams, Metres = f.Metres });
-                    continue;
-                }
-                t.Grams += f.Grams;
-                t.Metres += f.Metres;
-                t.ModelGrams = t.ModelGrams >= 0 && f.ModelGrams >= 0 ? t.ModelGrams + f.ModelGrams : -1;
-                if (t.Colour.Length == 0 && !string.IsNullOrEmpty(f.Colour)) t.Colour = f.Colour;
-                if (t.Type.Length == 0 && !string.IsNullOrEmpty(f.Type)) t.Type = f.Type;
-                if (t.Profile.Length == 0 && !string.IsNullOrEmpty(f.Profile)) t.Profile = f.Profile;
-            }
-            if (r.PurgeGrams >= 0) total.PurgeGrams = Math.Max(0, total.PurgeGrams) + r.PurgeGrams;
-            if (r.ColourChangeHours >= 0) total.ColourChangeHours = Math.Max(0, total.ColourChangeHours) + r.ColourChangeHours;
         }
 
         /// Empty link box + Enter puts this in (the 4-colour Benchy: shows the multi-colour rows).
@@ -1826,7 +2139,7 @@ namespace PrintPrice
         }
 
         /// "#RRGGBB" (or "#RRGGBBAA") -> colour; Color.Empty if unknown.
-        static Color ParseColour(string hex)
+        internal static Color ParseColour(string hex)
         {
             if (string.IsNullOrEmpty(hex)) return Color.Empty;
             string h = hex.Trim().TrimStart('#');
@@ -1871,7 +2184,7 @@ namespace PrintPrice
         }
 
         /// Dark tooltip (the standard one is light).
-        static void DrawDarkTip(object sender, DrawToolTipEventArgs e)
+        internal static void DrawDarkTip(object sender, DrawToolTipEventArgs e)
         {
             using (var b = new SolidBrush(Theme.InfoBack)) e.Graphics.FillRectangle(b, e.Bounds);
             using (var p = new Pen(Theme.Border)) e.Graphics.DrawRectangle(p, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
@@ -1992,29 +2305,7 @@ namespace PrintPrice
             }
         }
 
-        /// Small colour square with a thin border; several colours = equal vertical stripes; unknown colour = empty box.
-        sealed class Swatch : Control
-        {
-            Color[] colours = new Color[0];
-            public Swatch()
-            {
-                SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-                TabStop = false;
-            }
-            public Color[] Colours { get { return colours; } set { colours = value ?? new Color[0]; Invalidate(); } }
-            protected override void OnPaint(PaintEventArgs e)
-            {
-                var r = ClientRectangle;
-                using (var b = new SolidBrush(Theme.Input)) e.Graphics.FillRectangle(b, r);
-                var known = colours.Where(c => !c.IsEmpty).ToArray();
-                for (int i = 0; i < known.Length; i++)
-                {
-                    int x0 = r.Width * i / known.Length, x1 = r.Width * (i + 1) / known.Length;
-                    using (var b = new SolidBrush(known[i])) e.Graphics.FillRectangle(b, x0, 0, x1 - x0, r.Height);
-                }
-                using (var p = new Pen(Theme.Border)) e.Graphics.DrawRectangle(p, 0, 0, r.Width - 1, r.Height - 1);
-            }
-        }
+        // Swatch (the colour square of the material rows) is in Theme.cs: the file picker uses it too (idea 21)
 
         // ---------- UI helpers ----------
         /// Adds a row; returns its caption label (null for an empty caption).
@@ -3133,10 +3424,14 @@ namespace PrintPrice
                 {
                     r.Filaments[k].Colour = used[k].Colour ?? "";
                     r.Filaments[k].Type = used[k].Type ?? "";
-                    r.Filaments[k].Name = used[k].Profile ?? "";
+                    // short preset name ("Bambu PLA Matte", not "… @BBL A1") = MaterialName's key, so prices keep matching
+                    r.Filaments[k].Name = string.IsNullOrEmpty(used[k].Profile) ? "" : BambuSlicer.ShortName(used[k].Profile).Trim();
                 }
                 if (filaments != null) r.PurgeGrams = jobPurge;
             }
+            if (jobParts != null) History.SetParts(r, jobParts, jobTogether);   // idea 21: the filament / colour per file
+            else if (repeatOf != null && History.PartsOf(repeatOf) != null)    // a repeat print: new records don't copy them
+                History.SetParts(r, History.PartsOf(repeatOf), History.PartsTogether(repeatOf));
             if (reopened != null) r.For = reopened.For;   // opened again and re-saved: same person as before
             if (repeatOf != null) { r.For = repeatOf.For; r.RepeatOf = repeatOf.Id ?? ""; }   // a repeat print: new record, same person
             if (forWho != 0)
@@ -3261,6 +3556,146 @@ namespace PrintPrice
             Environment.Exit(ok ? 0 : 4);
         }
 
+        // ---------- test hooks for idea 21 (test mode + --hidden only; plans\idea21-multipart\test-hook.md) ----------
+        /// The last finished job's slice (set by ShowJobResult), for the test hooks.
+        SliceResult lastJobResult;
+
+        /// "--test-slice <spec>": slices the spec's files with a filament / colour each (no picker), like the picker's
+        /// result, then saves the job. Spec lines: "file|filament|#RRGGBB" (filament / colour may be empty; a relative
+        /// file is next to the spec), "together=1"; blank lines and "//" lines skipped. Writes <folder>\test_slice.txt and
+        /// test_slice.png; exit 0 = sliced and saved with its parts, 4 = not.
+        internal async void TestSliceFlow(string specFile)
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            string dir = AppSettings.Folder;
+            var log = new List<string>();
+            bool ok = true;
+            Action<bool, string> check = (pass, what) => { log.Add((pass ? "PASS " : "FAIL ") + what); if (!pass) ok = false; };
+            try
+            {
+                var parts = new List<HistoryPart>();
+                bool together = false;
+                string baseDir = Path.GetDirectoryName(specFile);
+                foreach (var raw in File.ReadAllLines(specFile))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("//")) continue;
+                    if (line.StartsWith("together=", StringComparison.OrdinalIgnoreCase)) { together = line.Substring(9).Trim() == "1"; continue; }
+                    var f = line.Split('|');
+                    string file = f[0].Trim().Trim('"');
+                    if (!Path.IsPathRooted(file)) file = Path.GetFullPath(Path.Combine(baseDir, file));
+                    parts.Add(new HistoryPart { File = file, Filament = f.Length > 1 ? f[1].Trim() : "", Colour = f.Length > 2 ? f[2].Trim() : "" });
+                }
+                log.Add("spec: " + parts.Count + " file(s), together=" + (together ? 1 : 0));
+                check(parts.Count > 0 && parts.All(p => File.Exists(p.File)), "spec files exist");
+                if (ok)
+                {
+                    var files = parts.Select(p => p.File).ToList();
+                    txtUrl.Text = files.Count == 1 ? files[0] : L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
+                    lastJobResult = null;
+                    bool done = await AnalyzeAsync(null, files, null, parts, together);
+                    check(done && lastJobResult != null, "sliced");
+                    TestJobLines(log, lastJobResult);
+                    QuoteRecord rec = null;
+                    string err = done ? SaveToHistory(0, null, out rec) : "not sliced";
+                    if (err != null) rec = null;
+                    check(err == null && rec != null, "saved to history" + (err != null ? ": " + err : ""));
+                    TestRecordLines(log, rec);
+                    var savedParts = rec != null ? History.PartsOf(rec) : null;
+                    check(savedParts != null && savedParts.Count == parts.Count, "record keeps the " + parts.Count + " part(s)");
+                }
+                Screenshots.Snap(this, dir, "test_slice.png");
+            }
+            catch (Exception ex) { check(false, "exception: " + ex); }
+            try { File.WriteAllLines(Path.Combine(dir, "test_slice.txt"), log); } catch { }
+            Environment.Exit(ok ? 0 : 4);
+        }
+
+        /// "--test-repeat": Repeat print of the newest history record (the saved parts slice again without the picker),
+        /// then saves it (a new record, RepeatOf = the original). Writes <folder>\test_repeat.txt and test_repeat.png;
+        /// exit 0 = sliced again and saved, 4 = not.
+        internal async void TestRepeatFlow()
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            string dir = AppSettings.Folder;
+            var log = new List<string>();
+            bool ok = true;
+            Action<bool, string> check = (pass, what) => { log.Add((pass ? "PASS " : "FAIL ") + what); if (!pass) ok = false; };
+            try
+            {
+                EnsureHistory();
+                var r = history != null && history.Count > 0 ? history[0] : null;
+                check(r != null, "history has a record" + (historyProblem != null ? " (" + historyProblem + ")" : ""));
+                if (r != null)
+                {
+                    log.Add("original: " + r.Id + " " + RecordName(r) + ", saved " + r.SavedAt);
+                    TestRecordLines(log, r);
+                    lastJobResult = null;
+                    await RepeatAsync(r);
+                    check(repeatWhy == null && lastJobResult != null, "sliced again" + (repeatWhy != null ? " (not: " + repeatWhy + ")" : ""));
+                    TestJobLines(log, lastJobResult);
+                    QuoteRecord rec;
+                    string err = SaveToHistory(0, null, out rec);
+                    if (err != null) rec = null;
+                    check(err == null && rec != null, "saved to history" + (err != null ? ": " + err : ""));
+                    check(rec != null && rec.RepeatOf == (r.Id ?? ""), "saved as a repeat of the original");
+                    TestRecordLines(log, rec);
+                    var a = History.PartsOf(r);
+                    var b = rec != null ? History.PartsOf(rec) : null;
+                    check((a == null) == (b == null) && (a == null || a.Count == b.Count), "same parts as the original");
+                }
+                Screenshots.Snap(this, dir, "test_repeat.png");
+            }
+            catch (Exception ex) { check(false, "exception: " + ex); }
+            try { File.WriteAllLines(Path.Combine(dir, "test_repeat.txt"), log); } catch { }
+            Environment.Exit(ok ? 0 : 4);
+        }
+
+        /// The test hooks' lines about the job on screen: the slice (slots, time, plates, together) and what the window shows.
+        void TestJobLines(List<string> log, SliceResult res)
+        {
+            if (res != null)
+            {
+                log.Add("seconds: " + res.Seconds.ToString("0", Num.Dk) + ", grams: " + res.Grams.ToString("0.##", Num.Dk) +
+                        ", plates: " + res.Plates + ", purge g: " + res.PurgeGrams.ToString("0.##", Num.Dk));
+                foreach (var f in res.Filaments)
+                    log.Add("slot " + f.Slot + ": " + (f.Colour ?? "") + " " + (f.Type ?? "") + " \"" + (f.Profile ?? "") + "\" " +
+                            f.Grams.ToString("0.##", Num.Dk) + " g");
+                log.Add("together: " + res.Together + ", together problem: " + (res.TogetherProblem ?? "(none)"));
+                var plates = res.PlateList ?? new List<PlateInfo>();
+                bool showFile = plates.Select(p => p.File ?? "").Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
+                foreach (var p in plates)
+                    log.Add("plate line: " + BambuSlicer.PlateLine(p, showFile) + " [" + string.Join(", ", p.Objects ?? new List<string>()) + "]");
+            }
+            else log.Add("slice: (none)");
+            log.Add("info line: " + lblAuto.Text);
+            log.Add("muted line: " + lblAuto.MutedLine);
+            log.Add("link: " + (lblAuto.LinkControl != null ? lblAuto.LinkControl.Text : ""));
+            log.Add("time box: " + txtHours.Text + " h " + txtMinutes.Text + " m, grams box: " + txtGrams.Text);
+            for (int i = 0; i < colourRows; i++)
+                log.Add("row " + (i + 1) + ": " + (rowCombo[i] != null ? rowCombo[i].Text : "") + ", " + (rowGrams[i] != null ? rowGrams[i].Text : "") +
+                        ", " + (rowPrice[i] != null ? rowPrice[i].Text : "") + " kr/kg");
+            if (last != null) log.Add("prices: friends " + Num.Kr(last.FriendsPrice) + ", customers " + Num.Kr(last.OthersPrice));
+        }
+
+        /// The test hooks' lines about a saved record: its parts (file, filament, colour, slot) and colours.
+        static void TestRecordLines(List<string> log, QuoteRecord r)
+        {
+            if (r == null) { log.Add("record: (none)"); return; }
+            log.Add("record " + r.Id + ": " + r.Hours + " h " + r.Minutes + " m, " + r.Grams.ToString("0.##", Num.Dk) + " g, repeat of: " +
+                    (string.IsNullOrEmpty(r.RepeatOf) ? "-" : r.RepeatOf));
+            var parts = History.PartsOf(r);
+            if (parts == null) log.Add("record parts: (none)");
+            else
+            {
+                log.Add("record parts together: " + History.PartsTogether(r));
+                foreach (var p in parts) log.Add("record part: " + p.File + " | " + p.Filament + " | " + p.Colour + " | slot " + p.Slot);
+            }
+            if (r.Filaments != null)
+                foreach (var f in r.Filaments)
+                    log.Add("record colour: " + (f.Colour ?? "") + " " + (f.Type ?? "") + " \"" + (f.Name ?? "") + "\" " + f.Grams.ToString("0.##", Num.Dk) + " g");
+        }
+
         // a made-up model picture for TestPictureFlow (transparent, orange shape)
         static Bitmap TestPicture()
         {
@@ -3375,6 +3810,12 @@ namespace PrintPrice
         /// record with RepeatOf = the original's Id and the same For.
         internal async void Repeat(QuoteRecord r)
         {
+            await RepeatAsync(r);
+        }
+
+        /// Repeat's work, awaitable (TestRepeatFlow waits for it).
+        async Task RepeatAsync(QuoteRecord r)
+        {
             if (r == null || cts != null) return;
             FillFromRecord(r, true);
             repeatOf = r;
@@ -3382,6 +3823,27 @@ namespace PrintPrice
             string id = src.Length > 0 ? Printables.ParseId(src) : null;
             bool local = id == null && src.Length > 0 && File.Exists(src) && (BambuSlicer.IsModelFile(src) || BambuSlicer.IsGcodeFile(src));
             if (offline) { ShowRepeatLine(r, null); return; }   // picture mode never slices
+            var parts = History.PartsOf(r);   // idea 21: several files with a filament / colour each: sliced the same way
+            if (parts != null)
+            {
+                List<string> paths = null;
+                if (id == null)
+                {
+                    paths = parts.Select(p => (p.File ?? "").Trim()).ToList();
+                    if (paths.Any(p => p.Length == 0 || !File.Exists(p)))
+                    {
+                        ShowRepeatLine(r, L.S("a saved file isn't there any more", "en gemt fil findes ikke længere"));
+                        return;
+                    }
+                }
+                bool done = await AnalyzeAsync(id, paths, res => KeepSavedMaterials(res, r), parts, History.PartsTogether(r));
+                if (done) { repeatOf = r; ShowRepeatLine(r, null); return; }
+                string failed = (lblAuto.Text ?? "").Trim().TrimEnd('.');
+                FillFromRecord(r, true);
+                repeatOf = r;
+                ShowRepeatLine(r, failed.Length > 0 ? failed : L.S("slicing failed", "slicing mislykkedes"));
+                return;
+            }
             if (id == null && !local)
             {
                 ShowRepeatLine(r, src.Length == 0 ? L.S("no link or file was saved", "der blev ikke gemt et link eller en fil")
@@ -3427,11 +3889,14 @@ namespace PrintPrice
             repeatLine = null;
             repeatOf = null;
             savedId = null;    // saving it again is a new sale: it pays back again
+            ForgetPlates();    // a saved record has no plates list (Repeat print gets a new one when it slices again)
             SetUrlHint(false);
             UseRecordPrinter(r);   // the quote's printer (if it still exists): its wear and power, and Repeat print slices for it
             ShowLinkSource(r.Source);
             SetStudioFile(null);   // no slice from this session (also when the link was the same, so TextChanged didn't fire)
             jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)
+            jobParts = History.PartsOf(r);   // a colour per file (idea 21): saving it again / a failed repeat keeps them
+            jobTogether = History.PartsTogether(r);
             ResetModelPicture();
             SetJobLoaded(true);   // no picture (Printables link, missing file) = logo without "No model yet"
             string src = (r.Source ?? "").Trim().Trim('"');
@@ -3532,7 +3997,11 @@ namespace PrintPrice
             var r = repeatLine;
             DateTime t;
             string when = History.TryTime(r.SavedAt, out t) ? t.ToString("dd-MM-yyyy", Num.Dk) : r.SavedAt;
-            string main = repeatWhy == null
+            // sliced again into 2+ plates: the plates link comes back under the lines, so the main line is kept to one line
+            // (the box stays at 3 lines: window <= ~760 px with 4 colour rows)
+            bool plates = repeatWhy == null && shownPlates != null && shownPlates.Count >= 2;
+            string main = plates ? OneLineRepeatText(r, when)
+                : repeatWhy == null
                 ? L.F("↻ Repeat print of {0} (first quoted {1}) with today's prices.", "↻ Print igen af {0} (første tilbud {1}) med dagens priser.",
                       RecordName(r), when)
                 : L.F("↻ Repeat print of {0}: not sliced again ({1}), so the saved time and weight are used.",
@@ -3551,9 +4020,49 @@ namespace PrintPrice
             }
             if (lblAuto.Text != main || lblAuto.MutedLine != muted)
             {
-                lblAuto.SetText(main, muted);
+                lblAuto.SetText(main, muted);   // removes the link line: put it back
+                if (plates) ShowRepeatPlatesLink();
                 SetAutoColor();
             }
+        }
+
+        /// "↻ Repeat print of "X", first quoted dd-MM-yyyy." on one line of the box: the name is cut with "…" until it
+        /// fits the box's text width (measured with the label's own font, real px).
+        string OneLineRepeatText(QuoteRecord r, string when)
+        {
+            string name = RecordName(r);
+            bool quoted = name.Length >= 2 && name[0] == '"' && name[name.Length - 1] == '"';
+            string raw = quoted ? name.Substring(1, name.Length - 2) : name;
+            Label lbl = lblAuto.Controls.Count > 0 ? lblAuto.Controls[0] as Label : null;
+            int width = lbl != null ? lbl.MaximumSize.Width : 0;
+            string text = "";
+            for (int max = raw.Length; max >= 6; max--)
+            {
+                string n = BambuSlicer.CutName(raw, max);
+                if (quoted) n = "\"" + n + "\"";
+                text = L.F("↻ Repeat print of {0}, first quoted {1}.", "↻ Print igen af {0}, første tilbud {1}.", n, when);
+                if (lbl == null || width <= 0) break;
+                var flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+                if (TextRenderer.MeasureText(text, lbl.Font, new Size(int.MaxValue, int.MaxValue), flags).Width <= width - 2) break;
+            }
+            return text;
+        }
+
+        /// Repeat print of a 2+ plates job: the plates link again; when "together" fell back its text says so ("Sliced one
+        /// by one: …") and its dark tooltip gives the reason (+ "Studio opens file 1 of N").
+        void ShowRepeatPlatesLink()
+        {
+            var list = shownPlates;
+            if (list == null || list.Count < 2) return;
+            bool fellBack = !string.IsNullOrEmpty(platesProblem);
+            lblAuto.SetLink(PlatesLinkText(list.Count, fellBack), () => ShowPlatesMenu(list));
+            if (lblAuto.LinkControl == null || printerTip == null) return;
+            var tip = new List<string>();
+            if (fellBack) tip.Add(WrapTip(platesProblem, 45));
+            if (platesStudioOf > 1)
+                tip.Add(WrapTip(L.F("\"Open in Studio\" opens only the first file (1 of {0}).",
+                                    "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", platesStudioOf), 45));
+            if (tip.Count > 0) printerTip.SetToolTip(lblAuto.LinkControl, string.Join("\n\n", tip));
         }
 
         void ClearJob()
@@ -3562,8 +4071,10 @@ namespace PrintPrice
             repeatLine = null;
             repeatOf = null;
             savedId = null;
+            ForgetPlates();
             if (lblAuto.MutedLine.Length > 0) ShowAutoIdle();   // the "Opened from history" lines go with the job
             txtUrl.Text = "";
+            jobParts = null;
             SetStudioFile(null);   // back to "Get time & weight" (also if the box was already empty)
             SetUrlHint(false);
             SetColours(null);   // back to the single-filament layout

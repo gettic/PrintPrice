@@ -56,6 +56,22 @@ else
                 {
                     <div class="@(fileError ? "file-msg error" : "file-msg")" role="status">@fileText</div>
                 }
+                @if (plates != null)
+                {
+                    <ul class="plates" aria-label="@L.S("Plates", "Plader")">
+                        <li>@(plates.Count == 2
+                            ? L.S("2 plates, the price is for both:", "2 plader, prisen gælder dem begge:")
+                            : L.F("{0} plates, the price is for all of them:", "{0} plader, prisen gælder dem alle:", plates.Count))</li>
+                        @foreach (var p in plates.Take(MaxPlateLines))
+                        {
+                            <li><span class="pn">@BambuSlicer.PlateTitle(p, false)</span> – @BambuSlicer.PlateNumbers(p)</li>
+                        }
+                        @if (plates.Count > MaxPlateLines)
+                        {
+                            <li>@L.F("+{0} more", "+{0} mere", plates.Count - MaxPlateLines)</li>
+                        }
+                    </ul>
+                }
                 @if (fileNote != null)
                 {
                     <div class="file-msg muted" role="status">@fileNote</div>
@@ -266,6 +282,8 @@ else
     PrinterProfile switchPrinter;      // a printer in Settings with the file's model
     SliceResult fileResult;            // the file's values (printer check again after Settings)
     List<ColourRow> rows = new List<ColourRow>();   // 2+ colours from a file
+    List<PlateInfo> plates;            // idea 21: the file's plates, shown only with 2+ (texts made at render: language toggle)
+    const int MaxPlateLines = 8;       // more plates: the first 8 + "+N more"
 
     bool Multi { get { return rows.Count >= 2; } }
 
@@ -423,6 +441,7 @@ else
         materialName = null;
         fileResult = null;
         fileText = fileNote = missingText = printerWarning = pictureUrl = null;
+        plates = null;
         switchPrinter = null;
         fileError = false;
         single = null;
@@ -593,6 +612,7 @@ else
                    + " (" + L.S("read from the sliced file", "læst fra den slicede fil")
                    + (multi ? " · " + L.F("{0} colours", "{0} farver", rows.Count) : "") + ")." + more;
         fileResult = res;
+        plates = res.PlateList != null && res.PlateList.Count >= 2 ? res.PlateList : null;
         fileNote = BambuSlicer.OtherSlicerNote(res);
         CheckPrinter(res);
         Recalculate();

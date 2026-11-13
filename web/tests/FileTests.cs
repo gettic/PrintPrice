@@ -22,6 +22,7 @@ static class FileTests
         JsonShapes();
         Synthetic();
         OtherSlicers();
+        Plates();
         string dir = Samples();
         if (dir == null) { Console.WriteLine("NOTE sample files not found: sample tests skipped"); return; }
         Sample3mf(Path.Combine(dir, "test-cubes-3colour.gcode.3mf"));
@@ -113,6 +114,55 @@ static class FileTests
         var endJob = Read(Encoding.UTF8.GetBytes(endOnly.ToString()), "end.gcode", out s);
         True("G-code numbers at the end: found, read " + s.BytesRead, endJob.Result != null && endJob.Result.Seconds == 3723
              && s.BytesRead <= SlicedFile.GcodeHeadBytes + SlicedFile.GcodeTailBytes);
+    }
+
+    // ---------- plates list (idea 21): names from Metadata/model_settings.config via the shared ApplyPlateNames ----------
+
+    static void Plates()
+    {
+        string slice = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n" +
+            "<plate><metadata key=\"index\" value=\"1\"/><metadata key=\"prediction\" value=\"4500\"/><metadata key=\"weight\" value=\"39.2\"/>" +
+            "<object identify_id=\"1\" name=\"Body\" skipped=\"false\"/>" +
+            "<filament id=\"1\" type=\"PLA\" color=\"#C12E1F\" used_m=\"13\" used_g=\"39.2\"/></plate>\n" +
+            "<plate><metadata key=\"index\" value=\"2\"/><metadata key=\"prediction\" value=\"4800\"/><metadata key=\"weight\" value=\"34\"/>" +
+            "<object identify_id=\"2\" name=\"Wheel\" skipped=\"false\"/><object identify_id=\"3\" name=\"Wheel\" skipped=\"false\"/>" +
+            "<object identify_id=\"4\" name=\"Wheel\" skipped=\"false\"/><object identify_id=\"5\" name=\"Spare\" skipped=\"true\"/>" +
+            "<filament id=\"2\" type=\"PLA\" color=\"#F2F2F2\" used_m=\"11\" used_g=\"34\"/></plate>\n" +
+            "<plate><metadata key=\"index\" value=\"3\"/><metadata key=\"prediction\" value=\"0\"/><metadata key=\"weight\" value=\"0\"/></plate>\n</config>\n";
+        string model = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n" +
+            "<plate><metadata key=\"plater_id\" value=\"1\"/><metadata key=\"plater_name\" value=\"\"/></plate>\n" +
+            "<plate><metadata key=\"plater_id\" value=\"2\"/><metadata key=\"plater_name\" value=\"Wheels\"/></plate>\n</config>\n";
+        Func<bool, byte[]> zip = withNames =>
+        {
+            var e = new Dictionary<string, byte[]>
+            {
+                { "Metadata/slice_info.config", Encoding.UTF8.GetBytes(slice) },
+                { "Metadata/plate_1.gcode", Encoding.UTF8.GetBytes("G1 X1\n") },
+                { "Metadata/plate_2.gcode", Encoding.UTF8.GetBytes("G1 X1\n") },
+            };
+            if (withNames) e["Metadata/model_settings.config"] = Encoding.UTF8.GetBytes(model);
+            return MakeZip(e, 1);
+        };
+        BytesSource s;
+        var job = Read(zip(true), "Car.gcode.3mf", out s);
+        var pl = job.Result == null ? null : job.Result.PlateList;
+        True("plates: 2 sliced plates (unsliced plate 3 left out), totals unchanged", pl != null && pl.Count == 2
+             && job.Result.Seconds == 9300 && Math.Abs(job.Result.Grams - 73.2) < 1e-9);
+        True("plates: name from model_settings.config", pl != null && pl.Count == 2 && pl[0].Name == "" && pl[1].Name == "Wheels");
+        bool wasDanish = L.Danish;
+        L.Danish = false;
+        string en1 = BambuSlicer.PlateLine(pl[0], false), en2 = BambuSlicer.PlateLine(pl[1], false);
+        True("plate line EN: " + en2, en1 == "Plate 1 – 1 h 15 m, 39,2 g, 1 object" && en2 == "Plate 2 'Wheels' – 1 h 20 m, 34 g, 3 objects");
+        L.Danish = true;
+        string da2 = BambuSlicer.PlateLine(pl[1], false);
+        True("plate line DA: " + da2, da2 == "Plade 2 'Wheels' – 1 t 20 m, 34 g, 3 objekter");
+        L.Danish = wasDanish;
+        var noNames = Read(zip(false), "Car.gcode.3mf", out s);
+        True("plates without model_settings.config: no names, no error", noNames.Result != null && noNames.Error == null
+             && noNames.Result.PlateList.Count == 2 && noNames.Result.PlateList.All(p => p.Name == ""));
+        var g = Read(Encoding.UTF8.GetBytes("; HEADER_BLOCK_START\n; total estimated time: 1h 2m 3s\n; total filament weight [g] : 10.5\n; HEADER_BLOCK_END\n"),
+                     "one.gcode", out s);
+        True("G-code: one plate (no list)", g.Result != null && g.Result.PlateList.Count == 1);
     }
 
     // ---------- G-code from other slicers (idea 14): small made-up samples in web\tests\gcode-samples ----------
