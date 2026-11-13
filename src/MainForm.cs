@@ -481,6 +481,7 @@ namespace PrintPrice
             if (!offline && !AppSettings.TestMode) Shown += delegate { Task.Run(() => BambuSlicer.CleanStudioFiles(null)); };
             // leftover record pictures (issue #4): history.json read in the background, cleaned once it read fine
             if (!offline) Shown += delegate { StartupPictureClean(); };
+            if (!offline) Shown += delegate { ApplySetupHint(); };   // idea 19: after "Set up later" (Program.ShowSetupHint)
             // read Bambu Studio's profile index once in the background (Settings' lists and the first slice are quicker)
             if (!offline) Shown += delegate
             {
@@ -615,13 +616,16 @@ namespace PrintPrice
             SetPowerInfo(L.F("Fetching the current electricity price for {0}…", "Henter den aktuelle elpris for {0}…", area), false);
             try
             {
-                var q = await Task.Run(() => PowerPrice.GetCurrent(area));
+                // test mode (--settings, every --test- hook): never Energi Data Service; a fixed stand-in price instead,
+                // marked "test" in the line, so test runs stay offline and give the same numbers every time
+                bool test = AppSettings.TestMode;
+                var q = test ? SetupTest.StandInPower(area, 1.20) : await Task.Run(() => PowerPrice.GetCurrent(area));
                 double total = Math.Round(PowerPrice.TotalPrice(q.SpotDkkPerKwh, addOn, vat), 2);
                 // Danish kept short ("afg.", "moms" = always 25 %) so the line fits on one line in the box
                 string breakdown = L.F("spot {0} + fees {1}", "spot {0} + afg. {1}",
                                        q.SpotDkkPerKwh.ToString("0.00", Num.Dk), addOn.ToString("0.00", Num.Dk)) +
                                    (vat ? L.S(" + 25 % VAT", " + moms") : "");
-                string when = q.Area + " " + q.SlotStartUtc.ToLocalTime().ToString("HH:mm", Num.Dk);
+                string when = q.Area + " " + (test ? "test" : q.SlotStartUtc.ToLocalTime().ToString("HH:mm", Num.Dk));
                 if (txtElecPrice.Text == before)
                 {
                     txtElecPrice.Text = total.ToString("0.00", Num.Dk);
@@ -1800,7 +1804,7 @@ namespace PrintPrice
         static bool logoLoaded;
 
         /// The app logo: the biggest PNG frame of the program's own icon (app.ico has a 128 px one). Null if not found.
-        static Bitmap Logo
+        internal static Bitmap Logo   // also the setup window's welcome picture
         {
             get
             {
@@ -2595,41 +2599,111 @@ namespace PrintPrice
                     dlg.BackupRequested = (owner, t) => OpenBackup(owner, t);   // App tab: Back up… / Restore…
                     if (prepare != null) prepare(dlg);
                     dlg.Shown += delegate { restore(); };   // back to normal once the window is up
-                    if (dlg.ShowDialog(this) == DialogResult.OK)
-                    {
-                        var old = settings;
-                        settings = dlg.Result;
-                        if (old.AutoUpdateCheck == 0 && settings.AutoUpdateCheck != 0 && pendingUpdate == null)
-                            BeginInvoke((MethodInvoker)StartupUpdateCheck);   // switched back on: check now
-                        SyncUpdateTimer();   // the 10-minute check follows the setting
-                        bool powerChanged = old.PriceArea != settings.PriceArea || old.PowerAddOn != settings.PowerAddOn ||
-                                            old.PowerIncludeVat != settings.PowerIncludeVat ||
-                                            (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
-                        if (powerChanged && settings.AutoPowerPrice != 0) BeginInvoke((MethodInvoker)FetchPowerPrice);
-                        // other slicing settings make the slice out of date: the button slices again instead of opening it
-                        bool slicingChanged = SlicingChanged(old, settings);
-                        if (slicingChanged || old.FilamentPreset != settings.FilamentPreset || old.SlicerPath != settings.SlicerPath)
-                            SetStudioFile(null);
-                        SaveLastPrices();
-                        RefreshSettingsLabels();
-                        foreach (var cb in rowCombo) cb.Tag = null;   // nozzle / slicer may have changed: re-read the list when opened
-                        if (!jobLoaded && cts == null) SetColours(null);   // no model yet: the row follows Settings' filament profile
-                        Recalculate();
-                        if (cts == null)
-                        {
-                            if (jobLoaded && slicingChanged && old.ActivePrinterId != settings.ActivePrinterId) ShowPrinterChanged();
-                            else ShowAutoIdle();
-                        }
-                        if (dlg.RestartRequested && !offline)
-                        {
-                            // new language: settings are already saved above; Restart closes this window (saves again) and starts anew
-                            if (cts != null) cts.Cancel();
-                            BeginInvoke((MethodInvoker)Program.Restart);   // same arguments (test mode stays in its folder)
-                        }
-                    }
+                    var answer = dlg.ShowDialog(this);
+                    if (dlg.SetupRequested && !offline) BeginInvoke((MethodInvoker)RunSetupAgain);   // App tab: "Run setup again…"
+                    if (answer == DialogResult.OK) TakeNewSettings(dlg.Result, dlg.RestartRequested);
                 }
             }
             finally { restore(); }   // also if building the window failed
+        }
+
+        /// After Settings' OK or the setup window (idea 19): the new settings and their follow-ups (update check, live
+        /// price, Studio file, labels, colour rows, prices); restart = the language changed (saved first, then restart).
+        void TakeNewSettings(AppSettings newSettings, bool restart)
+        {
+            var old = settings;
+            settings = newSettings;
+            if (old.AutoUpdateCheck == 0 && settings.AutoUpdateCheck != 0 && pendingUpdate == null)
+                BeginInvoke((MethodInvoker)StartupUpdateCheck);   // switched back on: check now
+            SyncUpdateTimer();   // the 10-minute check follows the setting
+            bool powerChanged = old.PriceArea != settings.PriceArea || old.PowerAddOn != settings.PowerAddOn ||
+                                old.PowerIncludeVat != settings.PowerIncludeVat ||
+                                (old.AutoPowerPrice == 0 && settings.AutoPowerPrice != 0);
+            if (powerChanged && settings.AutoPowerPrice != 0) BeginInvoke((MethodInvoker)FetchPowerPrice);
+            // other slicing settings make the slice out of date: the button slices again instead of opening it
+            bool slicingChanged = SlicingChanged(old, settings);
+            if (slicingChanged || old.FilamentPreset != settings.FilamentPreset || old.SlicerPath != settings.SlicerPath)
+                SetStudioFile(null);
+            SaveLastPrices();
+            RefreshSettingsLabels();
+            foreach (var cb in rowCombo) cb.Tag = null;   // nozzle / slicer may have changed: re-read the list when opened
+            if (!jobLoaded && cts == null) SetColours(null);   // no model yet: the row follows Settings' filament profile
+            Recalculate();
+            if (cts == null)
+            {
+                if (jobLoaded && slicingChanged && old.ActivePrinterId != settings.ActivePrinterId) ShowPrinterChanged();
+                else ShowAutoIdle();
+            }
+            if (restart && !offline)
+            {
+                // new language: settings are already saved above; Restart closes this window (saves again) and starts anew
+                if (cts != null) cts.Cancel();
+                BeginInvoke((MethodInvoker)Program.Restart);   // same arguments (test mode stays in its folder)
+            }
+        }
+
+        // ---------- first-time setup (idea 19): hint after "Set up later", test hooks ----------
+        bool setupHintPending;
+
+        static string SetupHintText { get { return L.S("Setup skipped – run it now", "Opsætning sprunget over – kør den nu"); } }
+
+        /// Program, after the setup window was closed with Set up later / ✕ / Esc: once the window shows, the info box gets
+        /// a "Setup skipped – run it now" line (the normal help text stays); the next message replaces it.
+        internal void ShowSetupHint()
+        {
+            setupHintPending = true;
+        }
+
+        void ApplySetupHint()
+        {
+            if (!setupHintPending || cts != null) return;
+            setupHintPending = false;
+            lblAuto.SetLink(SetupHintText, () => { if (!offline) RunSetupAgain(); });
+        }
+
+        /// Picture mode: the hint on the fresh window (main_setup_hint.png).
+        internal void SampleSetupHint()
+        {
+            setupHintPending = true;
+            ApplySetupHint();
+        }
+
+        /// --test-setup: the settings in use and whether the hint shows.
+        internal AppSettings TestSettings { get { return settings; } }
+        internal string TestPowerLine { get { return lblPowerInfo.Text; } }
+        internal bool TestHintShown { get { return lblAuto.LinkControl != null && lblAuto.LinkControl.Text == SetupHintText; } }
+
+        /// --test-setup: Settings > App > "Run setup again…" through the real button (Settings closes, RunSetupAgain follows).
+        internal void TestSetupAgain()
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            OpenSettings(SettingsForm.TabApp, s => s.Shown += delegate { s.BeginInvoke((MethodInvoker)s.TestClickSetupAgain); });
+        }
+
+        /// --test-setup: the lines after "main" (SetupTest.PlayMain).
+        internal void TestSetupFlow(SetupTest t)
+        {
+            if (!AppSettings.TestMode || !Program.Hidden || t == null) return;
+            t.PlayMain(this);
+        }
+
+        /// Settings > App > "Run setup again…" (idea 19): the setup window with today's answers filled in; Save takes them
+        /// over like Settings' OK (a fixed electricity price goes into the main window's box first).
+        void RunSetupAgain()
+        {
+            if (offline || IsDisposed) return;
+            try
+            {
+                SaveLastPrices();   // the electricity box's price is the setup's starting value
+                using (var dlg = new SetupForm(settings, true))
+                {
+                    if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Result == null) return;
+                    var res = dlg.Result;
+                    if (res.AutoPowerPrice == 0) txtElecPrice.Text = Num.Fmt(res.LastElectricityPrice);   // SaveLastPrices reads it back
+                    TakeNewSettings(res, dlg.RestartRequested);
+                }
+            }
+            catch (Exception ex) { ErrorReport.Show(ex); }
         }
 
         // ---------- several printers (ideas 7 + 24 + 11) ----------
@@ -3489,6 +3563,7 @@ namespace PrintPrice
             var log = new List<string>();
             bool ok = true;
             Action<bool, string> check = (pass, what) => { log.Add((pass ? "PASS " : "FAIL ") + what); if (!pass) ok = false; };
+            log.Add(SetupTest.StandInNote);
             try
             {
                 var one = new SliceResult { Seconds = 38 * 60, Grams = 11.8, Plates = 1 };
@@ -3553,7 +3628,7 @@ namespace PrintPrice
             }
             catch (Exception ex) { check(false, "exception: " + ex); }
             try { File.WriteAllLines(Path.Combine(dir, "test_pictures.txt"), log); } catch { }
-            Environment.Exit(ok ? 0 : 4);
+            Program.EndTestRun(ok ? 0 : 4);
         }
 
         // ---------- test hooks for idea 21 (test mode + --hidden only; plans\idea21-multipart\test-hook.md) ----------
@@ -3571,6 +3646,7 @@ namespace PrintPrice
             var log = new List<string>();
             bool ok = true;
             Action<bool, string> check = (pass, what) => { log.Add((pass ? "PASS " : "FAIL ") + what); if (!pass) ok = false; };
+            log.Add(SetupTest.StandInNote);
             try
             {
                 var parts = new List<HistoryPart>();
@@ -3608,7 +3684,7 @@ namespace PrintPrice
             }
             catch (Exception ex) { check(false, "exception: " + ex); }
             try { File.WriteAllLines(Path.Combine(dir, "test_slice.txt"), log); } catch { }
-            Environment.Exit(ok ? 0 : 4);
+            Program.EndTestRun(ok ? 0 : 4);
         }
 
         /// "--test-repeat": Repeat print of the newest history record (the saved parts slice again without the picker),
@@ -3621,6 +3697,7 @@ namespace PrintPrice
             var log = new List<string>();
             bool ok = true;
             Action<bool, string> check = (pass, what) => { log.Add((pass ? "PASS " : "FAIL ") + what); if (!pass) ok = false; };
+            log.Add(SetupTest.StandInNote);
             try
             {
                 EnsureHistory();
@@ -3648,7 +3725,112 @@ namespace PrintPrice
             }
             catch (Exception ex) { check(false, "exception: " + ex); }
             try { File.WriteAllLines(Path.Combine(dir, "test_repeat.txt"), log); } catch { }
-            Environment.Exit(ok ? 0 : 4);
+            Program.EndTestRun(ok ? 0 : 4);
+        }
+
+        /// "--test-history <spec>" (test mode + --hidden only; plans\history-test-hook\plan.md): plays the spec's lines
+        /// with the app's own code. Outside the window: seed (sample quotes + pictures into an empty history), reopen
+        /// <id> (Open again), save, expect …; "open" … "close" runs in the History window opened by ShowHistory (the
+        /// History… button's method), played by HistoryForm.TestPlay. Writes <folder>\test_history.txt; exit 0 = all
+        /// passed, 4 = a FAIL (also after 120 s, so a stuck window never hangs a run).
+        internal void TestHistoryFlow(string specFile)
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            string dir = AppSettings.Folder, specDir = Path.GetDirectoryName(specFile);
+            var log = new TestLog();
+            Action write = () => { try { File.WriteAllLines(Path.Combine(dir, "test_history.txt"), log.Lines); } catch { } };
+            var guard = new System.Windows.Forms.Timer { Interval = 120000 };
+            guard.Tick += delegate { log.Check(false, "timeout: the run took over 120 s"); write(); Environment.Exit(4); };
+            guard.Start();
+            BackupForm.AskForm.TestAnswers = new Queue<DialogResult>();
+            BackupForm.AskForm.TestLog = log;
+            try
+            {
+                var lines = File.ReadAllLines(specFile).Select(x => x.Trim()).Where(x => x.Length > 0 && !x.StartsWith("//")).ToList();
+                EnsureHistory();
+                log.Add(SetupTest.StandInNote);
+                log.Add("start: " + MainTestState());
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    string cmd, arg;
+                    HistoryTest.Split(lines[i], out cmd, out arg);
+                    if (cmd == "open")
+                    {
+                        var block = new List<string>();
+                        while (++i < lines.Count)
+                        {
+                            block.Add(lines[i]);
+                            if (HistoryTest.Command(lines[i]) == "close") break;
+                        }
+                        log.Add("> open");
+                        bool played = false;
+                        HistoryForm.TestDriver = async f =>
+                        {
+                            played = true;
+                            try { await f.TestPlay(block, log, dir, specDir); }
+                            catch (Exception ex) { log.Check(false, "exception in the History window: " + ex); f.Close(); }
+                        };
+                        ShowHistory();
+                        HistoryForm.TestDriver = null;
+                        log.Check(played, "History window opened");
+                        log.Add("  after the window: " + MainTestState());
+                        continue;
+                    }
+                    log.Add("> " + lines[i]);
+                    switch (cmd)
+                    {
+                        case "seed":
+                        {
+                            if (history.Count > 0) { log.Check(false, "seed needs an empty history"); break; }
+                            history.AddRange(HistoryForm.SampleQuotes());
+                            string err = History.Save(history);
+                            int saved = 0;
+                            foreach (var kv in HistoryForm.SamplePictures()) if (History.SavePicture(kv.Key, kv.Value)) saved++;
+                            log.Check(err == null, "seeded " + history.Count + " quotes" + (err != null ? ": " + err : ""));
+                            log.Check(saved == HistoryForm.SamplePictures().Count, "seeded " + saved + " pictures");
+                            break;
+                        }
+                        case "reopen":
+                        {
+                            var r = history.Find(x => x.Id == arg);
+                            log.Check(r != null, "quote " + arg + " in the history");
+                            if (r != null) { Reopen(r); log.Check(reopened == r, "opened again: " + RecordName(r)); }
+                            break;
+                        }
+                        case "save":
+                        {
+                            QuoteRecord rec;
+                            string err = SaveToHistory(0, null, out rec);
+                            if (err != null) rec = null;
+                            log.Check(rec != null, "saved to history" + (err != null ? ": " + err : ""));
+                            if (rec != null)
+                            {
+                                bool linked = !string.IsNullOrEmpty(rec.RepeatOf) && !history.Any(x => x.Id == rec.RepeatOf);
+                                log.Add("  saved " + rec.Id + ", RepeatOf \"" + rec.RepeatOf + "\", For " + rec.For);
+                                log.Check(!linked, "the new quote doesn't point at a deleted one");
+                            }
+                            break;
+                        }
+                        case "expect":
+                            HistoryTest.Expect(arg, log, history, null, () => reopened == null ? "none" : reopened.Id);
+                            break;
+                        default:
+                            log.Check(false, "unknown step: " + lines[i]);
+                            break;
+                    }
+                    if (cmd != "expect") log.Add("  " + MainTestState());
+                }
+            }
+            catch (Exception ex) { log.Check(false, "exception: " + ex); }
+            guard.Stop();
+            write();
+            Program.EndTestRun(log.Ok ? 0 : 4);
+        }
+
+        string MainTestState()
+        {
+            return "main: history " + (history == null ? "(none)" : history.Count.ToString()) + ", open quote " +
+                   (reopened == null ? "none" : reopened.Id) + ", repeat of " + (repeatOf == null ? "none" : repeatOf.Id) + ", " + HistoryTest.FileState();
         }
 
         /// The test hooks' lines about the job on screen: the slice (slots, time, plates, together) and what the window shows.

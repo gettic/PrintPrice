@@ -1850,6 +1850,7 @@ namespace PrintPrice
             {
                 rs = bs.Clone();
                 rs.CopyKeys(currentSettings, PcOnlyKeys);   // SlicerPath, BackupCode, LastOnlineBackup stay this PC's
+                rs.SetupDone = 1;                           // a restored user is set up (idea 19): never the setup window again
                 res.SettingsRestored = true;
             }
             else rs = currentSettings.Clone();

@@ -39,7 +39,7 @@ static class QuoteTests
     {
         bool wasDanish = L.Danish;
         L.Danish = false;
-        var s = new AppSettings();
+        var s = new AppSettings { QuoteName = AppSettings.LegacyQuoteName };   // quote_light.png's "Gettic" (new installs: empty)
         WebCalc.ApplyAutoWear(s, "PLA");
         var when = new DateTime(2026, 11, 4, 17, 45, 0);
 

@@ -681,6 +681,21 @@ namespace PrintPrice.Tests
             res = History.Combine(new List<QuoteRecord>(), s, new BackupData { Quotes = new List<QuoteRecord>(), Settings = other.ToIni() }, false, false);
             True("Combine without settings: this PC's keys kept", res.Settings.GetBackupCode() == Code && res.Settings.FriendsMarkupPct == s.FriendsMarkupPct);
 
+            // first-time setup (idea 19): a restore with settings always ends set up (SetupDone 1), even when this PC
+            // (in the setup window) and the backup's own lines say 0; without settings this PC's value stays
+            var newPc = new AppSettings(); newPc.SetupDone = 0;
+            var other0 = other.Clone(); other0.SetupDone = 0;
+            True("backup lines carry SetupDone=0", Array.IndexOf(other0.ToIni(), "SetupDone=0") >= 0);
+            res = History.Combine(new List<QuoteRecord>(), newPc, new BackupData { Quotes = new List<QuoteRecord>(), Settings = other0.ToIni() }, true, true);
+            True("Combine with settings: SetupDone forced 1", res.SettingsRestored && res.Settings.SetupDone == 1 && res.Settings.FriendsMarkupPct == 55);
+            res = History.Combine(new List<QuoteRecord>(), newPc, new BackupData { Quotes = new List<QuoteRecord>(), Settings = other.ToIni() }, false, true);
+            True("Combine merge + settings: SetupDone 1", res.SettingsRestored && res.Settings.SetupDone == 1);
+            res = History.Combine(new List<QuoteRecord>(), newPc, new BackupData { Quotes = new List<QuoteRecord>(), Settings = other.ToIni() }, true, false);
+            True("Combine without settings: this PC's SetupDone 0 kept", !res.SettingsRestored && res.Settings.SetupDone == 0);
+            res = History.Combine(new List<QuoteRecord>(), newPc, new BackupData { Quotes = new List<QuoteRecord>(), Settings = null }, true, true);
+            True("Combine 'with settings' but backup has none: SetupDone 0 kept", !res.SettingsRestored && res.Settings.SetupDone == 0);
+            True("Combine doesn't change the PC's own settings object", newPc.SetupDone == 0);
+
             // Restore (files, test folder only)
             string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-backup-keys");
             try
@@ -689,6 +704,7 @@ namespace PrintPrice.Tests
                 System.IO.Directory.CreateDirectory(dir);
                 foreach (var f in System.IO.Directory.GetFiles(dir)) System.IO.File.Delete(f);
                 History.ResetBlock();
+                s.SetupDone = 0;   // restoring from the setup window
                 s.Save();
                 BackupData data;
                 History.ReadBackup(History.ToBackup(new List<QuoteRecord> { BRec("C", "2026-11-07 10:00:00") }, other, "1.12.0", DateTime.Now), out data);
@@ -697,6 +713,7 @@ namespace PrintPrice.Tests
                 var ls = AppSettings.Load();
                 True("Restore with settings: saved file keeps this PC's code, time, slicer", ls.FriendsMarkupPct == 55 && ls.GetBackupCode() == Code
                      && ls.LastOnlineBackup == "2026-11-10 14:05" && ls.SlicerPath == @"C:\Bambu\bambu-studio.exe");
+                Eq("Restore with settings: saved file has SetupDone 1 (was 0)", 1, ls.SetupDone);
             }
             finally
             {
@@ -1083,7 +1100,8 @@ namespace PrintPrice.Tests
 
             // settings defaults, Clone, valid-until
             var d = new AppSettings();
-            True("quote defaults: Gettic, 14 days, customer, dark", d.QuoteName == "Gettic" && d.QuoteValidDays == 14 &&
+            True("quote defaults: empty name, 14 days, customer, dark", d.QuoteName == "" && AppSettings.DefaultQuoteName == ""
+                 && AppSettings.LegacyQuoteName == "Gettic" && d.QuoteValidDays == 14 &&
                  d.QuotePrice == "customer" && !d.QuoteFriends && d.QuoteFor == History.ForCustomer && d.QuoteDark == 1);
             var dc = new AppSettings { QuoteName = "X", QuoteValidDays = 3, QuotePrice = "friends", QuoteDark = 0 }.Clone();
             True("Clone keeps quote settings", dc.QuoteName == "X" && dc.QuoteValidDays == 3 && dc.QuotePrice == "friends" && dc.QuoteDark == 0);
@@ -1230,11 +1248,11 @@ namespace PrintPrice.Tests
             // not invoiced yet (preview): due from today 10/11 + 30 = 10/12/2026
             var inew = History.InvoiceInfo(HistRecord(t), ss, new DateTime(2026, 11, 10, 9, 0, 0));
             True("not invoiced: due from today", !inew.FromSnapshot && inew.Due == new DateTime(2026, 12, 10));
-            // bad snapshot date -> today's settings; null record / settings never crash (defaults: 14 days, "Gettic")
+            // bad snapshot date -> today's settings; null record / settings never crash (defaults: 14 days, no name)
             var sbad = HistRecord(t); sbad.InvoiceNo = "2026-BAD1"; sbad.BilledAt = "2026-11-04 14:05:33"; sbad.InvoiceDue = "18/11/2026";
             True("bad snapshot date -> settings", !History.InvoiceInfo(sbad, ss, t).FromSnapshot);
             var inull = History.InvoiceInfo(null, null, t);
-            True("null record + settings -> defaults", inull != null && inull.Due == new DateTime(2026, 11, 18) && inull.FromName == "Gettic");
+            True("null record + settings -> defaults", inull != null && inull.Due == new DateTime(2026, 11, 18) && inull.FromName == "");
             // null settings in MakeInvoice: no snapshot
             var sn = HistRecord(t); sn.Model = "N";
             History.MakeInvoice(sl, sn, t, null, Seq(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11));
@@ -3066,6 +3084,30 @@ namespace PrintPrice.Tests
                 Eq("missing folder: LastFilamentPrice default", defaults.LastFilamentPrice, fresh.LastFilamentPrice);
                 True("missing folder: Language default", fresh.Language == defaults.Language);
                 True("Load doesn't create the folder", !System.IO.Directory.Exists(neverDir));
+                // 4a. first-time setup (idea 19): no settings.ini and no history.json = a new user -> setup window, empty quote name
+                Eq("new install: SetupDone 0", 0, fresh.SetupDone);
+                True("new install: QuoteName empty", fresh.QuoteName == "");
+                True("new AppSettings() (tests, picture mode, Defaults button): SetupDone 1, QuoteName empty",
+                     defaults.SetupDone == 1 && defaults.QuoteName == "");
+                // history.json but no settings.ini: not a new user -> no setup window, the old default name kept
+                string histOnlyDir = System.IO.Path.Combine(testDir, "history-only");
+                True("UseFolder history-only", AppSettings.UseFolder(histOnlyDir));
+                System.IO.Directory.CreateDirectory(histOnlyDir);
+                if (System.IO.File.Exists(AppSettings.FilePath)) System.IO.File.Delete(AppSettings.FilePath);
+                System.IO.File.WriteAllText(History.FilePath, "{}");   // only its existence counts
+                var ho = AppSettings.Load();
+                True("history only: SetupDone 1, QuoteName Gettic", ho.SetupDone == 1 && ho.QuoteName == "Gettic");
+                True("history only: Load wrote no settings.ini", !System.IO.File.Exists(AppSettings.FilePath));
+                // ForModel: a printer at its model's defaults (Settings' Defaults button / setup window)
+                var fm = PrinterProfile.ForModel("3", "", Wear.ModelP1S);
+                True("ForModel P1S: id 3, label name, 130 W, auto wear, P1S rate, stock nozzle/plate/profile", fm.Id == "3"
+                     && fm.Name == "Bambu Lab P1S" && fm.Model == "P1S" && fm.Watts == 130 && fm.AutoWearRate == 1
+                     && fm.MachineRatePerHour == Wear.DefaultRateFor("P1S") && fm.Nozzle == "0.4 stainless"
+                     && fm.BedType == "High Temp Plate" && fm.ProcessPreset == "0.16mm Optimal");
+                var fm2 = PrinterProfile.ForModel("x", "  Garage  ", "nope");
+                True("ForModel bad id -> 1, unknown model -> A1 (100 W), name trimmed", fm2.Id == "1" && fm2.Model == "A1"
+                     && fm2.Watts == 100 && fm2.Name == "Garage" && fm2.MachineRatePerHour == Wear.DefaultRateFor("A1"));
+                Eq("ForModel A1 mini: 70 W", 70, PrinterProfile.ForModel("2", null, Wear.ModelA1Mini).Watts);
                 // 5. save/load round trip in the test folder
                 True("UseFolder test dir again", AppSettings.UseFolder(testDir));
                 var s5 = new AppSettings();
@@ -3091,7 +3133,7 @@ namespace PrintPrice.Tests
                 System.IO.File.WriteAllText(testFile, "PrinterName=" + new string('b', 60) + "\r\n");
                 Eq("long PrinterName in file capped at 40", 40, AppSettings.Load().PrinterName.Length);
                 // 5a. quote export settings
-                True("quote defaults in file", r5.QuoteName == "Gettic" && r5.QuoteValidDays == 14 &&
+                True("quote defaults in file (empty name written as QuoteName=)", r5.QuoteName == "" && r5.QuoteValidDays == 14 &&
                      r5.QuotePrice == "customer" && r5.QuoteDark == 1);
                 var sq = new AppSettings { QuoteName = "Gettic 3D = Print", QuoteValidDays = 30, QuotePrice = "friends", QuoteDark = 0 };
                 sq.Save();
@@ -3106,6 +3148,43 @@ namespace PrintPrice.Tests
                 Eq("old QuoteDark=0 key ignored -> dark default", 1, AppSettings.Load().QuoteDark);
                 new AppSettings { QuoteName = "" }.Save();
                 True("round trip empty QuoteName stays empty", AppSettings.Load().QuoteName == "");
+                // SetupDone (idea 19): key round trip; an existing file without the key (old app) = 1, and an old
+                // file without QuoteName keeps "Gettic" (only a brand-new install starts empty)
+                new AppSettings { SetupDone = 0 }.Save();
+                True("file has SetupDone=0", System.IO.File.ReadAllText(testFile).Contains("SetupDone=0\r\n"));
+                Eq("round trip SetupDone 0", 0, AppSettings.Load().SetupDone);
+                new AppSettings().Save();
+                True("file has SetupDone=1", System.IO.File.ReadAllText(testFile).Contains("SetupDone=1\r\n"));
+                Eq("round trip SetupDone 1", 1, AppSettings.Load().SetupDone);
+                System.IO.File.WriteAllText(testFile, "SettingsVersion=2\r\nFriendsMarkupPct=30\r\n");
+                var noKey = AppSettings.Load();
+                True("old file without SetupDone / QuoteName: SetupDone 1, QuoteName Gettic", noKey.SetupDone == 1 && noKey.QuoteName == "Gettic");
+                System.IO.File.WriteAllText(testFile, "");
+                Eq("empty settings.ini (exists) = not new: SetupDone 1", 1, AppSettings.Load().SetupDone);
+                System.IO.File.WriteAllText(testFile, "SetupDone=7\r\n");
+                Eq("SetupDone 7 -> 1", 1, AppSettings.Load().SetupDone);
+                System.IO.File.WriteAllText(testFile, "SetupDone=-1\r\n");
+                Eq("SetupDone -1 ignored -> 1", 1, AppSettings.Load().SetupDone);
+                System.IO.File.WriteAllText(testFile, "SetupDone=0\r\nQuoteName=\r\n");
+                var still = AppSettings.Load();
+                True("file with SetupDone=0 (skipped nothing yet) keeps 0 and empty name", still.SetupDone == 0 && still.QuoteName == "");
+                Eq("FromIni(null) (website new install): SetupDone 1", 1, AppSettings.FromIni(null).SetupDone);
+                Eq("FromIni old lines without the key: SetupDone 1", 1, AppSettings.FromIni(new[] { "MinimumPrice=33" }).SetupDone);
+                // QuoteName: a new website visitor gets the empty default; old INI text without the key keeps "Gettic";
+                // an empty key stays empty; "QuoteName=" in the file and a missing key are told apart
+                True("FromIni(null) (website new visitor): QuoteName empty", AppSettings.FromIni(null).QuoteName == "");
+                True("FromIni(empty list): QuoteName Gettic (text exists)", AppSettings.FromIni(new string[0]).QuoteName == "Gettic");
+                True("FromIni old lines without QuoteName: Gettic", AppSettings.FromIni(new[] { "MinimumPrice=33" }).QuoteName == "Gettic");
+                True("FromIni QuoteName= stays empty", AppSettings.FromIni(new[] { "QuoteName=" }).QuoteName == "");
+                True("FromIni QuoteName=Lene kept", AppSettings.FromIni(new[] { "QuoteName=Lene" }).QuoteName == "Lene");
+                True("FromIni(new AppSettings().ToIni()): empty name round trip",
+                     AppSettings.FromIni(new AppSettings().ToIni()).QuoteName == "");
+                System.IO.File.WriteAllText(testFile, "");
+                True("empty settings.ini (exists): QuoteName Gettic", AppSettings.Load().QuoteName == "Gettic");
+                // a backup's settings without the key (History.Combine reads them with FromIni) also keep "Gettic"
+                var oldBackup = History.Combine(new List<QuoteRecord>(), new AppSettings(),
+                    new BackupData { Quotes = new List<QuoteRecord>(), Settings = new[] { "FriendsMarkupPct=30" } }, false, true);
+                True("restored old backup settings without QuoteName: Gettic", oldBackup.Settings != null && oldBackup.Settings.QuoteName == "Gettic");
                 System.IO.File.WriteAllText(testFile, "QuoteValidDays=0\r\nQuotePrice=boss\r\nQuoteLook=7\r\n");
                 var bq = AppSettings.Load();
                 True("bad quote values -> defaults (days 0 -> 14, price -> customer), QuoteLook 7 -> 1",

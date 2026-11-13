@@ -582,7 +582,7 @@ namespace PrintPrice
             }
 
             /// One line, cut with "…" when too long (then remembered for the dark tooltip, in content coordinates).
-            void Text(Graphics g, QuoteRecord r, string s, Font f, Rectangle rc, Color c, bool right)
+            void DrawText(Graphics g, QuoteRecord r, string s, Font f, Rectangle rc, Color c, bool right)
             {
                 if (string.IsNullOrEmpty(s) || rc.Width <= 0) return;
                 using (var sf = MakeFormat(right, true))
@@ -611,26 +611,26 @@ namespace PrintPrice
                 bool friends = r.For == History.ForFriends;
                 Color main = s ? Color.White : Theme.Text, muted = s ? Theme.Text : Theme.Muted;
                 int x = rc.X + P(8), w = rc.Width - P(16), y = well.Bottom + P(6);
-                Text(g, r, ModelText(r), NameFont, new Rectangle(x, y, w, NameH), main, false);
+                DrawText(g, r, ModelText(r), NameFont, new Rectangle(x, y, w, NameH), main, false);
                 y += NameH;
                 // price (Friends / Others, bold) + date (muted, right)
                 string date = ShortDate(r);
                 int dw = TextW(g, date, small);
-                Text(g, null, date, small, new Rectangle(x + w - dw, y + P(1), dw + 1, LineH), muted, true);
-                Text(g, null, Num.Kr(History.PriceFor(r)), NameFont, new Rectangle(x, y, w - dw - P(6), LineH),
+                DrawText(g, null, date, small, new Rectangle(x + w - dw, y + P(1), dw + 1, LineH), muted, true);
+                DrawText(g, null, Num.Kr(History.PriceFor(r)), NameFont, new Rectangle(x, y, w - dw - P(6), LineH),
                      s ? Color.White : friends ? Theme.Friends : Theme.Others, false);
                 y += LineH;
                 // time · grams (muted) + status (medium) / colour dots (large)
                 string facts = TimeText(r) + " · " + Num.Fmt(r.Grams) + " g";
                 int rightW = mode == ViewLarge ? DrawDots(g, r, x + w, y + LineH / 2) : DrawStatus(g, r, false, x + w, y, s);
-                Text(g, r, facts, small, new Rectangle(x, y + P(1), w - rightW - (rightW > 0 ? P(6) : 0), LineH), muted, false);
+                DrawText(g, r, facts, small, new Rectangle(x, y + P(1), w - rightW - (rightW > 0 ? P(6) : 0), LineH), muted, false);
                 if (mode == ViewLarge)
                 {
                     y += LineH;
                     int sw = DrawStatus(g, r, true, x + w, y, s);
                     string note = !string.IsNullOrEmpty(r.Note) ? r.Note
                                 : friends ? L.S("Friends & family", "Venner og familie") : L.S("Customer", "Kunde");
-                    Text(g, r, note, small, new Rectangle(x, y + P(1), w - sw - (sw > 0 ? P(6) : 0), LineH), muted, false);
+                    DrawText(g, r, note, small, new Rectangle(x, y + P(1), w - sw - (sw > 0 ? P(6) : 0), LineH), muted, false);
                 }
                 if (i == current && Focused)
                     using (var p = new Pen(s ? Color.White : Theme.Text) { DashStyle = DashStyle.Dot })
@@ -647,13 +647,13 @@ namespace PrintPrice
                 else if (longForm) { text = L.S("Not printed", "Ikke printet"); colour = selected ? Theme.Text : Theme.Muted; }
                 else return 0;
                 int tw = TextW(g, text, small);
-                Text(g, null, text, small, new Rectangle(right - tw, y + P(1), tw + 1, LineH), colour, true);
+                DrawText(g, null, text, small, new Rectangle(right - tw, y + P(1), tw + 1, LineH), colour, true);
                 int used = tw;
                 if (longForm && !string.IsNullOrEmpty(r.InvoiceNo))
                 {
                     string inv = r.InvoiceNo;
                     int iw = TextW(g, inv, small);
-                    Text(g, null, inv, small, new Rectangle(right - tw - P(6) - iw, y + P(1), iw + 1, LineH), selected ? Theme.Text : Theme.Muted, true);
+                    DrawText(g, null, inv, small, new Rectangle(right - tw - P(6) - iw, y + P(1), iw + 1, LineH), selected ? Theme.Text : Theme.Muted, true);
                     used += P(6) + iw;
                 }
                 return used;

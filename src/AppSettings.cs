@@ -41,6 +41,12 @@ namespace PrintPrice
             SettingsVersion = CurrentSettingsVersion;
         }
 
+        // First-time setup (idea 19): 0 = show the setup window at start, 1 = done or skipped (INI "SetupDone").
+        // Default 1, so new AppSettings() (tests, picture mode, website) and old files without the key never ask;
+        // only Load() on a new install (no settings.ini and no history.json) sets 0 (StartNewInstall).
+        // A restore with settings always gives 1 (History.Combine).
+        public double SetupDone = 1;
+
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
         public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
@@ -235,7 +241,10 @@ namespace PrintPrice
 
         // Quote export (picture / PDF)
         public const string QuotePriceCustomer = "customer", QuotePriceFriends = "friends";
-        public string QuoteName = "Gettic";     // name on the quote (may be empty)
+        // name on the quote: empty for new or default settings (new AppSettings(), the Settings Defaults button, a new
+        // install, a new website visitor); an existing file or INI without the key keeps the old default (StartRead)
+        public const string DefaultQuoteName = "", LegacyQuoteName = "Gettic";
+        public string QuoteName = DefaultQuoteName;   // name on the quote (may be empty)
         public double QuoteValidDays = 14;      // valid until = quote date + N days (whole days, min 1)
         public string QuotePrice = QuotePriceCustomer;   // which price the quote shows: "customer" or "friends"
         public double QuoteDark = 1;            // 1 = quote picture in the dark look (default), 0 = light; saved as "QuoteLook" (the old "QuoteDark" key is ignored so the dark default reaches everyone once)
@@ -491,6 +500,7 @@ namespace PrintPrice
             d["InvoiceDueDays"] = InvoiceDueDays;
             d["SettingsVersion"] = SettingsVersion;
             d["LastPrinterId"] = LastPrinterId;
+            d["SetupDone"] = SetupDone;
             return d;
         }
 
@@ -544,6 +554,7 @@ namespace PrintPrice
                 case "InvoiceDueDays": if (v >= 1 && v <= 365) InvoiceDueDays = Math.Round(v); break;
                 case "SettingsVersion": SettingsVersion = Math.Floor(v); break;
                 case "LastPrinterId": if (v >= 1 && v < 1e9) LastPrinterId = Math.Floor(v); break;
+                case "SetupDone": SetupDone = v != 0 ? 1 : 0; break;
             }
         }
 
@@ -590,7 +601,12 @@ namespace PrintPrice
             bool read = false;
             try
             {
-                if (!File.Exists(FilePath)) return s;   // new install: version 2 defaults
+                if (!File.Exists(FilePath))   // no settings file: version 2 defaults
+                {
+                    if (!File.Exists(History.FilePath)) s.StartNewInstall();   // nothing at all: a new user
+                    else s.QuoteName = LegacyQuoteName;   // history but no settings.ini: an existing user, who had the old default
+                    return s;
+                }
                 s.StartRead();   // also before reading: a file that exists but can't be read keeps these (ReadIni repeats it)
                 s.ReadIni(File.ReadAllLines(FilePath));
                 read = true;
@@ -629,11 +645,20 @@ namespace PrintPrice
             return FromIni(lines, out upgraded);
         }
 
+        /// A new install (Load: no settings.ini and no history.json): the setup window shows (SetupDone 0) and the name on
+        /// quotes is the (empty) default. Doesn't save.
+        internal void StartNewInstall()
+        {
+            SetupDone = 0;
+            QuoteName = DefaultQuoteName;
+        }
+
         // before reading a file: what a missing key means in an existing file
         void StartRead()
         {
             SettingsVersion = 0;                  // a file without the key is from before version 2
             ActivePrinterId = "";                 // not in the file = the first printer
+            QuoteName = LegacyQuoteName;          // a file without the key had the old default name (an empty key stays empty)
         }
 
         // parses settings.ini lines into this (fresh) object; may throw (Load / FromIni catch)
@@ -764,6 +789,22 @@ namespace PrintPrice
         public string ProcessPreset = "0.16mm Optimal";
 
         public PrinterProfile Clone() { return (PrinterProfile)MemberwiseClone(); }
+
+        /// A printer with its model's defaults (unknown model = A1), as Settings' Defaults button gives: the model's
+        /// power use and stock wear rate, auto wear on, stock nozzle / plate / print profile. Name empty = the model's
+        /// label. Cleaned; not added anywhere (AppSettings.SetPrinter puts it in place of the printer with this Id).
+        public static PrinterProfile ForModel(string id, string name, string modelKey)
+        {
+            var m = Wear.FindModel(modelKey);
+            var p = new PrinterProfile
+            {
+                Id = AppSettings.ValidPrinterId(id) ? id : "1", Model = m.Key,
+                Name = (name ?? "").Trim().Length == 0 ? m.Label : name,
+                Watts = m.DefaultWatts, AutoWearRate = 1, MachineRatePerHour = Wear.DefaultRateFor(m.Key)
+            };
+            p.Clean();
+            return p;
+        }
 
         /// Fixes bad values in place: name (CleanPrinterName), unknown model -> A1, unknown nozzle -> stock,
         /// empty bed type / profile -> defaults, negative or NaN numbers -> defaults.

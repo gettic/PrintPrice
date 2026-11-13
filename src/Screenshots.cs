@@ -25,6 +25,7 @@ namespace PrintPrice
             {
                 Directory.CreateDirectory(folder);
                 var s = new AppSettings();   // defaults only; never Load() or Save()
+                s.QuoteName = AppSettings.LegacyQuoteName;   // pictures keep "Gettic" (new users start with an empty name)
                 var fake = FakeUpdate();
 
                 using (var main = new MainForm(s, true))
@@ -32,6 +33,8 @@ namespace PrintPrice
                     Place(main);
                     main.Show();
                     Snap(main, folder, "main_empty.png");   // fresh window: logo + "No model yet"
+                    main.SampleSetupHint();   // idea 19: after "Set up later" (the next message removes it)
+                    Snap(main, folder, "main_setup_hint.png");
                     main.SetSampleJob();   // Benchy example with a sample live price
                     // sample model picture: <folder>\model.png if it is there (e.g. a slicer plate_1.png), else the logo stays
                     string sample = Path.Combine(folder, "model.png");
@@ -177,6 +180,43 @@ namespace PrintPrice
                         set.Show();
                         Snap(set, folder, "settings_payback.png");
                         set.Hide();
+                    }
+
+                    // first-time setup (idea 19): each step of a first run (new install: no name on quotes), the printer step
+                    // without Bambu Studio, the summary with two printers ticked; then the summary of a re-run from Settings
+                    var fresh = s.Clone();
+                    fresh.QuoteName = "";
+                    fresh.SetupDone = 0;
+                    using (var setup = new SetupForm(fresh, false))
+                    {
+                        Place(setup);
+                        setup.Show();
+                        string[] setupNames = { "setup_1.png", "setup_2.png", "setup_3.png", "setup_4.png" };
+                        for (int i = 0; i < setupNames.Length; i++)
+                        {
+                            setup.SampleStep(i);
+                            Snap(setup, folder, setupNames[i]);
+                        }
+                        setup.SampleStep(SetupForm.StepPrinter);
+                        setup.SampleStudioMissing(true);
+                        Snap(setup, folder, "setup_studio_missing.png");
+                        setup.SampleStudioMissing(false);
+                        setup.SampleAnswers();
+                        setup.SampleStep(SetupForm.StepPrinter);
+                        Snap(setup, folder, "setup_2_two.png");
+                        setup.SampleStep(SetupForm.StepSummary);
+                        Snap(setup, folder, "setup_5.png");
+                        setup.Hide();
+                    }
+                    using (var setup = new SetupForm(s, true))
+                    {
+                        Place(setup);
+                        setup.Show();
+                        setup.SampleStep(SetupForm.StepPrinter);
+                        Snap(setup, folder, "setup_again_printer.png");
+                        setup.SampleStep(SetupForm.StepSummary);
+                        Snap(setup, folder, "setup_again.png");
+                        setup.Hide();
                     }
 
                     using (var up = new UpdateForm(fake, null))

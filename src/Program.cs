@@ -19,6 +19,17 @@ namespace PrintPrice
 
         static string[] startArgs = new string[0];
 
+        /// Exit code of a --test-* hook run (0 = passed, 4 = a FAIL); Main returns it after Application.Run.
+        static int testExitCode;
+
+        /// Ends a --test-* hook run: closes the windows the normal way (Application.Exit) and makes Main return code.
+        /// (Environment.Exit straight from the UI thread could let a late repaint hit GDI+ while it shut down: exit 3.)
+        internal static void EndTestRun(int code)
+        {
+            testExitCode = code;
+            Application.Exit();
+        }
+
         [STAThread]
         static int Main(string[] args)
         {
@@ -41,10 +52,12 @@ namespace PrintPrice
             // --test-slice "<spec file>" / --test-repeat (idea 21, test mode + --hidden only): MainForm.TestSliceFlow slices the
             // spec's files with a colour each and saves the job; TestRepeatFlow repeats the newest history record. Both write
             // a txt in the settings folder and exit 0 / 4 (see plans\idea21-multipart\test-hook.md).
+            // --test-history "<spec file>" (idea 22, test mode + --hidden only): MainForm.TestHistoryFlow plays the spec in the
+            // History window (delete, undo, Clear all, restore...) with the app's own handlers; test_history.txt, exit 0 / 4.
             bool testError = Array.IndexOf(args, "--test-error") >= 0;
             bool testPictures = Array.IndexOf(args, "--test-pictures") >= 0;
             bool testRepeat = Array.IndexOf(args, "--test-repeat") >= 0;
-            string testSlice = null;
+            string testSlice = null, testHistory = null, testSetup = null;
             var rest = new System.Collections.Generic.List<string>();
             for (int i = 0; i < args.Length; i++)
             {
@@ -52,6 +65,18 @@ namespace PrintPrice
                 {
                     if (i + 1 >= args.Length || testSlice != null) return Fail("--test-slice needs one spec file");
                     testSlice = args[++i];
+                    continue;
+                }
+                if (args[i] == "--test-setup")
+                {
+                    if (i + 1 >= args.Length || testSetup != null) return Fail("--test-setup needs one spec file");
+                    testSetup = args[++i];
+                    continue;
+                }
+                if (args[i] == "--test-history")
+                {
+                    if (i + 1 >= args.Length || testHistory != null) return Fail("--test-history needs one spec file");
+                    testHistory = args[++i];
                     continue;
                 }
                 if (args[i] != "--test-error" && args[i] != "--test-pictures" && args[i] != "--test-repeat") rest.Add(args[i]);
@@ -64,6 +89,19 @@ namespace PrintPrice
                 return Fail("--test-slice / --test-repeat need --settings and --hidden");
             if (testSlice != null && testRepeat) return Fail("--test-slice and --test-repeat can't be used together");
             if (testSlice != null && !File.Exists(testSlice)) return Fail("--test-slice spec file not found: " + testSlice);
+            if (testHistory != null)
+            {
+                if (opt.SettingsFolder == null || !opt.Hidden) return Fail("--test-history needs --settings and --hidden");
+                if (testSlice != null || testRepeat || testPictures) return Fail("--test-history can't be used with another --test- hook");
+                if (!File.Exists(testHistory)) return Fail("--test-history spec file not found: " + testHistory);
+            }
+            if (testSetup != null)
+            {
+                if (opt.SettingsFolder == null || !opt.Hidden) return Fail("--test-setup needs --settings and --hidden");
+                if (testSlice != null || testRepeat || testPictures || testHistory != null || testError)
+                    return Fail("--test-setup can't be used with another --test- hook");
+                if (!File.Exists(testSetup)) return Fail("--test-setup spec file not found: " + testSetup);
+            }
             if (opt.SettingsFolder != null)
             {
                 if (!AppSettings.UseFolder(opt.SettingsFolder)) return Fail("--settings folder refused: " + opt.SettingsFolder);
@@ -85,6 +123,37 @@ namespace PrintPrice
             Application.SetCompatibleTextRenderingDefault(false);
             var settings = AppSettings.Load();
             L.Danish = AppSettings.IsDanish(settings.Language);   // set once; a change in Settings needs a restart
+            // first-time setup (idea 19): a new install (no settings.ini and no history.json) gets the setup window before
+            // the main one, so its language choice needs no restart. Never in test mode (an empty test folder is "new" too).
+            // Finished or skipped (Set up later / ✕): SetupDone = 1 and saved, so it never asks again.
+            // --test-setup "<spec>" (test mode + --hidden only, plans\idea19-setup\followup-plan.md) is the one test run that
+            // may open it: SetupTest plays the spec's "setup" block in it and the rest once the main window shows.
+            SetupTest setupTest = null;
+            if (testSetup != null)
+            {
+                try { setupTest = new SetupTest(Path.GetFullPath(testSetup)); setupTest.Start(settings); }
+                catch (Exception ex) { return Fail("--test-setup spec can't be read: " + ex.Message); }
+            }
+            bool setupShown = false, setupLater = false;
+            if (settings.SetupDone == 0 && (!AppSettings.TestMode || setupTest != null))
+            {
+                setupShown = true;
+                try
+                {
+                    using (var setup = new SetupForm(settings, false))
+                    {
+                        setup.ShowDialog();
+                        if (setup.Restored) settings = AppSettings.Load();   // a backup with settings was restored and saved
+                        else if (setup.Result != null) settings = setup.Result;
+                        setupLater = setup.SetUpLater && !setup.Restored;
+                    }
+                }
+                catch (Exception ex) { ErrorReport.Show(ex); }   // the main window still opens, with what we have
+                settings.SetupDone = 1;
+                settings.Save();
+                L.Danish = AppSettings.IsDanish(settings.Language);
+            }
+            if (setupTest != null) setupTest.AfterStart(setupShown, settings);
             MainForm main;
             try { main = new MainForm(settings, false); }
             catch (Exception ex) { ErrorReport.Show(ex, true); return 1; }   // no main window: tell, then end
@@ -106,8 +175,16 @@ namespace PrintPrice
             }
             if (testRepeat)
                 main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestRepeatFlow); };
+            if (setupLater) main.ShowSetupHint();   // "Setup skipped – run it now" once, in the info box
+            if (setupTest != null)
+                main.Shown += delegate { main.BeginInvoke((MethodInvoker)delegate { main.TestSetupFlow(setupTest); }); };
+            if (testHistory != null)
+            {
+                string spec = Path.GetFullPath(testHistory);
+                main.Shown += delegate { main.BeginInvoke((MethodInvoker)delegate { main.TestHistoryFlow(spec); }); };
+            }
             Application.Run(main);
-            return 0;
+            return testExitCode;   // 0 in normal runs
         }
 
         static int Fail(string message)

@@ -232,6 +232,42 @@ namespace PrintPrice
             clock.Tick += delegate { ClockTick(); };
             clock.Start();
             FormClosed += delegate { clock.Stop(); clock.Dispose(); };
+            Shown += delegate
+            {
+                // --test-history only (test mode + --hidden): the hook plays its restore steps in this window
+                var d = TestDriver;
+                if (d == null || !AppSettings.TestMode || !Program.Hidden) return;
+                TestDriver = null;
+                BeginInvoke((MethodInvoker)delegate { d(this); });
+            };
+        }
+
+        // ---------- --test-history hook (test mode + --hidden only; plans\history-test-hook\plan.md) ----------
+        /// Set by HistoryForm's test player before Backup… is clicked: runs once on this window's Shown.
+        internal static Action<BackupForm> TestDriver;
+
+        /// The Restore tab as a user fills it: a file (LoadFile = Browse… after its dialog), Merge / Replace, the settings
+        /// tick, then the Restore button (Replace question answered by AskForm.TestAnswers). Logs what the window says.
+        internal async Task TestRestore(string path, bool replace, bool withSettings, TestLog log)
+        {
+            string startFile;
+            string startDir = BrowseStart(list.Count, out startFile);
+            log.Add("  browse would open at: " + (startDir ?? "(Windows' default)") + (startFile != null ? ", file picked: " + startFile : ""));
+            SelectedTab = TabRestore;
+            rbFromFile.Checked = true;
+            if (path == null) { log.Check(false, "backup file given"); return; }
+            await LoadFile(path);
+            log.Add("  restore summary: " + infoSummary.Text);
+            if (replace) rbReplace.Checked = true; else rbMerge.Checked = true;
+            chkSettings.Checked = withSettings;
+            bool can = btnAction.Visible && btnAction.Enabled;
+            log.Check(can, "Restore button can be clicked");
+            if (can) btnAction.PerformClick();
+            if (doneShown)
+                log.Add("  done: " + doneMain.Text.Replace("\n", " / ") + " | " + doneMain.MutedLine +
+                        (doneSafety.Text.Length > 0 ? " | " + doneSafety.Text + " " + doneSafety.MutedLine : ""));
+            else log.Add("  not restored: " + infoSummary.Text);
+            log.Check(doneShown, "restored");
         }
 
         int Px(float v) { return (int)Math.Round(v * DeviceDpi / 96f); }
@@ -780,21 +816,42 @@ namespace PrintPrice
                          L.S("All files", "Alle filer") + " (*.*)|*.*"
             })
             {
-                // idea 22: after a Clear all the way back is its safety copy in the (hidden) settings folder: start there,
-                // with the newest copy already picked while the history is empty
-                string clearCopy = History.NewestClearCopy();
-                if (clearCopy != null)
+                string startFile;
+                string startDir = BrowseStart(list.Count, out startFile);
+                if (startDir != null)
                 {
                     try
                     {
-                        dlg.InitialDirectory = Path.GetDirectoryName(clearCopy);
-                        if (list.Count == 0) dlg.FileName = Path.GetFileName(clearCopy);
+                        dlg.InitialDirectory = startDir;
+                        if (startFile != null) dlg.FileName = startFile;
                     }
                     catch { }
                 }
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 path = dlg.FileName;
             }
+            await LoadFile(path);
+        }
+
+        /// Where Browse… opens (null = Windows' default). Idea 22: after a Clear all the way back is its safety copy in
+        /// the (hidden) settings folder: start there, with the newest copy already picked (file) while the history is empty.
+        static string BrowseStart(int quotes, out string file)
+        {
+            file = null;
+            try
+            {
+                string clearCopy = History.NewestClearCopy();
+                if (clearCopy == null) return null;
+                if (quotes == 0) file = Path.GetFileName(clearCopy);
+                return Path.GetDirectoryName(clearCopy);
+            }
+            catch { file = null; return null; }
+        }
+
+        /// The chosen backup file (Browse…, and the --test-history hook): read and parsed off the UI thread, then the
+        /// Restore tab shows its summary.
+        internal async Task LoadFile(string path)
+        {
             fileData = null;
             fileProblem = null;
             txtFile.Text = Path.GetFileName(path);
@@ -1165,7 +1222,29 @@ namespace PrintPrice
                     info.SetWidth(w);
                     root.MinimumSize = new Size(w + root.Padding.Horizontal, 0);
                 };
-                Shown += delegate { if (!Program.Hidden && !Screenshots.Active) btnNo.Focus(); };
+                Shown += delegate
+                {
+                    if (!Program.Hidden && !Screenshots.Active) btnNo.Focus();
+                    TestAnswer();
+                };
+            }
+
+            /// --test-history (test mode + --hidden only): the question is logged and answered from TestAnswers at once
+            /// (none left = an unexpected question: FAIL, answered No).
+            internal static Queue<DialogResult> TestAnswers;
+            internal static TestLog TestLog;
+
+            void TestAnswer()
+            {
+                if (TestAnswers == null || !AppSettings.TestMode || !Program.Hidden) return;
+                bool expected = TestAnswers.Count > 0;
+                var a = expected && TestAnswers.Dequeue() == DialogResult.Yes ? DialogResult.Yes : DialogResult.No;
+                if (TestLog != null)
+                {
+                    TestLog.Add("  ask: " + Text + " | " + question.Text + " | " + (info.Text ?? "").Replace("\n", " / ") + " -> " + a);
+                    if (!expected) TestLog.Check(false, "unexpected question");
+                }
+                DialogResult = a;
             }
 
             protected override void OnHandleCreated(EventArgs e)

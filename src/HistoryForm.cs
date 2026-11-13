@@ -559,6 +559,7 @@ namespace PrintPrice
                 DropUndo();
                 if (pics != null) pics.Dispose();
             };
+            HookTestDriver();   // --test-history only (HistoryFormTest.cs)
             ActiveControl = grid;
         }
 
@@ -1204,6 +1205,8 @@ namespace PrintPrice
             doneShown = true;
             info.Text = text;
             info.Kind = kind;
+            doneLinks = links;
+            doneClicks = clicks;
             if (links != null) info.SetLinks(links, clicks);
             KeepInfoHeight(false);
         }
@@ -1540,7 +1543,7 @@ namespace PrintPrice
                 int n = undoClearMemory.Count;
                 undoClearMemory = null;
                 pics.Reload();
-                Rebuild(true, null, null);
+                ShowAllAfterUndo();
                 ShowDone(L.F("✓ {0} quotes back.", "✓ {0} tilbud er tilbage.", n), InfoKind.Success, null, null);
             }
             else if (undoClearCopy != null)
@@ -1556,11 +1559,18 @@ namespace PrintPrice
                 else { list.Clear(); list.AddRange(res.Quotes); }
                 undoClearCopy = null;
                 pics.Reload();
-                Rebuild(true, null, null);
+                ShowAllAfterUndo();
                 if (err != null) ShowDone(err, InfoKind.Warning, null, null);   // the history is back, the settings file wasn't written
                 else ShowDone(L.F("✓ {0} quotes back.", "✓ {0} tilbud er tilbage.", list.Count), InfoKind.Success, null, null);
             }
             FocusList();
+        }
+
+        /// Undo of Clear all: like after a restore (all printers), but on "All months", so every job that came back shows.
+        void ShowAllAfterUndo()
+        {
+            RefillMonths(DateTime.MinValue);   // the "All months" item's Month
+            BuildList(true, null, null, null);
         }
 
         /// The undo is gone (window closing, a new delete, Clear all, Backup…): deleted records' pictures go now.

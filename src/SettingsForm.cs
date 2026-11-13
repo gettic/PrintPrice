@@ -28,6 +28,9 @@ namespace PrintPrice
         /// Back up… / Restore…: (owner, BackupForm tab) opens the Backup window (MainForm.OpenBackup); true = a restore
         /// saved new settings, so this window closes without saving.
         public Func<IWin32Window, int, bool> BackupRequested;
+        Button btnSetupAgain;   // App tab: "Run setup again…" (idea 19)
+        /// True when the window closed with "Run setup again…" (nothing saved; MainForm opens the setup window).
+        public bool SetupRequested;
 
         // several printers: the Printer tab edits one printer of `work` (a copy of the settings) at a time
         AppSettings work;
@@ -243,6 +246,20 @@ namespace PrintPrice
             backupFlow.Controls.Add(btnRestoreFrom);
             t.Controls.Add(backupFlow, 1, br);
             t.SetColumnSpan(backupFlow, 2);
+            // first-time setup again (idea 19): closes Settings (Cancel), then MainForm opens the setup window
+            Section(t, L.S("Setup", "Opsætning")).Margin = new Padding(0, 6, 0, 4);
+            int sr = t.RowCount++;
+            t.Controls.Add(Caption(L.S("Guided setup", "Guidet opsætning")), 0, sr);
+            btnSetupAgain = new Button { Text = L.S("Run setup again…", "Kør opsætning igen…"), Size = new Size(120, 25), Padding = Padding.Empty,
+                                         Margin = new Padding(0, 3, 0, 3), UseMnemonic = false, Font = new Font("Segoe UI", 9f), Anchor = AnchorStyles.Left };
+            btnSetupAgain.Click += delegate
+            {
+                SetupRequested = true;
+                DialogResult = DialogResult.Cancel;
+                Close();
+            };
+            t.Controls.Add(btnSetupAgain, 1, sr);
+            t.SetColumnSpan(btnSetupAgain, 2);
 
             // ----- below the tabs: line, version + "check now" (left), Defaults / OK / Cancel (right) -----
             separator = new Panel { Height = 1 };
@@ -340,7 +357,7 @@ namespace PrintPrice
             foreach (var b in new[] { reset, ok, cancel }) b.Size = new Size(bw, Px(ButtonH));
             // Add… / Remove: box height, each its text + 24 px (flat buttons draw with inner padding), so the printer
             // drop-down keeps room for "Bambu Lab A1 mini"; its open list is as wide as the longest name
-            foreach (var b in new[] { btnAddPrinter, btnRemovePrinter, btnBackupTo, btnRestoreFrom })
+            foreach (var b in new[] { btnAddPrinter, btnRemovePrinter, btnBackupTo, btnRestoreFrom, btnSetupAgain })
                 b.Size = new Size(TextRenderer.MeasureText(b.Text, b.Font).Width + Px(24), txtWatts.Height);
             FitHeight();
             FitPrinterList();
@@ -370,6 +387,14 @@ namespace PrintPrice
             separator.SetBounds(m, by - Px(SepGap) - 1, cw, 1);
             checkFlow.MaximumSize = new Size(Math.Max(1, reset.Left - Px(8) - m), 0);
             checkFlow.Location = new Point(m, by + (cancel.Height - checkFlow.Height) / 2);
+        }
+
+        /// --test-setup (test mode + --hidden only): clicks "Run setup again…" like the user (the App tab must be showing).
+        internal void TestClickSetupAgain()
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            SelectedTab = TabApp;
+            btnSetupAgain.PerformClick();
         }
 
         /// Back up… / Restore… on the App tab. After a restore the settings on disk are new: close without saving.
@@ -521,7 +546,7 @@ namespace PrintPrice
         }
 
         /// Unit label drawn without GDI's side padding, so "6 px after the box" is 6 px to the text.
-        sealed class UnitLabel : Label
+        internal sealed class UnitLabel : Label   // also SetupForm's units
         {
             const TextFormatFlags Flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine |
                                           TextFormatFlags.Left | TextFormatFlags.Top;

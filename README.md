@@ -16,6 +16,24 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 
 **Optional:** install [Bambu Studio](https://bambulab.com/en/download/studio) to detect print time and filament use automatically.
 
+**First start:** on a new PC, a short setup window opens before the main window. It has 4 steps and a summary:
+
+| Step | What you set |
+|---|---|
+| 1 | Language (English or Dansk). **Restore a backup…** if you used PrintPrice before |
+| 2 | Which printers you have (A1, A1 mini, P1S; tick each one), and whether Bambu Studio was found |
+| 3 | Your filament price, and a live (DK1 or DK2) or fixed electricity price |
+| 4 | Markups, minimum price and your name on quotes, with an example price |
+
+- **Back**, **Skip** and **Next** are on every step. **Skip** keeps the default for that step.
+- If Bambu Studio isn't found, step 2 has a **Download Bambu Studio** link and **Find bambu-studio.exe…**.
+- A restored backup with settings ends the setup. A backup with only the price history lets you carry on.
+- **Set up later** (or closing the window) keeps the defaults. The main window then shows "Setup skipped – run it now" once.
+- Run it again any time from **Settings → App → Run setup again…**. It fills in your answers, and only adds printers, never removes them. A new language takes effect after a restart (PrintPrice restarts when you save).
+- If you already use PrintPrice, you never see it after an update.
+
+<p align="center"><img src="assets/screenshot-setup.png" width="420" alt="Screenshot of the setup window"></p>
+
 ## Website
 There is also a calculator in the browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). Type the print time, grams, kr/kg and the electricity price, and you get both prices and the cost breakdown. It is in English and Danish. Settings are kept only in that browser.
 
@@ -101,7 +119,7 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Failed prints:** optional. Set a % in Settings and material and power are raised by it for failed prints and reprints, before the markup. The default is 0 % (off). When it is above 0, the Cost breakdown shows a "Failed prints" line.
 - **Failed prints payback:** on by default. In the price history, tick **Failed** on a saved quote. With **Earn back failed prints** on in Settings, new quotes get a payback of 10 % (**% per quote**) of material + power until the failed print's material, power and wear are made back. It never adds more than what is left. It is shown as **Failed prints payback** in the Cost breakdown, is not marked up, and is added after the minimum price and before rounding. **Paid by** is **Customers only** (default; only quotes saved For = Customer count) or **Both prices**. Settings shows **Not made back yet**. A saved quote counts as sold, so delete quotes you didn't sell.
-- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank) and **App** (language, update check, Bambu Studio path).
+- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank) and **App** (language, update check, Bambu Studio path, backup, and **Run setup again…**).
   - On the **Printer** tab, the **Printer** drop-down picks which printer you edit; the one in use is marked "(in use)". **Add…** adds an A1, A1 mini or P1S with that model's defaults. **Remove** removes the printer shown (only when you have 2 or more).
   - Each printer's **Name** is shown on the printer card and the quote. Left empty, the model name is used. The filament profile is the same for all printers.
 - **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
@@ -191,7 +209,7 @@ The default setup is a 0.4 stainless nozzle, PLA and the smooth PEI plate. All o
 | Failed prints | 0 % (off; % of material + power) |
 | Minimum price | 50 kr. (customers only) |
 | Failed prints payback | On; 10 % per quote; paid by customers only |
-| Quote | Name "Gettic", valid 14 days, customer price, dark picture |
+| Quote | No name on a new install (set it in the setup or Settings), valid 14 days, customer price, dark picture |
 | Invoice | Due after 14 days; MobilePay and bank empty |
 | History | List view |
 | Language | Automatic (Danish if Windows is Danish, otherwise English) |
@@ -208,9 +226,9 @@ The app sends no personal information anywhere. It has no account, cookies or tr
 | Service | When | What is sent |
 |---|---|---|
 | GitHub | At startup, every 10 minutes while the program is open, and when you open Settings, to look for a new version (all of it can be switched off in Settings); when you click **Update now** | A normal web request with the app name and version. Unchanged answers are not downloaded again (ETag), and if GitHub says "too many requests" the app quietly waits longer |
-| Energi Data Service | At startup to get the electricity price (can be switched off in Settings), or when you click the price button | The price area (DK1/DK2) |
+| Energi Data Service | At startup to get the electricity price (can be switched off in Settings), when you click the price button, or in the setup window's electricity step while the live price is chosen (the default) | The price area (DK1/DK2) |
 | PrintPrice's backup service (Cloudflare relay) | Only when you use **Online, with a code** in the Backup window (in the app or on the website): back up, get a backup, new code or delete | The encrypted backup and a storage id made from the code. The backup is locked on your PC (or in your browser) first, and the code itself is never sent |
-| Your browser | Only when you click **GitHub** in "Made by Gettic · GitHub" at the bottom of the main window, the issues link in the message about an unsupported printer, or **Open the page** in the MakerWorld message | Opens this project's page (github.com/gettic/PrintPrice), its issues page or the MakerWorld page you pasted. Nothing is sent before the click |
+| Your browser | Only when you click **GitHub** in "Made by Gettic · GitHub" at the bottom of the main window, the issues link in the message about an unsupported printer, **Open the page** in the MakerWorld message, or **Download Bambu Studio** in the setup window | Opens this project's page (github.com/gettic/PrintPrice), its issues page, the MakerWorld page you pasted or the Bambu Studio download page. Nothing is sent before the click |
 | Printables | Only when you paste a Printables link | The model's ID, then the file and a small model picture (~10 KB, from media.printables.com) download |
 
 To enforce the 5-a-day online backup limit, the relay keeps only a salted hash of your IP address (not the address itself) for 2 days.
@@ -239,7 +257,7 @@ This runs the tests and compiles `bin\PrintPrice.exe` with the C# compiler that 
 
 To redraw the README pictures, run `PrintPrice.exe --screenshots <folder>`. This hidden option saves the windows as PNGs in that folder and exits. It uses default settings, never goes online and never saves anything. Add `--lang da` for Danish pictures. A `model.png` in the folder is used as the sample model picture for `main.png`, and a `model2.png` for the multi-colour `main_multi.png`.
 
-For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` runs the app on a separate settings folder. The folder is created if missing and starts with defaults. The real `%APPDATA%\PrintPrice` is never touched, and there are no update checks or installs. `--hidden` keeps the window off-screen.
+For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` runs the app on a separate settings folder. The folder is created if missing and starts with defaults. The real `%APPDATA%\PrintPrice` is never touched. There are no update checks or installs, the live electricity price is never fetched (a fixed test price marked "test" is used instead), and the setup window doesn't open. `--hidden` keeps the window off-screen.
 
 ### Project layout
 | Path | What |
@@ -258,6 +276,8 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/PrinterPickerForm.cs` | The Choose printer window |
 | `src/QuotePage.cs`, `src/QuoteForm.cs` | The quote and invoice page (picture, PDF) and its window |
 | `src/MainForm.cs`, `src/SettingsForm.cs`, `src/UpdateForm.cs`, `src/Theme.cs` | User interface |
+| `src/SetupForm.cs` | The first-time setup window |
+| `src/FilePickerForm.cs` | The Choose files and colours window |
 | `src/ErrorForm.cs` | The "Something went wrong" window and `errors.log` |
 | `src/Lang.cs` | English and Danish texts |
 | `src/Screenshots.cs` | Hidden `--screenshots` picture mode |
