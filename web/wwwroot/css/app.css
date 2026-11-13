@@ -148,7 +148,7 @@ summary:hover { color: var(--text); }
 details .rows { margin-top: 8px; font-size: 13px; }
 
 /* bottom row */
-.bottom { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.bottom { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }   /* narrow + Danish: buttons wrap instead of widening the page */
 .bottom .made { flex: 1; color: var(--muted); font-size: 13px; }
 .bottom .made a { color: var(--muted); text-decoration: none; }
 .bottom .made a:hover { color: var(--text); text-decoration: underline; }
@@ -423,4 +423,69 @@ table.hist tr.picked.ticked td { background: var(--accent); }
     .prices { grid-template-columns: 1fr; }
     .tab { grid-template-columns: 1fr; }
     .tab h3, .tab .help, .tab .wear { grid-column: 1; }
+}
+
+/* idea 19: first-time setup (Pages\SetupDialog.razor); Theme colours only */
+.dialog.setup { max-width: 560px; }
+.setup .shead { padding: 12px 14px 0; }
+.setup .srow { display: flex; align-items: baseline; gap: 10px; }
+.setup .srow h2 { flex: 1; margin: 0; font-size: 17px; font-weight: 600; }
+.setup .scount { color: var(--muted); font-size: 13px; white-space: nowrap; }
+.setup .sbar { display: flex; gap: 6px; margin-top: 6px; }
+.setup .sbar i { flex: 1; height: 3px; background: var(--border); }
+.setup .sbar i.on { background: var(--accent); }
+.setup .sbody { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.setup .sbody .hinfo { margin-top: 0; font-size: 14px; }
+.setup .sbody .hinfo .muted { font-size: 13px; }
+.setup h3 { margin: 4px 0 0; font-size: 14px; font-weight: 600; }
+.setup .small { font-size: 13px; }
+.setup .sgrid { display: grid; grid-template-columns: 200px 1fr; gap: 8px 12px; align-items: center; }
+.setup .sgrid.indent { grid-template-columns: 177px 1fr; }
+.setup .sgrid select { justify-self: start; width: 268px; max-width: 100%; }   /* same right edge in both languages */
+.setup .indent { margin-left: 23px; }
+.setup select:disabled, .setup input:disabled { opacity: .55; }
+.setup .stiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.setup .stile { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 6px; background: var(--info);
+    border: 1px solid var(--border); border-radius: 6px; }
+.setup .stile:hover { background: var(--hot-back); border-color: var(--hot-border); }
+.setup .stile.on { border: 2px solid var(--accent); padding: 9px 5px; }
+.setup .stile svg { margin-bottom: 4px; }
+.setup .stile .nm { font-weight: 600; }
+.setup .stile .tag { margin-top: 4px; font-size: 12px; background: var(--accent); color: #fff; padding: 0 6px; border-radius: 3px; }
+.setup .exrow { display: flex; justify-content: space-between; gap: 12px; }
+.setup .exrow .f { color: var(--friends); font-weight: 600; }
+.setup .exrow .o { color: var(--others); font-weight: 600; }
+.setup .ssum { display: grid; grid-template-columns: auto 1fr auto; column-gap: 0; align-items: stretch; }   /* gap as cell padding: unbroken row lines */
+.setup .ssum > * { padding: 5px 12px 5px 0; border-bottom: 1px solid var(--input); display: flex; align-items: center; }   /* same height: one row line */
+.setup .ssum > .linkbtn { padding-right: 0; border-bottom: 1px solid var(--input); border-radius: 0; }
+.setup .ssum .c { color: var(--muted); }
+.setup .ssum .v { min-width: 0; overflow-wrap: anywhere; }
+.setup .linkbtn { border: 0; background: transparent; padding: 5px 0; text-decoration: underline; font-size: 14px; }
+.setup .linkbtn:hover { background: transparent; color: #fff; }
+.setup .problem { margin-top: 0; }
+.setup .sbuttons { border-top: 1px solid var(--border); align-items: center; }
+.setup .sbuttons .later { margin-right: auto; border: 0; background: transparent; color: var(--muted); padding: 6px 0; }
+.setup .sbuttons .later:hover { color: var(--text); text-decoration: underline; }
+.setup .sbuttons button:disabled { opacity: .5; cursor: default; }
+.setup-hint { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+.setup-hint a { flex: 1; }
+.setup-hint button.x { border: 0; background: transparent; padding: 2px 8px; }
+.setup-hint button.x:hover { background: var(--button-hover); }
+@media (max-width: 560px) {
+    .setup-overlay { padding: 0; }
+    .dialog.setup { border: 0; min-height: 100vh; }
+    .setup .sgrid, .setup .sgrid.indent { grid-template-columns: 1fr; gap: 4px; }
+    .setup .sgrid label { margin-top: 4px; }
+    .setup .stiles { gap: 6px; }
+    .setup .stile svg { width: 44px; height: 35px; }
+    .setup .ssum { grid-template-columns: 1fr auto; }
+    .setup .ssum .c { grid-column: 1 / -1; border-bottom: 0; padding-bottom: 0; font-size: 13px; }
+    .setup .linkbtn { min-height: 44px; padding-left: 16px; }
+    .setup .sgrid select { width: 100%; }
+    .setup .sbuttons { flex-wrap: wrap; }
+    .setup .sbuttons button { flex: 1; padding: 8px 6px; min-height: 44px; }
+    .setup .sbuttons .back.first { display: none; }   /* the disabled Back on step 1 takes no room */
+    .setup .sbuttons .later { flex-basis: 100%; order: 9; text-align: center; margin: 4px 0 0; min-height: 44px; }
+    .bottom .made { flex-basis: 100%; order: 9; }   /* "Made by Gettic · GitHub" on its own line under the buttons */
+    .bottom button { flex: 1 1 auto; }
 }

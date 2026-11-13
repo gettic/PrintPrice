@@ -184,6 +184,23 @@
             told: function () { try { if (window.printPrice.channel) window.printPrice.channel.postMessage('history'); } catch (e) { } },
             go: function (hash) { if ((location.hash || '') !== hash) location.hash = hash; },
             toTop: function () { window.scrollTo(0, 0); },
+            // first-time setup: focus a box (selector) with its text selected; touch screens skipped unless always (no
+            // phone keyboard popping up). The setup's text boxes also select all whenever they get focus.
+            focusBox: function (selector, always) {
+                if (!window.__ppSelect) {
+                    window.__ppSelect = true;
+                    document.addEventListener('focusin', function (e) {
+                        var t = e.target;
+                        if (t && t.matches && t.matches('.setup input[type=text]')) { try { t.select(); } catch (x) { } }
+                    });
+                }
+                if (!always && window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return false;
+                var el = document.querySelector(selector);
+                if (!el) return false;
+                el.focus();
+                if (el.select) { try { el.select(); } catch (x) { } }
+                return true;
+            },
             // ---- stage 3b: backup ----
             // a backup / safety copy as a download (made here, saved by the browser; nothing is sent)
             download: function (name, text) {

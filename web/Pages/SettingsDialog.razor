@@ -1,4 +1,4 @@
-@* Settings (web): Prices, Printer, Language. Works on a copy; Save hands it back, Cancel / Esc drops it. *@
+@* Settings (web): Prices, Printer, Electricity, Quote & invoice, App (language, Run setup again…). Works on a copy; Save hands it back, Cancel / Esc drops it. *@
 
 <div class="overlay" @onclick="Cancel">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" @onclick:stopPropagation="true" @onkeydown="Key">
@@ -135,6 +135,11 @@
                 </select>
                 <div class="help">@L.S("The settings are kept in this browser. Another browser or device starts with the defaults.",
                                        "Indstillingerne gemmes i denne browser. En anden browser eller enhed starter med standardværdierne.")</div>
+                <h3>@L.S("Setup", "Opsætning")</h3>
+                <label>@L.S("Guided setup", "Guidet opsætning")</label>
+                <div><button @onclick="() => SetupRequested.InvokeAsync()">@L.S("Run setup again…", "Kør opsætning igen…")</button></div>
+                <div class="help">@L.S("The first-time questions again: printer, filament and electricity, markups and your name on quotes. Your answers are filled in.",
+                                       "Spørgsmålene fra første gang igen: printer, filament og strøm, avance og dit navn på tilbud. Dine svar er udfyldt.")</div>
             </div>
         }
 
@@ -163,13 +168,14 @@
     [Parameter] public int StartTab { get; set; }
     [Parameter] public bool BrowserDanish { get; set; }
     [Parameter] public EventCallback<Result> OnClose { get; set; }
+    [Parameter] public EventCallback SetupRequested { get; set; }   // App > Run setup again…: Settings closes unsaved, the setup opens
 
     AppSettings work;
     int tab;
     bool auto, reset, vat, autoPower;
     string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays;
 
-    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), L.S("Language", "Sprog") }; } }
+    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), "App" }; } }
 
     Wear.Model Model { get { return Wear.FindModel(work.PrinterModel); } }
 

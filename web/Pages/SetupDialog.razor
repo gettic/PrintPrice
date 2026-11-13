@@ -1,0 +1,353 @@
+@* First-time setup (idea 19, website): 4 questions + a summary, like the desktop's SetupForm. The answers and how they become
+   settings are the desktop's own (src\AppSettings.cs: SetupAnswers, AppSettings.ApplySetup); texts in Logic\WebSetup.cs. *@
+@inject Store Store
+
+<div class="overlay setup-overlay" inert="@Behind">
+    <div class="dialog setup" role="dialog" aria-modal="true" aria-labelledby="setup-title" @onkeydown="Key">
+        <div class="title">
+            <span id="setup-title">@L.S("Set up PrintPrice", "Opsætning af PrintPrice")</span>
+            <button @onclick="Close" aria-label="@(Again ? L.S("Cancel", "Annullér") : L.S("Set up later", "Opsæt senere"))">✕</button>
+        </div>
+        <div class="shead">
+            <div class="srow"><h2>@WebSetup.StepTitle(step, Again)</h2><span class="scount">@WebSetup.StepCount(step)</span></div>
+            <div class="sbar" aria-hidden="true">
+                @for (int i = 0; i < SetupAnswers.Questions; i++) { <i class="@(i <= step ? "on" : "")"></i> }
+            </div>
+        </div>
+
+        <div class="sbody">
+        @if (step == SetupAnswers.StepLanguage)
+        {
+            <div class="hinfo">@(Again ? L.S("Go through the main questions again. Your answers are filled in; Skip leaves a step as it is.",
+                                             "Gå de vigtigste spørgsmål igennem igen. Dine svar er udfyldt; Spring over lader et trin være, som det er.")
+                                       : L.S("A few quick questions so your prices fit your printer, your filament and your electricity. It takes about a minute.",
+                                             "Et par hurtige spørgsmål, så dine priser passer til din printer, dit filament og din strøm. Det tager omkring et minut."))
+                <div class="muted">@(Again ? L.S("Everything else stays in Settings.", "Alt andet ligger stadig i Indstillinger.")
+                                           : L.S("Skip anything you're unsure of: it keeps a sensible default, and everything can be changed later in Settings.",
+                                                 "Spring over, hvis du er i tvivl: så bruges en fornuftig standard, og alt kan ændres senere i Indstillinger."))</div>
+            </div>
+            <h3>Sprog / Language</h3>
+            <label class="radio"><input type="radio" name="setup-lang" checked="@(!danish)" @onchange='() => Language(false)' /> <span>English</span></label>
+            <label class="radio"><input type="radio" name="setup-lang" checked="@danish" @onchange='() => Language(true)' /> <span>Dansk</span></label>
+            <div class="muted small">@L.S("Picked from your browser. The page switches language at once.", "Valgt ud fra din browser. Siden skifter sprog med det samme.")</div>
+            @if (!Again)
+            {
+                <h3>@L.S("Used PrintPrice before?", "Har du brugt PrintPrice før?")</h3>
+                @if (RestoreText != null)
+                {
+                    <div class="hinfo ok" role="status">@RestoreText</div>
+                }
+                else
+                {
+                    <div class="hinfo">@L.S("If you have a backup (a .printprice-backup file, or an online backup code from the app or another browser), restore it instead: your settings and price history come back and this setup ends.",
+                                            "Har du en sikkerhedskopi (en .printprice-backup-fil eller en online-kode fra programmet eller en anden browser), så gendan den i stedet: dine indstillinger og din prishistorik kommer tilbage, og opsætningen slutter.")</div>
+                }
+                <div><button @onclick="() => OnRestore.InvokeAsync()">@L.S("Restore a backup…", "Gendan en sikkerhedskopi…")</button></div>
+                <div class="muted small">@L.S("Everything you enter stays in this browser.", "Alt, hvad du skriver, bliver i denne browser.")</div>
+            }
+        }
+        else if (step == SetupAnswers.StepPrinter)
+        {
+            <div class="hinfo">@L.S("Which printer do you use? It sets the power use and the wear cost per hour that both prices include.",
+                                    "Hvilken printer bruger du? Den bestemmer strømforbruget og slidet pr. time, som begge priser indeholder.")
+                <div class="muted">@(Again ? L.S("A new model works like the Model box in Settings > Printer: power and wear follow it.",
+                                                 "En ny model virker som Model-feltet i Indstillinger > Printer: strøm og slid følger med.")
+                                           : L.S("Nozzle, build plate and power: Settings > Printer.", "Dyse, byggeplade og effekt: Indstillinger > Printer."))</div>
+            </div>
+            <div class="stiles" role="group" aria-label="@L.S("Printer", "Printer")">
+                @foreach (var m in Wear.Models)
+                {
+                    var key = m.Key;
+                    bool on = ChosenModel == key;
+                    <button class="@(on ? "stile on" : "stile")" aria-pressed="@(on ? "true" : "false")" @onclick="() => PickModel(key)">
+                        @PrinterArt(key)
+                        <span class="nm">@m.Label.Replace("Bambu Lab ", "")</span>
+                        <span class="muted small">@WebSetup.ModelWatts(m)</span>
+                        <span class="muted small">@WebSetup.ModelRate(m)</span>
+                        @if (on) { <span class="tag">@(Again ? L.S("In use", "I brug") : L.S("Chosen", "Valgt"))</span> }
+                    </button>
+                }
+            </div>
+            <div class="muted small">@L.S("Another printer? Pick the closest; the wear rate can be typed in Settings > Printer.",
+                                          "En anden printer? Vælg den nærmeste; slid pr. time kan skrives i Indstillinger > Printer.")</div>
+        }
+        else if (step == SetupAnswers.StepCosts)
+        {
+            <h3>@L.S("Filament", "Filament")</h3>
+            <div class="sgrid">
+                <label for="setup-kg">@L.S("Filament price", "Filamentpris")</label>
+                <div class="field"><input id="setup-kg" type="text" inputmode="decimal" class="mid @Bad("filament")" @bind="answers.FilamentText" @bind:event="oninput" @onkeydown="BoxKey" /><span>kr/kg</span></div>
+            </div>
+            <div class="muted small">@L.F("What you pay per kg for your usual filament ({0}), shipping included. Other filaments remember their own price.",
+                                          "Hvad du betaler pr. kg for dit sædvanlige filament ({0}), med fragt. Andre filamenter husker deres egen pris.",
+                                          BambuSlicer.FilamentBaseName(Settings.FilamentPreset))</div>
+            <h3>@L.S("Electricity", "Strøm")</h3>
+            <label class="radio"><input type="radio" name="setup-power" checked="@answers.LivePower" @onchange="() => Live(true)" /> <span>@L.S("Live price from Energinet (changes every hour)", "Aktuel pris fra Energinet (skifter hver time)")</span></label>
+            <div class="sgrid indent">
+                <label for="setup-area" class="@(answers.LivePower ? "" : "muted")">@L.S("Price area", "Prisområde")</label>
+                <select id="setup-area" value="@answers.Area" @onchange="AreaChanged" disabled="@(!answers.LivePower)">
+                    <option value="DK1">@WebSetup.AreaName("DK1")</option>
+                    <option value="DK2">@WebSetup.AreaName("DK2")</option>
+                </select>
+            </div>
+            @if (answers.LivePower && liveFor == answers.Area)
+            {
+                <div class="@(liveResult != null && !liveResult.Ok ? "hinfo indent warn" : "hinfo indent")" role="status">@WebSetup.LiveText(liveResult, Settings.PowerAddOn, Settings.PowerIncludeVat != 0)</div>
+            }
+            <label class="radio"><input type="radio" name="setup-power" checked="@(!answers.LivePower)" @onchange="() => Live(false)" /> <span>@L.S("A fixed price", "En fast pris")</span></label>
+            <div class="sgrid indent">
+                <label for="setup-elec" class="@(answers.LivePower ? "muted" : "")">@L.S("Electricity price", "Elpris")</label>
+                <div class="field"><input id="setup-elec" type="text" inputmode="decimal" class="mid @(answers.LivePower ? "" : Bad("elec"))" @bind="answers.ElecText" @bind:event="oninput" disabled="@answers.LivePower" @onkeydown="BoxKey" /><span class="@(answers.LivePower ? "muted" : "")">kr/kWh</span></div>
+            </div>
+            <div class="muted small">@L.S("The live price comes through PrintPrice's own small relay; only the price area is sent. Tariffs, VAT and the start-up fetch are in Settings > Electricity.",
+                                          "Den aktuelle pris kommer gennem PrintPrices egen lille relætjeneste; kun prisområdet sendes. Afgifter, moms og hentning ved start ligger i Indstillinger > Elpris.")</div>
+        }
+        else if (step == SetupAnswers.StepPrices)
+        {
+            <div class="hinfo">@L.S("Every print gets two prices: one for friends & family, one for customers.", "Hvert print får to priser: en til venner og familie og en til kunder.")
+                <div class="muted">@L.S("Failed-print allowance, rounding and invoice details keep their defaults (Settings).", "Tillæg for fejlprint, afrunding og fakturaoplysninger beholder deres standard (Indstillinger).")</div>
+            </div>
+            <div class="sgrid">
+                <label for="setup-friends">@L.S("Friends & family markup", "Avance, venner og familie")</label>
+                <div class="field"><input id="setup-friends" type="text" inputmode="decimal" class="mid @Bad("friends")" @bind="answers.FriendsText" @bind:event="oninput" @onkeydown="BoxKey" /><span>%</span></div>
+                <label for="setup-others">@L.S("Customer markup", "Avance, kunder")</label>
+                <div class="field"><input id="setup-others" type="text" inputmode="decimal" class="mid @Bad("others")" @bind="answers.OthersText" @bind:event="oninput" @onkeydown="BoxKey" /><span>%</span></div>
+                <label for="setup-min">@L.S("Minimum price (customers)", "Minimumspris (kunder)")</label>
+                <div class="field"><input id="setup-min" type="text" inputmode="decimal" class="mid @Bad("min")" @bind="answers.MinText" @bind:event="oninput" @onkeydown="BoxKey" /><span>@L.S("kr. (0 = off)", "kr. (0 = fra)")</span></div>
+                <label for="setup-name">@L.S("Your name on quotes", "Dit navn på tilbud")</label>
+                <input id="setup-name" type="text" class="left" maxlength="40" placeholder="@L.S("optional (you or your shop)", "valgfrit (dig eller din butik)")" @bind="answers.QuoteName" @bind:event="oninput" @onkeydown="BoxKey" />
+            </div>
+            var ex = WebSetup.Example(Settings, answers, Again, FilamentType, LiveForArea);
+            <div class="hinfo sexample" aria-live="polite">
+                <div>@L.S("Example: an 8 h print with 150 g filament", "Eksempel: et print på 8 t med 150 g filament")</div>
+                <div class="exrow"><span>@L.S("Friends & family", "Venner og familie")</span><span class="f">@(ex == null ? "–" : Num.Kr(ex.FriendsPrice))</span></div>
+                <div class="exrow"><span>@L.S("Customers", "Kunder")</span><span class="o">@(ex == null ? "–" : Num.Kr(ex.OthersPrice))</span></div>
+                <div class="muted">@(ex == null ? L.S("Fill in the boxes above to see the prices.", "Udfyld felterne ovenfor for at se priserne.")
+                                                : L.F("Material + power, plus your markup, plus printer wear ({0} kr/h).", "Materiale + strøm, plus din avance, plus slid på printeren ({0} kr/t).",
+                                                      Num.N2(WebSetup.Result(Settings, answers, Again, FilamentType).MachineRatePerHour)))</div>
+            </div>
+        }
+        else
+        {
+            <div class="ssum">
+                @foreach (var r in WebSetup.SummaryRows(WebSetup.Result(Settings, answers, Again, FilamentType), danish, SkippedForSummary, Again))
+                {
+                    var target = r.Step;
+                    <span class="c">@r.Caption</span>
+                    <span class="@(r.Muted ? "v muted" : "v")">@r.Value</span>
+                    <button class="linkbtn" @onclick="() => GoTo(target)" aria-label="@(L.S("Change", "Ret") + " " + r.Caption)">@L.S("Change", "Ret")</button>
+                }
+            </div>
+            <div class="hinfo ok">@(Again ? L.S("✓ Ready. Save to use these answers.", "✓ Klar. Gem for at bruge disse svar.")
+                                          : L.S("✓ All set. Drop a sliced file or type a print time and weight to get your first price.",
+                                                "✓ Klar. Slip en slicet fil, eller skriv printtid og vægt for at få din første pris."))
+                <div class="muted">@(Again ? L.S("Everything else is in Settings.", "Alt andet ligger i Indstillinger.")
+                                           : L.S("Change any of this in Settings, or run this setup again from Settings > App.",
+                                                 "Ret det i Indstillinger, eller kør opsætningen igen fra Indstillinger > App."))</div>
+            </div>
+        }
+        @if (problem && WebSetup.BadBoxes(answers, step).Count > 0)
+        {
+            <div class="problem" role="alert">@L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.")</div>
+        }
+        </div>
+
+        <div class="buttons sbuttons">
+            @if (!Again && step < WebSetup.Summary)
+            {
+                <button class="later" @onclick="Close">@L.S("Set up later", "Opsæt senere")</button>
+            }
+            <button class="@(step == 0 ? "back first" : "back")" @onclick="Back" disabled="@(step == 0)">@L.S("Back", "Tilbage")</button>
+            @if (step < WebSetup.Summary)
+            {
+                <button @onclick="Skip">@L.S("Skip", "Spring over")</button>
+                <button class="accent" @ref="nextButton" @onclick="Next">@L.S("Next", "Næste")</button>
+            }
+            else
+            {
+                <button class="accent" @ref="nextButton" @onclick="Finish">@(Again ? L.S("Save", "Gem") : L.S("Start using PrintPrice", "Kom i gang"))</button>
+            }
+        </div>
+    </div>
+</div>
+
+@code {
+    /// How the setup ended. null (to OnDone) = a re-run cancelled: nothing changes.
+    public sealed class Outcome
+    {
+        public AppSettings Settings;   // the settings with the answers in (SetupDone 1), not saved yet
+        public bool Later;             // first run closed with Set up later / ✕ / Esc (the page shows the one-time hint)
+    }
+
+    [Parameter] public AppSettings Settings { get; set; }   // the settings when the setup opened (not changed here)
+    [Parameter] public bool Again { get; set; }              // Run setup again… (a re-run): Cancel keeps everything
+    [Parameter] public string FilamentType { get; set; }     // the page's filament type (auto wear)
+    [Parameter] public string RestoreText { get; set; }      // "✓ Price history restored…" after a restore without settings
+    [Parameter] public EventCallback<Outcome> OnDone { get; set; }
+    [Parameter] public EventCallback OnRestore { get; set; }
+    [Parameter] public EventCallback LanguageChanged { get; set; }
+    [Parameter] public bool Behind { get; set; }              // another dialog (Backup) is open on top: this one is inert
+
+    SetupAnswers opening, answers;
+    int step;
+    bool danish, startDanish, problem, focusNext = true, focusBad;
+    readonly bool[] done = new bool[SetupAnswers.Questions], skipped = new bool[SetupAnswers.Questions];
+    ElementReference nextButton;
+
+    // live price on step 3 (desktop FetchLive): asked once per area while Live is chosen
+    string liveFor;
+    LivePower.Result liveResult;   // null while asking
+
+    protected override void OnInitialized()
+    {
+        var mode = WebSetup.Mode(Again);
+        opening = SetupAnswers.From(Settings, mode);
+        answers = opening.Clone();
+        danish = startDanish = L.Danish;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (focusBad)   // a refused Next: the first red box (also on touch screens: the user is typing there)
+        {
+            focusBad = false;
+            await Store.FocusBox(".setup input.invalid", true);
+            return;
+        }
+        if (!focusNext) return;
+        focusNext = false;
+        // steps 3 and 4: the first box (desktop FocusStep), not on touch screens; else Next
+        string box = step == SetupAnswers.StepCosts ? "#setup-kg" : step == SetupAnswers.StepPrices ? "#setup-friends" : null;
+        if (box != null && await Store.FocusBox(box, false)) return;
+        try { await nextButton.FocusAsync(); } catch { /* not rendered */ }
+    }
+
+    string ChosenModel { get { return answers.Models.Count > 0 ? Wear.FindModel(answers.Models[0]).Key : ""; } }
+
+    double LiveForArea { get { return liveFor == answers.Area && liveResult != null && liveResult.Ok ? liveResult.Total : -1; } }
+
+    bool[] SkippedForSummary
+    {
+        get
+        {
+            var s = new bool[SetupAnswers.Questions];
+            for (int i = 0; i < s.Length; i++) s[i] = skipped[i] || (!done[i] && !Again);
+            return s;
+        }
+    }
+
+    string Bad(string box) { return WebSetup.BadBoxes(answers, step).Contains(box) ? "invalid" : ""; }
+
+    async Task Language(bool da)
+    {
+        danish = da;
+        // untouched (back to the opening language) = the opening answer, so "" (follow the browser) stays ""
+        answers.Language = da == startDanish ? opening.Language : (da ? "da" : "en");
+        L.Danish = da;
+        await LanguageChanged.InvokeAsync();
+    }
+
+    void PickModel(string key)
+    {
+        answers.Models = new List<string> { key };
+    }
+
+    async Task Live(bool on)
+    {
+        answers.LivePower = on;
+        await FetchLive();
+    }
+
+    async Task AreaChanged(ChangeEventArgs e)
+    {
+        answers.Area = (string)e.Value == "DK2" ? "DK2" : "DK1";
+        await FetchLive();
+    }
+
+    async Task FetchLive()
+    {
+        if (!answers.LivePower || liveFor == answers.Area) return;
+        string a = answers.Area;
+        liveFor = a;
+        liveResult = null;
+        StateHasChanged();
+        LivePower.Result r;
+        try
+        {
+            var answer = await Store.FetchPower(a);
+            r = LivePower.Interpret(answer, a, DateTime.UtcNow, Settings.PowerAddOn, Settings.PowerIncludeVat != 0);
+        }
+        catch { r = new LivePower.Result(); }
+        if (liveFor != a) return;   // another area was picked meanwhile
+        liveResult = r;
+        StateHasChanged();
+    }
+
+    async Task Next()
+    {
+        if (WebSetup.BadBoxes(answers, step).Count > 0) { problem = true; focusBad = true; return; }
+        problem = false;
+        done[step] = true;
+        skipped[step] = false;
+        await Show(step + 1);
+    }
+
+    async Task Skip()
+    {
+        answers.CopyStep(step, opening);
+        if (step == SetupAnswers.StepLanguage && danish != startDanish) { danish = startDanish; L.Danish = startDanish; await LanguageChanged.InvokeAsync(); }
+        problem = false;
+        skipped[step] = true;
+        done[step] = false;
+        await Show(step + 1);
+    }
+
+    async Task Back()
+    {
+        if (step > 0) await Show(step - 1);
+    }
+
+    async Task GoTo(int target) { await Show(target); }
+
+    async Task Show(int s)
+    {
+        problem = false;
+        step = Math.Max(0, Math.Min(WebSetup.Summary, s));
+        focusNext = true;
+        if (step == SetupAnswers.StepCosts) await FetchLive();
+    }
+
+    async Task Finish()
+    {
+        await OnDone.InvokeAsync(new Outcome { Settings = WebSetup.Result(Settings, answers, Again, FilamentType) });
+    }
+
+    /// ✕ / Esc / Set up later. First run: the steps finished with Next are kept, the rest default. Re-run: Cancel.
+    async Task Close()
+    {
+        if (Again) { await OnDone.InvokeAsync(null); return; }
+        var a = WebSetup.Later(answers, opening, done);
+        await OnDone.InvokeAsync(new Outcome { Settings = WebSetup.Result(Settings, a, false, FilamentType), Later = true });
+    }
+
+    async Task Key(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") await Close();
+    }
+
+    /// Enter in a box = Next (the buttons get Enter themselves).
+    async Task BoxKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await Next();
+    }
+
+    /// The tile's small drawing (an outline in the Theme colours, as the mock-up; no printer photos on the web).
+    static RenderFragment PrinterArt(string key)
+    {
+        if (key == Wear.ModelA1Mini)
+            return @<svg width="56" height="44" viewBox="0 0 56 44" aria-hidden="true"><rect x="10" y="8" width="36" height="5" fill="#6e6e74" /><rect x="12" y="13" width="4" height="27" fill="#4e4e52" /><rect x="25" y="15" width="10" height="8" fill="#961e23" /><rect x="8" y="38" width="40" height="4" fill="#6e6e74" /></svg>;
+        if (key == Wear.ModelP1S)
+            return @<svg width="56" height="44" viewBox="0 0 56 44" aria-hidden="true"><rect x="9" y="3" width="38" height="38" rx="3" fill="none" stroke="#6e6e74" stroke-width="3" /><rect x="22" y="10" width="12" height="9" fill="#961e23" /><rect x="13" y="32" width="30" height="3" fill="#4e4e52" /></svg>;
+        return @<svg width="56" height="44" viewBox="0 0 56 44" aria-hidden="true"><rect x="6" y="3" width="44" height="6" fill="#6e6e74" /><rect x="8" y="9" width="4" height="31" fill="#4e4e52" /><rect x="44" y="9" width="4" height="31" fill="#4e4e52" /><rect x="22" y="11" width="12" height="10" fill="#961e23" /><rect x="4" y="38" width="48" height="4" fill="#6e6e74" /></svg>;
+    }
+}

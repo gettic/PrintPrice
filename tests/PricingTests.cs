@@ -3355,9 +3355,205 @@ namespace PrintPrice.Tests
             SliceXmlTests();
             PictureTests();
             HistoryDeleteTests();
+            SetupApplyTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        // ---------- first-time setup answers (idea 19): SetupAnswers + AppSettings.ApplySetup, shared by desktop and web ----------
+
+        static string Ini(AppSettings s) { return string.Join("\n", s.ToIni()); }
+
+        static SetupAnswers Answers(params string[] models)
+        {
+            var a = new SetupAnswers();
+            a.Models.AddRange(models);
+            return a;
+        }
+
+        static void SetupApplyTests()
+        {
+            // 1. Replace [A1M, P1S] on new settings: printer 1 -> A1 mini at its defaults, P1S added as "2"
+            var s0 = new AppSettings();
+            s0.SetupDone = 0;
+            var r = s0.ApplySetup(Answers(Wear.ModelA1Mini, Wear.ModelP1S), SetupPrinterMode.Replace);
+            var ps = r.Printers;
+            True("Setup 1 Replace two printers", ps.Count == 2 && r.ActivePrinterId == "1");
+            True("Setup 1 printer 1 = A1 mini", ps[0].Id == "1" && ps[0].Model == Wear.ModelA1Mini && ps[0].Name == "Bambu Lab A1 mini" && ps[0].AutoWearRate == 1);
+            Eq("Setup 1 A1 mini watts 70", 70, ps[0].Watts);
+            Eq("Setup 1 A1 mini rate 1,38", 1.38, ps[0].MachineRatePerHour);
+            True("Setup 1 printer 2 = P1S", ps[1].Id == "2" && ps[1].Model == Wear.ModelP1S);
+            Eq("Setup 1 P1S watts 130", 130, ps[1].Watts);
+            Eq("Setup 1 P1S rate 2,54", 2.54, ps[1].MachineRatePerHour);
+            True("Setup 1 flat fields = A1 mini", r.PrinterModel == Wear.ModelA1Mini && r.PrinterWatts == 70);
+            Eq("Setup 1 SetupDone 1", 1, r.SetupDone);
+
+            // 2. Replace on a custom printer 1: stock printer of the new model (first run, as today)
+            var s2 = new AppSettings();
+            s2.PrinterWatts = 95; s2.PrinterName = "Workshop"; s2.AutoWearRate = 0; s2.MachineRatePerHour = 3;
+            r = s2.ApplySetup(Answers(Wear.ModelP1S), SetupPrinterMode.Replace);
+            True("Setup 2 Replace -> stock P1S", r.PrinterModel == Wear.ModelP1S && r.PrinterName == "Bambu Lab P1S" && r.AutoWearRate == 1 && r.PrinterCount == 1);
+            Eq("Setup 2 watts 130", 130, r.PrinterWatts);
+            Eq("Setup 2 rate 2,54", 2.54, r.MachineRatePerHour);
+
+            // 3. Add: A1 + P1S there, answers A1, P1S, A1M, A1M -> only one A1 mini added, id "3"
+            var s3 = new AppSettings();
+            s3.AddPrinter("", Wear.ModelP1S);
+            string before1 = s3.Printers[0].Name + "|" + s3.Printers[0].Watts;
+            r = s3.ApplySetup(Answers(Wear.ModelA1, Wear.ModelP1S, Wear.ModelA1Mini, Wear.ModelA1Mini), SetupPrinterMode.Add);
+            ps = r.Printers;
+            True("Setup 3 Add only the A1 mini", ps.Count == 3 && ps[2].Id == "3" && ps[2].Model == Wear.ModelA1Mini);
+            True("Setup 3 active still 1, printer 1 unchanged", r.ActivePrinterId == "1" && ps[0].Name + "|" + ps[0].Watts == before1);
+
+            // 4. ChangeModel A1 -> P1S, watts/name still the A1's, auto wear on: all follow
+            var s4 = new AppSettings();
+            r = s4.ApplySetup(Answers(Wear.ModelP1S), SetupPrinterMode.ChangeModel);
+            True("Setup 4 ChangeModel name follows", r.PrinterModel == Wear.ModelP1S && r.PrinterName == "Bambu Lab P1S" && r.PrinterCount == 1);
+            Eq("Setup 4 watts 100 -> 130", 130, r.PrinterWatts);
+            Eq("Setup 4 auto rate -> 2,54", 2.54, r.MachineRatePerHour);
+
+            // 5. ChangeModel A1 -> A1M with own watts, name, rate (auto off): only the model changes
+            var s5 = new AppSettings();
+            s5.PrinterWatts = 95; s5.PrinterName = "Workshop"; s5.AutoWearRate = 0; s5.MachineRatePerHour = 3;
+            s5.Nozzle = "0.6 hardened"; s5.BedType = "Textured PEI Plate";
+            r = s5.ApplySetup(Answers(Wear.ModelA1Mini), SetupPrinterMode.ChangeModel);
+            True("Setup 5 ChangeModel keeps own values", r.PrinterModel == Wear.ModelA1Mini && r.PrinterName == "Workshop" && r.AutoWearRate == 0);
+            Eq("Setup 5 watts 95 kept", 95, r.PrinterWatts);
+            Eq("Setup 5 rate 3 kept", 3, r.MachineRatePerHour);
+            True("Setup 5 nozzle and plate kept", r.Nozzle == s5.Nozzle && r.BedType == s5.BedType);
+
+            // 6. ChangeModel to the same model: nothing changes
+            r = s5.ApplySetup(Answers(Wear.ModelA1), SetupPrinterMode.ChangeModel);
+            True("Setup 6 same model unchanged", r.PrinterModel == Wear.ModelA1 && r.PrinterName == "Workshop" && r.PrinterWatts == 95 && r.MachineRatePerHour == 3);
+
+            // 7. no models: printers untouched in every mode
+            foreach (SetupPrinterMode m in new[] { SetupPrinterMode.Replace, SetupPrinterMode.Add, SetupPrinterMode.ChangeModel })
+            {
+                r = s3.ApplySetup(Answers(), m);
+                True("Setup 7 no models, " + m + ": printers untouched", r.PrinterCount == 2 && r.PrinterModel == Wear.ModelA1 && r.Printers[1].Model == Wear.ModelP1S);
+            }
+
+            // 8. filament price: 250 -> remembered; the same as now -> no new entry
+            var a = Answers();
+            a.FilamentText = "250";
+            r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+            Eq("Setup 8 LastFilamentPrice 250", 250, r.LastFilamentPrice);
+            Eq("Setup 8 PriceFor preset 250", 250, r.PriceFor(r.FilamentPreset));
+            a.FilamentText = "180";   // = the default LastFilamentPrice, nothing remembered yet
+            r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+            True("Setup 8 same price -> no entry", r.FilamentPrices.Count == 0 && r.LastFilamentPrice == 180);
+
+            // 9. power: fixed 1,5; live keeps the fixed price; area DK2 / unknown -> DK1
+            a = Answers();
+            a.LivePower = false; a.ElecText = "1,5"; a.Area = "DK2";
+            r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+            True("Setup 9 fixed: AutoPowerPrice 0, DK2", r.AutoPowerPrice == 0 && r.PriceArea == "DK2");
+            Eq("Setup 9 fixed 1,5", 1.5, r.LastElectricityPrice);
+            a.LivePower = true; a.ElecText = "9"; a.Area = "XX";
+            r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+            True("Setup 9 live: AutoPowerPrice 1, XX -> DK1", r.AutoPowerPrice == 1 && r.PriceArea == "DK1");
+            Eq("Setup 9 live keeps 2,00", 2.00, r.LastElectricityPrice);
+
+            // 10. markups and minimum; bad numbers keep the value
+            a = Answers();
+            a.FriendsText = "30"; a.OthersText = "80,5"; a.MinText = "75";
+            r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+            Eq("Setup 10 friends 30", 30, r.FriendsMarkupPct);
+            Eq("Setup 10 others 80,5", 80.5, r.OthersMarkupPct);
+            Eq("Setup 10 minimum 75", 75, r.MinimumPrice);
+            foreach (string bad in new[] { "-5", "abc", "", null, "10000000" })
+            {
+                a.MinText = bad;
+                r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+                Eq("Setup 10 minimum '" + (bad ?? "null") + "' keeps 50", 50, r.MinimumPrice);
+            }
+            a.MinText = "9999999";
+            r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+            True("Setup 10 minimum 9999999 taken", r.MinimumPrice == 9999999);
+            double v;
+            True("Setup 10 ReadNumber rule", SetupAnswers.ReadNumber("1.234,5", out v) && v == 1234.5 && !SetupAnswers.ReadNumber("1e7", out v));
+
+            // 11. name on quotes trimmed; "" and null -> ""
+            a = Answers();
+            a.QuoteName = "  Lene Hansen  ";
+            True("Setup 11 name trimmed", new AppSettings().ApplySetup(a, SetupPrinterMode.Replace).QuoteName == "Lene Hansen");
+            a.QuoteName = "";
+            True("Setup 11 empty name", new AppSettings { QuoteName = "Gettic" }.ApplySetup(a, SetupPrinterMode.Replace).QuoteName == "");
+            a.QuoteName = null;
+            True("Setup 11 null name", new AppSettings().ApplySetup(a, SetupPrinterMode.Replace).QuoteName == "");
+
+            // 12. language: "da" set; null keeps "" (auto)
+            a = Answers();
+            a.Language = "da";
+            True("Setup 12 language da", new AppSettings().ApplySetup(a, SetupPrinterMode.Replace).Language == "da");
+            a.Language = null;
+            True("Setup 12 language null keeps auto", new AppSettings().ApplySetup(a, SetupPrinterMode.Replace).Language == "");
+
+            // 13. slicer path: null keeps, "" clears
+            a = Answers();
+            True("Setup 13 slicer null keeps", new AppSettings { SlicerPath = @"C:\Bambu\bambu-studio.exe" }.ApplySetup(a, SetupPrinterMode.Replace).SlicerPath == @"C:\Bambu\bambu-studio.exe");
+            a.SlicerPath = "";
+            True("Setup 13 slicer '' clears", new AppSettings { SlicerPath = @"C:\Bambu\bambu-studio.exe" }.ApplySetup(a, SetupPrinterMode.Replace).SlicerPath == "");
+
+            // 14. the start object is not changed; SetupDone 0 -> 1
+            var s14 = new AppSettings();
+            s14.SetupDone = 0;
+            string ini14 = Ini(s14);
+            a = SetupAnswers.From(s14, SetupPrinterMode.Replace);
+            a.FilamentText = "300"; a.FriendsText = "40"; a.Language = "en"; a.Models = new List<string> { Wear.ModelP1S, Wear.ModelA1 };
+            r = s14.ApplySetup(a, SetupPrinterMode.Replace);
+            True("Setup 14 start unchanged", Ini(s14) == ini14 && s14.PrinterCount == 1);
+            True("Setup 14 SetupDone 0 -> 1", s14.SetupDone == 0 && r.SetupDone == 1);
+
+            // 15. From / CopyStep
+            var f = SetupAnswers.From(new AppSettings(), SetupPrinterMode.Replace);
+            True("Setup 15 From models [A1]", J(f.Models) == Wear.ModelA1);
+            True("Setup 15 From texts", f.FilamentText == "180" && f.ElecText == "2" && f.FriendsText == "25" && f.OthersText == "75" && f.MinText == "50"
+                                        && f.LivePower && f.Area == "DK1" && f.QuoteName == "" && f.Language == "" && f.SlicerPath == "");
+            var s15 = new AppSettings();
+            s15.AddPrinter("", Wear.ModelP1S);
+            s15.AddPrinter("Second A1", Wear.ModelA1);
+            True("Setup 15 From Add = models in order, once", J(SetupAnswers.From(s15, SetupPrinterMode.Add).Models) == Wear.ModelA1 + "|" + Wear.ModelP1S);
+            True("Setup 15 From ChangeModel = active model", J(SetupAnswers.From(s15, SetupPrinterMode.ChangeModel).Models) == Wear.ModelA1);
+            var c = f.Clone();
+            c.FilamentText = "1"; c.ElecText = "1"; c.LivePower = false; c.Area = "DK2"; c.FriendsText = "1"; c.Language = "da";
+            c.Models.Add(Wear.ModelP1S);
+            True("Setup 15 Clone has its own Models", f.Models.Count == 1);
+            c.CopyStep(SetupAnswers.StepCosts, f);
+            True("Setup 15 CopyStep costs", c.FilamentText == "180" && c.ElecText == "2" && c.LivePower && c.Area == "DK1");
+            True("Setup 15 CopyStep leaves other steps", c.FriendsText == "1" && c.Language == "da" && c.Models.Count == 2);
+            c.CopyStep(SetupAnswers.StepPrinter, f);
+            c.CopyStep(SetupAnswers.StepLanguage, f);
+            c.CopyStep(SetupAnswers.StepPrices, f);
+            True("Setup 15 CopyStep printer/language/prices", J(c.Models) == Wear.ModelA1 && c.Language == "" && c.FriendsText == "25");
+
+            // 16. applying the opening answers changes nothing (every step skipped)
+            var s16 = new AppSettings();
+            s16.FriendsMarkupPct = 33; s16.OthersMarkupPct = 90.5; s16.MinimumPrice = 0; s16.LastElectricityPrice = 2.75;
+            s16.AutoPowerPrice = 0; s16.PriceArea = "DK2"; s16.QuoteName = "Lene Hansen"; s16.Language = "da";
+            s16.RememberPrice(s16.FilamentPreset, 215.5); s16.LastFilamentPrice = 215.5;
+            s16.SlicerPath = @"D:\Bambu\bambu-studio.exe";
+            s16.AddPrinter("", Wear.ModelA1Mini);
+            string ini16 = Ini(s16);
+            foreach (SetupPrinterMode m in new[] { SetupPrinterMode.Replace, SetupPrinterMode.Add, SetupPrinterMode.ChangeModel })
+                True("Setup 16 skip all, " + m + ": unchanged", Ini(s16.ApplySetup(SetupAnswers.From(s16, m), m)) == ini16);
+            var s16b = s16.Clone();
+            s16b.PrinterWatts = 95; s16b.PrinterName = "Workshop"; s16b.AutoWearRate = 0; s16b.MachineRatePerHour = 3;
+            string ini16b = Ini(s16b);
+            True("Setup 16 skip all, Add/ChangeModel keep a custom printer",
+                 Ini(s16b.ApplySetup(SetupAnswers.From(s16b, SetupPrinterMode.Add), SetupPrinterMode.Add)) == ini16b
+                 && Ini(s16b.ApplySetup(SetupAnswers.From(s16b, SetupPrinterMode.ChangeModel), SetupPrinterMode.ChangeModel)) == ini16b);
+
+            // 17. example price: P1S, 200 kr/kg, fixed 2 kr/kWh, 25 % / 75 %, minimum 0, 8 h / 150 g, wear 2,54 kr/h
+            // material 0,150 x 200 = 30,00; power 0,130 x 8 x 2 = 2,08; base 32,08
+            // friends 32,08 x 1,25 = 40,10 + 8 x 2,54 = 20,32 -> 60,42; customers 32,08 x 1,75 = 56,14 + 20,32 -> 76,46
+            a = Answers(Wear.ModelP1S);
+            a.FilamentText = "200"; a.LivePower = false; a.ElecText = "2"; a.FriendsText = "25"; a.OthersText = "75"; a.MinText = "0";
+            r = new AppSettings().ApplySetup(a, SetupPrinterMode.Replace);
+            var res = Pricing.Calculate(new QuoteInput { Hours = 8, Minutes = 0, FilamentGrams = 150, FilamentDkkPerKg = r.LastFilamentPrice, ElectricityDkkPerKwh = r.LastElectricityPrice }, r);
+            Eq("Setup 17 friends 60,42", 60.42, res.FriendsPrice);
+            Eq("Setup 17 customers 76,46", 76.46, res.OthersPrice);
         }
 
         // ---------- record pictures (issue #4): History picture helpers, files, backups, Backup.FitForUpload ----------

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -37,14 +37,22 @@ namespace PrintPrice
         /// First run: closed without finishing (Set up later, ✕, Esc) and not by a restore: the main window shows a hint once.
         public bool SetUpLater { get; private set; }
 
-        // ---------- the answers (texts for the number boxes, so a bad value stays as typed) ----------
-        string lang;
-        readonly List<string> models = new List<string>();       // ticked models, in tick order (first = in use on a first run)
+        // ---------- the answers (AppSettings.cs SetupAnswers, shared with the website; number boxes as typed) ----------
+        SetupAnswers answers, opening;   // opening = the answers the window opened with (Skip goes back to them)
+        string lang;                     // the window's language choice; answers.Language is set from it in Apply
         readonly List<string> haveModels = new List<string>();   // re-run: models already added (locked)
-        string slicerPath;
-        string filamentText, elecText, friendsText, othersText, minText, nameText;
-        bool live;
-        string area;
+        SetupPrinterMode Mode { get { return again ? SetupPrinterMode.Add : SetupPrinterMode.Replace; } }
+        // short names for the answers (read on every use: CopyStep puts a new Models list in)
+        List<string> models { get { return answers.Models; } }
+        string slicerPath { get { return answers.SlicerPath; } set { answers.SlicerPath = value; } }
+        string filamentText { get { return answers.FilamentText; } set { answers.FilamentText = value; } }
+        string elecText { get { return answers.ElecText; } set { answers.ElecText = value; } }
+        string friendsText { get { return answers.FriendsText; } set { answers.FriendsText = value; } }
+        string othersText { get { return answers.OthersText; } set { answers.OthersText = value; } }
+        string minText { get { return answers.MinText; } set { answers.MinText = value; } }
+        string nameText { get { return answers.QuoteName; } set { answers.QuoteName = value; } }
+        bool live { get { return answers.LivePower; } set { answers.LivePower = value; } }
+        string area { get { return answers.Area; } set { answers.Area = value; } }
         readonly bool[] done = new bool[Questions], skipped = new bool[Questions];
         double livePrice = -1;   // fetched total kr/kWh for liveFor (-1 = none)
         string liveFor, liveLine;
@@ -89,7 +97,8 @@ namespace PrintPrice
             lang = startLang;
             foreach (var p in start.Printers)
                 if (!haveModels.Contains(p.Model)) haveModels.Add(p.Model);
-            for (int i = 0; i < Questions; i++) ResetStep(i);
+            opening = SetupAnswers.From(start, Mode);
+            answers = opening.Clone();
 
             AutoScaleDimensions = new SizeF(96F, 96F);
             AutoScaleMode = AutoScaleMode.Dpi;
@@ -124,66 +133,18 @@ namespace PrintPrice
         /// Puts one step's answers back to the values the window opened with.
         void ResetStep(int i)
         {
-            switch (i)
-            {
-                case StepLanguage:
-                    lang = startLang;
-                    break;
-                case StepPrinter:
-                    models.Clear();
-                    if (again) models.AddRange(haveModels);
-                    else models.Add(start.PrinterModel);
-                    slicerPath = start.SlicerPath ?? "";
-                    break;
-                case StepCosts:
-                    filamentText = Num.Fmt(start.PriceFor(start.FilamentPreset));
-                    elecText = Num.Fmt(start.LastElectricityPrice);
-                    live = start.AutoPowerPrice != 0;
-                    area = start.PriceArea == "DK2" ? "DK2" : "DK1";
-                    break;
-                case StepPrices:
-                    friendsText = Num.Fmt(start.FriendsMarkupPct);
-                    othersText = Num.Fmt(start.OthersMarkupPct);
-                    minText = Num.Fmt(start.MinimumPrice);
-                    nameText = start.QuoteName ?? "";
-                    break;
-            }
+            if (i == StepLanguage) lang = startLang;   // the window's choice (answers.Language follows it in Apply)
+            else answers.CopyStep(i, opening);
         }
 
-        static bool ReadNumber(string text, out double v)
-        {
-            return Num.TryParse(text, out v) && v >= 0 && v < 1e7;
-        }
+        static bool ReadNumber(string text, out double v) { return SetupAnswers.ReadNumber(text, out v); }
 
-        /// The settings with every answer in (skipped steps = the values the window opened with).
+        /// The settings with every answer in (skipped steps = the values the window opened with); AppSettings.ApplySetup:
+        /// a first run replaces the default printer by the first one ticked, a re-run only adds.
         AppSettings Apply()
         {
-            var s = start.Clone();
-            if (lang != startLang) s.Language = lang;
-            // printers: a first run replaces the default printer by the first one ticked; a re-run only adds
-            if (!again && models.Count > 0)
-            {
-                s.SetPrinter(PrinterProfile.ForModel(s.ActivePrinterId, "", models[0]));
-                for (int i = 1; i < models.Count; i++) s.AddPrinter("", models[i]);
-            }
-            else if (again)
-                foreach (var m in models) if (!haveModels.Contains(m)) s.AddPrinter("", m);
-            s.SlicerPath = slicerPath ?? "";
-            double v;
-            if (ReadNumber(filamentText, out v) && v != start.PriceFor(start.FilamentPreset))
-            {
-                s.LastFilamentPrice = v;
-                s.RememberPrice(s.FilamentPreset, v);
-            }
-            s.AutoPowerPrice = live ? 1 : 0;
-            s.PriceArea = area;
-            if (!live && ReadNumber(elecText, out v)) s.LastElectricityPrice = v;
-            if (ReadNumber(friendsText, out v)) s.FriendsMarkupPct = v;
-            if (ReadNumber(othersText, out v)) s.OthersMarkupPct = v;
-            if (ReadNumber(minText, out v)) s.MinimumPrice = v;
-            s.QuoteName = (nameText ?? "").Trim();
-            s.SetupDone = 1;
-            return s;
+            answers.Language = lang != startLang ? lang : null;
+            return start.ApplySetup(answers, Mode);
         }
 
         // ---------- building ----------
@@ -458,20 +419,20 @@ namespace PrintPrice
             t.SetColumnSpan(cmbArea, 2);
             lblLiveNow = Note(t, " ", 1, 0);
             choiceFixed = ChoiceRow(t, L.S("A fixed price", "En fast pris"), 0);
-            txtElec = NumberRow(t, L.S("Electricity price", "Strømpris"), "kr/kWh", Indent, out lblElecCap);
+            txtElec = NumberRow(t, L.S("Electricity price", "Elpris"), "kr/kWh", Indent, out lblElecCap);
             txtElec.TextChanged += delegate { if (!filling) { elecText = txtElec.Text; Valid(txtElec); UpdateExample(); } };
             choiceLive.CheckedChanged += delegate { if (!filling && choiceLive.Checked) { live = true; UpdatePower(); FetchLive(); UpdateExample(); } };
             choiceFixed.CheckedChanged += delegate { if (!filling && choiceFixed.Checked) { live = false; UpdatePower(); UpdateExample(); } };
             Box(t, L.S("A print uses little power (an A1 about 0,1 kWh an hour), so this is a small part of the price.",
-                       "En print bruger lidt strøm (en A1 omkring 0,1 kWh i timen), så det er en lille del af prisen."),
+                       "Et print bruger lidt strøm (en A1 omkring 0,1 kWh i timen), så det er en lille del af prisen."),
                    L.S("Tariffs, VAT and the start-up fetch are in Settings > Electricity.",
-                       "Afgifter, moms og hentning ved start ligger i Indstillinger > Strøm."), 0);
+                       "Afgifter, moms og hentning ved start ligger i Indstillinger > Elpris."), 0);
         }
 
         void BuildPrices(TableLayoutPanel t)
         {
             Box(t, L.S("Every print gets two prices: one for friends & family, one for customers.",
-                       "Hver print får to priser: en til venner og familie og en til kunder."),
+                       "Hvert print får to priser: en til venner og familie og en til kunder."),
                    L.S("Failed-print allowance, rounding and invoice details keep their defaults (Settings).",
                        "Fejlprint, afrunding og fakturaoplysninger beholder deres standard (Indstillinger)."), 6);
             Label cap;
@@ -727,7 +688,7 @@ namespace PrintPrice
             else ok &= ReadNumber(elecText, out el);
             if (!ok)
             {
-                example.Set(L.S("Example: an 8 h print with 150 g filament", "Eksempel: en print på 8 t med 150 g filament"),
+                example.Set(L.S("Example: an 8 h print with 150 g filament", "Eksempel: et print på 8 t med 150 g filament"),
                             L.S("Friends & family", "Venner og familie"), "–", L.S("Customers", "Kunder"), "–",
                             L.S("Fill in the boxes above to see the prices.", "Udfyld felterne ovenfor for at se priserne."));
                 return;
@@ -739,7 +700,7 @@ namespace PrintPrice
                 s.MachineRatePerHour = Wear.DefaultRateFor(model.Key);
             }
             var res = Pricing.Calculate(new QuoteInput { Hours = 8, Minutes = 0, FilamentGrams = 150, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el }, s);
-            example.Set(L.S("Example: an 8 h print with 150 g filament", "Eksempel: en print på 8 t med 150 g filament"),
+            example.Set(L.S("Example: an 8 h print with 150 g filament", "Eksempel: et print på 8 t med 150 g filament"),
                         L.S("Friends & family", "Venner og familie"), Num.Kr(res.FriendsPrice),
                         L.S("Customers", "Kunder"), Num.Kr(res.OthersPrice),
                         L.F("Material + power, plus your markup, plus printer wear ({0} kr/h).",
@@ -949,7 +910,7 @@ namespace PrintPrice
                         return;
                     }
                     // history only: the saved settings carry the merged invoice codes and printer ids now
-                    if (got.Settings != null) start = got.Settings.Clone();
+                    if (got.Settings != null) { start = got.Settings.Clone(); opening = SetupAnswers.From(start, Mode); }
                     infoRestore.Kind = InfoKind.Success;
                     infoRestore.SetText(L.S("✓ Price history restored. Carry on with the setup.", "✓ Prishistorikken er gendannet. Fortsæt med opsætningen."), null);
                 }

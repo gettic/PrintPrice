@@ -10,7 +10,8 @@
 }
 else
 {
-    <div class="@(InHistory ? "page wide" : "page")">
+    @* inert while a dialog is open: Tab / clicks can't reach the page behind the overlay (qol: all dialogs) *@
+    <div class="@(InHistory ? "page wide" : "page")" inert="@AnyDialog">
         <div class="top">
             <img src="icon-192.png" alt="" />
             <h1>@Title</h1>
@@ -36,6 +37,13 @@ else
         }
 
         <div class="calc" hidden="@InHistory">
+        @if (setupHint)
+        {
+            <div class="hinfo setup-hint" role="status">
+                <a href="#setup" @onclick="RunSetup" @onclick:preventDefault="true">@L.S("Setup skipped – run it now", "Opsætning sprunget over – kør den nu")</a>
+                <button class="x" @onclick="() => setupHint = false" aria-label="@L.S("Close", "Luk")">✕</button>
+            </div>
+        }
         <div class="drop">
             <div class="pic">
                 @if (pictureUrl != null)
@@ -54,7 +62,6 @@ else
                 </div>
                 <input type="file" @ref="fileInput" class="hidden-file" tabindex="-1" aria-hidden="true"
                        accept=".3mf,.gcode,.gco,.gc,.bgcode,.stl,.obj,.step,.stp,.amf" />
-                <input type="file" id="backupFile" class="hidden-file" tabindex="-1" aria-hidden="true" accept=".printprice-backup,.json" />
                 @if (fileText != null)
                 {
                     <div class="@(fileError ? "file-msg error" : "file-msg")" role="status">@fileText</div>
@@ -233,6 +240,15 @@ else
         </div>
     </div>
 
+    @* outside the page: Backup's Choose file… clicks it while the page is inert *@
+    <input type="file" id="backupFile" class="hidden-file" tabindex="-1" aria-hidden="true" accept=".printprice-backup,.json" />
+
+    @if (setupOpen)
+    {
+        <SetupDialog @key="setupKey" Settings="settings" Again="setupAgain" FilamentType="@prefs.FilamentType" RestoreText="@setupRestoreText"
+                     OnDone="SetupClosed" OnRestore="() => OpenBackup(BackupDialog.TabRestore)" LanguageChanged="SetupLanguage" Behind="backupOpen" />
+    }
+
     @if (backupOpen)
     {
         <BackupDialog Quotes="history" Settings="settings" StartTab="backupTab" PendingId="pendingId" PendingName="@pendingName"
@@ -242,7 +258,7 @@ else
     @if (settingsOpen)
     {
         <SettingsDialog Settings="settings" FilamentType="prefs.FilamentType" StartTab="settingsTab"
-                        BrowserDanish="browserDanish" OnClose="SettingsClosed" />
+                        BrowserDanish="browserDanish" OnClose="SettingsClosed" SetupRequested="SetupFromSettings" />
     }
 
     @if (quoteOpen)
@@ -329,13 +345,17 @@ else
 
     bool InHistory { get { return view == "history"; } }
 
+    /// Any of the page's dialogs is open (Settings, Backup, quote page, setup): the page behind is inert.
+    bool AnyDialog { get { return setupOpen || settingsOpen || backupOpen || quoteOpen; } }
+
     string Title { get { return L.S("Gettic's 3D Print Price Calculator", "Gettics 3D-print prisberegner"); } }
 
     protected override async Task OnInitializedAsync()
     {
         bool upgraded;
-        settings = WebCalc.SettingsFromText(await Store.Get(Store.SettingsKey), out upgraded);
-        prefs = WebCalc.Prefs.FromText(await Store.Get(Store.PrefsKey));
+        string settingsText = await Store.Get(Store.SettingsKey), prefsText = await Store.Get(Store.PrefsKey);
+        settings = WebCalc.SettingsFromText(settingsText, out upgraded);
+        prefs = WebCalc.Prefs.FromText(prefsText);
         if (upgraded) await SaveSettings();
         string lang = (await Store.BrowserLanguage() ?? "").ToLowerInvariant();
         browserDanish = lang.StartsWith("da") || lang.StartsWith("nb") || lang.StartsWith("no");
@@ -349,7 +369,11 @@ else
         Recalculate();
         string hash = await Store.Hash();   // a link to ...#settings / #printer / #language opens Settings there
         lastBackup = await Store.Get(WebBackup.LastBackupKey) ?? "";
-        if (hash == "#history") view = "history";
+        // first-time setup (idea 19): a brand-new visitor, or a stored SetupDone=0; existing visitors never see it
+        WebSetup.MarkNewVisitor(settings, WebSetup.IsNewVisitor(settingsText, prefsText, lastBackup, history.Count, historyProblem, Histories.Available));
+        if (WebSetup.ShouldShow(settings) || hash == "#setup") OpenSetup(!WebSetup.ShouldShow(settings));
+        if (hash == "#setup") { }
+        else if (hash == "#history") view = "history";
         else if (hash == "#backup" || hash == "#restore") { view = "history"; OpenBackup(hash == "#restore" ? BackupDialog.TabRestore : BackupDialog.TabBackup); }
         else if (hash == "#settings") OpenSettings(SettingsDialog.TabPrices);
         else if (hash == "#printer") OpenSettings(SettingsDialog.TabPrinter);
@@ -431,6 +455,7 @@ else
 
     void Clear()
     {
+        setupHint = false;   // the one-time hint goes with the next action (desktop SetAuto)
         hours = minutes = grams = "";
         ClearJob();
         Changed();
@@ -487,7 +512,7 @@ else
             await Store.HookBackupInput();
             _ = Histories.CleanPictures(history);
         }
-        if (ready && !powerStarted)
+        if (ready && !powerStarted && !setupOpen)   // after the setup: its step 3 may change the area / live or fixed
         {
             powerStarted = true;   // once per page open, as the desktop does at startup (no timer)
             if (settings.AutoPowerPrice != 0) await FetchPower();
@@ -538,6 +563,7 @@ else
     public async Task FileChosen(int id, string name, double size, int count)
     {
         if (WebBackup.IsBackupName(name)) { await BackupFileChosen(id, name, (long)size); return; }   // Restore, not a sliced file
+        setupHint = false;
         var repeat = repeatOf;   // a repeat print stays one when its sliced file is dropped again (the hint asks for it)
         ClearJob();
         int mine = fileId = id;
@@ -689,6 +715,11 @@ else
             return;
         }
         if (quoteOpen) { quoteOpen = false; StateHasChanged(); }                // Back closes the quote page
+        if (hash == "#setup")
+        {
+            if (!setupOpen) { RunSetup(); StateHasChanged(); }
+            return;
+        }
         string v = hash == "#history" ? "history" : "calc";
         if (v == view) return;
         view = v;
@@ -1122,6 +1153,11 @@ else
         await Store.SetPageLanguage(L.Danish, Title);
         if (a.Problem == null) await Histories.WritePictures(WebHistory.PictureWrites(res));   // the backup's pictures (Merge keeps ours)
         _ = Histories.CleanPictures(history);
+        if (setupOpen)   // restored from the setup's step 1: with settings the setup is done (Combine set SetupDone 1)
+        {
+            if (res.SettingsRestored && !WebSetup.ShouldShow(settings)) setupOpen = false;
+            else setupRestoreText = L.S("✓ Price history restored. Carry on with the setup.", "✓ Prishistorikken er gendannet. Fortsæt med opsætningen.");
+        }
         StateHasChanged();   // the History page behind the dialog shows the restored list at once
         return a;
     }
@@ -1134,6 +1170,69 @@ else
         if (!settings.SelectPrinter(id)) return;
         WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
         _ = SaveSettings();
+    }
+
+    // ---------- first-time setup (idea 19) ----------
+    bool setupOpen, setupAgain, setupHint;
+    int setupKey;
+    string setupRestoreText;   // "✓ Price history restored…" (a restore without settings while the setup is open)
+
+    void OpenSetup(bool again)
+    {
+        setupAgain = again;
+        setupRestoreText = null;
+        setupHint = false;
+        setupKey++;
+        setupOpen = true;
+    }
+
+    /// The hint's link, #setup, Settings > App > Run setup again…: a re-run (Cancel keeps everything), unless the setup
+    /// was never done (stored SetupDone=0).
+    void RunSetup() { OpenSetup(!WebSetup.ShouldShow(settings)); }
+
+    void SetupFromSettings()
+    {
+        settingsOpen = false;
+        RunSetup();
+    }
+
+    /// The setup's language choice shows at once (the page behind it too); saved only when the setup closes.
+    async Task SetupLanguage()
+    {
+        StateHasChanged();
+        await Store.SetPageLanguage(L.Danish, Title);
+    }
+
+    async Task SetupClosed(SetupDialog.Outcome o)
+    {
+        setupOpen = false;
+        bool firstRun = !setupAgain;
+        string h = await Store.Hash();
+        if (h == "#setup") await Store.Go(view == "history" ? "#history" : "");
+        if (o == null)   // a re-run cancelled: nothing changes (the language it showed goes back)
+        {
+            ApplyLanguage();
+            await Store.SetPageLanguage(L.Danish, Title);
+            return;
+        }
+        bool powerChanged = o.Settings.PriceArea != settings.PriceArea || o.Settings.AutoPowerPrice != settings.AutoPowerPrice;
+        settings = o.Settings;
+        History.ReservePrinterIds(history, settings);   // a restore meanwhile may have brought printer ids
+        WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
+        if (materialName == null) perKg = Num.Fmt(settings.LastFilamentPrice);
+        if (settings.AutoPowerPrice == 0) elec = Num.Fmt(settings.LastElectricityPrice);
+        if (fileResult != null) CheckPrinter(fileResult);
+        ApplyLanguage();
+        Recalculate();
+        await SaveSettings();
+        await Store.SetPageLanguage(L.Danish, Title);
+        setupHint = firstRun && o.Later;   // this visit only
+        // the start-up fetch waited for the setup (OnAfterRenderAsync); a re-run asks again like Settings does
+        if (powerStarted && powerChanged)
+        {
+            if (settings.AutoPowerPrice != 0) await FetchPower();
+            else { powerError = false; powerLine = PowerOffText; }
+        }
     }
 
     void OpenSettings(int tab) { settingsTab = tab; settingsOpen = true; }

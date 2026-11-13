@@ -2,6 +2,9 @@
 
 # Gettic's 3D Print Price Calculator
 
+> [!TIP]
+> **Try it in your browser, no install:** [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/)
+
 > [!NOTE]
 > **AI disclaimer:** This app, including its code, logo and documentation, was made with the help of AI. It has been tested, but it may still contain mistakes. The prices it calculates are estimates, so check them before you send a quote.
 
@@ -16,6 +19,7 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 
 **Optional:** install [Bambu Studio](https://bambulab.com/en/download/studio) to detect print time and filament use automatically.
 
+<a id="first-start"></a>
 **First start:** on a new PC, a short setup window opens before the main window. It has 4 steps and a summary:
 
 | Step | What you set |
@@ -36,6 +40,13 @@ The exe isn't code-signed, so the first time you run it Windows SmartScreen may 
 
 ## Website
 There is also a calculator in the browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). Type the print time, grams, kr/kg and the electricity price, and you get both prices and the cost breakdown. It is in English and Danish. Settings are kept only in that browser.
+
+**First visit:** a brand-new visitor gets the same short setup as the app's [first start](#first-start): 4 steps and a summary.
+- Step 2 is one printer tile (A1, A1 mini or P1S), with its power and wear per hour. There is no Bambu Studio check.
+- The language switches the page at once. **Restore a backup…** works like in the app: a backup with settings ends the setup.
+- **Set up later** (or ✕ or Esc) keeps the defaults, and the page shows "Setup skipped – run it now" once.
+- Run it again from **Settings → App → Run setup again…**, or open the address `gettic.github.io/PrintPrice/#setup`. A new printer there changes the printer's model, like the **Model** box in **Settings → Printer**.
+- If you already use the site, you never see it.
 
 **Size:** the first visit downloads about 3.2 MB (gzip) or 2.6 MB (brotli, used when the browser allows). The browser unpacks the brotli files with Google's small Brotli decoder, included with the site. The decoder runs in your browser and sends nothing.
 
@@ -76,7 +87,7 @@ It does less than the Windows app: no slicing.
 
 The site runs in your browser. It stores your settings and price history in the browser's own storage. Files you drop on it are read on your PC and never leave it. The only link you click is **GitHub** at the bottom, and nothing is sent before you click it.
 
-The one outside service the site calls is PrintPrice's small Cloudflare relay (`printprice.gtd-relay.workers.dev`). It is used for the live electricity price, where it is sent the price area (DK1 or DK2) and nothing else, and for online backup, and only when you use it. For online backup it gets only the locked copy and a storage id made from the code, never the code. Cloudflare sees your IP address, like any website does, and the relay keeps only a salted hash of it, as described under Privacy. Turn the live price off in **Settings → Electricity**: then the page only asks when you click **Update**.
+The one outside service the site calls is PrintPrice's small Cloudflare relay (`printprice.gtd-relay.workers.dev`). It is used for the live electricity price, where it is sent the price area (DK1 or DK2) and nothing else, and for online backup, and only when you use it. For online backup it gets only the locked copy and a storage id made from the code, never the code. Cloudflare sees your IP address, like any website does, and the relay keeps only a salted hash of it, as described under Privacy. The setup's electricity step asks too, while the live price is chosen. Turn the live price off in **Settings → Electricity**: then the page only asks when you click **Update**.
 
 ## Linux and Steam Deck
 The Windows app isn't tested under Wine or Proton. Use the website instead, in any browser: [gettic.github.io/PrintPrice](https://gettic.github.io/PrintPrice/). To fill in time and grams from a model, slice it in Bambu Studio for Linux (Flathub `com.bambulab.BambuStudio`, or the AppImage) or in OrcaSlicer, PrusaSlicer or Cura, export the sliced plate, and drop the `.gcode.3mf` or `.gcode` file on the site.
@@ -282,7 +293,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/Lang.cs` | English and Danish texts |
 | `src/Screenshots.cs` | Hidden `--screenshots` picture mode |
 | `tests/PricingTests.cs` | Unit tests |
-| `web/` | The website version (reuses the pricing files) |
+| `web/` | The website version (reuses the pricing files and the setup's answers in `src/AppSettings.cs`) |
 | `.github/workflows/build.yml` | GitHub Actions: builds and tests the release exe |
 | `.github/workflows/pages.yml` | GitHub Actions: publishes the website |
 | `LICENSE` | GPL-3.0 |

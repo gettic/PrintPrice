@@ -179,6 +179,13 @@ namespace PrintPrice.Web
             catch (Exception) { return false; }
         }
 
+        /// First-time setup: focus the box (CSS selector) with its text selected. always = false skips touch screens.
+        public async Task<bool> FocusBox(string selector, bool always)
+        {
+            try { return await js.InvokeAsync<bool>("printPrice.focusBox", selector, always); }
+            catch (Exception) { return false; }
+        }
+
         public async Task SetPageLanguage(bool danish, string title)
         {
             try { await js.InvokeVoidAsync("printPrice.page", danish ? "da" : "en", title); }

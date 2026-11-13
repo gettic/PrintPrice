@@ -773,6 +773,70 @@ namespace PrintPrice
             }
             return c;
         }
+
+        // ---------- first-time setup (idea 19; shared by the desktop SetupForm and the website) ----------
+        /// A copy of these settings with the setup's answers in and SetupDone = 1. This object is not changed; doesn't save.
+        /// A bad or empty number answer keeps the setting's value (SetupAnswers.ReadNumber).
+        public AppSettings ApplySetup(SetupAnswers a, SetupPrinterMode mode)
+        {
+            var s = Clone();
+            if (a == null) a = new SetupAnswers();
+            if (!string.IsNullOrEmpty(a.Language)) s.Language = a.Language;
+
+            var models = a.Models ?? new List<string>();
+            if (models.Count > 0)
+            {
+                if (mode == SetupPrinterMode.Replace)
+                {
+                    s.SetPrinter(PrinterProfile.ForModel(s.ActivePrinterId, "", models[0]));
+                    for (int i = 1; i < models.Count; i++) s.AddPrinter("", models[i]);
+                }
+                else if (mode == SetupPrinterMode.Add)
+                {
+                    var have = new List<string>();
+                    foreach (var p in s.Printers) have.Add(p.Model);
+                    foreach (var key in models)
+                    {
+                        string m = Wear.FindModel(key).Key;
+                        if (have.Contains(m)) continue;
+                        s.AddPrinter("", m);
+                        have.Add(m);
+                    }
+                }
+                else
+                {
+                    // like Settings' Model box: watts and name follow while still the old model's, auto wear = the model's stock rate
+                    var p = s.ActivePrinter;
+                    var old = Wear.FindModel(p.Model);
+                    var n = Wear.FindModel(models[0]);
+                    if (n.Key != old.Key)
+                    {
+                        p.Model = n.Key;
+                        if (p.Watts == old.DefaultWatts) p.Watts = n.DefaultWatts;
+                        if (p.Name == old.Label) p.Name = n.Label;
+                        if (p.AutoWearRate != 0) p.MachineRatePerHour = Wear.DefaultRateFor(n.Key);
+                        s.SetPrinter(p);
+                    }
+                }
+            }
+
+            if (a.SlicerPath != null) s.SlicerPath = a.SlicerPath;
+            double v;
+            if (SetupAnswers.ReadNumber(a.FilamentText, out v) && v != PriceFor(FilamentPreset))
+            {
+                s.LastFilamentPrice = v;
+                s.RememberPrice(s.FilamentPreset, v);
+            }
+            s.AutoPowerPrice = a.LivePower ? 1 : 0;
+            s.PriceArea = a.Area == "DK2" ? "DK2" : "DK1";
+            if (!a.LivePower && SetupAnswers.ReadNumber(a.ElecText, out v)) s.LastElectricityPrice = v;
+            if (SetupAnswers.ReadNumber(a.FriendsText, out v)) s.FriendsMarkupPct = v;
+            if (SetupAnswers.ReadNumber(a.OthersText, out v)) s.OthersMarkupPct = v;
+            if (SetupAnswers.ReadNumber(a.MinText, out v)) s.MinimumPrice = v;
+            s.QuoteName = (a.QuoteName ?? "").Trim();
+            s.SetupDone = 1;
+            return s;
+        }
     }
 
     /// One printer (AppSettings.Printers). Id never changes and is never reused; History saves it with each quote.
@@ -861,6 +925,97 @@ namespace PrintPrice
         {
             o.Error = error;
             return o;
+        }
+    }
+
+    /// How AppSettings.ApplySetup uses the printer answer.
+    public enum SetupPrinterMode
+    {
+        Replace,     // first run: the active printer becomes ForModel(first model), each further model is added
+        Add,         // desktop re-run: models not yet among the printers are added; existing printers untouched
+        ChangeModel  // website re-run: the active printer's model changes like Settings' Model box
+    }
+
+    /// The first-time setup's answers (desktop SetupForm and the website). Number answers are texts as typed: a bad or
+    /// empty one keeps the setting's value when applied (AppSettings.ApplySetup).
+    public class SetupAnswers
+    {
+        public const int StepLanguage = 0, StepPrinter = 1, StepCosts = 2, StepPrices = 3, Questions = 4;
+
+        public string Language;                              // "en" / "da"; null or "" = keep
+        public List<string> Models = new List<string>();     // model keys in tick order; empty = printers untouched
+        public string SlicerPath;                            // desktop only; null = keep
+        public string FilamentText;                          // kr/kg
+        public bool LivePower;                               // true = live price (ElecText not used)
+        public string Area = "DK1";                          // "DK1" / "DK2" (anything else = DK1)
+        public string ElecText;                              // kr/kWh, fixed price
+        public string FriendsText, OthersText, MinText;      // markups % and minimum price kr.
+        public string QuoteName = "";                        // trimmed when applied
+
+        /// The opening answers for these settings (applying them changes nothing but SetupDone). Models: Replace /
+        /// ChangeModel = the active printer's model, Add = each model already among the printers (first-seen order).
+        public static SetupAnswers From(AppSettings s, SetupPrinterMode mode)
+        {
+            if (s == null) s = new AppSettings();
+            var a = new SetupAnswers();
+            a.Language = s.Language ?? "";
+            if (mode == SetupPrinterMode.Add)
+            {
+                foreach (var p in s.Printers)
+                    if (!a.Models.Contains(p.Model)) a.Models.Add(p.Model);
+            }
+            else a.Models.Add(Wear.FindModel(s.PrinterModel).Key);
+            a.SlicerPath = s.SlicerPath ?? "";
+            a.FilamentText = Num.Fmt(s.PriceFor(s.FilamentPreset));
+            a.ElecText = Num.Fmt(s.LastElectricityPrice);
+            a.LivePower = s.AutoPowerPrice != 0;
+            a.Area = s.PriceArea == "DK2" ? "DK2" : "DK1";
+            a.FriendsText = Num.Fmt(s.FriendsMarkupPct);
+            a.OthersText = Num.Fmt(s.OthersMarkupPct);
+            a.MinText = Num.Fmt(s.MinimumPrice);
+            a.QuoteName = s.QuoteName ?? "";
+            return a;
+        }
+
+        /// Puts one step's answers back to those in `opening` (Skip; Set up later for the unfinished steps).
+        public void CopyStep(int step, SetupAnswers opening)
+        {
+            if (opening == null) return;
+            switch (step)
+            {
+                case StepLanguage:
+                    Language = opening.Language;
+                    break;
+                case StepPrinter:
+                    Models = new List<string>(opening.Models ?? new List<string>());
+                    SlicerPath = opening.SlicerPath;
+                    break;
+                case StepCosts:
+                    FilamentText = opening.FilamentText;
+                    ElecText = opening.ElecText;
+                    LivePower = opening.LivePower;
+                    Area = opening.Area;
+                    break;
+                case StepPrices:
+                    FriendsText = opening.FriendsText;
+                    OthersText = opening.OthersText;
+                    MinText = opening.MinText;
+                    QuoteName = opening.QuoteName;
+                    break;
+            }
+        }
+
+        public SetupAnswers Clone()
+        {
+            var c = (SetupAnswers)MemberwiseClone();
+            c.Models = new List<string>(Models ?? new List<string>());
+            return c;
+        }
+
+        /// The setup's number rule (also for the red boxes): comma or dot, 0 <= v < 10 000 000.
+        public static bool ReadNumber(string text, out double v)
+        {
+            return Num.TryParse(text, out v) && v >= 0 && v < 1e7;
         }
     }
 }
