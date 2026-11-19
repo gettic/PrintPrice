@@ -429,7 +429,10 @@ namespace PrintPrice
                     // JPEG has no alpha: flatten onto white first (the page is opaque anyway)
                     using (var rgb = new Bitmap(bmp.Width, bmp.Height, PixelFormat.Format24bppRgb))
                     {
-                        using (var g = Graphics.FromImage(rgb)) { g.Clear(Color.White); g.DrawImageUnscaled(bmp, 0, 0); }
+                        // explicit pixel rectangle: DrawImageUnscaled would draw at physical size (150-dpi page onto a
+                        // 96-dpi bitmap = 64 %, issue #1)
+                        rgb.SetResolution(bmp.HorizontalResolution, bmp.VerticalResolution);
+                        using (var g = Graphics.FromImage(rgb)) { g.Clear(Color.White); g.DrawImage(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height)); }
                         rgb.Save(ms, codec, ps);
                     }
                 }

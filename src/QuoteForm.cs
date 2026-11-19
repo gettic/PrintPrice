@@ -460,7 +460,7 @@ namespace PrintPrice
                     var clip = g.Clip;
                     g.SetClip(v);
                     int x = page.Width < v.Width ? v.X + (v.Width - page.Width) / 2 : v.X - scrollX;
-                    g.DrawImageUnscaled(page, x, v.Y - scroll);
+                    g.DrawImage(page, new Rectangle(x, v.Y - scroll, page.Width, page.Height));   // pixel size, not 150-dpi physical size
                     g.Clip = clip;
                 }
                 else if (page != null)

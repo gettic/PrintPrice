@@ -10,7 +10,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, backup*.png / restore*.png (Backup window), ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; idea 21: main_parts.png, main_plates.png, main_plates_menu.png, main_makerworld.png, picker.png, picker_colour_menu.png; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, quote.pdf + quote_pdf.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, backup*.png / restore*.png (Backup window), ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; idea 21: main_parts.png, main_plates.png, main_plates_menu.png, main_makerworld.png, picker.png, picker_colour_menu.png; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -52,7 +52,11 @@ namespace PrintPrice
                     // customer name, dark with one; then the "Show quote…" window (made-up customer, nothing is saved)
                     foreach (bool dark in new[] { false, true })
                         using (var q = main.RenderSampleQuote(dark, dark ? "Mette Hansen" : ""))
-                            if (q != null) q.Save(Path.Combine(folder, dark ? "quote_dark.png" : "quote_light.png"), ImageFormat.Png);
+                            if (q != null)
+                            {
+                                q.Save(Path.Combine(folder, dark ? "quote_dark.png" : "quote_light.png"), ImageFormat.Png);
+                                if (!dark) SavePdfCheck(q, folder);   // quote.pdf + quote_pdf.png (issue #1)
+                            }
                     // the invoice page of the same job (sample code, customer and payment ways)
                     using (var inv = main.RenderSampleInvoice())
                         if (inv != null) inv.Save(Path.Combine(folder, "invoice_light.png"), ImageFormat.Png);
@@ -356,6 +360,23 @@ namespace PrintPrice
                 Version = new Version(c.Major, c.Minor, Math.Max(0, c.Build) + 3),
                 Tag = "v" + v(3), Title = "v" + v(3), Notes = notes
             };
+        }
+
+        /// Writes the quote page as quote.pdf (QuotePage.Pdf, as Save as PDF does) and the JPEG inside it, decoded,
+        /// as quote_pdf.png, so the PDF's real page content can be checked (it must fill the whole picture).
+        static void SavePdfCheck(Bitmap page, string folder)
+        {
+            byte[] pdf = QuotePage.Pdf(page);
+            File.WriteAllBytes(Path.Combine(folder, "quote.pdf"), pdf);
+            int start = -1, end = -1;   // the JPEG: from its FF D8 start marker to the last FF D9 end marker
+            for (int i = 0; i + 1 < pdf.Length; i++)
+                if (pdf[i] == 0xFF && pdf[i + 1] == 0xD8) { start = i; break; }
+            for (int i = pdf.Length - 2; i > start; i--)
+                if (pdf[i] == 0xFF && pdf[i + 1] == 0xD9) { end = i + 2; break; }
+            if (start < 0 || end < 0) return;
+            using (var ms = new MemoryStream(pdf, start, end - start))
+            using (var img = Image.FromStream(ms))
+                img.Save(Path.Combine(folder, "quote_pdf.png"), ImageFormat.Png);
         }
 
         /// Left of every monitor, so nothing ever appears on screen, and not in the taskbar.
