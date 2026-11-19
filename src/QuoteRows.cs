@@ -202,12 +202,14 @@ namespace PrintPrice
         }
 
         /// A saved record as plain text: title, name, model, link (already short), time and grams, the chosen price;
-        /// invoice: number, dates (History.InvoiceInfo: the invoice's snapshot when it has one), payment.
+        /// invoice: "Bill to" name, number, dates (History.InvoiceInfo: the invoice's snapshot when it has one), payment.
         public static string RecordText(QuoteRecord r, bool friends, bool invoice, AppSettings settings, string link)
         {
             string nl = Environment.NewLine;
             string text = (invoice ? L.S("Invoice", "Faktura") + " " + r.InvoiceNo : L.S("3D print quote", "Tilbud på 3D-print") + " " + History.QuoteNumber(r)) + nl;
-            if (!string.IsNullOrEmpty(r.Customer)) text += (invoice ? L.S("Bill to: ", "Kunde: ") : L.S("For: ", "Til: ")) + r.Customer + nl;
+            // invoice: the name it was made out to (History.InvoiceInfo: stored BilledTo, else Customer)
+            string who = invoice ? History.InvoiceInfo(r, settings).BilledTo : (r.Customer ?? "").Trim();
+            if (!string.IsNullOrEmpty(who)) text += (invoice ? L.S("Bill to: ", "Kunde: ") : L.S("For: ", "Til: ")) + who + nl;
             text += "Model: " + ModelName(r.Model) + nl;
             if (!string.IsNullOrEmpty(link)) text += link + nl;
             text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g", r.Hours, r.Minutes, Num.Fmt(r.Grams)) + nl;

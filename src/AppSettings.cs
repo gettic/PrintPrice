@@ -47,6 +47,9 @@ namespace PrintPrice
         // A restore with settings always gives 1 (History.Combine).
         public double SetupDone = 1;
 
+        // Main window quote/invoice toggle (INI "MainInvoice"): 0 = quote (default), 1 = invoice. Any other value reads as 0.
+        public double MainInvoice = 0;
+
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
         public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
@@ -501,6 +504,7 @@ namespace PrintPrice
             d["SettingsVersion"] = SettingsVersion;
             d["LastPrinterId"] = LastPrinterId;
             d["SetupDone"] = SetupDone;
+            d["MainInvoice"] = MainInvoice;
             return d;
         }
 
@@ -555,6 +559,7 @@ namespace PrintPrice
                 case "SettingsVersion": SettingsVersion = Math.Floor(v); break;
                 case "LastPrinterId": if (v >= 1 && v < 1e9) LastPrinterId = Math.Floor(v); break;
                 case "SetupDone": SetupDone = v != 0 ? 1 : 0; break;
+                case "MainInvoice": MainInvoice = v == 1 ? 1 : 0; break;
             }
         }
 

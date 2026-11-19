@@ -40,7 +40,7 @@ namespace PrintPrice
         // invoice (History's Invoice…): title "Invoice", number / invoice date / due date in the header, "Bill to" row
         // instead of Printer, "Please pay by" under the total and a Payment block (only the lines that are set)
         public bool Invoice;
-        public string InvoiceNo = "";     // History.MakeInvoice / NextInvoiceNo ("2026-006"); Date = the invoice date
+        public string InvoiceNo = "";     // History.MakeInvoice / NextInvoiceNo ("2026-48213": year + 5 random digits); Date = the invoice date
         public DateTime Due;              // AppSettings.InvoiceDue(Date)
         public string PayMobilePay = "";  // AppSettings.PayMobilePay ("" = no line)
         public string PayBank = "";       // AppSettings.PayBank ("" = no line)

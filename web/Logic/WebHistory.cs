@@ -316,10 +316,12 @@ namespace PrintPrice.Web
         /// The record for the quote on screen. materials = the colour lines' Colour / Type / Name (Name = the filament
         /// profile) in the same order as input's lines (null = leave them empty); purge = the file's purge grams (2+ colours).
         /// reopened = a quote opened again keeps its For; repeatOf = a repeat print: same For, RepeatOf = its Id.
+        /// wear = the job's wear split (WebCalc.WearBreakdown; saved only when Auto wear is on), null = none.
         public static QuoteRecord MakeRecord(QuoteInput input, QuoteResult result, AppSettings s, string model, DateTime now,
-                                             IList<HistoryFilament> materials, double purge, QuoteRecord reopened, QuoteRecord repeatOf)
+                                             IList<HistoryFilament> materials, double purge, QuoteRecord reopened, QuoteRecord repeatOf,
+                                             Wear.Breakdown wear = null)
         {
-            var r = History.FromQuote(input, result, s, model ?? "", "", now);
+            var r = History.FromQuote(input, result, s, model ?? "", "", now, wear);
             if (r.Filaments != null && materials != null && r.Filaments.Count == materials.Count)
             {
                 for (int k = 0; k < materials.Count; k++)

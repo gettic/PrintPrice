@@ -27,7 +27,7 @@ namespace PrintPrice
         readonly TableLayoutPanel top, bottom, cards;
         readonly ComboBox cmbMonth;
         readonly StatCard cardPrints, cardTime, cardCustomers, cardFriends, cardCosts, cardProfit;
-        readonly DataGridViewTextBoxColumn colDate, colModel, colTime, colGrams, colPrice, colNote, colInvoice, colPrinter;
+        readonly DataGridViewTextBoxColumn colDate, colModel, colTime, colGrams, colPrice, colNote, colInvoice, colPrinter, colCustomer;
         readonly ComboBox cmbPrinter;    // Printer filter (only with 2+ printers): All printers / one printer
         readonly Label lblPrinterCap;
         bool printerMode;                // 2+ printers (in Settings or in the records): Printer column + filter + profit tooltip
@@ -46,7 +46,7 @@ namespace PrintPrice
         readonly ToolTip modelTip;   // dark tooltip with the full model name when it is cut off
         readonly DataGridViewCheckBoxColumn colPrinted, colFailed;   // read-only cells, toggled by click / Space, drawn in the theme (PaintTicks)
         readonly ContextMenuStrip rowMenu;
-        ToolStripMenuItem miPrinted, miFailed, miDelete, miOpen, miRepeat, miQuote, miInvoice, miFriends, miCustomer;
+        ToolStripMenuItem miPrinted, miFailed, miDelete, miOpen, miRepeat, miQuote, miInvoice, miFriends, miCustomer, miName, miSameName;
         bool filling, refillingMonths;
         string saveError;
         string listError;   // building the list failed (Load / after a restore): shown in the info box, details in the error window
@@ -132,7 +132,7 @@ namespace PrintPrice
             txtSearch = new TextBox { Width = 260, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 24, 3), Tag = "single" };
             txtSearch.HandleCreated += delegate
             {
-                SendMessage(txtSearch.Handle, 0x1501, (IntPtr)1, L.S("Model, link or note", "Model, link eller note"));   // EM_SETCUEBANNER
+                SendMessage(txtSearch.Handle, 0x1501, (IntPtr)1, L.S("Model, name, link or note", "Model, navn, link eller note"));   // EM_SETCUEBANNER
             };
             txtSearch.TextChanged += delegate { Fill(); };
             txtSearch.Width = 220;
@@ -240,6 +240,11 @@ namespace PrintPrice
             };
             colPrinter = TextColumn("Printer", false);   // the quote's printer (only with 2+ printers)
             colPrinter.Visible = false;
+            // the customer's name (QuoteRecord.Customer): typed in place like Note, ▾ = earlier names (dark menu, CustomerMenu)
+            colCustomer = TextColumn(L.S("Customer", "Kunde"), false);
+            colCustomer.ReadOnly = false;
+            colCustomer.MaxInputLength = History.MaxCustomer;
+            colCustomer.DefaultCellStyle.Padding = new Padding(6, 0, CustomerArrowW, 0);   // room for the ▾
             colNote = TextColumn(L.S("Note", "Note"), false);
             colNote.ReadOnly = false;
             colNote.MaxInputLength = 200;
@@ -252,7 +257,7 @@ namespace PrintPrice
             colPrinted.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
             colInvoice = TextColumn(L.S("Invoice", "Faktura"), false);   // invoice no. (muted), empty = no invoice yet
             colPic = TextColumn("", false);   // the job's picture (idea 22), drawn by GridCellPainting
-            grid.Columns.AddRange(new DataGridViewColumn[] { colPic, colDate, colModel, colTime, colGrams, colPrice, colFor, colPrinter, colNote, colPrinted, colFailed, colInvoice });
+            grid.Columns.AddRange(new DataGridViewColumn[] { colPic, colDate, colModel, colTime, colGrams, colPrice, colFor, colPrinter, colCustomer, colNote, colPrinted, colFailed, colInvoice });
 
             grid.CellFormatting += GridCellFormatting;
             grid.CurrentCellDirtyStateChanged += delegate
@@ -291,16 +296,31 @@ namespace PrintPrice
                 TextRenderer.DrawText(e.Graphics, text, e.Font,
                     new Rectangle(e.Bounds.X, e.Bounds.Y + (e.Bounds.Height - sz.Height) / 2, e.Bounds.Width, sz.Height), Theme.Text, multi);
             };
+            // the dark tooltip: a cut-off model / printer / name / note / invoice code; a made invoice's kept name; "Printing, done about …"
             grid.CellMouseEnter += (s, e) =>
             {
-                if (e.RowIndex < 0 || (e.ColumnIndex != colModel.Index && e.ColumnIndex != colNote.Index && e.ColumnIndex != colInvoice.Index &&
-                                       e.ColumnIndex != colPrinter.Index)) return;   // cut-off model, printer, note or invoice code
+                if (e.RowIndex < 0) return;
+                var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
+                var r = grid.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
+                if (e.ColumnIndex == colPrinted.Index)
+                {
+                    string printing = PrintingText(rec, false);
+                    if (printing != null) modelTip.Show(printing, grid, r.Left, r.Bottom + 2, 8000);
+                    return;
+                }
+                if (e.ColumnIndex != colModel.Index && e.ColumnIndex != colNote.Index && e.ColumnIndex != colInvoice.Index &&
+                    e.ColumnIndex != colPrinter.Index && e.ColumnIndex != colCustomer.Index) return;
                 var cell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
                 string text = Convert.ToString(cell.FormattedValue);
-                var r = grid.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
                 var pad = cell.InheritedStyle.Padding;
-                if (string.IsNullOrEmpty(text) || TextRenderer.MeasureText(text, grid.Font).Width <= r.Width - pad.Horizontal - 4) return;
-                modelTip.Show(text, grid, r.Left, r.Bottom + 2, 8000);
+                bool cut = !string.IsNullOrEmpty(text) && TextRenderer.MeasureText(text, grid.Font).Width > r.Width - pad.Horizontal - 4;
+                if (e.ColumnIndex == colCustomer.Index)
+                {
+                    // a made invoice keeps the name it was made out to (BilledTo): say so when the name here differs
+                    string billed = BilledToNote(rec);
+                    if (billed != null) { modelTip.Show(cut ? text + "\n" + billed : billed, grid, r.Left, r.Bottom + 2, 8000); return; }
+                }
+                if (cut) modelTip.Show(text, grid, r.Left, r.Bottom + 2, 8000);
             };
             grid.CellMouseLeave += delegate { modelTip.Hide(grid); };
             FormClosed += delegate { modelTip.Dispose(); };
@@ -320,9 +340,10 @@ namespace PrintPrice
                 var col = grid.Columns[e.ColumnIndex];
                 if (col == colFailed) { ToggleFailed(e.RowIndex); return; }
                 if (col == colPrinted) { TogglePrinted(e.RowIndex); return; }
-                if (col != colFor && col != colNote) return;
+                if (col == colCustomer && OverCustomerArrow(e.RowIndex)) { ShowCustomerMenuAt(e.RowIndex); return; }
+                if (col != colFor && col != colNote && col != colCustomer) return;
                 grid.CurrentCell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
-                if (!grid.BeginEdit(col == colNote)) return;
+                if (!grid.BeginEdit(col != colFor)) return;
                 var cb = grid.EditingControl as ComboBox;
                 if (cb != null) cb.DroppedDown = true;
             };
@@ -330,7 +351,7 @@ namespace PrintPrice
             {
                 if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
                 var col = grid.Columns[e.ColumnIndex];
-                if (col == colFor || col == colNote || col == colFailed || col == colPrinted) return;   // those edit / toggle
+                if (col == colFor || col == colNote || col == colCustomer || col == colFailed || col == colPrinted) return;   // those edit / toggle
                 OpenAgain();
             };
             grid.OpenRequested = OpenAgain;
@@ -367,6 +388,7 @@ namespace PrintPrice
             };
             grid.CellPainting += PaintTicks;
             grid.CellPainting += PaintPicture;
+            HookCustomerColumn();   // ▾ on the Customer cell, its menu, Alt+Down in the editor (HistoryCustomer.cs)
             grid.SelectionChanged += delegate { if (!filling) { UpdateButtons(); UpdateCount(); } };
             // Ctrl + mouse wheel: bigger / smaller view (like Explorer)
             grid.MouseWheel += (s, e) =>
@@ -485,6 +507,12 @@ namespace PrintPrice
             rowMenu.Items.Add(miFriends);
             rowMenu.Items.Add(miCustomer);
             rowMenu.Items.Add(new ToolStripSeparator());
+            // the customer's name: the names menu for every selected quote; select every shown quote with the same name
+            miName = Item(L.S("Customer name…", "Kundenavn…"), () => ShowCustomerMenu(SelectedRecords(), rowMenuPoint));
+            miSameName = Item("", SelectSameName);
+            rowMenu.Items.Add(miName);
+            rowMenu.Items.Add(miSameName);
+            rowMenu.Items.Add(new ToolStripSeparator());
             miPrinted = Item(L.S("Printed", "Printet"), () => SetMarks(true));
             miFailed = Item(L.S("Failed", "Fejlet"), () => SetMarks(false));
             rowMenu.Items.Add(miPrinted);
@@ -509,6 +537,10 @@ namespace PrintPrice
                 miOpen.Enabled = miRepeat.Enabled = miQuote.Enabled = miInvoice.Enabled = one;
                 miQuote.Visible = miInvoice.Visible = QuoteRequested != null;
                 miDelete.Text = one ? L.S("Delete…", "Slet…") : L.F("Delete {0} quotes…", "Slet {0} tilbud…", sel.Count);
+                string same = SharedName(sel);
+                miSameName.Visible = same != null;
+                if (same != null)
+                    miSameName.Text = L.F("Select all quotes for {0}", "Vælg alle tilbud til {0}", MenuName(same, 30));
             };
             FormClosed += delegate { rowMenu.Dispose(); };
             // left: Delete + Backup… (6 px apart)
@@ -564,7 +596,7 @@ namespace PrintPrice
         }
 
         /// Load (after BuildList): a window wider or taller than the screen's work area (e.g. 150 % with 2+ printers) gets
-        /// narrower Note / Model columns (up to 45 + 40 px) and fewer list rows (at least 5), then is kept on that screen.
+        /// narrower Note / Customer / Model columns (up to 20 + 25 + 40 px) and fewer list rows (at least 5), then is kept on that screen.
         void FitToScreen()
         {
             if (Screenshots.Active || Program.Hidden) return;   // off-screen picture runs keep the 100 % layout
@@ -647,10 +679,15 @@ namespace PrintPrice
             colPrice.Width = width(colPrice, "0000,00", 74);
             colFor.Width = width(colFor, L.S("Customer", "Venner"), 96);
             colPrinter.Width = width(colPrinter, null, 140);   // "Bambu Lab A1 mini" fits; longer names get the dark tooltip
+            // "Lene Hansen" + the ▾ fits; longer names get the dark tooltip. A narrow screen takes px 21-45 of widthCut here
+            // (Note gives the first 20, Model the rest)
+            colCustomer.Width = width(colCustomer, null, 130) - Math.Max(0, Math.Min(widthCut, px(45)) - px(20));
+            colCustomer.DefaultCellStyle.Padding = new Padding(6, 0, ArrowZone(), 0);   // the text stops before the ▾
             colNote.MinimumWidth = px(110);
             colPrinted.Width = width(colPrinted, null, 72);
             colFailed.Width = width(colFailed, null, 64);
-            colInvoice.Width = width(colInvoice, "2026-WWWW", 80);   // the widest possible code (W = widest letter), measured: never cut
+            // the widest possible code, measured: never cut (older letter codes "2026-WWWW", W = widest letter; new digit codes "2026-00000")
+            colInvoice.Width = Math.Max(width(colInvoice, "2026-WWWW", 80), width(colInvoice, "2026-00000", 80));
 
             // Month / Show combos exactly as tall as the search box (owner-drawn: height = ItemHeight + its frame, measured),
             // the ‹ › buttons too
@@ -671,7 +708,8 @@ namespace PrintPrice
             grid.RowTemplate.Height = rowH;
             grid.ColumnHeadersHeight = textRowH + px(4);
             int cols = colPic.Width + colDate.Width + colModel.Width + colTime.Width + colGrams.Width + colPrice.Width + colFor.Width
-                     + colPrinted.Width + colFailed.Width + colInvoice.Width + px(155) - Math.Min(widthCut, px(45))    // Note gets the rest (~155 px + no-scroll-bar room; +40 from Model / Invoice)
+                     + colCustomer.Width
+                     + colPrinted.Width + colFailed.Width + colInvoice.Width + px(130) - Math.Min(widthCut, px(20))    // Note gets the rest (~130 px + no-scroll-bar room)
                      + (printerMode ? colPrinter.Width : 0);                              // 2+ printers: the window is wider by the Printer column
             gridFrame.Size = new Size(cols + SystemInformation.VerticalScrollBarWidth + 2,
                                       grid.ColumnHeadersHeight + rowsShown * rowH + 2);
@@ -800,6 +838,42 @@ namespace PrintPrice
             UpdateCount();
             UpdateButtons();
             UpdateCards();
+            SchedulePrintingRedraw();
+        }
+
+        // ---------- "Printing now" turns into ✓ by itself ----------
+        System.Windows.Forms.Timer printingTimer;   // runs only while a quote is printing: fires at the next print's end time
+
+        /// Sets the timer to the soonest end of a quote still printing (History.PrintingEnds); none = no timer.
+        /// Long waits are cut to an hour and worked out again.
+        void SchedulePrintingRedraw()
+        {
+            if (IsDisposed) return;
+            var now = DateTime.Now;
+            DateTime next = DateTime.MaxValue, end;
+            foreach (var r in list)
+                if (History.PrintingEnds(r, out end) && end > now && end < next) next = end;
+            if (next == DateTime.MaxValue)
+            {
+                if (printingTimer != null) printingTimer.Stop();
+                return;
+            }
+            if (printingTimer == null)
+            {
+                printingTimer = new System.Windows.Forms.Timer();
+                printingTimer.Tick += delegate
+                {
+                    printingTimer.Stop();
+                    grid.Invalidate();   // the amber clock -> ✓
+                    tiles.Invalidate();  // "Printing" -> ✓
+                    SchedulePrintingRedraw();
+                };
+                FormClosed += delegate { printingTimer.Stop(); printingTimer.Dispose(); };
+            }
+            double ms = Math.Min((next - now).TotalMilliseconds + 1000, 3600000);
+            printingTimer.Stop();
+            printingTimer.Interval = Math.Max(1000, (int)ms);
+            printingTimer.Start();
         }
 
         void FillGrid(ICollection<QuoteRecord> keep, QuoteRecord keepCurrent)
@@ -817,7 +891,7 @@ namespace PrintPrice
                     int i = grid.Rows.Add("", DateText(r), ModelText(r), TimeText(r),
                                           Num.Fmt(r.Grams), History.PriceFor(r).ToString("0.00", Num.Dk),
                                           r.For == History.ForFriends ? History.ForFriends : History.ForCustomer,
-                                          printerMode ? PrinterText(r) : "", r.Note ?? "", r.Printed, r.Failed, r.InvoiceNo ?? "");
+                                          printerMode ? PrinterText(r) : "", r.Customer ?? "", r.Note ?? "", r.Printed, r.Failed, r.InvoiceNo ?? "");
                     grid.Rows[i].Tag = r;
                     grid.Rows[i].Height = grid.RowTemplate.Height;
                     if (r == keepCurrent) cur = i;
@@ -1080,6 +1154,25 @@ namespace PrintPrice
             var box = new Rectangle(e.CellBounds.X + (e.CellBounds.Width - size) / 2, e.CellBounds.Y + (e.CellBounds.Height - size) / 2, size - 1, size - 1);
             using (var back = new SolidBrush(Theme.Input)) e.Graphics.FillRectangle(back, box);
             using (var pen = new Pen(selected ? Theme.Text : Theme.Muted)) e.Graphics.DrawRectangle(pen, box);
+            var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
+            if (on && printed && History.IsPrinting(rec, DateTime.Now))
+            {
+                // "Printing now": an amber clock instead of the ✓ until the print time has passed (tooltip: done about …)
+                var old = e.Graphics.SmoothingMode;
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                float w = Math.Max(1.5f, 1.5f * sc), inset = Math.Max(2f, 2.5f * sc);
+                var dial = new RectangleF(box.Left + inset, box.Top + inset, box.Width - 2 * inset, box.Height - 2 * inset);
+                float cx = dial.Left + dial.Width / 2, cy = dial.Top + dial.Height / 2;
+                using (var pen = new Pen(Theme.Warning, w))
+                {
+                    e.Graphics.DrawEllipse(pen, dial);
+                    e.Graphics.DrawLine(pen, cx, cy, cx, dial.Top + dial.Height * 0.22f);
+                    e.Graphics.DrawLine(pen, cx, cy, dial.Right - dial.Width * 0.25f, cy);
+                }
+                e.Graphics.SmoothingMode = old;
+                e.Handled = true;
+                return;
+            }
             if (on)
             {
                 var old = e.Graphics.SmoothingMode;
@@ -1110,7 +1203,7 @@ namespace PrintPrice
             var row = grid.Rows[rowIndex];
             var r = row.Tag as QuoteRecord;
             if (r == null) return;
-            r.Printed = !r.Printed;
+            History.SetPrinted(r, !r.Printed);   // unticking also ends "Printing now"
             filling = true;
             row.Cells[colPrinted.Index].Value = r.Printed;
             filling = false;
@@ -1163,6 +1256,7 @@ namespace PrintPrice
                 r.Note = note;
                 SaveList();
             }
+            else if (col == colCustomer) CustomerTyped(row, r);
         }
 
         /// Every change is written to history.json right away (never in picture mode).
@@ -1182,16 +1276,16 @@ namespace PrintPrice
             string help = view == ViewList
                 ? L.S("Ctrl+click or Shift+click selects several quotes (Ctrl+A all), Delete deletes them. Quote… makes a quote page, Invoice… a bill " +
                       "(it ticks Printed). Repeat print slices it with today's prices; Open again (or double-click) loads it as saved. Right-click for all of these.\n" +
-                      "Click For, Note, Printed or Failed to change them, changes are saved at once. Ctrl+1, 2, 3 or Ctrl+wheel: list, medium or large pictures.",
+                      "Click For, Customer, Note, Printed or Failed to change them, changes are saved at once. Ctrl+1, 2, 3 or Ctrl+wheel: list, medium or large pictures.",
                       "Ctrl+klik eller Shift+klik vælger flere tilbud (Ctrl+A alle), Slet sletter dem. Tilbud… laver et tilbud, Faktura… en regning " +
                       "(den sætter Printet). Print igen slicer det med dagens priser; Åbn igen (eller dobbeltklik) henter det som gemt. Højreklik for det hele.\n" +
-                      "Klik på Til, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Ctrl+1, 2, 3 eller Ctrl+hjul: liste, mellemstore eller store billeder.")
+                      "Klik på Til, Kunde, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Ctrl+1, 2, 3 eller Ctrl+hjul: liste, mellemstore eller store billeder.")
                 : L.S("Ctrl+click or Shift+click selects several quotes (Ctrl+A all), Delete deletes them. Double-click or Enter opens a quote again; " +
                       "right-click for more.\n" +
-                      "Notes are changed in the list (Ctrl+1). Ctrl+1, 2, 3 or Ctrl+wheel: list, medium or large pictures.",
+                      "Notes are changed in the list (Ctrl+1), names also by right-click. Ctrl+1, 2, 3 or Ctrl+wheel: list, medium or large pictures.",
                       "Ctrl+klik eller Shift+klik vælger flere tilbud (Ctrl+A alle), Slet sletter dem. Dobbeltklik eller Enter åbner et tilbud igen; " +
                       "højreklik for mere.\n" +
-                      "Noter ændres i listen (Ctrl+1). Ctrl+1, 2, 3 eller Ctrl+hjul: liste, mellemstore eller store billeder.");
+                      "Noter ændres i listen (Ctrl+1), navne også med højreklik. Ctrl+1, 2, 3 eller Ctrl+hjul: liste, mellemstore eller store billeder.");
             if (saveError != null) { info.Text = saveError; info.Kind = InfoKind.Error; }
             else if (listError != null) { info.Text = listError; info.Kind = InfoKind.Error; }
             else if (!string.IsNullOrEmpty(problem)) { info.Text = problem + "\n" + help; info.Kind = InfoKind.Warning; }
@@ -1361,6 +1455,7 @@ namespace PrintPrice
         void ShowRowMenu(Point screen)
         {
             if (SelectedCount() == 0) return;
+            rowMenuPoint = screen;   // Customer name… opens its menu at the same place
             rowMenu.Show(screen);
         }
 
@@ -1374,7 +1469,7 @@ namespace PrintPrice
             var now = DateTime.Now;
             foreach (var r in sel)
             {
-                if (printed) r.Printed = !all;
+                if (printed) History.SetPrinted(r, !all);
                 else if (r.Failed == all) History.MarkFailed(r, !all, now);
             }
             SaveList();
@@ -1646,20 +1741,36 @@ namespace PrintPrice
                     MaterialCost = Math.Round(g * 0.2, 2), PowerCost = Math.Round((h + m / 60.0) * 0.365, 2), MachineRatePerHour = 1.71
                 });
             int F = History.ForFriends, C = History.ForCustomer;
-            add("2026-11-03 14:12:00", "3D BENCHY", "https://www.printables.com/model/3161-3d-benchy", 0, 38, 11.8, 4.32, 5.62, F, L.S("Mads, red PLA", "Mads, rød PLA"));
-            add("2026-11-02 19:40:00", "Four-Color Multicolor Test benchy", "https://www.printables.com/model/1648230-four-color-multicolor-test-benchy", 10, 43, 135.85, 57.18, 72.72, C, L.S("Webshop #112, paid", "Webshop #112, betalt"));
-            add("2026-10-30 10:05:00", L.S("Phone stand (adjustable)", "Telefonholder (justerbar)"), @"C:\Models\phone_stand.3mf", 2, 5, 48.2, 16.56, 21.76, C, L.S("Lene, black", "Lene, sort"));
-            add("2026-10-27 21:18:00", L.S("Cable clips ×20", "Kabelclips ×20"), @"C:\Models\cable_clip.stl", 1, 12, 22.4, 8.20, 10.66, F, L.S("Dad, garage", "Far, garagen"));
-            add("2026-10-24 16:51:00", L.S("Planter pot 12 cm", "Urtepotte 12 cm"), @"C:\Models\planter.stl", 6, 30, 164, 55.08, 72.67, C, L.S("Café Bønne, 2 pcs", "Café Bønne, 2 stk."));
-            add("2026-10-19 12:33:00", L.S("Headphone hook", "Hovedtelefonkrog"), @"C:\Models\headphone_hook.stl", 1, 48, 38.6, 13.55, 17.74, C, "");
-            add("2026-10-12 20:02:00", L.S("Articulated dragon", "Bevægelig drage"), "https://www.printables.com/model/1234-articulated-dragon", 4, 55, 92.3, 33.73, 43.85, F, L.S("Emma's birthday", "Emmas fødselsdag"));
-            add("2026-10-05 09:47:00", L.S("Lithophane lamp", "Litofanlampe"), @"C:\Models\lithophane.3mf", 9, 20, 120.5, 50.34, 64.10, C, L.S("Not paid yet", "Ikke betalt endnu"));
+            add("2026-11-03 14:12:00", "3D BENCHY", "https://www.printables.com/model/3161-3d-benchy", 0, 38, 11.8, 4.32, 5.62, F, L.S("Green PLA", "Grøn PLA"));
+            add("2026-11-02 19:40:00", "Four-Color Multicolor Test benchy", "https://www.printables.com/model/1648230-four-color-multicolor-test-benchy", 10, 43, 135.85, 57.18, 72.72, C, L.S("Paid", "Betalt"));
+            // rows 2-7: real Printables models, times and grams from slicing them for an A1 (pictures: assets\history-samples)
+            add("2026-10-30 10:05:00", L.S("Phone stand (adjustable)", "Telefonholder (justerbar)"), "https://www.printables.com/model/942149", 0, 55, 10.8, 5.08, 7.11, C, L.S("Green", "Grøn"));
+            add("2026-10-27 21:18:00", L.S("Cable clips ×20", "Kabelclips ×20"), @"C:\Models\klamma-cable-clip-medium.stl", 4, 20, 64, 27.24, 38.13, F, L.S("For the garage", "Til garagen"));
+            add("2026-10-24 16:51:00", L.S("Tower planter pot", "Tårn-urtepotte"), "https://www.printables.com/model/25367", 4, 36, 143.2, 47.73, 66.82, C, L.S("2 pcs", "2 stk."));
+            add("2026-10-19 12:33:00", L.S("Headphone hook", "Hovedtelefonkrog"), @"C:\Models\headphone-hook-hexagons.stl", 2, 9, 56.5, 19.70, 27.58, C, "");
+            add("2026-10-12 20:02:00", L.S("Nessie toy (3 colours)", "Nessie-legetøj (3 farver)"), "https://www.printables.com/model/741126", 6, 20, 106.3, 43.00, 60.20, F, L.S("Birthday present", "Fødselsdagsgave"));
+            add("2026-10-05 09:47:00", L.S("Moon lamp (tealight)", "Månelampe (fyrfadslys)"), "https://www.printables.com/model/332012", 4, 37, 30.0, 19.47, 27.26, C, L.S("Not paid yet", "Ikke betalt endnu"));
+            // the 3-colour Nessie: one filament line per colour (green, black, white)
+            l[6].Filaments = new List<HistoryFilament> {
+                new HistoryFilament { Grams = 62.7, PricePerKg = 200, Colour = "#00AE42", Type = "PLA", Name = "Bambu PLA Basic" },
+                new HistoryFilament { Grams = 9.7, PricePerKg = 200, Colour = "#000000", Type = "PLA", Name = "Bambu PLA Basic" },
+                new HistoryFilament { Grams = 33.9, PricePerKg = 200, Colour = "#FFFFFF", Type = "PLA", Name = "Bambu PLA Basic" } };
             // one failed print, so the picture shows a ticked Failed box
             l[5].Note = L.S("Layer shift at 80 %", "Lagforskydning ved 80 %");
             History.MarkFailed(l[5], true, new DateTime(2026, 10, 19, 15, 10, 0));
             // two billed customer prints and one quote not printed yet (Printed unticked)
-            l[2].Customer = "Lene Hansen"; l[2].InvoiceNo = "2026-K7Q4"; l[2].BilledAt = "2026-10-31 09:12:00";
-            l[4].Customer = "Café Bønne"; l[4].InvoiceNo = "2026-3HWN"; l[4].BilledAt = "2026-10-25 10:30:00";
+            l[2].Customer = "Lene Hansen"; l[2].InvoiceNo = "2026-48213"; l[2].BilledAt = "2026-10-31 09:12:00"; l[2].BilledTo = "Lene Hansen";
+            l[4].Customer = "Café Bønne"; l[4].InvoiceNo = "2026-73096"; l[4].BilledAt = "2026-10-25 10:30:00"; l[4].BilledTo = "Café Bønne";
+            // the Customer column: names on most quotes (Lene Hansen twice, for "Select all quotes for …"), one without
+            l[0].Customer = "Mads"; l[1].Customer = L.S("Webshop order 112", "Webshop-ordre 112"); l[3].Customer = L.S("Dad", "Far");
+            l[5].Customer = "Lene Hansen"; l[6].Customer = "Emma";
+            // the invoiced phone stand was saved with the bill's look (Auto wear split, plate, nozzle, filament), so its
+            // Invoice… shows the same rows as a fresh quote; the other samples are older records without it
+            var wear = Wear.Calculate(Wear.Nozzles[0], false, "PLA", Wear.Plates[0]);
+            l[2].WearPrinter = wear.Printer; l[2].WearParts = wear.Parts; l[2].WearHotend = wear.Hotend; l[2].WearPlate = wear.Plate;
+            l[2].BedType = Wear.Plates[0].Key; l[2].Nozzle = Wear.Nozzles[0].Key; l[2].MaterialName = "Bambu PLA Basic @BBL A1";
+            // the 4-colour benchy is "Printing now" (started 2 hours ago, 10 h 43 m): the amber clock in Printed / on its card
+            History.SetPrintState(l[1], PrintState.Printing, DateTime.Now.AddHours(-2));
             l[7].Printed = false;
             l[7].Note = L.S("Quote sent, waiting", "Tilbud sendt, venter");
             return l;

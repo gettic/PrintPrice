@@ -30,8 +30,8 @@ static class HistoryTests
         add("2026-10-05 09:47:00", "Lithophane lamp", @"C:\Models\lithophane.3mf", 9, 20, 120.5, 50.34, 64.10, C, "Not paid yet");
         l[5].Note = "Layer shift at 80 %";
         History.MarkFailed(l[5], true, new DateTime(2026, 10, 19, 15, 10, 0));
-        l[2].Customer = "Lene Hansen"; l[2].InvoiceNo = "2026-K7Q4"; l[2].BilledAt = "2026-10-31 09:12:00";
-        l[4].Customer = "Café Bønne"; l[4].InvoiceNo = "2026-3HWN"; l[4].BilledAt = "2026-10-25 10:30:00";
+        l[2].Customer = "Lene Hansen"; l[2].InvoiceNo = "2026-48213"; l[2].BilledAt = "2026-10-31 09:12:00";
+        l[4].Customer = "Café Bønne"; l[4].InvoiceNo = "2026-3HWN";   // an old letter code: still read and shown as before l[4].BilledAt = "2026-10-25 10:30:00";
         l[7].Printed = false;
         l[7].Note = "Quote sent, waiting";
         return l;
@@ -129,7 +129,8 @@ static class HistoryTests
         True("failed: 1", count(new WebHistory.Filter { Show = WebHistory.ShowFailed }) == 1);
         True("not printed: 1", count(new WebHistory.Filter { Show = WebHistory.ShowNotPrinted }) == 1);
         True("search customer name 'hansen': 1", count(new WebHistory.Filter { Query = "hansen" }) == 1);
-        True("search invoice code: 1", count(new WebHistory.Filter { Query = "k7q4" }) == 1);
+        True("search invoice code: 1", count(new WebHistory.Filter { Query = "48213" }) == 1);
+        True("search old letter invoice code: 1", count(new WebHistory.Filter { Query = "3hwn" }) == 1);
         True("search link: 1", count(new WebHistory.Filter { Query = "1648230" }) == 1);
         True("search in another month: 0", count(new WebHistory.Filter { Month = oct, Query = "benchy" }) == 0);
         True("count text '6 of 8 quotes'", WebHistory.CountText(6, 8) == "6 of 8 quotes" && WebHistory.CountText(1, 1) == "1 quote");

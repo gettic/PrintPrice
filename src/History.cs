@@ -115,6 +115,11 @@ namespace PrintPrice
             set { printed = value; printedRead = true; }
         }
 
+        // print status from the quote window (History.SetPrintState): "Printing now" = Printed + the start time
+        // ("yyyy-MM-dd HH:mm:ss"); History.IsPrinting while start + print time is still ahead. "" = not printing (old
+        // files, bad values). Older app versions ignore the key (the record shows as Printed).
+        public string PrintingSince = "";
+
         // idea 23: repeat print of an earlier record (its Id); "" = not a repeat. Never merged with the original (SameQuote).
         public string RepeatOf = "";
 
@@ -134,10 +139,27 @@ namespace PrintPrice
         public string InvoicePayMobilePay = "";
         public string InvoicePayBank = "";
         public string InvoiceFromName = "";        // AppSettings.QuoteName at the time
+        // the name the invoice was made out to (Customer when MakeInvoice gave the number; filled once on the first
+        // re-issue of an older invoice). "" = not stored (History.InvoiceInfo then uses Customer). Customer can change later.
+        public string BilledTo = "";
 
         // idea 21: several model files with a filament / colour each (History.SetParts / PartsOf); null = none (old records,
         // one file, links, typed jobs). Older app versions ignore the key.
         public HistoryParts Parts;
+
+        // the bill as it was made (History.RecordBreakdown / RecordQuoteInfo), so a quote or invoice made again from
+        // History shows the same rows as the one made right after slicing. Missing in older records (0 / ""): those keep
+        // today's look (one wear line, today's nozzle / plate / valid days / name). Older app versions drop these keys
+        // when they save the file again.
+        public double WearPrinter;                 // machine wear split in kr/h (Wear.Breakdown, only when Auto wear was
+        public double WearParts;                   // on); all 0 = not stored: one wear line without sub-rows
+        public double WearHotend;
+        public double WearPlate;
+        public string BedType = "";                // build plate key (AppSettings.BedType) for the "Build plate (…)" row
+        public string Nozzle = "";                 // nozzle key (Wear.Nozzles) for the "…, 0.4 mm nozzle" row
+        public string MaterialName = "";           // Settings' filament preset then: the material name when the lines have none
+        public double QuoteValidDays;              // AppSettings.QuoteValidDays then; 0 = no quote snapshot
+        public string QuoteFromName = "";          // AppSettings.QuoteName then (trimmed); used when QuoteValidDays > 0
 
         internal object MemberwiseCopy() { return MemberwiseClone(); }   // History.CopyQuotes
     }
@@ -149,7 +171,19 @@ namespace PrintPrice
         public string MobilePay = "";
         public string Bank = "";
         public string FromName = "";
+        public string BilledTo = "";               // QuoteRecord.BilledTo, else its Customer (trimmed; "" = no name)
         public bool FromSnapshot;                  // true = saved with the invoice; false = today's settings
+    }
+
+    /// The print status chosen in the quote window (History.SetPrintState / PrintStateOf). Values are the box's order.
+    public enum PrintState { NotPrinted = 0, Printing = 1, Printed = 2, Failed = 3 }
+
+    /// What a quote of a saved record shows besides the prices (History.RecordQuoteInfo): its snapshot, else today's.
+    public class QuoteDetails
+    {
+        public DateTime ValidUntil;                // date only
+        public string FromName = "";               // the name on the quote (trimmed; may be "")
+        public bool FromSnapshot;                  // true = saved with the record; false = today's settings
     }
 
     /// One month of the price history (History.MonthSummary). kr. as saved; hours as decimal hours.
@@ -306,8 +340,16 @@ namespace PrintPrice
         }
 
         /// Copies a calculated quote into a record. ui fills Colour/Type/Name of the colour lines and PurgeGrams.
+        /// wear = the machine wear split the quote page showed (MainForm.WearBreakdown); saved only when s.AutoWearRate
+        /// is on (as Pricing.Breakdown only shows it then). null = one wear line.
         public static QuoteRecord FromQuote(QuoteInput input, QuoteResult result, AppSettings s,
                                             string model, string source, DateTime now)
+        {
+            return FromQuote(input, result, s, model, source, now, null);
+        }
+
+        public static QuoteRecord FromQuote(QuoteInput input, QuoteResult result, AppSettings s,
+                                            string model, string source, DateTime now, Wear.Breakdown wear)
         {
             if (input == null || result == null || s == null) throw new ArgumentNullException();
             var r = new QuoteRecord();
@@ -350,7 +392,74 @@ namespace PrintPrice
             r.PaybackCost = result.PaybackCost;
             r.FailedPaybackPct = s.FailedPaybackPct;
             r.FailedPaybackWho = s.FailedPaybackWho == 1 ? 1 : 2;
+
+            // the bill's look then (RecordBreakdown / RecordQuoteInfo)
+            if (s.AutoWearRate != 0 && wear != null && ValidWear(wear.Printer, wear.Parts, wear.Hotend, wear.Plate))
+            {
+                r.WearPrinter = wear.Printer; r.WearParts = wear.Parts; r.WearHotend = wear.Hotend; r.WearPlate = wear.Plate;
+            }
+            r.BedType = (s.BedType ?? "").Trim();
+            r.Nozzle = (s.Nozzle ?? "").Trim();
+            r.MaterialName = (s.FilamentPreset ?? "").Trim();
+            r.QuoteValidDays = s.QuoteValidDays;
+            r.QuoteFromName = (s.QuoteName ?? "").Trim();
             return r;
+        }
+
+        static bool GoodRate(double v) { return !double.IsNaN(v) && !double.IsInfinity(v) && v >= 0; }
+
+        // a usable wear split: every rate a finite number >= 0 and their sum > 0 (FromQuote and SavedWear)
+        static bool ValidWear(double printer, double parts, double hotend, double plate)
+        {
+            return GoodRate(printer) && GoodRate(parts) && GoodRate(hotend) && GoodRate(plate) && printer + parts + hotend + plate > 0;
+        }
+
+        /// The machine wear split saved with r (kr/h), or null when none is stored (older records, Auto wear off, bad values).
+        public static Wear.Breakdown SavedWear(QuoteRecord r)
+        {
+            if (r == null || !ValidWear(r.WearPrinter, r.WearParts, r.WearHotend, r.WearPlate)) return null;
+            return new Wear.Breakdown { Printer = r.WearPrinter, Parts = r.WearParts, Hotend = r.WearHotend, Plate = r.WearPlate };
+        }
+
+        /// The quote / invoice breakdown of a saved record as it was made: ToInput + SavedSettings, the saved wear split
+        /// (sub-rows, scaled to the saved rate like Pricing.Breakdown does), then the saved price (MatchSavedTotal).
+        /// Older records without a split give one wear line. current = today's settings (only fields the record doesn't
+        /// store; null = defaults). Shared by the desktop, the website and the combined bill.
+        public static QuoteBreakdown RecordBreakdown(QuoteRecord r, AppSettings current, bool friends)
+        {
+            if (r == null) throw new ArgumentNullException("r");
+            var s = SavedSettings(r, current);
+            var wear = SavedWear(r);
+            if (wear != null) s.AutoWearRate = 1;
+            var b = Pricing.Breakdown(ToInput(r), s, friends, wear);
+            Pricing.MatchSavedTotal(b, friends ? r.FriendsPrice : r.OthersPrice);
+            return b;
+        }
+
+        /// Valid-until date and the "from" name of r's quote: the snapshot saved with it (QuoteValidDays > 0), else
+        /// today's settings s (null = defaults). Quote date = SavedAt (unreadable = now). Never null.
+        public static QuoteDetails RecordQuoteInfo(QuoteRecord r, AppSettings s)
+        {
+            DateTime saved;
+            if (r == null || !TryTime(r.SavedAt, out saved)) saved = DateTime.Now;
+            return RecordQuoteInfo(r, s, saved);
+        }
+
+        /// As above with the quote date given.
+        public static QuoteDetails RecordQuoteInfo(QuoteRecord r, AppSettings s, DateTime quoteDate)
+        {
+            var d = new QuoteDetails();
+            if (r != null && GoodRate(r.QuoteValidDays) && r.QuoteValidDays > 0)
+            {
+                d.ValidUntil = AppSettings.ValidUntil(quoteDate, r.QuoteValidDays);
+                d.FromName = (r.QuoteFromName ?? "").Trim();
+                d.FromSnapshot = true;
+                return d;
+            }
+            if (s == null) s = new AppSettings();
+            d.ValidUntil = s.QuoteValidUntil(quoteDate);
+            d.FromName = (s.QuoteName ?? "").Trim();
+            return d;
         }
 
         /// The inputs of a record, ready for Pricing.Calculate (with SavedSettings: the price as it was) or for filling the
@@ -413,6 +522,8 @@ namespace PrintPrice
         public static bool SameQuote(QuoteRecord a, QuoteRecord b)
         {
             if (a == null || b == null) return false;
+            // an invoiced record is never "the same quote": a new save must not take over its number or Id
+            if (!string.IsNullOrEmpty(a.InvoiceNo) || !string.IsNullOrEmpty(b.InvoiceNo)) return false;
             // a repeat print is never the same as its original (or as a repeat of something else)
             string ra = a.RepeatOf ?? "", rb = b.RepeatOf ?? "";
             if (ra != rb) return false;
@@ -437,19 +548,25 @@ namespace PrintPrice
         /// (RepeatOf) never replaces its original. Then trims to MaxQuotes. Returns the record now in the list.
         public static QuoteRecord Add(List<QuoteRecord> list, QuoteRecord r)
         {
+            return Add(list, r, true);
+        }
+
+        // keepState false (AddFor with a print state): the replaced quote's Failed / FailedAt / Printed / PrintingSince are
+        // not taken over; the caller sets the state (SetPrintState).
+        static QuoteRecord Add(List<QuoteRecord> list, QuoteRecord r, bool keepState)
+        {
             if (list.Count > 0 && SameQuote(list[0], r))
             {
                 var old = list[0];
                 if (r.Customer == null) r.Customer = "";
-                r.Id = old.Id; r.For = old.For; r.Note = old.Note; r.Failed = old.Failed; r.FailedAt = old.FailedAt;
-                r.PaidBack = old.PaidBack;
-                if (!string.IsNullOrEmpty(old.InvoiceNo))
+                r.Id = old.Id; r.For = old.For; r.Note = old.Note;
+                if (keepState)
                 {
-                    r.InvoiceNo = old.InvoiceNo; r.BilledAt = old.BilledAt ?? "";
-                    r.InvoiceDue = old.InvoiceDue ?? ""; r.InvoicePayMobilePay = old.InvoicePayMobilePay ?? "";
-                    r.InvoicePayBank = old.InvoicePayBank ?? ""; r.InvoiceFromName = old.InvoiceFromName ?? "";
+                    r.Failed = old.Failed; r.FailedAt = old.FailedAt;
+                    r.Printed = old.Printed || r.Printed;
+                    if (string.IsNullOrEmpty(r.PrintingSince)) r.PrintingSince = old.PrintingSince ?? "";
                 }
-                r.Printed = old.Printed || r.Printed;
+                r.PaidBack = old.PaidBack;
                 list[0] = r;
             }
             else list.Insert(0, r);
@@ -477,6 +594,27 @@ namespace PrintPrice
             return res;
         }
 
+        public const int MaxCustomer = 80;
+
+        /// Sets Customer on every record (History's Customer column / "Customer…" on several rows): name trimmed and cut
+        /// to MaxCustomer characters, null / blank = "" (no name). Never touches BilledTo, so a made invoice keeps the name
+        /// it was made out to. Null records skipped. Returns how many records changed. Does not save.
+        public static int SetCustomer(IEnumerable<QuoteRecord> records, string name)
+        {
+            string n = (name ?? "").Trim();
+            if (n.Length > MaxCustomer) n = n.Substring(0, MaxCustomer).TrimEnd();
+            int changed = 0;
+            if (records == null) return 0;
+            foreach (var r in records)
+            {
+                if (r == null) continue;
+                if (r.Customer == n) continue;
+                r.Customer = n;
+                changed++;
+            }
+            return changed;
+        }
+
         /// Quote export: Add, then For = forWho (ForFriends / ForCustomer; anything else = ForCustomer), also when Add
         /// replaced a same newest quote (whose old For would otherwise be kept). Returns the record now in the list.
         public static QuoteRecord AddFor(List<QuoteRecord> list, QuoteRecord r, int forWho)
@@ -484,6 +622,107 @@ namespace PrintPrice
             var kept = Add(list, r);
             kept.For = forWho == ForFriends ? ForFriends : ForCustomer;
             return kept;
+        }
+
+        /// AddFor with the print status chosen in the quote window: the chosen state wins over the replaced same quote's
+        /// (Not printed yet really unticks Printed, Printed really clears Failed). A same quote that was already Failed
+        /// and stays Failed keeps its FailedAt; one that was already printing and stays Printing keeps its start time.
+        public static QuoteRecord AddFor(List<QuoteRecord> list, QuoteRecord r, int forWho, PrintState state, DateTime now)
+        {
+            var old = list.Count > 0 && SameQuote(list[0], r) ? list[0] : null;
+            var kept = Add(list, r, false);
+            kept.For = forWho == ForFriends ? ForFriends : ForCustomer;
+            if (old != null && !ReferenceEquals(old, kept))
+            {
+                if (old.Failed) { kept.Failed = true; kept.FailedAt = old.FailedAt ?? ""; }
+                else { kept.Failed = false; kept.FailedAt = ""; }
+                kept.Printed = old.Printed;
+                kept.PrintingSince = old.PrintingSince ?? "";
+            }
+            SetPrintState(kept, state, now);
+            return kept;
+        }
+
+        // ---------- print status (quote window: Not printed yet / Printing now / Printed / Failed) ----------
+
+        /// Puts one of the 4 states on r (one place for desktop and web):
+        /// NotPrinted = Printed off, Failed off, not printing; Printing = Printed on, Failed off, PrintingSince = now (kept
+        /// when r is already printing); Printed = Printed on, Failed off, not printing; Failed = Printed off and
+        /// MarkFailed(r, true, now) as ticking Failed in History (FailedAt kept when r is already failed), not printing.
+        /// Unticking Failed works like History (MarkFailed off: FailedAt ""; PaidBack stays).
+        public static void SetPrintState(QuoteRecord r, PrintState state, DateTime now)
+        {
+            if (r == null) return;
+            switch (state)
+            {
+                case PrintState.Failed:
+                    r.Printed = false;
+                    if (!r.Failed || string.IsNullOrEmpty(r.FailedAt)) MarkFailed(r, true, now);
+                    r.PrintingSince = "";
+                    break;
+                case PrintState.Printing:
+                    bool already = IsPrinting(r, now);   // a finished earlier print gets a new start
+                    if (r.Failed) MarkFailed(r, false, now);
+                    r.Printed = true;
+                    if (!already) r.PrintingSince = Stamp(now);
+                    break;
+                case PrintState.Printed:
+                    if (r.Failed) MarkFailed(r, false, now);
+                    r.Printed = true;
+                    r.PrintingSince = "";
+                    break;
+                default:   // NotPrinted
+                    if (r.Failed) MarkFailed(r, false, now);
+                    r.Printed = false;
+                    r.PrintingSince = "";
+                    break;
+            }
+        }
+
+        /// The History Printed tick: sets Printed; unticking also ends "Printing now" (PrintingSince "").
+        public static void SetPrinted(QuoteRecord r, bool printed)
+        {
+            if (r == null) return;
+            r.Printed = printed;
+            if (!printed) r.PrintingSince = "";
+        }
+
+        /// r's state for the quote window's box: Failed > Printing (still running at now) > Printed > NotPrinted.
+        public static PrintState PrintStateOf(QuoteRecord r, DateTime now)
+        {
+            if (r == null) return PrintState.NotPrinted;
+            if (r.Failed) return PrintState.Failed;
+            if (IsPrinting(r, now)) return PrintState.Printing;
+            return r.Printed ? PrintState.Printed : PrintState.NotPrinted;
+        }
+
+        /// True while r is "Printing now": Printed, not Failed, a readable PrintingSince, and start + print time
+        /// (Hours/Minutes) still after now. A print time of 0 is never printing.
+        public static bool IsPrinting(QuoteRecord r, DateTime now)
+        {
+            DateTime end;
+            return PrintingEnds(r, out end) && end > now;
+        }
+
+        /// When r's print is done (PrintingSince + Hours/Minutes; for the "done about 16:40" tooltip). false = r is not
+        /// marked printing (not Printed, Failed, no / bad PrintingSince, print time 0).
+        public static bool PrintingEnds(QuoteRecord r, out DateTime end)
+        {
+            end = DateTime.MinValue;
+            if (r == null || !r.Printed || r.Failed) return false;
+            var start = PrintStart(r);
+            if (start == null) return false;
+            int minutes = Math.Max(0, r.Hours) * 60 + Math.Max(0, r.Minutes);
+            if (minutes <= 0) return false;
+            end = start.Value.AddMinutes(minutes);
+            return true;
+        }
+
+        static DateTime? PrintStart(QuoteRecord r)
+        {
+            DateTime t;
+            if (r == null || string.IsNullOrEmpty(r.PrintingSince) || !TryTime(r.PrintingSince.Trim(), out t)) return null;
+            return t;
         }
 
         // ---------- several model files with a colour each (idea 21) ----------
@@ -583,9 +822,9 @@ namespace PrintPrice
 
         // ---------- invoices ----------
 
-        /// Characters of an invoice code: upper case, no 0/O, 1/I/L or 5/S (easy to misread). 29 characters.
-        public const string InvoiceAlphabet = "ABCDEFGHJKMNPQRTUVWXYZ2346789";
-        public const int InvoiceCodeLength = 4;
+        /// Digits after the year in a new invoice code: 5, the first one 1-9 (no leading 0): 90 000 codes per year.
+        /// Older invoices keep their letter codes ("2026-K7Q4"); they never clash with the digit codes.
+        public const int InvoiceCodeLength = 5;
         public const int MaxUsedInvoiceNos = 2000;
 
         static readonly System.Security.Cryptography.RandomNumberGenerator crypto = System.Security.Cryptography.RandomNumberGenerator.Create();
@@ -601,14 +840,15 @@ namespace PrintPrice
             return (int)(v % (uint)max);
         }
 
-        /// A new invoice number "<year>-<4 random characters>" (e.g. "2026-K7Q4"), different from every InvoiceNo in list
+        /// A new invoice number "<year>-<5 random digits, first 1-9>" (e.g. "2026-48213"), different from every InvoiceNo in list
         /// and from every code in usedCsv (comma-separated, AppSettings.UsedInvoiceNos). Crypto-random.
         public static string NextInvoiceNo(List<QuoteRecord> list, int year, string usedCsv)
         {
             return NextInvoiceNo(list, year, usedCsv, null);
         }
 
-        /// As above with an own random source: pick(n) returns an int in [0, n) (null = crypto). For tests.
+        /// As above with an own random source: pick(n) returns an int in [0, n) (null = crypto). For tests: per code,
+        /// pick(9) for the first digit (1 + value), then pick(10) for each other digit.
         public static string NextInvoiceNo(List<QuoteRecord> list, int year, string usedCsv, Func<int, int> pick)
         {
             if (pick == null) pick = CryptoIndex;
@@ -624,7 +864,8 @@ namespace PrintPrice
             {
                 if (attempt % 1000 == 0) len++;   // (practically never) a full code space: longer codes
                 var sb = new StringBuilder(prefix);
-                for (int i = 0; i < len; i++) sb.Append(InvoiceAlphabet[pick(InvoiceAlphabet.Length)]);
+                sb.Append((char)('1' + pick(9)));
+                for (int i = 1; i < len; i++) sb.Append((char)('0' + pick(10)));
                 string no = sb.ToString();
                 if (!taken.Contains(no)) return no;
             }
@@ -645,7 +886,9 @@ namespace PrintPrice
         /// BilledAt = Stamp(now) and Printed = true, and the code is added to s.UsedInvoiceNos (s may be null; the caller
         /// saves the settings too). A new number also saves the snapshot from s: InvoiceDue (s.InvoiceDue(now),
         /// "yyyy-MM-dd"), InvoicePayMobilePay, InvoicePayBank, InvoiceFromName (QuoteName); s null = no snapshot.
-        /// With a number it keeps the same number, date and snapshot. Returns the number. Does not save.
+        /// A new number also sets BilledTo = r.Customer (trimmed; the caller puts the typed name in Customer first).
+        /// With a number it keeps the same number, date, snapshot and BilledTo; an older invoice with BilledTo ""
+        /// gets it from Customer this once (kept from then on). Returns the number. Does not save.
         public static string MakeInvoice(List<QuoteRecord> list, QuoteRecord r, DateTime now, AppSettings s)
         {
             return MakeInvoice(list, r, now, s, null);
@@ -667,7 +910,10 @@ namespace PrintPrice
                     r.InvoicePayBank = s.PayBank ?? "";
                     r.InvoiceFromName = s.QuoteName ?? "";
                 }
+                r.BilledTo = (r.Customer ?? "").Trim();
             }
+            else if (string.IsNullOrWhiteSpace(r.BilledTo))
+                r.BilledTo = (r.Customer ?? "").Trim();   // older invoice: name frozen on its first re-issue
             return r.InvoiceNo;
         }
 
@@ -685,6 +931,11 @@ namespace PrintPrice
         public static InvoiceDetails InvoiceInfo(QuoteRecord r, AppSettings s, DateTime today)
         {
             var d = new InvoiceDetails();
+            if (r != null)
+            {
+                string bt = (r.BilledTo ?? "").Trim();
+                d.BilledTo = bt.Length > 0 ? bt : (r.Customer ?? "").Trim();
+            }
             DateTime due;
             if (r != null && !string.IsNullOrEmpty(r.InvoiceDue) &&
                 DateTime.TryParseExact(r.InvoiceDue.Trim(), DueFormat, Inv, DateTimeStyles.None, out due))
@@ -1065,6 +1316,7 @@ namespace PrintPrice
         {
             r.Failed = failed;
             r.FailedAt = failed ? Stamp(now) : "";
+            if (failed) r.PrintingSince = "";   // a failed print is no longer printing
         }
 
         // ---------- delete several / undo (idea 22, issue #5) ----------
@@ -1211,6 +1463,15 @@ namespace PrintPrice
                 if (r.InvoicePayMobilePay == null) r.InvoicePayMobilePay = "";
                 if (r.InvoicePayBank == null) r.InvoicePayBank = "";
                 if (r.InvoiceFromName == null) r.InvoiceFromName = "";
+                if (r.BilledTo == null) r.BilledTo = "";
+                if (r.BedType == null) r.BedType = "";
+                if (r.Nozzle == null) r.Nozzle = "";
+                if (r.MaterialName == null) r.MaterialName = "";
+                if (r.QuoteFromName == null) r.QuoteFromName = "";
+                if (SavedWear(r) == null) { r.WearPrinter = 0; r.WearParts = 0; r.WearHotend = 0; r.WearPlate = 0; }
+                if (!GoodRate(r.QuoteValidDays)) r.QuoteValidDays = 0;
+                if (PrintStart(r) == null) r.PrintingSince = "";   // null / unreadable -> not printing
+                else r.PrintingSince = r.PrintingSince.Trim();
                 if (!r.printedRead) r.Printed = true;   // saved before the Printed tick existed: those were printed
                 if (r.For != ForFriends) r.For = ForCustomer;   // old 0 (not set) or unknown -> customer
                 if (r.Filaments != null)
@@ -1754,18 +2015,45 @@ namespace PrintPrice
             {
                 keep.InvoiceNo = other.InvoiceNo; keep.BilledAt = other.BilledAt; keep.InvoiceDue = other.InvoiceDue;
                 keep.InvoicePayMobilePay = other.InvoicePayMobilePay; keep.InvoicePayBank = other.InvoicePayBank;
-                keep.InvoiceFromName = other.InvoiceFromName;
+                keep.InvoiceFromName = other.InvoiceFromName; keep.BilledTo = other.BilledTo;
                 changed = true;
             }
+            else if (!string.IsNullOrEmpty(keep.InvoiceNo) && keep.BilledTo.Trim().Length == 0 && other.BilledTo.Trim().Length > 0 &&
+                     string.Equals(keep.InvoiceNo.Trim(), (other.InvoiceNo ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+            { keep.BilledTo = other.BilledTo; changed = true; }   // same invoice, the other side stored its name
             if (other.Printed && !keep.Printed) { keep.Printed = true; changed = true; }
             if (other.Failed && !keep.Failed)
             {
                 keep.Failed = true; keep.FailedAt = other.FailedAt; keep.PaidBack = other.PaidBack;
+                keep.PrintingSince = "";
                 changed = true;
+            }
+            // printing: a failed record is never printing; else the later start time wins (none here = the other's)
+            var ps = PrintStart(other);
+            if (!keep.Failed && keep.Printed && ps != null)
+            {
+                var mine = PrintStart(keep);
+                if (mine == null || ps.Value > mine.Value) { keep.PrintingSince = other.PrintingSince.Trim(); changed = true; }
             }
             if (keep.Note.Trim().Length == 0 && other.Note.Trim().Length > 0) { keep.Note = other.Note; changed = true; }
             if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
             if (keep.Parts == null && other.Parts != null) { keep.Parts = other.Parts.Copy(); changed = true; }   // idea 21
+            // the bill's look then: filled when this PC's copy has none (e.g. resaved by an older app version)
+            if (SavedWear(keep) == null && SavedWear(other) != null)
+            {
+                keep.WearPrinter = other.WearPrinter; keep.WearParts = other.WearParts;
+                keep.WearHotend = other.WearHotend; keep.WearPlate = other.WearPlate;
+                changed = true;
+            }
+            if (string.IsNullOrEmpty(keep.BedType) && !string.IsNullOrEmpty(other.BedType)) { keep.BedType = other.BedType; changed = true; }
+            if (string.IsNullOrEmpty(keep.Nozzle) && !string.IsNullOrEmpty(other.Nozzle)) { keep.Nozzle = other.Nozzle; changed = true; }
+            if (string.IsNullOrEmpty(keep.MaterialName) && !string.IsNullOrEmpty(other.MaterialName))
+            { keep.MaterialName = other.MaterialName; changed = true; }
+            if (!(keep.QuoteValidDays > 0) && other.QuoteValidDays > 0)
+            {
+                keep.QuoteValidDays = other.QuoteValidDays; keep.QuoteFromName = other.QuoteFromName ?? "";
+                changed = true;
+            }
             return changed;
         }
 

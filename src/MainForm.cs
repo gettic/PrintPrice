@@ -26,6 +26,11 @@ namespace PrintPrice
         ToolStripMenuItem miQuoteInfo;   // muted first line of the menu: "No name · customer price · dark"
         DateTime quoteWhen;              // date/number the quote window shows (now, or the saved record's time)
         int copyArrowWidth;          // the ▾ part of btnCopy (real px, set on Load)
+        int saveCopyPair;            // Save to history + Show quote… ▾ together (the Customers box width minus the gap; real px, Load)
+        // --test-invoice only (TestInvoiceFlow): the file dialog's answer (kind, suggested name -> path, null = cancelled) and
+        // the clipboard (text / "[picture]"), so a test run never opens a dialog or touches the user's clipboard
+        static Func<QuoteExport, string, string> testExportPath;
+        Action<string> testClipboard;
         bool copyArrowPressed;       // the mouse press was on ▾: the Click that follows opens the menu instead of copying
         Panel leftCell;                   // left of the bottom buttons: update button or "Made by Gettic · GitHub"
         int autoMinHeight;                // the info box's normal minimum height (2 lines); raised to its height while a job runs (idea 26)
@@ -378,7 +383,7 @@ namespace PrintPrice
             var btnClear = new Button { Text = L.S("Clear", "Ryd"), Size = new Size(56, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3), AutoEllipsis = true };
             btnSettings = new Button { Text = L.S("Settings", "Indstillinger"), Size = new Size(76, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3), AutoEllipsis = true };
             btnSave = new Button { Text = L.S("Save to history", "Gem i historik"), Size = new Size(114, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 6, 3), AutoEllipsis = true };
-            btnCopy = new Button { Text = L.S("Show quote…", "Vis tilbud…"), Size = new Size(128, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3), AutoEllipsis = true };
+            btnCopy = new Button { Text = QuoteButtonText(), Size = new Size(128, 32), Padding = Padding.Empty, Margin = new Padding(0, 3, 0, 3), AutoEllipsis = true };
             BuildQuoteMenu();   // split button: main part = quote window, ▾ part = quick exports without a name
             Load += delegate
             {
@@ -391,10 +396,8 @@ namespace PrintPrice
                 // the price boxes' measured edges (same 540 px content width, so the row's right edge = Customers' right edge)
                 Control friendsBox = prices.GetControlFromPosition(0, 0);
                 int boxGap = friendsBox.Margin.Right;   // the 12 px between the boxes (scaled)
-                int pair = custBox.Width - btnSave.Margin.Right;
-                if (btnSave.Width <= pair / 2 && btnCopy.Width <= pair - pair / 2) btnSave.Width = pair / 2;
-                else btnSave.Width = (int)Math.Round((double)pair * btnSave.Width / (btnSave.Width + btnCopy.Width));
-                btnCopy.Width = pair - btnSave.Width;
+                saveCopyPair = custBox.Width - btnSave.Margin.Right;
+                SplitSaveCopy();
                 btnSettings.Margin = new Padding(0, 3, boxGap, 3);   // Settings ends where Friends & family ends
                 int used = 0;
                 foreach (var b in row) used += b.Width + b.Margin.Horizontal;
@@ -2626,6 +2629,7 @@ namespace PrintPrice
                 SetStudioFile(null);
             SaveLastPrices();
             RefreshSettingsLabels();
+            UpdateQuoteButton();   // Show quote… / Show invoice… (MainInvoice)
             foreach (var cb in rowCombo) cb.Tag = null;   // nozzle / slicer may have changed: re-read the list when opened
             if (!jobLoaded && cts == null) SetColours(null);   // no model yet: the row follows Settings' filament profile
             Recalculate();
@@ -2969,7 +2973,8 @@ namespace PrintPrice
         /// The menu's muted first line: "No name · customer price · dark".
         void UpdateQuoteMenu()
         {
-            miQuoteInfo.Text = L.S("No name · ", "Uden navn · ")
+            // with Show invoice… the quick menu still makes quotes (an invoice needs a name): the line says so
+            miQuoteInfo.Text = (MainInvoice ? L.S("Quote · no name · ", "Tilbud · uden navn · ") : L.S("No name · ", "Uden navn · "))
                 + (settings.QuoteFriends ? L.S("friends && family price", "venne- og familiepris") : L.S("customer price", "kundepris"))
                 + " · " + (settings.QuoteDark != 0 ? L.S("dark", "mørk") : L.S("light", "lys"));
         }
@@ -2997,33 +3002,191 @@ namespace PrintPrice
             g.Restore(st);
         }
 
+        /// Settings > Quote & invoice "Main window: Show invoice… instead of Show quote…" (AppSettings.MainInvoice).
+        bool MainInvoice { get { return settings.MainInvoice == 1; } }
+
+        /// The split button's text: "Show quote…" or, with MainInvoice on, "Show invoice…".
+        string QuoteButtonText()
+        {
+            return MainInvoice ? L.S("Show invoice…", "Vis faktura…") : L.S("Show quote…", "Vis tilbud…");
+        }
+
+        /// Save to history + Show quote… ▾ fill saveCopyPair (the Customers box): 50/50, or split by their texts when one
+        /// needs more than half. Load, and after Settings changes the button's text.
+        void SplitSaveCopy()
+        {
+            if (saveCopyPair <= 0) return;
+            SizeByText(new[] { btnSave, btnCopy }, ScalePx(14));
+            int pair = saveCopyPair;
+            if (btnSave.Width <= pair / 2 && btnCopy.Width <= pair - pair / 2) btnSave.Width = pair / 2;
+            else btnSave.Width = (int)Math.Round((double)pair * btnSave.Width / (btnSave.Width + btnCopy.Width));
+            btnCopy.Width = pair - btnSave.Width;
+        }
+
+        /// After Settings: the button follows MainInvoice (text and the pair's split).
+        void UpdateQuoteButton()
+        {
+            string text = QuoteButtonText();
+            if (btnCopy.Text == text) return;
+            btnCopy.Text = text;
+            SplitSaveCopy();
+            btnCopy.Invalidate();
+        }
+
         /// "Show quote…": the quote window (preview, customer name, price, look, copy / save). Nothing is saved by opening it.
+        /// With MainInvoice on ("Show invoice…") the same window in invoice mode (NewJobInvoiceForm).
         void ShowQuoteWindow()
         {
             if (last == null || lastInput == null || cts != null) return;
-            using (var f = NewQuoteForm("")) f.ShowDialog(this);
+            using (var f = MainInvoice ? NewJobInvoiceForm("") : NewQuoteForm("")) f.ShowDialog(this);
+        }
+
+        /// "Show invoice…" (MainInvoice): the invoice window for the job on screen. Opening it saves nothing and uses no
+        /// number; the first Copy / Save / PDF / Copy text saves the job (History.AddFor), makes the invoice
+        /// (History.MakeInvoice: number, date, Printed) and from then on the window shows that record: later exports in the
+        /// same window re-issue the same invoice (ExportRecord), the name is locked. Save to history = a plain quote, no number.
+        QuoteForm NewJobInvoiceForm(string customer)
+        {
+            EnsureHistory();
+            quoteWhen = DateTime.Now;
+            var made = new QuoteRecord[1];   // the invoice's record once made (null before)
+            string help = L.S("Making the invoice (copy or save) gives it a number, saves it in the history and ticks Printed. Esc closes.",
+                              "Når fakturaen laves (kopi eller gem), får den et nummer, gemmes i historikken, og Printet bliver sat. Esc lukker.");
+            QuoteForm f = null;
+            f = new QuoteForm(QuoteModelName(), customer, settings.QuoteFriends, settings.QuoteDark != 0,
+                History.RecentCustomers(history, 10), last.OthersPrice, last.FriendsPrice,
+                (friends, name) => made[0] != null ? BuildRecordQuote(made[0], friends, name, true, modelImage)
+                                                   : BuildJobInvoice(friends, name),
+                (IWin32Window o, QuoteExport kind, bool friends, bool dark, string name, out bool failed) =>
+                {
+                    bool before = made[0] != null;
+                    string msg = ExportJobInvoice(o, kind, friends, dark, name, made, out failed);
+                    if (!before && made[0] != null) f.LockCustomer();   // made now: its name stays
+                    return msg;
+                },
+                (friends, dark) =>
+                {
+                    settings.QuotePrice = friends ? AppSettings.QuotePriceFriends : AppSettings.QuotePriceCustomer;
+                    settings.QuoteDark = dark ? 1 : 0;
+                    if (!offline) settings.Save();
+                },
+                true, help);
+            return f;
+        }
+
+        /// The invoice page of the job on screen before it is made: number "(new)", today's date, due date and the
+        /// payment ways from Settings (History.InvoiceInfo without a record).
+        QuoteData BuildJobInvoice(bool friends, string customer)
+        {
+            var d = BuildQuote(friends, quoteWhen, History.QuoteNumber(quoteWhen), customer);
+            var inv = History.InvoiceInfo(null, settings, quoteWhen);
+            d.Invoice = true;
+            d.InvoiceNo = L.S("(new)", "(ny)");
+            d.Due = inv.Due;
+            d.PayMobilePay = (inv.MobilePay ?? "").Trim();
+            d.PayBank = (inv.Bank ?? "").Trim();
+            d.Name = (inv.FromName ?? "").Trim();
+            return d;
+        }
+
+        /// One export of the job's invoice window. made[0] = the record once the invoice is made (then ExportRecord: same
+        /// number). Save to history = the quote only (no number). Otherwise: name required, file dialog first (cancel =
+        /// nothing saved, no number used), then the job is saved, the invoice made and the page copied / written.
+        string ExportJobInvoice(IWin32Window owner, QuoteExport kind, bool friends, bool dark, string customer,
+                                QuoteRecord[] made, out bool failed)
+        {
+            failed = false;
+            if (made[0] != null)
+                return ExportRecord(owner, made[0], true, kind, friends, dark, customer, modelImage, null, out failed);
+            if (kind == QuoteExport.History) return ExportQuote(owner, kind, friends, dark, customer, null, out failed);
+            if (last == null || lastInput == null)
+            {
+                failed = true;
+                return L.S("Nothing to send yet.", "Der er ikke noget at sende endnu.");
+            }
+            customer = (customer ?? "").Trim();
+            if (customer.Length == 0)
+            {
+                failed = true;
+                return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
+            }
+            DateTime now = DateTime.Now;
+            string path = null;
+            if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
+            {
+                path = AskExportPath(owner, kind, true, QuoteRows.FileName(now, QuoteModelName(), customer));
+                if (path == null) return null;
+            }
+            QuoteRecord rec;
+            string err = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, PrintState.Printed, out rec);
+            if (rec == null) { failed = true; return err ?? L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu."); }
+            made[0] = rec;
+            return ExportRecordTo(rec, true, kind, friends, dark, customer, modelImage, null, path, now, out failed);
+        }
+
+        /// Quote / invoice text to the clipboard (--test-invoice: to the test's own catcher instead).
+        void CopyText(string text)
+        {
+            if (testClipboard != null) testClipboard(text);
+            else Clipboard.SetText(text);
+        }
+
+        /// Quote / invoice picture to the clipboard (--test-invoice: only noted, as "[picture]").
+        void CopyPicture(Bitmap bmp)
+        {
+            if (testClipboard != null) testClipboard("[picture]");
+            else QuotePage.CopyToClipboard(bmp);
+        }
+
+        /// The Save picture / Save as PDF dialog of a quote or invoice export; null = cancelled (or not a file export).
+        static string AskExportPath(IWin32Window owner, QuoteExport kind, bool invoice, string fileName)
+        {
+            if (kind != QuoteExport.Png && kind != QuoteExport.Pdf) return null;
+            if (testExportPath != null) return testExportPath(kind, fileName);   // --test-invoice: no dialog (null = "cancelled")
+            bool pdf = kind == QuoteExport.Pdf;
+            string title = invoice ? (pdf ? L.S("Save invoice as PDF", "Gem faktura som PDF") : L.S("Save invoice picture", "Gem faktura som billede"))
+                                   : (pdf ? L.S("Save quote as PDF", "Gem tilbud som PDF") : L.S("Save quote picture", "Gem tilbud som billede"));
+            using (var dlg = new SaveFileDialog
+            {
+                Title = title,
+                Filter = pdf ? "PDF (*.pdf)|*.pdf" : L.S("PNG picture", "PNG-billede") + " (*.png)|*.png",
+                FileName = fileName + (pdf ? ".pdf" : ".png"), AddExtension = true, OverwritePrompt = true
+            })
+                return dlg.ShowDialog(owner) == DialogResult.OK ? dlg.FileName : null;
         }
 
         QuoteForm NewQuoteForm(string customer)
         {
             EnsureHistory();
             quoteWhen = DateTime.Now;   // the preview's number/date until an export saves the quote (then the record's)
-            return new QuoteForm(QuoteModelName(), customer, settings.QuoteFriends, settings.QuoteDark != 0,
-                new List<string>(History.RecentCustomers(history, 10)), last.OthersPrice, last.FriendsPrice,
+            QuoteForm f = null;
+            f = new QuoteForm(QuoteModelName(), customer, settings.QuoteFriends, settings.QuoteDark != 0,
+                History.RecentCustomers(history, 10), last.OthersPrice, last.FriendsPrice,
                 (friends, name) => BuildQuote(friends, quoteWhen, History.QuoteNumber(quoteWhen), name),
-                ExportQuote,
+                // every export saves the quote with the print status chosen in the window
+                (IWin32Window o, QuoteExport kind, bool friends, bool dark, string name, out bool failed) =>
+                    ExportQuote(o, kind, friends, dark, name, f.PrintStatus, out failed),
                 (friends, dark) =>
                 {
                     settings.QuotePrice = friends ? AppSettings.QuotePriceFriends : AppSettings.QuotePriceCustomer;
                     settings.QuoteDark = dark ? 1 : 0;
                     if (!offline) settings.Save();
                 });
+            f.PrintStatus = PrintState.NotPrinted;   // a new job: always "Not printed yet"
+            return f;
         }
 
         /// One export (window or ▾ menu): Copy picture / Save picture / Save as PDF ask for the file first (null = cancelled),
         /// then the quote goes into the history with this price and customer (History.AddFor), then the page is drawn
         /// (PDF always light) and copied / written. Returns the status text; failed = it is an error text.
         string ExportQuote(IWin32Window owner, QuoteExport kind, bool friends, bool dark, string customer, out bool failed)
+        {
+            return ExportQuote(owner, kind, friends, dark, customer, null, out failed);
+        }
+
+        /// state = the quote window's print status (put on the saved quote, History.AddFor with a state); null = the ▾ quick
+        /// menu (no status: today's rule).
+        string ExportQuote(IWin32Window owner, QuoteExport kind, bool friends, bool dark, string customer, PrintState? state, out bool failed)
         {
             failed = false;
             if (last == null || lastInput == null)
@@ -3036,29 +3199,19 @@ namespace PrintPrice
             {
                 // "Save to history": the quote with this price and name, nothing else
                 QuoteRecord saved;
-                string e = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, out saved);
+                string e = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, state, out saved);
                 if (saved != null) { DateTime w; if (History.TryTime(saved.SavedAt, out w)) quoteWhen = w; }
                 if (e != null) { failed = true; return e; }
-                return L.S("✓ Saved to history.", "✓ Gemt i historikken.");
+                return L.S("✓ Saved to history.", "✓ Gemt i historikken.") + FailedSavedNote(saved);
             }
             string path = null;
             if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
             {
-                bool pdf = kind == QuoteExport.Pdf;
-                using (var dlg = new SaveFileDialog
-                {
-                    Title = pdf ? L.S("Save quote as PDF", "Gem tilbud som PDF") : L.S("Save quote picture", "Gem tilbud som billede"),
-                    Filter = pdf ? "PDF (*.pdf)|*.pdf" : L.S("PNG picture", "PNG-billede") + " (*.png)|*.png",
-                    FileName = QuoteFileName(DateTime.Now, customer) + (pdf ? ".pdf" : ".png"),
-                    AddExtension = true, OverwritePrompt = true
-                })
-                {
-                    if (dlg.ShowDialog(owner) != DialogResult.OK) return null;
-                    path = dlg.FileName;
-                }
+                path = AskExportPath(owner, kind, false, QuoteFileName(DateTime.Now, customer));
+                if (path == null) return null;
             }
             QuoteRecord rec;
-            string err = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, out rec);
+            string err = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, state, out rec);
             DateTime when;
             if (rec == null || !History.TryTime(rec.SavedAt, out when)) when = DateTime.Now;
             quoteWhen = when;
@@ -3067,7 +3220,7 @@ namespace PrintPrice
             {
                 if (kind == QuoteExport.Text)
                 {
-                    Clipboard.SetText(QuoteText(customer));
+                    CopyText(QuoteText(customer));
                     done = L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
                 }
                 else
@@ -3075,7 +3228,7 @@ namespace PrintPrice
                     var data = BuildQuote(friends, when, History.QuoteNumber(when), customer);
                     using (var bmp = QuotePage.Render(data, dark && kind != QuoteExport.Pdf))   // a printed PDF is always light
                     {
-                        if (kind == QuoteExport.Copy) QuotePage.CopyToClipboard(bmp);
+                        if (kind == QuoteExport.Copy) CopyPicture(bmp);
                         else if (kind == QuoteExport.Png) bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
                         else QuotePage.SavePdf(bmp, path);
                     }
@@ -3089,7 +3242,17 @@ namespace PrintPrice
                 return (kind == QuoteExport.Copy || kind == QuoteExport.Text ? L.S("Clipboard: ", "Udklipsholder: ") : "") + ex.Message;
             }
             if (err != null) { failed = true; return done + ". " + err; }
-            return done + L.S(" and saved to history.", " og gemt i historikken.");
+            return done + L.S(" and saved to history.", " og gemt i historikken.") + FailedSavedNote(rec);
+        }
+
+        /// After saving a quote marked Failed: a second line saying what that means for new quotes ("" otherwise).
+        string FailedSavedNote(QuoteRecord r)
+        {
+            if (r == null || !r.Failed) return "";
+            if (settings.FailedPayback == 0)
+                return "\n" + L.S("Marked as failed in the history.", "Markeret som fejlet i historikken.");
+            return "\n" + L.F("Marked as failed: new quotes earn back {0}.", "Markeret som fejlet: nye tilbud tjener {0} ind.",
+                              Num.Kr(History.FailedCost(r)).Replace(' ', ' '));
         }
 
         /// Default file name of a quote: "2026-11-04 3D Benchy" (+ " - Mette Hansen" with a customer).
@@ -3147,7 +3310,14 @@ namespace PrintPrice
         /// The build plate's short name for the wear line: "Smooth PEI / High Temp Plate" -> "Smooth PEI" ("Glat PEI").
         string QuotePlate()
         {
-            string plate = Wear.FindPlate(settings.BedType).Label;
+            return QuotePlate(settings.BedType);
+        }
+
+        /// The same for a given bed type (a saved record's BedType; "" = today's Settings).
+        string QuotePlate(string bedType)
+        {
+            if (string.IsNullOrWhiteSpace(bedType)) bedType = settings.BedType;
+            string plate = Wear.FindPlate(bedType).Label;
             int cut = plate.IndexOf(" / ", StringComparison.Ordinal);
             if (cut > 0) plate = plate.Substring(0, cut);
             if (L.Danish && plate == "Smooth PEI") plate = "Glat PEI";
@@ -3159,13 +3329,14 @@ namespace PrintPrice
             return PrinterText(null);
         }
 
-        /// "<printer name>, 0.4 mm nozzle": the active printer, or a saved quote's printer (its saved name; the nozzle of
-        /// that printer today, if it still exists).
+        /// "<printer name>, 0.4 mm nozzle": the active printer, or a saved quote's printer (its saved name; the nozzle saved
+        /// with it, else (older records) the nozzle of that printer today, if it still exists).
         string PrinterText(QuoteRecord r)
         {
             var p = r != null ? settings.FindPrinter(History.PrinterOf(r)) : null;
             string name = r != null && !string.IsNullOrEmpty(r.PrinterName) ? r.PrinterName : p != null ? p.Name : settings.PrinterName;
-            var nozzle = Wear.FindNozzle(p != null ? p.Nozzle : settings.Nozzle);
+            string savedNozzle = r != null ? (r.Nozzle ?? "").Trim() : "";
+            var nozzle = Wear.FindNozzle(savedNozzle.Length > 0 ? savedNozzle : p != null ? p.Nozzle : settings.Nozzle);
             return L.F("{0}, {1} mm nozzle", "{0}, {1} mm dyse", AppSettings.CleanPrinterName(name),
                        L.Danish ? nozzle.Size.Replace('.', ',') : nozzle.Size);
         }
@@ -3186,24 +3357,42 @@ namespace PrintPrice
             EnsureHistory();
             bool owned;
             Image pic = RecordPicture(r, out owned);
-            string help = invoice
+            // a made invoice keeps the name it was made out to (BilledTo, else Customer for older invoices)
+            bool made = invoice && InvoiceMade(r);
+            string help = made
+                ? L.F("Invoice {0} is already made: it keeps its number, date and name. Esc closes.",
+                      "Faktura {0} er allerede lavet: den beholder sit nummer, sin dato og sit navn. Esc lukker.", r.InvoiceNo)
+                : invoice
                 ? L.S("Making the invoice (copy or save) gives it a number and ticks Printed in the history. Esc closes.",
                       "Når fakturaen laves (kopi eller gem), får den et nummer, og Printet bliver sat i historikken. Esc lukker.")
                 : L.S("Copying or saving puts the name and price on this quote in the history. Esc closes.",
                       "Når du kopierer eller gemmer, kommer navn og pris på dette tilbud i historikken. Esc lukker.");
-            var f = new QuoteForm(RecordModelName(r), r.Customer ?? "", r.For == History.ForFriends, settings.QuoteDark != 0,
-                new List<string>(History.RecentCustomers(history, 10)), r.OthersPrice, r.FriendsPrice,
+            string billTo = made ? History.InvoiceInfo(r, settings).BilledTo : r.Customer ?? "";
+            QuoteForm f = null;
+            f = new QuoteForm(RecordModelName(r), billTo, r.For == History.ForFriends, settings.QuoteDark != 0,
+                History.RecentCustomers(history, 10), r.OthersPrice, r.FriendsPrice,
                 (friends, name) => BuildRecordQuote(r, friends, name, invoice, pic),
                 (IWin32Window o, QuoteExport kind, bool friends, bool dark, string customer, out bool failed) =>
-                    ExportRecord(o, r, invoice, kind, friends, dark, customer, pic, out failed),
+                    ExportRecord(o, r, invoice, kind, friends, dark, customer, pic, invoice ? (PrintState?)null : f.PrintStatus, out failed),
                 (friends, dark) =>
                 {
                     settings.QuoteDark = dark ? 1 : 0;   // the price choice belongs to the record (For), not to Settings
                     if (!offline) settings.Save();
                 },
                 invoice, help);
+            if (made) f.LockCustomer();
+            if (!invoice) f.PrintStatus = History.PrintStateOf(r, DateTime.Now);   // the quote's status in History
+            else if (r.Failed)
+                f.ShowNote(help + "\n" + L.S("This print is marked as failed in the history.", "Dette print er markeret som fejlet i historikken."),
+                           InfoKind.Warning);
             if (owned && pic != null) f.FormClosed += delegate { pic.Dispose(); };
             return f;
+        }
+
+        /// The record has an invoice number (Invoice… re-issues it: same number, date, snapshot and name).
+        static bool InvoiceMade(QuoteRecord r)
+        {
+            return r != null && !string.IsNullOrEmpty(r.InvoiceNo);
         }
 
         /// The record's picture: the one saved with it (issue #4), else the model on screen when it is the same link/file,
@@ -3234,16 +3423,18 @@ namespace PrintPrice
             return QuoteRows.ModelName(r.Model);
         }
 
-        /// The page of a saved record: its saved inputs and prices (History.ToInput + SavedSettings), quote number and
-        /// date from SavedAt; invoice: its number and date (or the next number and today while it isn't made yet),
-        /// due date and the payment ways set in Settings.
+        /// The page of a saved record, as it was made: its saved inputs, prices and wear split (History.RecordBreakdown),
+        /// plate, nozzle, material name, valid-until and from-name saved with it (older records: today's settings for
+        /// those, as before); quote number and date from SavedAt; invoice: its number and date (or the next number and
+        /// today while it isn't made yet), due date and the payment ways (its snapshot, else Settings).
         QuoteData BuildRecordQuote(QuoteRecord r, bool friends, string customer, bool invoice, Image pic)
         {
             DateTime saved;
             if (!History.TryTime(r.SavedAt, out saved)) saved = DateTime.Now;
+            var quote = History.RecordQuoteInfo(r, settings, saved);
             var d = new QuoteData
             {
-                Name = (settings.QuoteName ?? "").Trim(),
+                Name = quote.FromName,
                 Customer = (customer ?? "").Trim(),
                 Model = RecordModelName(r),
                 Link = ShortLink(r.Source),
@@ -3252,21 +3443,25 @@ namespace PrintPrice
                 Hours = r.Hours, Minutes = r.Minutes,
                 Weight = Num.Fmt(r.Grams) + " g",
                 Printer = PrinterText(r),
-                Number = History.QuoteNumber(r), Date = saved, ValidUntil = settings.QuoteValidUntil(saved),
-                PlateName = QuotePlate(),
+                Number = History.QuoteNumber(r), Date = saved, ValidUntil = quote.ValidUntil,
+                PlateName = QuotePlate(r.BedType),
                 PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? r.PurgeGrams : -1,
-                Breakdown = Pricing.Breakdown(History.ToInput(r), History.SavedSettings(r, settings), friends, null)
+                // N4: the saved price (as Copy text and the History list), with the saved wear split as sub-rows
+                Breakdown = History.RecordBreakdown(r, settings, friends)
             };
-            // N4: the page shows the saved price (as Copy text and the History list do), even if the inputs no longer give it
-            Pricing.MatchSavedTotal(d.Breakdown, friends ? r.FriendsPrice : r.OthersPrice);
+            // a typed job (no slice): its one line has no name; the filament preset saved with it, as the fresh quote showed
+            string savedMaterial = BambuSlicer.ShortName(r.MaterialName ?? "").Trim();
+            bool typedLine = r.Filaments != null && r.Filaments.Count == 1 && string.IsNullOrEmpty(r.Filaments[0].Name)
+                             && string.IsNullOrEmpty(r.Filaments[0].Type);
             if (r.Filaments != null)
                 for (int k = 0; k < r.Filaments.Count; k++)
                 {
                     var f = r.Filaments[k];
-                    d.MaterialNames.Add(MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
+                    d.MaterialNames.Add(typedLine && savedMaterial.Length > 0 ? savedMaterial
+                        : MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
                     d.MaterialColours.Add(ParseColour(f.Colour));
                 }
-            else d.MaterialNames.Add(BambuSlicer.ShortName(settings.FilamentPreset).Trim());
+            else d.MaterialNames.Add(savedMaterial.Length > 0 ? savedMaterial : BambuSlicer.ShortName(settings.FilamentPreset).Trim());
             d.Material = QuoteRows.MaterialLine(r.Filaments != null ? r.Filaments.Select(f => f.Type) : null,
                                                 r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
             if (invoice)
@@ -3290,18 +3485,20 @@ namespace PrintPrice
         /// One export of a record's quote / invoice: file dialog first (null = cancelled), then the record gets the name
         /// and For (and the invoice number), the history is saved, the page is drawn (PDF always light) and copied / written.
         string ExportRecord(IWin32Window owner, QuoteRecord r, bool invoice, QuoteExport kind, bool friends, bool dark,
-                            string customer, Image pic, out bool failed)
+                            string customer, Image pic, PrintState? state, out bool failed)
         {
             failed = false;
             customer = (customer ?? "").Trim();
             if (kind == QuoteExport.History)
             {
-                // "Save to history" of a saved record: only its name and price (For); an invoice is not made by this
-                r.Customer = customer;
+                if (state.HasValue) History.SetPrintState(r, state.Value, DateTime.Now);   // the quote window's print status
+                // "Save to history" of a saved record: only its name and price (For); an invoice is not made by this.
+                // A made invoice's box shows its kept name (read-only): the record's Customer stays as it is.
+                if (!(invoice && InvoiceMade(r))) r.Customer = customer;
                 r.For = friends ? History.ForFriends : History.ForCustomer;
                 string e = offline ? null : History.Save(history);
                 if (e != null) { failed = true; return e; }
-                return L.S("✓ Saved to history.", "✓ Gemt i historikken.");
+                return L.S("✓ Saved to history.", "✓ Gemt i historikken.") + FailedSavedNote(r);
             }
             if (invoice && customer.Length == 0)
             {
@@ -3312,27 +3509,25 @@ namespace PrintPrice
             string path = null;
             if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
             {
-                bool pdf = kind == QuoteExport.Pdf;
-                string title = invoice ? (pdf ? L.S("Save invoice as PDF", "Gem faktura som PDF") : L.S("Save invoice picture", "Gem faktura som billede"))
-                                       : (pdf ? L.S("Save quote as PDF", "Gem tilbud som PDF") : L.S("Save quote picture", "Gem tilbud som billede"));
                 // "2026-11-02 Model - Name": the quote's date, for an invoice its date (today while it isn't made yet)
                 DateTime qd;
                 if (invoice) { if (string.IsNullOrEmpty(r.InvoiceNo) || !History.TryTime(r.BilledAt, out qd)) qd = now; }
                 else if (!History.TryTime(r.SavedAt, out qd)) qd = DateTime.Now;
-                string name = QuoteRows.FileName(qd, RecordModelName(r), customer);
-                using (var dlg = new SaveFileDialog
-                {
-                    Title = title,
-                    Filter = pdf ? "PDF (*.pdf)|*.pdf" : L.S("PNG picture", "PNG-billede") + " (*.png)|*.png",
-                    FileName = name + (pdf ? ".pdf" : ".png"), AddExtension = true, OverwritePrompt = true
-                })
-                {
-                    if (dlg.ShowDialog(owner) != DialogResult.OK) return null;
-                    path = dlg.FileName;
-                }
+                path = AskExportPath(owner, kind, invoice, QuoteRows.FileName(qd, RecordModelName(r), customer));
+                if (path == null) return null;
             }
-            r.Customer = customer;
+            return ExportRecordTo(r, invoice, kind, friends, dark, customer, pic, state, path, now, out failed);
+        }
+
+        /// The rest of ExportRecord once the file (path) is chosen: name, For, print state, invoice number, save, then the
+        /// page copied / written. Also the first export of the main window's "Show invoice…" (ExportJobInvoice).
+        string ExportRecordTo(QuoteRecord r, bool invoice, QuoteExport kind, bool friends, bool dark, string customer,
+                              Image pic, PrintState? state, string path, DateTime now, out bool failed)
+        {
+            failed = false;
+            if (!(invoice && InvoiceMade(r))) r.Customer = customer;   // MakeInvoice stores a new invoice's name from it (BilledTo)
             r.For = friends ? History.ForFriends : History.ForCustomer;
+            if (state.HasValue) History.SetPrintState(r, state.Value, now);   // quotes only (the invoice window has no status)
             string err = null;
             if (invoice)
             {
@@ -3345,7 +3540,7 @@ namespace PrintPrice
             {
                 if (kind == QuoteExport.Text)
                 {
-                    Clipboard.SetText(RecordText(r, friends, invoice));
+                    CopyText(RecordText(r, friends, invoice));
                     done = invoice ? L.S("✓ Invoice text copied", "✓ Fakturaen er kopieret som tekst") : L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
                 }
                 else
@@ -3353,7 +3548,7 @@ namespace PrintPrice
                     var data = BuildRecordQuote(r, friends, customer, invoice, pic);
                     using (var bmp = QuotePage.Render(data, dark && kind != QuoteExport.Pdf))   // a printed PDF is always light
                     {
-                        if (kind == QuoteExport.Copy) QuotePage.CopyToClipboard(bmp);
+                        if (kind == QuoteExport.Copy) CopyPicture(bmp);
                         else if (kind == QuoteExport.Png) bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
                         else QuotePage.SavePdf(bmp, path);
                     }
@@ -3385,7 +3580,7 @@ namespace PrintPrice
             var when = new DateTime(2026, 11, 4, 17, 45, 0);
             var d = BuildQuote(false, when, History.QuoteNumber(when), "Lene Hansen");
             d.Invoice = true;
-            d.InvoiceNo = "2026-K7Q4";
+            d.InvoiceNo = "2026-48213";
             d.Due = settings.InvoiceDue(when);
             d.PayMobilePay = "12 34 56 78";
             d.PayBank = L.S("reg. 1234, account 0012345678", "reg.nr. 1234, konto 0012345678");
@@ -3412,6 +3607,31 @@ namespace PrintPrice
             quoteWhen = new DateTime(2026, 11, 4, 17, 45, 0);
             f.Redraw();
             return f;
+        }
+
+        /// Picture mode: Settings' "Show invoice… instead of Show quote…" on / off (in memory, never saved).
+        internal void SampleMainInvoice(bool on)
+        {
+            if (!offline) return;
+            settings.MainInvoice = on ? 1 : 0;
+            UpdateQuoteButton();
+        }
+
+        /// Picture mode: the main window's "Show invoice…" window for the job on screen (nothing is saved).
+        internal QuoteForm SampleJobInvoiceWindow(string customer)
+        {
+            if (!offline || last == null || lastInput == null) return null;
+            var f = NewJobInvoiceForm(customer);
+            quoteWhen = new DateTime(2026, 11, 4, 17, 45, 0);
+            f.Redraw();
+            return f;
+        }
+
+        /// Picture mode: Invoice… on a made (sample) invoice: the kept name in a read-only box.
+        internal QuoteForm SampleMadeInvoiceWindow(QuoteRecord r)
+        {
+            if (!offline || r == null) return null;
+            return NewRecordQuoteForm(r, true);
         }
 
         // ---------- price history ----------
@@ -3486,10 +3706,19 @@ namespace PrintPrice
         /// Customer). saved = the record now in the list (null if there was nothing to save).
         string SaveToHistory(int forWho, string customer, out QuoteRecord saved)
         {
+            return SaveToHistory(forWho, customer, null, out saved);
+        }
+
+        /// state = the quote window's print status (History.AddFor with a state: it wins over a replaced same quote's);
+        /// null = no status (Save button, ▾ quick menu: today's rule).
+        string SaveToHistory(int forWho, string customer, PrintState? state, out QuoteRecord saved)
+        {
             saved = null;
             if (last == null || lastInput == null) return L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu.");
             EnsureHistory();
-            var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", LinkSource(), DateTime.Now);
+            // with the wear split shown on the quote (Auto wear), so History's Quote… / Invoice… show the same rows later
+            var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", LinkSource(), DateTime.Now,
+                                      settings.AutoWearRate != 0 ? WearBreakdown(settings) : null);
             // colour, type and material of each row, so "Open again" can rebuild the material rows without slicing
             var used = filaments ?? (single != null ? new List<FilamentUse> { single } : null);
             if (r.Filaments != null && used != null && r.Filaments.Count == used.Count)
@@ -3510,7 +3739,7 @@ namespace PrintPrice
             if (repeatOf != null) { r.For = repeatOf.For; r.RepeatOf = repeatOf.Id ?? ""; }   // a repeat print: new record, same person
             if (forWho != 0)
             {
-                saved = History.AddFor(history, r, forWho);
+                saved = state.HasValue ? History.AddFor(history, r, forWho, state.Value, DateTime.Now) : History.AddFor(history, r, forWho);
                 saved.Customer = (customer ?? "").Trim();   // the name typed now (a same-quote replace takes it too)
             }
             else
@@ -3550,6 +3779,167 @@ namespace PrintPrice
             var bmp = img as Bitmap;
             if (bmp != null) return bmp;
             using (img) return new Bitmap(img);
+        }
+
+        /// Test run "--settings <folder> --hidden --test-invoice" (plans\invoice-toggle), only in test mode: Settings'
+        /// "Show invoice…" (MainInvoice = 1) with the real window and export code (NewJobInvoiceForm, QuoteForm's own
+        /// Export, ExportJobInvoice / ExportRecord / ExportQuote, MenuExport); file dialogs answered by testExportPath (files
+        /// in the folder), the clipboard caught by testClipboard. Results in <folder>\test_invoice.txt; exit 0 / 4.
+        internal void TestInvoiceFlow()
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            string dir = AppSettings.Folder;
+            var log = new TestLog();
+            log.Add(SetupTest.StandInNote);
+            string clip = null;
+            bool cancel = false;
+            testClipboard = t => clip = t;
+            testExportPath = (kind, name) => cancel ? null : Path.Combine(dir, name + (kind == QuoteExport.Pdf ? ".pdf" : ".png"));
+            QuoteForm f = null;
+            try
+            {
+                // a typed one-colour job (no slicing)
+                Func<int, bool> setJob = minutes =>
+                {
+                    var one = new SliceResult { Seconds = minutes * 60, Grams = 11.8, Plates = 1 };
+                    one.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#F07850", Type = "PLA", Profile = "Bambu PLA Matte @BBL A1", Grams = 11.8 });
+                    SetColours(one);
+                    txtUrl.Text = SingleBenchyLink;
+                    txtHours.Text = "0";
+                    txtMinutes.Text = minutes.ToString();
+                    txtGrams.Text = "11,8";
+                    rowPrice[0].Text = "200";
+                    txtElecPrice.Text = "3,65";
+                    jobModel = "3D Benchy";
+                    SetJobLoaded(true);
+                    Recalculate();
+                    return last != null && lastInput != null;
+                };
+                log.Check(setJob(38), "job on screen (0 h 38 m, 11,8 g)");
+                EnsureHistory();
+                settings.MainInvoice = 1;
+                settings.Save();
+                UpdateQuoteButton();
+                log.Check(btnCopy.Text == L.S("Show invoice…", "Vis faktura…"), "main button reads \"" + btnCopy.Text + "\"");
+
+                Func<int> invoices = () => history.Count(r => !string.IsNullOrEmpty(r.InvoiceNo));
+                Func<string> used = () => settings.UsedInvoiceNos ?? "";
+                int count0 = history.Count, inv0 = invoices();
+                string used0 = used();
+
+                // 1. opening the window and a cancelled file dialog use no number and save nothing
+                f = NewJobInvoiceForm("Test Kunde");
+                log.Check(history.Count == count0 && invoices() == inv0 && used() == used0, "1a window opened: nothing saved, no number used");
+                log.Check(f.TestActionsOn, "1b export buttons on (name given)");
+                cancel = true;
+                string msg = f.TestExport(QuoteExport.Pdf);
+                cancel = false;
+                log.Check(history.Count == count0 && invoices() == inv0 && used() == used0, "1c PDF dialog cancelled: nothing saved, no number used");
+                log.Check(!f.TestCustomerLocked, "1d name not locked before the invoice is made");
+
+                // 4. Save to history in the invoice window: a plain quote, no number
+                msg = f.TestExport(QuoteExport.History);
+                var plain = history.Count > 0 ? history[0] : null;
+                log.Check(f.TestInfoKind != InfoKind.Error && history.Count == count0 + 1, "4a Save to history saved one record: " + msg);
+                log.Check(plain != null && string.IsNullOrEmpty(plain.InvoiceNo) && invoices() == inv0 && used() == used0,
+                          "4b it is a plain quote: no invoice number, none used");
+                log.Check(plain != null && plain.Customer == "Test Kunde", "4c quote has the typed name");
+                log.Add("INFO the invoice below is the same job within 10 min, so it takes over this quote's record (History.Add)");
+
+                // 2. first export: PDF to the folder, then text
+                msg = f.TestExport(QuoteExport.Pdf);
+                log.Check(f.TestInfoKind == InfoKind.Success, "2a PDF export: " + msg.Replace("\n", " / "));
+                var made = history.FirstOrDefault(r => !string.IsNullOrEmpty(r.InvoiceNo));
+                string no = made != null ? made.InvoiceNo : "";
+                log.Check(invoices() == inv0 + 1, "2b exactly one invoice made (" + invoices() + " in history)");
+                log.Check(System.Text.RegularExpressions.Regex.IsMatch(no, @"^\d{4}-[1-9]\d{4}$") && no.StartsWith(DateTime.Now.Year + "-"),
+                          "2c number \"" + no + "\" is this year + 5 digits");
+                log.Check(no != "2026-48213", "2d not the picture-mode sample number");
+                log.Check(made != null && made.Printed, "2e record ticked Printed");
+                log.Check(made != null && made.BilledTo == "Test Kunde", "2f BilledTo = \"" + (made != null ? made.BilledTo : "") + "\"");
+                DateTime billedAt;
+                log.Check(made != null && History.TryTime(made.BilledAt, out billedAt) && !string.IsNullOrEmpty(made.InvoiceDue), "2g billed date and due date saved");
+                log.Check(used().Split(',').Contains(no) && used().Split(',').Length == (used0.Length == 0 ? 0 : used0.Split(',').Length) + 1,
+                          "2h UsedInvoiceNos got the number (only it)");
+                string pdf = Path.Combine(dir, QuoteRows.FileName(DateTime.Now, QuoteModelName(), "Test Kunde") + ".pdf");
+                bool pdfOk = false;
+                try { pdfOk = File.Exists(pdf) && System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(pdf), 0, 5) == "%PDF-"; } catch { }
+                log.Check(pdfOk, "2i PDF written: " + Path.GetFileName(pdf));
+                string ini = "", json = "";
+                try { ini = File.ReadAllText(AppSettings.FilePath); } catch { }
+                try { json = File.ReadAllText(History.FilePath); } catch { }
+                log.Check(ini.Contains("MainInvoice=1"), "2j settings.ini has MainInvoice=1");
+                log.Check(no.Length > 0 && ini.Contains(no), "2k settings.ini's used numbers have " + no);
+                log.Check(no.Length > 0 && json.Contains(no), "2l history.json has the invoice " + no);
+                log.Check(f.TestCustomerLocked, "3a name locked after the invoice is made");
+                clip = null;
+                msg = f.TestExport(QuoteExport.Text);
+                log.Check(f.TestInfoKind == InfoKind.Success && clip != null && no.Length > 0 && clip.Contains(no),
+                          "2m Copy text: invoice text with " + no + " (" + msg + ")");
+
+                // 3. another export from the same window: same number, nothing new
+                msg = f.TestExport(QuoteExport.Pdf);
+                log.Check(f.TestInfoKind == InfoKind.Success && made != null && made.InvoiceNo == no && invoices() == inv0 + 1,
+                          "3b second PDF keeps " + no + ", still one invoice (" + msg.Replace("\n", " / ") + ")");
+                log.Check(used() .Split(',').Count(x => x == no) == 1 && used().Split(',').Length == (used0.Length == 0 ? 0 : used0.Split(',').Length) + 1,
+                          "3c no other number used");
+                f.Dispose(); f = null;
+
+                // the SAME unchanged job again within 10 minutes (History.SameQuote: an invoiced record is never the same
+                // quote): nothing may take over the invoice's record or number
+                Func<int> usedCount = () => used().Length == 0 ? 0 : used().Split(',').Length;
+                int used1 = usedCount();
+                Func<string> inv1Text = () => made == null ? "none" : made.InvoiceNo + " / " + made.Customer + " / " + made.BilledTo;
+                Func<bool> inv1Kept = () => made != null && made.InvoiceNo == no && made.Customer == "Test Kunde" && made.BilledTo == "Test Kunde"
+                                            && history.Contains(made);
+
+                // 5. ▾ quick export: a new quote record, no number
+                int count5 = history.Count;
+                clip = null;
+                MenuExport(QuoteExport.Text);
+                var quick = history.Count > 0 ? history[0] : null;
+                log.Check(history.Count == count5 + 1 && quick != null && !ReferenceEquals(quick, made) && string.IsNullOrEmpty(quick.InvoiceNo),
+                          "5a same job: quick Copy text added a new quote without a number");
+                log.Check(clip != null && clip.Length > 0 && !clip.Contains(no), "5b quote text copied (no invoice number in it)");
+                log.Check(invoices() == inv0 + 1 && usedCount() == used1, "5c no number used by the quick export");
+                log.Check(inv1Kept(), "5d first invoice unchanged (number / Customer / BilledTo = " + inv1Text() + ")");
+                log.Check(btnCopy.Text == L.S("Show invoice…", "Vis faktura…"), "5e main button still \"" + btnCopy.Text + "\"");
+
+                // 6. a second Show invoice… of the same job for another customer: a NEW number
+                f = NewJobInvoiceForm("Anden Kunde");
+                msg = f.TestExport(QuoteExport.Pdf);
+                var made2 = history.FirstOrDefault(r => !string.IsNullOrEmpty(r.InvoiceNo) && !ReferenceEquals(r, made));
+                string no2 = made2 != null ? made2.InvoiceNo : "";
+                log.Check(f.TestInfoKind == InfoKind.Success, "6a second invoice PDF: " + msg.Replace("\n", " / "));
+                log.Check(no2.Length > 0 && no2 != no && invoices() == inv0 + 2, "6b new number " + no2 + " (first " + no + "), " + invoices() + " invoices");
+                log.Check(made2 != null && made2.BilledTo == "Anden Kunde", "6c second invoice billed to \"" + (made2 != null ? made2.BilledTo : "") + "\"");
+                log.Check(inv1Kept(), "6d first invoice kept its number, Customer and BilledTo (" + inv1Text() + ")");
+                log.Check(usedCount() == used1 + 1 && used().Split(',').Contains(no2), "6e exactly one more number used");
+                f.Dispose(); f = null;
+
+                // 7. Save to history in a new invoice window (same job, an invoice on top): adds a plain quote
+                int count7 = history.Count;
+                f = NewJobInvoiceForm("Tredje Kunde");
+                msg = f.TestExport(QuoteExport.History);
+                var plain7 = history.Count > 0 ? history[0] : null;
+                log.Check(f.TestInfoKind != InfoKind.Error && history.Count == count7 + 1 && plain7 != null
+                          && !ReferenceEquals(plain7, made) && !ReferenceEquals(plain7, made2) && string.IsNullOrEmpty(plain7.InvoiceNo),
+                          "7a Save to history added a plain quote without a number: " + msg);
+                log.Check(plain7 != null && plain7.Customer == "Tredje Kunde", "7b plain quote has the typed name");
+                log.Check(inv1Kept() && made2 != null && made2.InvoiceNo == no2 && made2.Customer == "Anden Kunde" && made2.BilledTo == "Anden Kunde",
+                          "7c invoices not renamed (" + inv1Text() + "; " + (made2 != null ? made2.InvoiceNo + " / " + made2.Customer + " / " + made2.BilledTo : "none") + ")");
+                log.Check(invoices() == inv0 + 2 && usedCount() == used1 + 1, "7d no number used");
+                f.Dispose(); f = null;
+            }
+            catch (Exception ex) { log.Check(false, "exception: " + ex); }
+            finally
+            {
+                if (f != null) f.Dispose();
+                testClipboard = null;
+                testExportPath = null;
+            }
+            try { File.WriteAllLines(Path.Combine(dir, "test_invoice.txt"), log.Lines); } catch { }
+            Program.EndTestRun(log.Ok ? 0 : 4);
         }
 
         /// Test run "--settings <folder> --hidden --test-pictures" (issue #4), only in test mode: a job with a picture

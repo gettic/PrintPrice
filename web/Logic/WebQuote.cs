@@ -7,8 +7,8 @@ namespace PrintPrice.Web
 {
     /// The quote / invoice page on the website (stage 4), without browser calls (web\tests runs it). What the page shows
     /// = the desktop's QuoteData (MainForm.BuildQuote / BuildRecordQuote); the rows, dates, material line, file name and
-    /// plain texts come from the linked src\QuoteRows.cs, the prices from Pricing.Breakdown / MatchSavedTotal, a saved
-    /// quote's inputs from History.ToInput / SavedSettings. Pages\QuoteSheet.razor draws it in the same 1000-unit layout
+    /// plain texts come from the linked src\QuoteRows.cs, the prices from Pricing.Breakdown, a saved quote's bill from
+    /// History.RecordBreakdown / RecordQuoteInfo / InvoiceInfo (as it was made). Pages\QuoteSheet.razor draws it in the same 1000-unit layout
     /// as QuotePage.
     public static class WebQuote
     {
@@ -83,9 +83,10 @@ namespace PrintPrice.Web
         {
             DateTime saved;
             if (!History.TryTime(r.SavedAt, out saved)) saved = now;
+            var quote = History.RecordQuoteInfo(r, s, saved);
             var d = new Sheet
             {
-                Name = (s.QuoteName ?? "").Trim(),
+                Name = quote.FromName,
                 Customer = (customer ?? "").Trim(),
                 Model = QuoteRows.ModelName(r.Model),
                 Link = ShortLink(r.Source),
@@ -93,22 +94,27 @@ namespace PrintPrice.Web
                 Hours = r.Hours, Minutes = r.Minutes,
                 Weight = Num.Fmt(r.Grams) + " g",
                 Printer = PrinterText(s, r),
-                Number = History.QuoteNumber(r), Date = saved, ValidUntil = s.QuoteValidUntil(saved),
-                PlateName = PlateName(s),
+                Number = History.QuoteNumber(r), Date = saved, ValidUntil = quote.ValidUntil,
+                PlateName = PlateName(s, r.BedType),
                 PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? r.PurgeGrams : -1,
-                Breakdown = Pricing.Breakdown(History.ToInput(r), History.SavedSettings(r, s), friends, null)
+                // the saved price, with the saved wear split as sub-rows (older records: one wear line)
+                Breakdown = History.RecordBreakdown(r, s, friends)
             };
-            Pricing.MatchSavedTotal(d.Breakdown, friends ? r.FriendsPrice : r.OthersPrice);
+            // a typed job (no slice) whose one line has no name: the filament preset saved with it
+            string savedMaterial = BambuSlicer.FilamentBaseName(r.MaterialName ?? "").Trim();
+            bool typedLine = r.Filaments != null && r.Filaments.Count == 1 && string.IsNullOrEmpty(r.Filaments[0].Name)
+                             && string.IsNullOrEmpty(r.Filaments[0].Type);
             var types = new List<string>();
             if (r.Filaments != null)
                 for (int k = 0; k < r.Filaments.Count; k++)
                 {
                     var f = r.Filaments[k];
-                    d.MaterialNames.Add(WebHistory.MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
+                    d.MaterialNames.Add(typedLine && savedMaterial.Length > 0 ? savedMaterial
+                        : WebHistory.MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
                     d.MaterialColours.Add(ColourCss(f.Colour));
                     types.Add(f.Type);
                 }
-            else d.MaterialNames.Add(DefaultMaterial(s));
+            else d.MaterialNames.Add(savedMaterial.Length > 0 ? savedMaterial : DefaultMaterial(s));
             d.Material = QuoteRows.MaterialLine(r.Filaments != null ? types : null, r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
             if (invoice)
             {
@@ -123,6 +129,7 @@ namespace PrintPrice.Web
                 d.PayMobilePay = (inv.MobilePay ?? "").Trim();
                 d.PayBank = (inv.Bank ?? "").Trim();
                 d.Name = (inv.FromName ?? "").Trim();
+                if (made) d.Customer = (inv.BilledTo ?? "").Trim();   // a made invoice keeps the name it was made out to
             }
             return d;
         }
@@ -130,20 +137,25 @@ namespace PrintPrice.Web
         static string DefaultMaterial(AppSettings s) { return BambuSlicer.FilamentBaseName(s.FilamentPreset); }
 
         /// "<printer name>, 0.4 mm nozzle" (MainForm.PrinterText): the active printer, or a saved quote's printer (its
-        /// saved name; the nozzle of that printer today, if it still exists).
+        /// saved name; the nozzle saved with it, else (older records) the nozzle of that printer today, if it still exists).
         public static string PrinterText(AppSettings s, QuoteRecord r)
         {
             var p = r != null ? s.FindPrinter(History.PrinterOf(r)) : null;
             string name = r != null && !string.IsNullOrEmpty(r.PrinterName) ? r.PrinterName : p != null ? p.Name : s.PrinterName;
-            var nozzle = Wear.FindNozzle(p != null ? p.Nozzle : s.Nozzle);
+            string savedNozzle = r != null ? (r.Nozzle ?? "").Trim() : "";
+            var nozzle = Wear.FindNozzle(savedNozzle.Length > 0 ? savedNozzle : p != null ? p.Nozzle : s.Nozzle);
             return L.F("{0}, {1} mm nozzle", "{0}, {1} mm dyse", AppSettings.CleanPrinterName(name),
                        L.Danish ? nozzle.Size.Replace('.', ',') : nozzle.Size);
         }
 
         /// The build plate's short name for the wear line (MainForm.QuotePlate): "Smooth PEI" ("Glat PEI").
-        public static string PlateName(AppSettings s)
+        public static string PlateName(AppSettings s) { return PlateName(s, null); }
+
+        /// The same for a given bed type (a saved record's BedType; ""/null = today's Settings).
+        public static string PlateName(AppSettings s, string bedType)
         {
-            string plate = Wear.FindPlate(s.BedType).Label;
+            if (string.IsNullOrEmpty(bedType) || bedType.Trim().Length == 0) bedType = s.BedType;
+            string plate = Wear.FindPlate(bedType).Label;
             int cut = plate.IndexOf(" / ", StringComparison.Ordinal);
             if (cut > 0) plate = plate.Substring(0, cut);
             if (L.Danish && plate == "Smooth PEI") plate = "Glat PEI";
@@ -469,9 +481,15 @@ namespace PrintPrice.Web
         /// number, date and snapshot (History.MakeInvoice, settings.UsedInvoiceNos). The caller saves both.
         public static void ApplyRecordExport(List<QuoteRecord> list, QuoteRecord r, bool friends, string customer, bool invoice, DateTime now, AppSettings s)
         {
-            r.Customer = (customer ?? "").Trim();
+            if (!(invoice && InvoiceMade(r))) r.Customer = (customer ?? "").Trim();   // MakeInvoice stores a new invoice's name (BilledTo)
             r.For = friends ? History.ForFriends : History.ForCustomer;
             if (invoice) History.MakeInvoice(list, r, now, s);
+        }
+
+        /// The record's invoice is made (number and date): it keeps its name, the window's box is read-only (MainForm.InvoiceMade).
+        public static bool InvoiceMade(QuoteRecord r)
+        {
+            return r != null && !string.IsNullOrEmpty(r.InvoiceNo);
         }
 
         /// The PDF's suggested name (the page title while printing): "2026-11-04 3D Benchy - Mette Hansen"; a record: the

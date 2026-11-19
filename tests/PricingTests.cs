@@ -216,6 +216,19 @@ namespace PrintPrice.Tests
             History.Add(list, HistRecord(t0.AddMinutes(9 + 11)));
             True("History Add 11 min later -> new entry", list.Count == 2 && list[0].SavedAt == "2026-11-03 14:25:00");
 
+            // invoiced record is never reused: same job within 10 min after an invoice adds a new record without a number
+            var invList = new List<QuoteRecord>();
+            History.Add(invList, HistRecord(t0));
+            invList[0].InvoiceNo = "2026-001";
+            string invId = invList[0].Id;
+            History.Add(invList, HistRecord(t0.AddMinutes(3)));
+            True("History Add same job after invoice -> new record", invList.Count == 2);
+            True("History new record has no invoice number and a new Id", (invList[0].InvoiceNo ?? "") == "" && invList[0].Id != invId);
+            True("History invoiced record untouched", invList[1].InvoiceNo == "2026-001" && invList[1].Id == invId);
+            True("History SameQuote invoiced -> no", !History.SameQuote(invList[1], HistRecord(t0.AddMinutes(1))));
+            History.Add(invList, HistRecord(t0.AddMinutes(5)));
+            True("History same job without invoice still reused", invList.Count == 2);
+
             // idea 21: customer name
             True("Customer default empty", new QuoteRecord().Customer == "");
             var cl = new List<QuoteRecord>();
@@ -532,6 +545,26 @@ namespace PrintPrice.Tests
             True("Merge same Id: caller's record unchanged", Bh.InvoiceNo == "" && !Bh.Printed && Bh.Customer == "");
             res = History.Combine(new List<QuoteRecord> { B2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Bh } }, false, false);
             True("Merge same Id: this PC's invoice kept, nothing new = Same", res.Same == 1 && res.Updated == 0 && res.Quotes[0].InvoiceNo == "2026-K7Q4" && res.Quotes[0].Note == "theirs");
+            // BilledTo (combined-bill Part B): taken with the invoice; same invoice here without a name -> filled; own name kept
+            var Bt = BRec("B", "2026-11-01 10:00:00"); Bt.InvoiceNo = "2026-K7Q4"; Bt.BilledAt = "2026-11-02 09:00:00";
+            Bt.Customer = "Anna Jensen"; Bt.BilledTo = "Anna";
+            var Bn = BRec("B", "2026-11-01 10:00:00"); Bn.Customer = "Ole";
+            res = History.Combine(new List<QuoteRecord> { Bn }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Bt } }, false, false);
+            True("Merge: BilledTo taken with the invoice, own Customer kept", res.Updated == 1 && res.Quotes[0].BilledTo == "Anna" && res.Quotes[0].Customer == "Ole");
+            var Bs = BRec("B", "2026-11-01 10:00:00"); Bs.InvoiceNo = "2026-K7Q4"; Bs.BilledAt = "2026-11-02 09:00:00";
+            res = History.Combine(new List<QuoteRecord> { Bs }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Bt } }, false, false);
+            True("Merge: same invoice without BilledTo here -> filled", res.Updated == 1 && res.Quotes[0].BilledTo == "Anna" && res.Quotes[0].Customer == "Anna Jensen");
+            var Bo = BRec("B", "2026-11-01 10:00:00"); Bo.InvoiceNo = "2026-K7Q4"; Bo.BilledAt = "2026-11-02 09:00:00"; Bo.Customer = "Anna Jensen"; Bo.BilledTo = "A. Jensen";
+            res = History.Combine(new List<QuoteRecord> { Bo }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Bt } }, false, false);
+            True("Merge: this PC's BilledTo kept", res.Same == 1 && res.Quotes[0].BilledTo == "A. Jensen");
+            var Bx = BRec("B", "2026-11-01 10:00:00"); Bx.InvoiceNo = "2026-ZZZZ"; Bx.BilledAt = "2026-11-02 09:00:00"; Bx.Customer = "Anna Jensen";
+            res = History.Combine(new List<QuoteRecord> { Bx }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Bt } }, false, false);
+            True("Merge: other invoice code -> BilledTo not taken", res.Quotes[0].BilledTo == "" && res.Quotes[0].InvoiceNo == "2026-ZZZZ");
+            // backup round trip keeps BilledTo; a backup without the key reads ""
+            True("BilledTo: backup round trip", History.ReadBackup(History.ToBackup(new List<QuoteRecord> { Bt }, null, "1.22.0", t), out data) == null
+                 && data.Quotes[0].BilledTo == "Anna" && data.Quotes[0].Customer == "Anna Jensen");
+            True("BilledTo: backup without the key / null -> \"\"", History.ReadBackup("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"InvoiceNo\":\"2026-K7Q4\",\"Customer\":\"Ole\"},{\"Id\":\"y\",\"BilledTo\":null}]}", out data) == null
+                 && data.Quotes[0].BilledTo == "" && data.Quotes[1].BilledTo == "");
             // failed in the backup only -> failed
             var Fb = BRec("A", "2026-11-05 10:00:00"); History.MarkFailed(Fb, true, new DateTime(2026, 11, 6, 8, 0, 0));
             res = History.Combine(new List<QuoteRecord> { A }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { Fb } }, false, false);
@@ -1133,19 +1166,29 @@ namespace PrintPrice.Tests
             return delegate(int n) { return v[i++ % v.Length] % n; };
         }
 
+        /// A fake random source that makes NextInvoiceNo draw these 5-digit codes in turn ("48213" -> pick(9) = 3, then 8, 2, 1, 3).
+        static Func<int, int> Digits(params string[] codes)
+        {
+            var v = new List<int>();
+            foreach (var c in codes)
+                for (int i = 0; i < c.Length; i++) v.Add(c[i] - '0' - (i == 0 ? 1 : 0));
+            return Seq(v.ToArray());
+        }
+
         static bool CodeOk(string no, int year)
         {
-            if (no == null || no.Length != 9 || !no.StartsWith(year.ToString() + "-")) return false;
-            for (int i = 5; i < 9; i++) if (History.InvoiceAlphabet.IndexOf(no[i]) < 0) return false;
-            return true;
+            if (no == null || no.Length != 10 || !no.StartsWith(year.ToString() + "-")) return false;
+            for (int i = 5; i < 10; i++) if (no[i] < '0' || no[i] > '9') return false;
+            return no[5] != '0';
         }
 
         static void InvoiceTests()
         {
             var t = new DateTime(2026, 11, 4, 14, 5, 33);
-            True("alphabet: 29 upper-case characters, no 0 O 1 I L 5 S", History.InvoiceAlphabet.Length == 29 &&
-                 History.InvoiceAlphabet == History.InvoiceAlphabet.ToUpperInvariant() &&
-                 History.InvoiceAlphabet.IndexOfAny("01ILO5S".ToCharArray()) < 0);
+            True("invoice code: 5 digits", History.InvoiceCodeLength == 5);
+            // first digit = 1 + pick(9), others pick(10): Seq(0) -> "10000", Seq(8, 9, 9, 9, 9) -> "99999" (no leading 0)
+            True("fake source lowest / highest: 2026-10000 / 2026-99999", History.NextInvoiceNo(null, 2026, "", Seq(0)) == "2026-10000"
+                 && History.NextInvoiceNo(null, 2026, "", Seq(8, 9, 9, 9, 9)) == "2026-99999");
             // format with the real crypto source
             bool fmt = true; var seen = new HashSet<string>();
             for (int i = 0; i < 200; i++)
@@ -1154,19 +1197,21 @@ namespace PrintPrice.Tests
                 fmt = fmt && CodeOk(no, 2026);
                 seen.Add(no);
             }
-            True("200 crypto codes all look like 2026-XXXX", fmt);
+            True("200 crypto codes all look like 2026-NNNNN (first digit 1-9)", fmt);
             True("200 crypto codes are (nearly) all different", seen.Count >= 195);
             True("year in the code: 2027-", History.NextInvoiceNo(null, 2027, "").StartsWith("2027-"));
-            True("fake source: ABCD", History.NextInvoiceNo(null, 2026, "", Seq(0, 1, 2, 3)) == "2026-ABCD");
-            True("fake source: K7Q4", History.NextInvoiceNo(null, 2026, "", Seq(9, 26, 13, 24)) == "2026-K7Q4");
+            True("fake source: 11234", History.NextInvoiceNo(null, 2026, "", Digits("11234")) == "2026-11234");
+            True("fake source: 48213", History.NextInvoiceNo(null, 2026, "", Seq(3, 8, 2, 1, 3)) == "2026-48213");
 
             // unique against history and against the used list: the fake returns two taken codes first
-            var hist = new List<QuoteRecord> { new QuoteRecord { InvoiceNo = "2026-ABCD" }, null, new QuoteRecord { InvoiceNo = "" } };
-            string got = History.NextInvoiceNo(hist, 2026, "2026-EFGH,2025-XXXX", Seq(0, 1, 2, 3, 4, 5, 6, 7, 9, 26, 13, 24));
-            True("collision with history (ABCD) and used list (EFGH) -> K7Q4", got == "2026-K7Q4");
-            True("used list is trimmed and case-insensitive", History.NextInvoiceNo(null, 2026, " 2026-abcd , ", Seq(0, 1, 2, 3, 4, 5, 6, 7)) == "2026-EFGH");
+            var hist = new List<QuoteRecord> { new QuoteRecord { InvoiceNo = "2026-11234" }, null, new QuoteRecord { InvoiceNo = "" } };
+            string got = History.NextInvoiceNo(hist, 2026, "2026-56789,2025-XXXX", Digits("11234", "56789", "48213"));
+            True("collision with history (11234) and used list (56789) -> 48213", got == "2026-48213");
+            True("used list is trimmed", History.NextInvoiceNo(null, 2026, " 2026-11234 , ", Digits("11234", "56789")) == "2026-56789");
             // same code in another year is a different invoice number
-            True("same letters in another year is free", History.NextInvoiceNo(hist, 2027, "", Seq(0, 1, 2, 3)) == "2027-ABCD");
+            True("same digits in another year is free", History.NextInvoiceNo(hist, 2027, "", Digits("11234")) == "2027-11234");
+            // old letter codes stay taken but never clash with digit codes
+            True("old letter code in the used list: digit code still given", History.NextInvoiceNo(null, 2026, "2026-K7Q4", Digits("48213")) == "2026-48213");
 
             // MakeInvoice: new code, BilledAt, Printed, used list
             var list = new List<QuoteRecord>();
@@ -1175,25 +1220,25 @@ namespace PrintPrice.Tests
             var st = new AppSettings();
             True("UsedInvoiceNos default empty", st.UsedInvoiceNos == "");
             True("record without invoice: no number", a.InvoiceNo == "" && a.BilledAt == "" && !a.Printed);
-            string n1 = History.MakeInvoice(list, a, t, st, Seq(0, 1, 2, 3));
-            True("MakeInvoice: 2026-ABCD, BilledAt, Printed", n1 == "2026-ABCD" && a.InvoiceNo == n1 &&
+            string n1 = History.MakeInvoice(list, a, t, st, Digits("11234"));
+            True("MakeInvoice: 2026-11234, BilledAt, Printed", n1 == "2026-11234" && a.InvoiceNo == n1 &&
                  a.BilledAt == "2026-11-04 14:05:33" && a.Printed);
-            True("code added to the used list", st.UsedInvoiceNos == "2026-ABCD");
+            True("code added to the used list", st.UsedInvoiceNos == "2026-11234");
             // a second invoice on the same record keeps code and date, the used list stays
-            string again = History.MakeInvoice(list, a, t.AddDays(30), st, Seq(4, 5, 6, 7));
-            True("second invoice on the same record: same code and date", again == "2026-ABCD" && a.BilledAt == "2026-11-04 14:05:33" &&
-                 st.UsedInvoiceNos == "2026-ABCD");
+            string again = History.MakeInvoice(list, a, t.AddDays(30), st, Digits("56789"));
+            True("second invoice on the same record: same code and date", again == "2026-11234" && a.BilledAt == "2026-11-04 14:05:33" &&
+                 st.UsedInvoiceNos == "2026-11234");
             // never reused: the record is deleted, its code still can't come back
             var b = HistRecord(t.AddHours(1)); b.Model = "Other";
             list.Clear(); list.Add(b);
-            string n2 = History.MakeInvoice(list, b, t.AddDays(1), st, Seq(0, 1, 2, 3, 4, 5, 6, 7));
-            True("deleted record's code ABCD not given again -> EFGH", n2 == "2026-EFGH" && st.UsedInvoiceNos == "2026-ABCD,2026-EFGH");
+            string n2 = History.MakeInvoice(list, b, t.AddDays(1), st, Digits("11234", "56789"));
+            True("deleted record's code 11234 not given again -> 56789", n2 == "2026-56789" && st.UsedInvoiceNos == "2026-11234,2026-56789");
             // null settings: works, nothing remembered
             var c = HistRecord(t); c.Model = "C";
-            True("MakeInvoice with null settings", History.MakeInvoice(list, c, t, null, Seq(9, 26, 13, 24)) == "2026-K7Q4" && c.Printed);
+            True("MakeInvoice with null settings", History.MakeInvoice(list, c, t, null, Digits("48213")) == "2026-48213" && c.Printed);
             // a year change uses the new year
             var d2 = HistRecord(t); d2.Model = "D";
-            True("MakeInvoice in 2027 -> 2027-...", History.MakeInvoice(list, d2, new DateTime(2027, 1, 2, 9, 0, 0), st, Seq(0, 1, 2, 3)) == "2027-ABCD");
+            True("MakeInvoice in 2027 -> 2027-...", History.MakeInvoice(list, d2, new DateTime(2027, 1, 2, 9, 0, 0), st, Digits("11234")) == "2027-11234");
 
             // used list: last 2000 kept
             string used = "";
@@ -1205,14 +1250,15 @@ namespace PrintPrice.Tests
             // Add (same-quote replace) keeps code and date
             var al = new List<QuoteRecord>();
             var first = History.Add(al, HistRecord(t));
-            History.MakeInvoice(al, first, t, null, Seq(0, 1, 2, 3));
+            History.MakeInvoice(al, first, t, null, Digits("11234"));
             var second = History.Add(al, HistRecord(t.AddMinutes(2)));
-            True("Add replace keeps InvoiceNo, BilledAt, Printed", al.Count == 1 && second.InvoiceNo == "2026-ABCD" &&
-                 second.BilledAt == "2026-11-04 14:05:33" && second.Printed);
+            True("Add after an invoice: invoiced record untouched, new one has no invoice", al.Count == 2 && al[0] == second && second != first &&
+                 (second.InvoiceNo ?? "") == "" && (second.BilledAt ?? "") == "" && !second.Printed &&
+                 first.InvoiceNo == "2026-11234" && first.BilledAt == "2026-11-04 14:05:33" && first.Printed);
 
             // JSON round trip, and old files without the keys read ""
-            var back = History.ParseJson(History.ToJson(al));
-            True("JSON round trip keeps invoice fields", back[0].InvoiceNo == "2026-ABCD" && back[0].BilledAt == second.BilledAt);
+            var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { first }));
+            True("JSON round trip keeps invoice fields", back[0].InvoiceNo == "2026-11234" && back[0].BilledAt == "2026-11-04 14:05:33" && back[0].Printed);
             var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"Model\":\"m\"}]}");
             True("old file: InvoiceNo and BilledAt are empty", old[0].InvoiceNo == "" && old[0].BilledAt == "");
 
@@ -1221,14 +1267,14 @@ namespace PrintPrice.Tests
             var sl = new List<QuoteRecord>();
             var sa = HistRecord(t); sl.Add(sa);
             True("not invoiced: no snapshot", sa.InvoiceDue == "" && sa.InvoicePayMobilePay == "" && sa.InvoicePayBank == "" && sa.InvoiceFromName == "");
-            History.MakeInvoice(sl, sa, t, ss, Seq(0, 1, 2, 3));
+            History.MakeInvoice(sl, sa, t, ss, Digits("11234"));
             // 4/11/2026 14:05 -> date 4/11 + 14 days = 18/11/2026
             True("snapshot: due 2026-11-18, MobilePay, bank, from name", sa.InvoiceDue == "2026-11-18" &&
                  sa.InvoicePayMobilePay == "12 34 56 78" && sa.InvoicePayBank == "Reg 1234 konto 0012345678" && sa.InvoiceFromName == "Gettic 3D");
             // settings change later: re-invoice keeps the snapshot, InvoiceInfo shows it
             ss.InvoiceDueDays = 30; ss.PayMobilePay = ""; ss.PayBank = "Other bank"; ss.QuoteName = "New name";
-            History.MakeInvoice(sl, sa, t.AddDays(10), ss, Seq(4, 5, 6, 7));
-            True("re-invoice keeps the snapshot", sa.InvoiceNo == "2026-ABCD" && sa.InvoiceDue == "2026-11-18" &&
+            History.MakeInvoice(sl, sa, t.AddDays(10), ss, Digits("56789"));
+            True("re-invoice keeps the snapshot", sa.InvoiceNo == "2026-11234" && sa.InvoiceDue == "2026-11-18" &&
                  sa.InvoicePayMobilePay == "12 34 56 78" && sa.InvoicePayBank == "Reg 1234 konto 0012345678" && sa.InvoiceFromName == "Gettic 3D");
             var ia = History.InvoiceInfo(sa, ss, t.AddDays(10));
             True("InvoiceInfo uses the snapshot, not today's settings", ia.FromSnapshot && ia.Due == new DateTime(2026, 11, 18) &&
@@ -1236,7 +1282,7 @@ namespace PrintPrice.Tests
             // a snapshot with empty payment fields stays empty (not filled from today's settings)
             var se = new AppSettings { PayMobilePay = "", PayBank = "", QuoteName = "" };
             var sb2 = HistRecord(t.AddHours(2)); sb2.Model = "E"; sl.Add(sb2);
-            History.MakeInvoice(sl, sb2, t, se, Seq(9, 26, 13, 24));
+            History.MakeInvoice(sl, sb2, t, se, Digits("48213"));
             var ib = History.InvoiceInfo(sb2, ss, t);
             True("empty snapshot fields stay empty", ib.FromSnapshot && ib.MobilePay == "" && ib.Bank == "" && ib.FromName == "" &&
                  ib.Due == new DateTime(2026, 11, 18));
@@ -1255,23 +1301,82 @@ namespace PrintPrice.Tests
             True("null record + settings -> defaults", inull != null && inull.Due == new DateTime(2026, 11, 18) && inull.FromName == "");
             // null settings in MakeInvoice: no snapshot
             var sn = HistRecord(t); sn.Model = "N";
-            History.MakeInvoice(sl, sn, t, null, Seq(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11));
+            History.MakeInvoice(sl, sn, t, null, Digits("11234", "56789", "48213"));
             True("MakeInvoice with null settings: no snapshot", sn.InvoiceNo != "" && sn.InvoiceDue == "");
             // Add (same-quote replace) keeps the snapshot
             var al2 = new List<QuoteRecord>();
             var f2 = History.Add(al2, HistRecord(t));
-            History.MakeInvoice(al2, f2, t, new AppSettings { PayMobilePay = "MP", PayBank = "BK", QuoteName = "Q" }, Seq(0, 1, 2, 3));
+            History.MakeInvoice(al2, f2, t, new AppSettings { PayMobilePay = "MP", PayBank = "BK", QuoteName = "Q" }, Digits("11234"));
             var s2b = History.Add(al2, HistRecord(t.AddMinutes(2)));
-            True("Add replace keeps the snapshot", al2.Count == 1 && s2b.InvoiceDue == "2026-11-18" && s2b.InvoicePayMobilePay == "MP" &&
-                 s2b.InvoicePayBank == "BK" && s2b.InvoiceFromName == "Q");
+            True("Add after an invoice: snapshot stays on the invoiced record, new one has none", al2.Count == 2 && al2[0] == s2b &&
+                 s2b.InvoiceDue == "" && s2b.InvoicePayMobilePay == "" && s2b.InvoicePayBank == "" && s2b.InvoiceFromName == "" &&
+                 f2.InvoiceDue == "2026-11-18" && f2.InvoicePayMobilePay == "MP" && f2.InvoicePayBank == "BK" && f2.InvoiceFromName == "Q");
             // JSON round trip; old file without the keys reads ""
-            var sj = History.ParseJson(History.ToJson(al2));
+            var sj = History.ParseJson(History.ToJson(new List<QuoteRecord> { f2 }));
             True("JSON round trip keeps the snapshot", sj[0].InvoiceDue == "2026-11-18" && sj[0].InvoicePayMobilePay == "MP" &&
                  sj[0].InvoicePayBank == "BK" && sj[0].InvoiceFromName == "Q");
             True("old file: snapshot fields empty", old[0].InvoiceDue == "" && old[0].InvoicePayMobilePay == "" &&
                  old[0].InvoicePayBank == "" && old[0].InvoiceFromName == "");
             var jn = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"InvoiceDue\":null,\"InvoicePayBank\":null}]}");
             True("null snapshot keys read as empty", jn[0].InvoiceDue == "" && jn[0].InvoicePayBank == "");
+
+            // BilledTo (combined-bill Part B): the name the invoice was made out to
+            var bl = new List<QuoteRecord>();
+            var ba = HistRecord(t); bl.Add(ba);
+            True("new record: BilledTo empty", ba.BilledTo == "" && ba.Customer == "");
+            True("not invoiced: InvoiceInfo.BilledTo = Customer", History.InvoiceInfo(ba, ss, t).BilledTo == "");
+            ba.Customer = "  Lene Hansen ";
+            True("not invoiced: InvoiceInfo.BilledTo = trimmed Customer", History.InvoiceInfo(ba, ss, t).BilledTo == "Lene Hansen" && ba.BilledTo == "");
+            History.MakeInvoice(bl, ba, t, new AppSettings(), Digits("11234"));
+            True("new invoice: BilledTo = trimmed Customer", ba.InvoiceNo == "2026-11234" && ba.BilledTo == "Lene Hansen");
+            History.SetCustomer(new[] { ba }, "Lene H. Jensen");
+            History.MakeInvoice(bl, ba, t.AddDays(5), ss, Digits("56789"));
+            True("re-issue keeps BilledTo after Customer changed", ba.InvoiceNo == "2026-11234" && ba.BilledTo == "Lene Hansen" && ba.Customer == "Lene H. Jensen");
+            var bi = History.InvoiceInfo(ba, ss, t);
+            True("InvoiceInfo.BilledTo = stored name, not Customer", bi.BilledTo == "Lene Hansen");
+            // new invoice with no name: BilledTo "" stays ""
+            var bz = HistRecord(t); bz.Model = "Z"; bl.Add(bz);
+            History.MakeInvoice(bl, bz, t, null, Digits("48213"));
+            True("new invoice without a name: BilledTo empty", bz.InvoiceNo == "2026-48213" && bz.BilledTo == "" && History.InvoiceInfo(bz, null, t).BilledTo == "");
+            // old invoice (no BilledTo): InvoiceInfo falls back to Customer; first re-issue freezes it, later Customer changes don't
+            var bo = HistRecord(t); bo.InvoiceNo = "2026-OLD1"; bo.BilledAt = "2026-11-04 14:05:33"; bo.Customer = "Ole";
+            True("old invoice: InvoiceInfo.BilledTo = Customer", History.InvoiceInfo(bo, ss, t).BilledTo == "Ole" && bo.BilledTo == "");
+            True("old invoice re-issued: same code", History.MakeInvoice(bl, bo, t.AddDays(3), ss, Digits("11234")) == "2026-OLD1");
+            True("old invoice re-issued: BilledTo filled once", bo.BilledTo == "Ole" && bo.BilledAt == "2026-11-04 14:05:33");
+            bo.Customer = "Ole Berg";
+            History.MakeInvoice(bl, bo, t.AddDays(4), ss, Digits("11234"));
+            True("old invoice: second re-issue keeps the frozen name", bo.BilledTo == "Ole" && History.InvoiceInfo(bo, ss, t).BilledTo == "Ole");
+            True("InvoiceInfo null record: BilledTo empty", History.InvoiceInfo(null, null, t).BilledTo == "");
+            // Add (same-quote replace) keeps BilledTo with the invoice
+            var bal = new List<QuoteRecord>();
+            var bf = History.Add(bal, HistRecord(t)); bf.Customer = "Anna";
+            History.MakeInvoice(bal, bf, t, null, Digits("11234"));
+            var bs2 = History.Add(bal, HistRecord(t.AddMinutes(2)));
+            True("Add after an invoice: BilledTo stays on the invoiced record, new one has none", bal.Count == 2 && bal[0] == bs2 &&
+                 (bs2.InvoiceNo ?? "") == "" && bs2.BilledTo == "" && bf.InvoiceNo == "2026-11234" && bf.BilledTo == "Anna");
+            // JSON round trip; old file without the key; null key
+            var bj = History.ParseJson(History.ToJson(new List<QuoteRecord> { ba, bo }));
+            True("JSON round trip keeps BilledTo and Customer", bj[0].BilledTo == "Lene Hansen" && bj[0].Customer == "Lene H. Jensen" &&
+                 bj[1].BilledTo == "Ole" && bj[1].Customer == "Ole Berg");
+            True("JSON has the BilledTo key", History.ToJson(new List<QuoteRecord> { ba }).Contains("\"BilledTo\":\"Lene Hansen\""));
+            True("old file: BilledTo empty", old[0].BilledTo == "");
+            var bnull = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"InvoiceNo\":\"2026-K7Q4\",\"Customer\":\"Ole\",\"BilledTo\":null}]}");
+            True("null BilledTo reads as empty, InvoiceInfo uses Customer", bnull[0].BilledTo == "" && History.InvoiceInfo(bnull[0], null, t).BilledTo == "Ole");
+
+            // SetCustomer: several records, trimmed, max 80, "" allowed, never touches BilledTo, returns changed count
+            var c1 = HistRecord(t); var c2 = HistRecord(t); c2.Customer = "Mia"; var c3 = HistRecord(t);
+            c3.InvoiceNo = "2026-C3C3"; c3.Customer = "Old"; c3.BilledTo = "Old";
+            True("SetCustomer: 2 changed (null skipped, same name not counted), trimmed", History.SetCustomer(new List<QuoteRecord> { c1, null, c2, c3 }, "  Mia  ") == 2 &&
+                 c1.Customer == "Mia" && c2.Customer == "Mia" && c3.Customer == "Mia");
+            True("SetCustomer never touches BilledTo", c3.BilledTo == "Old" && c1.BilledTo == "" && History.InvoiceInfo(c3, null, t).BilledTo == "Old");
+            True("SetCustomer same name again: 0 changed", History.SetCustomer(new[] { c1, c2 }, "Mia") == 0);
+            True("SetCustomer null / blank -> \"\"", History.SetCustomer(new[] { c1 }, null) == 1 && c1.Customer == "" &&
+                 History.SetCustomer(new[] { c2 }, "   ") == 1 && c2.Customer == "");
+            True("SetCustomer null list -> 0", History.SetCustomer(null, "x") == 0);
+            History.SetCustomer(new[] { c1 }, new string('a', 79) + " bcd");
+            True("SetCustomer cuts to 80 (then trims the end)", c1.Customer == new string('a', 79) && History.MaxCustomer == 80);
+            History.SetCustomer(new[] { c1 }, new string('b', 85));
+            True("SetCustomer 85 chars -> 80", c1.Customer.Length == 80);
 
             // due date: 14 days default, time dropped; month and year ends
             var s = new AppSettings();
@@ -3104,6 +3209,14 @@ namespace PrintPrice.Tests
                 Eq("missing folder: LastFilamentPrice default", defaults.LastFilamentPrice, fresh.LastFilamentPrice);
                 True("missing folder: Language default", fresh.Language == defaults.Language);
                 True("Load doesn't create the folder", !System.IO.Directory.Exists(neverDir));
+                // 4-inv. MainInvoice (quote/invoice toggle): default 0, 1 survives save/load, anything else reads as 0
+                Eq("MainInvoice default 0", 0, new AppSettings().MainInvoice);
+                var mi = new AppSettings(); mi.MainInvoice = 1;
+                Eq("MainInvoice 1 survives ToIni/FromIni", 1, AppSettings.FromIni(mi.ToIni()).MainInvoice);
+                True("MainInvoice line in ini", Array.IndexOf(mi.ToIni(), "MainInvoice=1") >= 0);
+                Eq("MainInvoice=7 reads as 0", 0, AppSettings.FromIni(new string[] { "MainInvoice=7" }).MainInvoice);
+                Eq("MainInvoice=-1 reads as 0", 0, AppSettings.FromIni(new string[] { "MainInvoice=-1" }).MainInvoice);
+                Eq("MainInvoice missing reads as 0", 0, AppSettings.FromIni(new string[] { "SetupDone=1" }).MainInvoice);
                 // 4a. first-time setup (idea 19): no settings.ini and no history.json = a new user -> setup window, empty quote name
                 Eq("new install: SetupDone 0", 0, fresh.SetupDone);
                 True("new install: QuoteName empty", fresh.QuoteName == "");
@@ -3376,9 +3489,246 @@ namespace PrintPrice.Tests
             PictureTests();
             HistoryDeleteTests();
             SetupApplyTests();
+            RecordBillTests();
+            PrintStateTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        // ---------- a bill made again from History = the bill made after slicing (RecordBreakdown / RecordQuoteInfo) ----------
+
+        static string BillText(QuoteBreakdown b)
+        {
+            var parts = new List<string>();
+            foreach (var l in b.Lines)
+            {
+                string p = l.Key + "=" + l.Ore;
+                if (l.Parts != null) foreach (var x in l.Parts) p += "[" + x.Key + "=" + x.Ore + "]";
+                parts.Add(p);
+            }
+            return string.Join("|", parts.ToArray()) + " total=" + b.TotalOre;
+        }
+
+        static void RecordBillTests()
+        {
+            var t = new DateTime(2026, 11, 3, 14, 5, 0);
+            var s = HistSettings();
+            s.AutoWearRate = 1; s.MachineRatePerHour = 1.71; s.BedType = "High Temp Plate"; s.Nozzle = "0.4 stainless";
+            s.QuoteValidDays = 14; s.QuoteName = " Gettic "; s.FilamentPreset = "Bambu PLA Basic";
+            var input = new QuoteInput { Hours = 2, Minutes = 0, FilamentGrams = 100, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2 };
+            var wear = new Wear.Breakdown { Printer = 0.80, Parts = 0.40, Hotend = 0.31, Plate = 0.20 };   // sum 1,71
+            // 0,100 x 200 = 20,00 material; 2 h x 0,1 kW = 0,2 kWh x 2 = 0,40 power; 20,40 x 10 % = 2,04 failed; base 22,44
+            // customer 22,44 x 1,75 = 39,27 + 2 x 1,71 = 3,42 -> 42,69; friends 22,44 x 1,25 = 28,05 + 3,42 = 31,47
+            var fresh = Pricing.Breakdown(input, s, false, wear);
+            var freshF = Pricing.Breakdown(input, s, true, wear);
+            var rec = History.FromQuote(input, Pricing.Calculate(input, s), s, "Box", "", t, wear);
+            True("Bill: snapshot saved (wear 0,80/0,40/0,31/0,20, plate, nozzle, material, 14 days, name)",
+                 rec.WearPrinter == 0.80 && rec.WearParts == 0.40 && rec.WearHotend == 0.31 && rec.WearPlate == 0.20
+                 && rec.BedType == "High Temp Plate" && rec.Nozzle == "0.4 stainless" && rec.MaterialName == "Bambu PLA Basic"
+                 && rec.QuoteValidDays == 14 && rec.QuoteFromName == "Gettic");
+            Eq("Bill: customer total 42,69", 42.69, fresh.Total);
+            var fw = Find(fresh, "wear");
+            // wear 2 x 1,71 = 3,42: parts 2 x 0,80 = 1,60, 2 x 0,40 = 0,80, 2 x 0,31 = 0,62, 2 x 0,20 = 0,40
+            True("Bill: fresh wear 342 = 160 + 80 + 62 + 40", fw != null && fw.Ore == 342 && fw.Parts != null
+                 && fw.Parts[0].Ore == 160 && fw.Parts[1].Ore == 80 && fw.Parts[2].Ore == 62 && fw.Parts[3].Ore == 40);
+
+            // today's settings changed: Auto wear off, other plate, rate 2,54, 30 days, other name -> the record's bill is unchanged
+            var today = s.Clone();
+            today.AutoWearRate = 0; today.BedType = "Textured PEI Plate"; today.MachineRatePerHour = 2.54;
+            today.QuoteValidDays = 30; today.QuoteName = "Other"; today.Nozzle = "0.2 stainless";
+            today.FriendsMarkupPct = 50; today.OthersMarkupPct = 100; today.FailedPrintPct = 0;
+            var hist = History.RecordBreakdown(rec, today, false);
+            True("Bill: History customer bill = fresh (" + BillText(fresh) + ")", BillText(hist) == BillText(fresh));
+            True("Bill: History friends bill = fresh (" + BillText(freshF) + ")", BillText(History.RecordBreakdown(rec, today, true)) == BillText(freshF));
+            var hw = Find(hist, "wear");
+            Eq("Bill: History wear part printer kr/h 0,80", 0.80, hw != null && hw.Parts != null ? hw.Parts[0].UnitPrice : -1);
+
+            // JSON round trip and a deep copy keep the snapshot
+            var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { rec }));
+            True("Bill: JSON round trip keeps the snapshot", back != null && BillText(History.RecordBreakdown(back[0], today, false)) == BillText(fresh)
+                 && back[0].BedType == "High Temp Plate" && back[0].Nozzle == "0.4 stainless" && back[0].MaterialName == "Bambu PLA Basic"
+                 && back[0].QuoteValidDays == 14 && back[0].QuoteFromName == "Gettic");
+            True("Bill: CopyQuotes = JSON round trip", History.ToJson(History.CopyQuotes(new List<QuoteRecord> { rec }))
+                 == History.ToJson(back));
+
+            // quote details: snapshot (3 Nov + 14 = 17 Nov, "Gettic") vs an old record (today's: 3 Nov + 30 = 3 Dec, "Other")
+            var qi = History.RecordQuoteInfo(rec, today);
+            True("Bill: quote info from snapshot: 2026-11-17, Gettic", qi.FromSnapshot && qi.ValidUntil == new DateTime(2026, 11, 17) && qi.FromName == "Gettic");
+
+            // an old record (no keys): one wear line 2 x 1,71 = 3,42 without sub-rows, today's valid days and name
+            string oldJson = History.ToJson(new List<QuoteRecord> { rec });
+            foreach (var k in new[] { "WearPrinter", "WearParts", "WearHotend", "WearPlate", "QuoteValidDays" })
+                oldJson = System.Text.RegularExpressions.Regex.Replace(oldJson, ",\"" + k + "\":[0-9.]+", "");
+            foreach (var k in new[] { "BedType", "Nozzle", "MaterialName", "QuoteFromName" })
+                oldJson = System.Text.RegularExpressions.Regex.Replace(oldJson, ",\"" + k + "\":\"[^\"]*\"", "");
+            var old = History.ParseJson(oldJson);
+            True("Bill: old record reads 0 / \"\"", old != null && old.Count == 1 && !oldJson.Contains("WearPrinter") && !oldJson.Contains("MaterialName")
+                 && old[0].WearPrinter == 0 && old[0].QuoteValidDays == 0 && old[0].BedType == "" && old[0].Nozzle == ""
+                 && old[0].MaterialName == "" && old[0].QuoteFromName == "" && History.SavedWear(old[0]) == null);
+            var ob = History.RecordBreakdown(old[0], today, false);
+            var ow = Find(ob, "wear");
+            True("Bill: old record = one wear line 342 without parts, same total", ow != null && ow.Ore == 342 && ow.Parts == null && ob.TotalOre == 4269);
+            qi = History.RecordQuoteInfo(old[0], today);
+            True("Bill: old record quote info = today's: 2026-12-03, Other", !qi.FromSnapshot && qi.ValidUntil == new DateTime(2026, 12, 3) && qi.FromName == "Other");
+
+            // Auto wear off when saved: no split stored even if one is given
+            var off = s.Clone();
+            off.AutoWearRate = 0;
+            var recOff = History.FromQuote(input, Pricing.Calculate(input, off), off, "Box", "", t, wear);
+            True("Bill: Auto wear off -> no split saved, one wear line", History.SavedWear(recOff) == null && recOff.WearPrinter == 0
+                 && Find(History.RecordBreakdown(recOff, today, false), "wear").Parts == null);
+            True("Bill: 6-argument FromQuote = no split", History.SavedWear(History.FromQuote(input, Pricing.Calculate(input, s), s, "Box", "", t)) == null);
+
+            // a rate (2,00) other than the split's sum (1,71): parts scaled to the rate, as Pricing.Breakdown does.
+            // printer 2,00 x 0,80 / 1,71 = 0,9357 kr/h -> 1,8713 kr; parts 0,9357; hotend 0,7251; plate 0,4678 (sum 4,00)
+            // øre: floors 187 + 93 + 72 + 46 = 398, the 2 øre left go to plate (,78) and parts (,57) -> 187 / 94 / 72 / 47
+            var two = s.Clone();
+            two.MachineRatePerHour = 2.00;
+            var rec2 = History.FromQuote(input, Pricing.Calculate(input, two), two, "Box", "", t, wear);
+            var w2 = Find(History.RecordBreakdown(rec2, today, false), "wear");
+            bool w2ok = w2 != null && w2.Parts != null && w2.Parts.Count == 4;
+            True("Bill: rate 2,00 vs split 1,71: wear 400 = 187 + 94 + 72 + 47", w2ok && w2.Ore == 400
+                 && w2.Parts[0].Ore == 187 && w2.Parts[1].Ore == 94 && w2.Parts[2].Ore == 72 && w2.Parts[3].Ore == 47);
+            Eq("Bill: rate 2,00 printer part 0,9357 kr/h", 0.9357, w2ok ? w2.Parts[0].UnitPrice : -1);
+
+            // CleanQuotes: a bad split value drops the whole split, bad days -> 0
+            var bad = History.CopyQuotes(new List<QuoteRecord> { rec });
+            bad[0].WearPlate = -1;
+            var cleaned = History.ParseJson(History.ToJson(bad));
+            True("Bill: negative wear part -> no split", cleaned != null && History.SavedWear(cleaned[0]) == null && cleaned[0].WearPrinter == 0);
+            var bad2 = History.CopyQuotes(new List<QuoteRecord> { rec });
+            bad2[0].QuoteValidDays = -3;
+            True("Bill: negative valid days -> today's", !History.RecordQuoteInfo(History.ParseJson(History.ToJson(bad2))[0], today).FromSnapshot);
+
+            // SameQuote ignores the snapshot (a record without it is still the same quote)
+            True("Bill: SameQuote ignores the snapshot", History.SameQuote(rec, old[0]));
+
+            // merge: a copy here without the snapshot (resaved by an older app) gets it from the backup; one with it stays
+            var here = History.ParseJson(oldJson);
+            var res = History.Combine(here, new AppSettings(), new BackupData { Quotes = History.CopyQuotes(new List<QuoteRecord> { rec }) }, false, false);
+            True("Bill: merge fills the snapshot", res.Updated == 1 && res.Quotes.Count == 1 && History.SavedWear(res.Quotes[0]) != null
+                 && res.Quotes[0].BedType == "High Temp Plate" && res.Quotes[0].Nozzle == "0.4 stainless" && res.Quotes[0].MaterialName == "Bambu PLA Basic"
+                 && res.Quotes[0].QuoteValidDays == 14 && res.Quotes[0].QuoteFromName == "Gettic"
+                 && BillText(History.RecordBreakdown(res.Quotes[0], today, false)) == BillText(fresh));
+            res = History.Combine(History.CopyQuotes(new List<QuoteRecord> { rec }), new AppSettings(), new BackupData { Quotes = History.ParseJson(oldJson) }, false, false);
+            True("Bill: merge from an old backup keeps the snapshot", res.Same == 1 && History.SavedWear(res.Quotes[0]) != null && res.Quotes[0].QuoteValidDays == 14);
+        }
+
+        // ---------- print status from the quote window (SetPrintState, IsPrinting, AddFor with a state) ----------
+
+        static void PrintStateTests()
+        {
+            var t = new DateTime(2026, 11, 19, 10, 0, 0);
+            const string T = "2026-11-19 10:00:00";
+
+            // old file (no key), null and unreadable values = not printing
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Hours\":5},{\"Id\":\"b\",\"PrintingSince\":null},{\"Id\":\"c\",\"Printed\":true,\"Hours\":5,\"PrintingSince\":\"soon\"}]}");
+            True("PrintState: old / null / bad PrintingSince -> \"\"", old != null && old[0].PrintingSince == "" && old[1].PrintingSince == "" && old[2].PrintingSince == ""
+                 && !History.IsPrinting(old[2], t) && History.PrintStateOf(old[0], t) == PrintState.Printed);   // old file = printed
+
+            // Printing now: Printed, start = now; Example() is 5 h 30 m -> done 15:30
+            var r = HistRecord(t.AddMinutes(-5));
+            True("PrintState: new record = Not printed", History.PrintStateOf(r, t) == PrintState.NotPrinted && r.PrintingSince == "");
+            History.SetPrintState(r, PrintState.Printing, t);
+            DateTime end;
+            True("PrintState: Printing -> Printed + start " + T, r.Printed && !r.Failed && r.PrintingSince == T
+                 && History.PrintingEnds(r, out end) && end == new DateTime(2026, 11, 19, 15, 30, 0));
+            True("PrintState: printing at 15:29, done at 15:30", History.IsPrinting(r, t.AddMinutes(329)) && !History.IsPrinting(r, t.AddMinutes(330)));
+            True("PrintState: state at 12:00 Printing, at 16:00 Printed", History.PrintStateOf(r, t.AddHours(2)) == PrintState.Printing
+                 && History.PrintStateOf(r, t.AddHours(6)) == PrintState.Printed);
+            History.SetPrintState(r, PrintState.Printing, t.AddMinutes(3));
+            True("PrintState: Printing again keeps the start", r.PrintingSince == T);
+            var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { r }));
+            True("PrintState: JSON round trip keeps PrintingSince", back[0].PrintingSince == T && History.IsPrinting(back[0], t.AddHours(1)));
+            True("PrintState: CopyQuotes keeps it", History.CopyQuotes(new List<QuoteRecord> { r })[0].PrintingSince == T);
+
+            // Printed / Not printed
+            History.SetPrintState(r, PrintState.Printed, t);
+            True("PrintState: Printed -> Printed, not printing", r.Printed && !r.Failed && r.PrintingSince == "" && History.PrintStateOf(r, t) == PrintState.Printed);
+            History.SetPrintState(r, PrintState.NotPrinted, t);
+            True("PrintState: Not printed -> Printed off", !r.Printed && !r.Failed && r.PrintingSince == "" && History.PrintStateOf(r, t) == PrintState.NotPrinted);
+
+            // Failed = ticking Failed in History: FailedAt now, Printed off, its cost 21,60 + 1,10 + 5,5 x 2 = 33,70 becomes debt
+            History.SetPrintState(r, PrintState.Printing, t);
+            History.SetPrintState(r, PrintState.Failed, t.AddHours(1));
+            True("PrintState: Failed -> Failed, FailedAt 11:00, Printed off, not printing", r.Failed && r.FailedAt == "2026-11-19 11:00:00" && !r.Printed
+                 && r.PrintingSince == "" && History.PrintStateOf(r, t.AddHours(2)) == PrintState.Failed);
+            Eq("PrintState: Failed adds 33,70 debt", 33.70, History.FailedDebt(new List<QuoteRecord> { r }, null));
+            History.SetPrintState(r, PrintState.Failed, t.AddHours(3));
+            True("PrintState: Failed again keeps FailedAt", r.FailedAt == "2026-11-19 11:00:00");
+            History.SetPrintState(r, PrintState.Printed, t.AddHours(3));
+            True("PrintState: Printed after Failed -> Failed off, FailedAt \"\"", !r.Failed && r.FailedAt == "" && r.Printed);
+            Eq("PrintState: no debt after unfailing", 0, History.FailedDebt(new List<QuoteRecord> { r }, null));
+            // MarkFailed (History's tick) also ends printing; 0 h 0 m is never printing; null record no error
+            History.SetPrintState(r, PrintState.Printing, t);
+            History.MarkFailed(r, true, t);
+            True("PrintState: MarkFailed clears PrintingSince", r.PrintingSince == "" && !History.IsPrinting(r, t));
+            var z = HistRecord(t); z.Hours = 0; z.Minutes = 0;
+            History.SetPrintState(z, PrintState.Printing, t);
+            True("PrintState: 0 h 0 m is never printing", z.Printed && !History.IsPrinting(z, t) && History.PrintStateOf(z, t) == PrintState.Printed);
+            bool threw = false;
+            try { History.SetPrintState(null, PrintState.Failed, t); History.PrintStateOf(null, t); History.IsPrinting(null, t); }
+            catch (Exception) { threw = true; }
+            True("PrintState: null record no error", !threw);
+
+            // same quote saved again: the window's state wins over the old keep-Printed / keep-Failed rule
+            var list = new List<QuoteRecord>();
+            var a = History.AddFor(list, HistRecord(t), History.ForCustomer, PrintState.Printed, t);
+            True("AddFor state: Printed", list.Count == 1 && a.Printed);
+            var plain = History.Add(new List<QuoteRecord> { a }, HistRecord(t.AddMinutes(1)));
+            True("Add without a state keeps Printed (old rule)", plain.Printed);
+            var b = History.AddFor(list, HistRecord(t.AddMinutes(2)), History.ForFriends, PrintState.NotPrinted, t.AddMinutes(2));
+            True("AddFor state: Not printed wins over the old Printed", list.Count == 1 && b.Id == a.Id && !b.Printed && b.For == History.ForFriends);
+            var c = History.AddFor(list, HistRecord(t.AddMinutes(3)), History.ForCustomer, PrintState.Failed, t.AddMinutes(3));
+            True("AddFor state: Failed, FailedAt 10:03", list.Count == 1 && c.Failed && c.FailedAt == "2026-11-19 10:03:00" && !c.Printed);
+            var keepF = History.Add(list, HistRecord(t.AddMinutes(4)));
+            True("Add without a state keeps Failed (old rule)", keepF.Failed && keepF.FailedAt == "2026-11-19 10:03:00");
+            var d = History.AddFor(list, HistRecord(t.AddMinutes(5)), History.ForCustomer, PrintState.Failed, t.AddMinutes(5));
+            True("AddFor state: Failed again keeps FailedAt 10:03", d.Failed && d.FailedAt == "2026-11-19 10:03:00");
+            var e = History.AddFor(list, HistRecord(t.AddMinutes(6)), History.ForCustomer, PrintState.Printed, t.AddMinutes(6));
+            True("AddFor state: Printed wins over the old Failed", list.Count == 1 && !e.Failed && e.FailedAt == "" && e.Printed);
+            var f = History.AddFor(list, HistRecord(t.AddMinutes(7)), History.ForCustomer, PrintState.Printing, t.AddMinutes(7));
+            var g = History.AddFor(list, HistRecord(t.AddMinutes(8)), History.ForCustomer, PrintState.Printing, t.AddMinutes(8));
+            True("AddFor state: Printing again keeps the start 10:07", g.PrintingSince == "2026-11-19 10:07:00" && History.IsPrinting(g, t.AddMinutes(8)));
+            var h = History.Add(list, HistRecord(t.AddMinutes(9)));
+            True("Add without a state keeps printing", h.Printed && h.PrintingSince == "2026-11-19 10:07:00" && list.Count == 1);
+            var other = History.AddFor(list, HistRecord(t.AddMinutes(30)), History.ForCustomer, PrintState.Printing, t.AddMinutes(30));
+            True("AddFor state: a new quote is added", list.Count == 2 && other.PrintingSince == "2026-11-19 10:30:00");
+
+            // a finished print set Printing again gets a new start: 10-min job started 10:00 (done 10:10), again at 10:11
+            var ten = HistRecord(t); ten.Hours = 0; ten.Minutes = 10;
+            History.SetPrintState(ten, PrintState.Printing, t);
+            History.SetPrintState(ten, PrintState.Printing, t.AddMinutes(11));
+            True("PrintState: finished print set Printing again -> new start 10:11, printing", ten.PrintingSince == "2026-11-19 10:11:00"
+                 && History.IsPrinting(ten, t.AddMinutes(12)));
+            // same through AddFor: an old ended start is not carried over (10-min jobs, 10:00 then 10:11 -> start 10:11)
+            var tl = new List<QuoteRecord>();
+            var j1 = HistRecord(t); j1.Hours = 0; j1.Minutes = 10;
+            History.AddFor(tl, j1, History.ForCustomer, PrintState.Printing, t);
+            var j2 = HistRecord(t.AddMinutes(9)); j2.Hours = 0; j2.Minutes = 10;   // saved within 10 min = the same quote
+            var j2k = History.AddFor(tl, j2, History.ForCustomer, PrintState.Printing, t.AddMinutes(11));
+            True("AddFor state: ended start not carried over -> 10:11, printing", tl.Count == 1 && j2k.PrintingSince == "2026-11-19 10:11:00"
+                 && History.IsPrinting(j2k, t.AddMinutes(12)));
+            // the History Printed tick: unticking ends printing, ticking keeps nothing else
+            History.SetPrinted(j2k, false);
+            True("SetPrinted false: not printed, not printing", !j2k.Printed && j2k.PrintingSince == "");
+            History.SetPrinted(j2k, true);
+            True("SetPrinted true: printed, not printing", j2k.Printed && !History.IsPrinting(j2k, t.AddMinutes(12)));
+            History.SetPrinted(null, true);
+
+            // merge: the backup's printing start comes in (later one wins); never onto a failed record
+            var mine = BRec("M", "2026-11-19 10:00:00"); mine.Printed = true;
+            var theirs = BRec("M", "2026-11-19 10:00:00"); History.SetPrintState(theirs, PrintState.Printing, t);
+            var res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("PrintState merge: printing start filled", res.Updated == 1 && res.Quotes[0].PrintingSince == T);
+            var mineF = BRec("M", "2026-11-19 10:00:00"); History.MarkFailed(mineF, true, t);
+            res = History.Combine(new List<QuoteRecord> { mineF }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("PrintState merge: failed here stays failed, not printing", res.Quotes[0].Failed && res.Quotes[0].PrintingSince == "");
+            var theirsF = BRec("M", "2026-11-19 10:00:00"); History.MarkFailed(theirsF, true, t);
+            var mineP = BRec("M", "2026-11-19 10:00:00"); History.SetPrintState(mineP, PrintState.Printing, t);
+            res = History.Combine(new List<QuoteRecord> { mineP }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirsF } }, false, false);
+            True("PrintState merge: failed in the backup ends printing", res.Quotes[0].Failed && res.Quotes[0].PrintingSince == "");
         }
 
         // ---------- first-time setup answers (idea 19): SetupAnswers + AppSettings.ApplySetup, shared by desktop and web ----------
@@ -3890,7 +4240,7 @@ namespace PrintPrice.Tests
                 var f = BRec("F", "2026-11-01 10:00:00");
                 f.Hours = 0; f.Minutes = 0; f.MaterialCost = 20; f.PowerCost = 10; f.Failed = true; f.FailedAt = "2026-11-01 12:00:00"; f.PaidBack = 0;
                 var p = BRec("P", "2026-11-05 10:00:00");
-                p.Failed = false; p.FailedAt = ""; p.PaybackCost = 10; p.For = History.ForCustomer; p.FailedPaybackWho = 2; p.InvoiceNo = "2026-ABCD";
+                p.Failed = false; p.FailedAt = ""; p.PaybackCost = 10; p.For = History.ForCustomer; p.FailedPaybackWho = 2; p.InvoiceNo = "2026-11234";
                 var o = BRec("O", "2026-11-06 10:00:00");
                 o.Failed = false; o.PaybackCost = 0;
                 return new List<QuoteRecord> { o, p, f };

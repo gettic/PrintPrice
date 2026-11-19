@@ -57,6 +57,9 @@ namespace PrintPrice
             bool testError = Array.IndexOf(args, "--test-error") >= 0;
             bool testPictures = Array.IndexOf(args, "--test-pictures") >= 0;
             bool testRepeat = Array.IndexOf(args, "--test-repeat") >= 0;
+            // --test-invoice (test mode + --hidden only, alone): MainForm.TestInvoiceFlow checks Settings' "Show invoice…"
+            // export path; test_invoice.txt in the settings folder, exit 0 / 4.
+            bool testInvoice = Array.IndexOf(args, "--test-invoice") >= 0;
             string testSlice = null, testHistory = null, testSetup = null;
             var rest = new System.Collections.Generic.List<string>();
             for (int i = 0; i < args.Length; i++)
@@ -79,7 +82,7 @@ namespace PrintPrice
                     testHistory = args[++i];
                     continue;
                 }
-                if (args[i] != "--test-error" && args[i] != "--test-pictures" && args[i] != "--test-repeat") rest.Add(args[i]);
+                if (args[i] != "--test-error" && args[i] != "--test-pictures" && args[i] != "--test-repeat" && args[i] != "--test-invoice") rest.Add(args[i]);
             }
             var opt = StartOptions.Parse(rest.ToArray());
             if (opt.Error != null) return Fail(opt.Error);
@@ -101,6 +104,12 @@ namespace PrintPrice
                 if (testSlice != null || testRepeat || testPictures || testHistory != null || testError)
                     return Fail("--test-setup can't be used with another --test- hook");
                 if (!File.Exists(testSetup)) return Fail("--test-setup spec file not found: " + testSetup);
+            }
+            if (testInvoice)
+            {
+                if (opt.SettingsFolder == null || !opt.Hidden) return Fail("--test-invoice needs --settings and --hidden");
+                if (testSlice != null || testRepeat || testPictures || testHistory != null || testSetup != null || testError)
+                    return Fail("--test-invoice can't be used with another --test- hook");
             }
             if (opt.SettingsFolder != null)
             {
@@ -175,6 +184,8 @@ namespace PrintPrice
             }
             if (testRepeat)
                 main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestRepeatFlow); };
+            if (testInvoice)
+                main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestInvoiceFlow); };
             if (setupLater) main.ShowSetupHint();   // "Setup skipped – run it now" once, in the info box
             if (setupTest != null)
                 main.Shown += delegate { main.BeginInvoke((MethodInvoker)delegate { main.TestSetupFlow(setupTest); }); };

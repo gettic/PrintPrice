@@ -268,7 +268,7 @@ else
                    CustomerPrice="@(quoteRecord != null ? quoteRecord.OthersPrice : last?.OthersPrice ?? 0)"
                    FriendsPrice="@(quoteRecord != null ? quoteRecord.FriendsPrice : last?.FriendsPrice ?? 0)"
                    StartFriends="@(quoteRecord != null ? quoteRecord.For == History.ForFriends : settings.QuoteFriends)"
-                   StartDark="@(settings.QuoteDark != 0)" StartCustomer="@(quoteRecord != null ? quoteRecord.Customer ?? "" : "")"
+                   StartDark="@(settings.QuoteDark != 0)" StartCustomer="@QuoteStartName" NameLocked="@(quoteInvoice && WebQuote.InvoiceMade(quoteRecord))"
                    Build="BuildQuoteSheet" Export="ExportQuote" Remember="RememberQuoteLook" OnClose="CloseQuote" />
     }
 }
@@ -885,7 +885,9 @@ else
             foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "" });
         }
         else materials = new List<HistoryFilament> { WebHistory.JobMaterial(single, materialName, settings, prefs.FilamentType) };
-        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf);
+        // the wear split goes with the record (only with Auto wear on, as the desktop), so its bill keeps the detail
+        var wear = settings.AutoWearRate != 0 ? WebCalc.WearBreakdown(settings, prefs.FilamentType) : null;
+        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf, wear);
         if (jobSource != null && jobSource.StartsWith("http", StringComparison.OrdinalIgnoreCase)) rec.Source = jobSource;
         return rec;
     }
@@ -893,6 +895,17 @@ else
     // ---------- stage 4: quote / invoice (MainForm's quote export and saved-record sections) ----------
 
     string QuoteModelName { get { return QuoteRows.ModelName(quoteRecord != null ? quoteRecord.Model : jobModel); } }
+
+    /// The name box at the start: a made invoice keeps the name it was made out to (BilledTo, else Customer for older
+    /// invoices), else the record's name (MainForm.OpenRecordQuote).
+    string QuoteStartName
+    {
+        get
+        {
+            if (quoteRecord == null) return "";
+            return quoteInvoice && WebQuote.InvoiceMade(quoteRecord) ? History.InvoiceInfo(quoteRecord, settings).BilledTo ?? "" : quoteRecord.Customer ?? "";
+        }
+    }
 
     WebQuote.Job CurrentJob()
     {
@@ -979,7 +992,7 @@ else
             var r = quoteRecord;
             if (kind == "history")
             {
-                r.Customer = customer;
+                if (!(quoteInvoice && WebQuote.InvoiceMade(r))) r.Customer = customer;   // a made invoice's name stays as it is
                 r.For = friends ? History.ForFriends : History.ForCustomer;
             }
             else

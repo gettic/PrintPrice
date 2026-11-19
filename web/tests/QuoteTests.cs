@@ -76,13 +76,13 @@ static class QuoteTests
 
         // ---- the invoice = invoice_light.png (sample number, payment ways; desktop RenderSampleInvoice) ----
         var inv = WebQuote.FromJob(Benchy(), s, false, when, History.QuoteNumber(when), "Lene Hansen");
-        inv.Invoice = true; inv.InvoiceNo = "2026-K7Q4"; inv.Due = s.InvoiceDue(when);
+        inv.Invoice = true; inv.InvoiceNo = "2026-73096"; inv.Due = s.InvoiceDue(when);
         inv.PayMobilePay = "12 34 56 78"; inv.PayBank = "reg. 1234, account 0012345678";
         var il = WebQuote.Draw(inv, true);
         string it = Texts(il);
-        foreach (var w in new[] { "Invoice|Gettic · 3D printing|Invoice no. 2026-K7Q4|Invoice date 4 November 2026|Due 18 November 2026",
+        foreach (var w in new[] { "Invoice|Gettic · 3D printing|Invoice no. 2026-73096|Invoice date 4 November 2026|Due 18 November 2026",
                                   "Bill to|Lene Hansen", "Please pay by 18 November 2026", "Payment|MobilePay: 12 34 56 78|Bank: reg. 1234, account 0012345678",
-                                  "Please write invoice no. 2026-K7Q4 with the payment." })
+                                  "Please write invoice no. 2026-73096 with the payment." })
             True("invoice page has \"" + w + "\"", it.Contains(w));
         True("invoice: no Printer row, no validity", !it.Contains("Printer|Bambu") && !it.Contains("Valid until") && !it.Contains("For: "));
         True("invoice taller than A4, as the desktop's (its rows end at 1412, footer line at 1440): " + il.Height, Math.Abs(il.Height - 1502) < 1);
@@ -107,7 +107,7 @@ static class QuoteTests
              && ri.Due == s.InvoiceDue(when.AddDays(1)) && WebQuote.PayLines(ri).Count == 0);
         s.PayMobilePay = "12 34 56 78";
         WebQuote.ApplyRecordExport(list, saved, true, "Lene Hansen", true, when.AddDays(1), s);
-        True("invoice made: code, Printed, For, name, used code kept", System.Text.RegularExpressions.Regex.IsMatch(saved.InvoiceNo ?? "", @"^2026-[0-9A-Z]{4}$") && saved.Printed && saved.For == History.ForFriends
+        True("invoice made: code, Printed, For, name, used code kept", System.Text.RegularExpressions.Regex.IsMatch(saved.InvoiceNo ?? "", @"^2026-[1-9][0-9]{4}$") && saved.Printed && saved.For == History.ForFriends
              && saved.Customer == "Lene Hansen" && s.UsedInvoiceNos.Contains(saved.InvoiceNo));
         string no = saved.InvoiceNo;
         s.PayMobilePay = "99 99 99 99";   // changed later: the invoice keeps what it said (its snapshot)
@@ -117,6 +117,49 @@ static class QuoteTests
         WebQuote.ApplyRecordExport(list, saved, true, "Lene Hansen", true, when.AddDays(20), s);
         True("making it again keeps the number", saved.InvoiceNo == no);
         s.PayMobilePay = "";
+        // a made invoice keeps its Bill to (BilledTo), whatever name is typed or stored later
+        saved.Customer = "Someone Else";
+        WebQuote.ApplyRecordExport(list, saved, true, "Typed Name", true, when.AddDays(21), s);
+        var keptName = WebQuote.FromRecord(saved, s, true, "Typed Name", true, when.AddDays(21), null);
+        True("made invoice: Bill to = BilledTo, Customer not overwritten: " + keptName.Customer,
+             keptName.Customer == "Lene Hansen" && saved.Customer == "Someone Else" && Texts(WebQuote.Draw(keptName, true)).Contains("Bill to|Lene Hansen")
+             && WebQuote.InvoiceMade(saved));
+        var oldInv = new QuoteRecord { InvoiceNo = "2026-K7Q4", BilledAt = "2026-10-31 09:12:00", Customer = "Old Name", SavedAt = "2026-10-30 10:00:00", OthersPrice = 50, FriendsPrice = 40 };
+        True("old letter-code invoice still shows its code and name", WebQuote.FromRecord(oldInv, s, false, "x", true, when, null).InvoiceNo == "2026-K7Q4"
+             && WebQuote.FromRecord(oldInv, s, false, "x", true, when, null).Customer == "Old Name");
+
+        // ---- History bills as they were made (RecordBreakdown / RecordQuoteInfo, saved plate / nozzle / material) ----
+        {
+            var bs = s.Clone();
+            bs.AutoWearRate = 1; WebCalc.ApplyAutoWear(bs, "PLA");
+            var bj = Benchy();
+            var bres = Pricing.Calculate(bj.Input, bs);
+            var nr = WebHistory.MakeRecord(bj.Input, bres, bs, "Bill test", when, null, -1, null, null, WebCalc.WearBreakdown(bs, "PLA"));
+            True("new web record keeps the wear split", History.SavedWear(nr) != null && nr.QuoteValidDays == bs.QuoteValidDays);
+            var fresh = WebQuote.FromRecord(nr, bs, false, "", false, when, null);
+            string before = Texts(WebQuote.Draw(fresh, true));
+            True("record bill has the wear sub-rows", before.Contains("Spare parts & upkeep") && before.Contains("Build plate (Smooth PEI)"));
+            // settings change afterwards: the bill keeps what it said
+            var later = bs.Clone();
+            later.QuoteValidDays = 30; later.QuoteName = "New Name"; later.AutoWearRate = 0;
+            later.BedType = "Textured PEI Plate"; later.FilamentPreset = "Bambu PETG HF @BBL A1";
+            var after = WebQuote.FromRecord(nr, later, false, "", false, when, null);
+            True("record bill unchanged by later settings: " + after.ValidUntil.ToString("yyyy-MM-dd") + " " + after.Name + " " + after.PlateName,
+                 Texts(WebQuote.Draw(after, true)) == before && after.ValidUntil == fresh.ValidUntil && after.Name == fresh.Name
+                 && Math.Abs(after.Breakdown.Total - nr.OthersPrice) < 0.005);
+            var noWear = WebHistory.MakeRecord(bj.Input, bres, bs, "x", when, null, -1, null, null, null);
+            True("no split given: none saved", History.SavedWear(noWear) == null);
+            var offRec = WebHistory.MakeRecord(bj.Input, Pricing.Calculate(bj.Input, s), s.Clone(), "x", when, null, -1, null, null, WebCalc.WearBreakdown(s, "PLA"));
+            True("auto wear off: no split saved", s.AutoWearRate != 0 || History.SavedWear(offRec) == null);
+            // an old record (no snapshot): today's settings, one wear line, as before
+            var oldRec = History.ParseJson(History.ToJson(new List<QuoteRecord> { nr }));
+            var o = oldRec[0];
+            o.WearPrinter = o.WearParts = o.WearHotend = o.WearPlate = 0; o.BedType = ""; o.Nozzle = ""; o.MaterialName = ""; o.QuoteValidDays = 0; o.QuoteFromName = "";
+            var oq = WebQuote.FromRecord(o, later, false, "", false, when, null);
+            True("old record: today's valid-until, name, plate; one wear line", oq.ValidUntil == later.QuoteValidUntil(when) && oq.Name == "New Name"
+                 && oq.PlateName == WebQuote.PlateName(later) && !Texts(WebQuote.Draw(oq, true)).Contains("Spare parts & upkeep")
+                 && Math.Abs(oq.Breakdown.Total - o.OthersPrice) < 0.005);
+        }
 
         // ---- helpers ----
         True("Printables id", WebQuote.ParsePrintablesId("https://www.printables.com/model/1648230-four-color") == "1648230"

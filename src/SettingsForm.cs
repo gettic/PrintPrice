@@ -15,6 +15,8 @@ namespace PrintPrice
         TextBox txtQuoteName, txtQuoteDays;   // quote export: name on the quote, valid for N days
         TextBox txtDueDays, txtMobilePay, txtBank, txtPrinterName;   // invoice: pay within N days, ways to pay; printer name
         CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate, chkPayback;
+        CheckBox chkMainInvoice;   // Quote & invoice tab: the main window's button makes invoices (AppSettings.MainInvoice)
+        ToolTip tip;               // dark tooltips (MainForm.DrawDarkTip)
         ComboBox cmbPaybackWho;   // 0 = customers only (FailedPaybackWho 2), 1 = both prices (1)
         Label lblCheck, lnkCheck;   // "v1.1.0 –" / check result, and the clickable "check now"
         /// Called when "check now" finds a newer version (MainForm shows its red update button).
@@ -200,6 +202,13 @@ namespace PrintPrice
             txtQuoteName = TextRow(t, L.S("Name on the quote", "Navn på tilbuddet"), null, 40);
             txtQuoteDays = Row(t, L.S("Valid for", "Gyldigt i"), L.S("days", "dage"));   // valid until = quote date + days
             Section(t, L.S("Invoice", "Faktura"));
+            chkMainInvoice = Check(t, L.S("Main window: Show invoice… instead of Show quote…",
+                                          "Hovedvinduet: Vis faktura… i stedet for Vis tilbud…"));
+            tip = new ToolTip { OwnerDraw = true, InitialDelay = 400, AutoPopDelay = 15000 };
+            tip.Draw += MainForm.DrawDarkTip;
+            Disposed += delegate { tip.Dispose(); };
+            tip.SetToolTip(chkMainInvoice, L.S("On: the main window's button makes an invoice with a number.\nQuotes are still made from History.",
+                                               "Til: knappen i hovedvinduet laver en faktura med nummer.\nTilbud kan stadig laves fra Historik."));
             txtDueDays = Row(t, L.S("Pay within", "Betalingsfrist"), L.S("days", "dage"));
             txtMobilePay = TextRow(t, L.S("MobilePay number", "MobilePay-nummer"), L.S("optional", "valgfrit"), 40);
             txtBank = TextRow(t, L.S("Bank account", "Bankkonto"), L.S("optional (reg. no. + account no.)", "valgfrit (reg.nr. + kontonr.)"), 60);
@@ -895,6 +904,7 @@ namespace PrintPrice
             txtDueDays.Text = Num.Fmt(s.InvoiceDueDays);
             txtMobilePay.Text = s.PayMobilePay ?? "";
             txtBank.Text = s.PayBank ?? "";
+            chkMainInvoice.Checked = s.MainInvoice == 1;
             filling = false;
         }
 
@@ -1182,6 +1192,7 @@ namespace PrintPrice
             Result.InvoiceDueDays = dueDays;
             Result.PayMobilePay = txtMobilePay.Text.Trim();
             Result.PayBank = txtBank.Text.Trim();
+            Result.MainInvoice = chkMainInvoice.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
         }

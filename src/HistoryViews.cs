@@ -23,6 +23,17 @@ namespace PrintPrice
             return History.TryTime(r.SavedAt, out t) ? t.ToString("dd-MM-yyyy", Num.Dk) : (r.SavedAt ?? "");
         }
 
+        /// A quote marked "Printing now" that is still running: "Printing, done about 16:40" (short = "Printing · 16:40"
+        /// for a card); another day's end time gets its date. null = not printing.
+        static string PrintingText(QuoteRecord r, bool shortForm)
+        {
+            DateTime end, now = DateTime.Now;
+            if (r == null || !History.IsPrinting(r, now) || !History.PrintingEnds(r, out end)) return null;
+            string at = end.Date == now.Date ? end.ToString("HH:mm", Num.Dk) : end.ToString("dd-MM HH:mm", Num.Dk);
+            return shortForm ? L.F("Printing · {0}", "Printer · {0}", at)
+                             : L.F("Printing, done about {0}", "Printer, færdig ca. {0}", at);
+        }
+
         // ---------- pictures: loaded only when shown, scaled once, kept in a capped cache ----------
         /// The record pictures (History pictures folder) at the sizes the window needs. Get never waits: the first call
         /// queues a load on one background task and returns null (placeholder); Loaded(id) fires on the UI thread when
@@ -621,15 +632,19 @@ namespace PrintPrice
                      s ? Color.White : friends ? Theme.Friends : Theme.Others, false);
                 y += LineH;
                 // time · grams (muted) + status (medium) / colour dots (large)
-                string facts = TimeText(r) + " · " + Num.Fmt(r.Grams) + " g";
+                // Medium: the customer's name instead of time · grams when it has one (no room for another line)
+                string customer = (r.Customer ?? "").Trim();
+                string facts = mode != ViewLarge && customer.Length > 0 ? customer : TimeText(r) + " · " + Num.Fmt(r.Grams) + " g";
                 int rightW = mode == ViewLarge ? DrawDots(g, r, x + w, y + LineH / 2) : DrawStatus(g, r, false, x + w, y, s);
                 DrawText(g, r, facts, small, new Rectangle(x, y + P(1), w - rightW - (rightW > 0 ? P(6) : 0), LineH), muted, false);
                 if (mode == ViewLarge)
                 {
                     y += LineH;
                     int sw = DrawStatus(g, r, true, x + w, y, s);
-                    string note = !string.IsNullOrEmpty(r.Note) ? r.Note
-                                : friends ? L.S("Friends & family", "Venner og familie") : L.S("Customer", "Kunde");
+                    // the customer's name first (when set), then the note; neither = who the price is for
+                    string note = (r.Note ?? "").Trim();
+                    if (customer.Length > 0) note = note.Length > 0 ? customer + " · " + note : customer;
+                    else if (note.Length == 0) note = friends ? L.S("Friends & family", "Venner og familie") : L.S("Customer", "Kunde");
                     DrawText(g, r, note, small, new Rectangle(x, y + P(1), w - sw - (sw > 0 ? P(6) : 0), LineH), muted, false);
                 }
                 if (i == current && Focused)
@@ -642,7 +657,13 @@ namespace PrintPrice
             int DrawStatus(Graphics g, QuoteRecord r, bool longForm, int right, int y, bool selected)
             {
                 string text; Color colour;
-                if (r.Failed) { text = longForm ? L.S("✗ Failed", "✗ Fejlet") : "✗"; colour = selected ? Color.White : Theme.Error; }
+                string printing = PrintingText(r, true);
+                if (printing != null)   // "Printing now" still running: amber (white on a selected card), Large with the end time
+                {
+                    text = longForm ? printing : L.S("Printing", "Printer");
+                    colour = selected ? Color.White : Theme.Warning;
+                }
+                else if (r.Failed) { text = longForm ? L.S("✗ Failed", "✗ Fejlet") : "✗"; colour = selected ? Color.White : Theme.Error; }
                 else if (r.Printed) { text = "✓"; colour = selected ? Color.White : Theme.Success; }
                 else if (longForm) { text = L.S("Not printed", "Ikke printet"); colour = selected ? Theme.Text : Theme.Muted; }
                 else return 0;
@@ -864,6 +885,36 @@ namespace PrintPrice
         }
 
         internal List<QuoteRecord> SampleSelected() { return SelectedRecords(); }
+
+        /// Real model pictures for SampleQuotes (idea 28; PNG bytes by record id): per row `<folder>\sampleN.png`, else
+        /// `<exe folder>\..\assets\history-samples\sampleN.png` (the repo's Bambu Studio plate renders, see credits.txt
+        /// there), else the drawn icon of SamplePictures(). Nothing is embedded in the exe; the user's data is never read.
+        internal static Dictionary<string, byte[]> SamplePictures(string folder)
+        {
+            var res = SamplePictures();
+            string repo = null;
+            try { repo = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), @"..\assets\history-samples")); }
+            catch { }
+            for (int i = 0; i < 8; i++)
+            {
+                string name = "sample" + i + ".png";
+                foreach (string dir in new[] { folder, repo })
+                {
+                    if (string.IsNullOrEmpty(dir)) continue;
+                    try
+                    {
+                        string p = Path.Combine(dir, name);
+                        if (!File.Exists(p)) continue;
+                        byte[] b = File.ReadAllBytes(p);
+                        using (var img = History.PictureImage(b)) if (img == null) continue;
+                        res["sample" + i] = b;
+                        break;
+                    }
+                    catch { }
+                }
+            }
+            return res;
+        }
 
         /// Made-up 256 px pictures for SampleQuotes (PNG bytes by record id; "sample5", the failed hook, has none).
         internal static Dictionary<string, byte[]> SamplePictures()

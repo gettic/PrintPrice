@@ -1,0 +1,49 @@
+History sample pictures: credits
+
+These small pictures are Bambu Studio plate renders of the 3D models below, made by slicing the unchanged model files.
+The models belong to their authors and are used under the licences named here. These pictures are NOT covered by
+the app's own licence: each picture is shared under the licence of its model (CC BY-SA ones under CC BY-SA 4.0,
+CC BY-NC-SA ones under CC BY-NC-SA 4.0).
+
+sample0.png - 3D BENCHY
+  Author: Creative Tools (#3DBenchy), uploaded by Prusa Research
+  https://www.printables.com/model/3161
+  Licence: CC0 1.0 (public domain), as listed on Printables
+
+sample1.png - Four-Color Multicolor Test benchy (Universal 3mf)
+  Author: PDX 3D Forge
+  https://www.printables.com/model/1648230
+  Licence: CC BY-NC-SA 4.0 - this picture is shared under CC BY-NC-SA 4.0 (non-commercial)
+
+sample2.png - Adjustable Phone Stand (Print-in-place)
+  Author: Purplecraft
+  https://www.printables.com/model/942149
+  Licence: CC BY-SA 4.0 - this picture is shared under CC BY-SA 4.0
+
+sample3.png - KLAMMA - Locking Cable Clip (medium)
+  Author: FH
+  https://www.printables.com/model/359285
+  Licence: CC BY-SA 4.0 - this picture is shared under CC BY-SA 4.0
+
+sample4.png - Tower Planter Pot
+  Author: Qrome
+  https://www.printables.com/model/25367
+  Licence: CC BY 4.0
+
+sample5.png - Underslung headphone hook (hexagons)
+  Author: SaddamCZ
+  https://www.printables.com/model/24464
+  Licence: CC BY-SA 4.0 - this picture is shared under CC BY-SA 4.0
+
+sample6.png - Cute Lock Ness Monster - Multicolor AMS
+  Author: Graylynn
+  https://www.printables.com/model/741126
+  Licence: CC BY-SA 4.0 - this picture is shared under CC BY-SA 4.0
+
+sample7.png - Moon Lamp LED Tealight
+  Author: yahbluez
+  https://www.printables.com/model/332012
+  Licence: CC BY 4.0
+
+Licences: https://creativecommons.org/licenses/by/4.0/  https://creativecommons.org/licenses/by-sa/4.0/
+          https://creativecommons.org/licenses/by-nc-sa/4.0/  https://creativecommons.org/publicdomain/zero/1.0/

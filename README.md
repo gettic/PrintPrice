@@ -77,10 +77,10 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 - Backups hold each job's small picture too, both ways with the app. A file backup takes the newest pictures first, up to 20 MB, and an online backup the newest that fit. **Merge** keeps pictures already in the browser, **Replace** uses the backup's. The safety copy includes the pictures, and Restore shows how many pictures a backup has.
 - A **Last backup** line under the list reminds you to back up. It turns into a warning if you never backed up or the last backup is over 30 days old.
 
-**Quote and invoice:** **Show quote…** on the calculator, and **Quote…** and **Invoice…** on the History tab, open the A4 page, like the app's.
+**Quote and invoice:** **Show quote…** on the calculator, and **Quote…** and **Invoice…** on the History tab, open the A4 page, like the app's. A saved quote shows the same rows as when it was saved.
 - Type the customer's name, choose the **Customers** or **Friends & family** price, and choose a **Dark** or **Light** look.
 - **Print / PDF…** opens the browser's print window. Choose "Save as PDF" there. It is always one light A4 page. **Copy text** copies the quote as text. **Save to history** saves it.
-- An invoice needs the customer's name. It gets its random invoice number when it is made, and ticks **Printed**.
+- An invoice needs the customer's name. It gets its random invoice number (for example 2026-48213) when it is made, and ticks **Printed**. After that it keeps its number and the customer's name (the name box is then read-only).
 - **Settings → Quote & invoice** has the name on the quote, **Valid for**, **Pay within**, MobilePay and bank account. MobilePay and bank account show on invoices only when filled in.
 
 It does less than the Windows app: no slicing.
@@ -130,18 +130,20 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Failed prints:** optional. Set a % in Settings and material and power are raised by it for failed prints and reprints, before the markup. The default is 0 % (off). When it is above 0, the Cost breakdown shows a "Failed prints" line.
 - **Failed prints payback:** on by default. In the price history, tick **Failed** on a saved quote. With **Earn back failed prints** on in Settings, new quotes get a payback of 10 % (**% per quote**) of material + power until the failed print's material, power and wear are made back. It never adds more than what is left. It is shown as **Failed prints payback** in the Cost breakdown, is not marked up, and is added after the minimum price and before rounding. **Paid by** is **Customers only** (default; only quotes saved For = Customer count) or **Both prices**. Settings shows **Not made back yet**. A saved quote counts as sold, so delete quotes you didn't sell.
-- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank) and **App** (language, update check, Bambu Studio path, backup, and **Run setup again…**).
+- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank, Show invoice… instead of Show quote…) and **App** (language, update check, Bambu Studio path, backup, and **Run setup again…**).
   - On the **Printer** tab, the **Printer** drop-down picks which printer you edit; the one in use is marked "(in use)". **Add…** adds an A1, A1 mini or P1S with that model's defaults. **Remove** removes the printer shown (only when you have 2 or more).
   - Each printer's **Name** is shown on the printer card and the quote. Left empty, the model name is used. The filament profile is the same for all printers.
 - **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
 - **Quote page:** **Show quote…** opens a window with a live preview of an A4 quote page: logo, model picture, print time, weight, printer, material, a full price breakdown (material per colour, electricity, machine wear split into printer / spare parts / nozzle / build plate, "Work & handling", and failed prints payback, minimum price or rounding when used), the total, a quote number, a valid-until date and small print.
   - **For:** an optional customer name (recent names from the history are offered).
   - **Price:** Customers or Friends & family.
-  - **Look:** Dark (default) or Light for the picture. The PDF is always light.
+  - **Look of the picture:** Dark (default) or Light. The PDF is always light.
+  - **Print status:** Not printed yet, Printing now, Printed or Failed. It is saved with the quote on every export and on **Save to history**. A new job starts at Not printed yet. **Failed** works like ticking **Failed** in History. The invoice window has no status box: making an invoice ticks **Printed**.
   - **Export:** **Copy picture**, **Save picture…**, **Save as PDF…** or **Copy text**. The **▾** on the button gives the same four as quick exports without a name.
   - **Save to history** saves the quote with the chosen price and name without making a file. Every export is also saved to the price history. Just opening the window saves nothing.
   - The window is large and can be resized. Click the page to zoom to 100 %, and drag to move around.
   - The name on the quote, the number of days it is valid (default 14) and the printer name are set in Settings.
+  - **Show invoice… instead:** with **Main window: Show invoice… instead of Show quote…** on (Settings → Quote & invoice, off by default), the button makes an invoice for the job on screen. A name is required. The first copy or save gives it a number, saves it in History and ticks **Printed**. More copies from the same window keep that number. The **▾** quick exports still make quotes without a name. Only in the Windows app for now.
 
 <p align="center"><img src="assets/screenshot-quote.png" width="480" alt="Screenshot of a quote"></p>
 
@@ -149,16 +151,18 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Month** picker (all months or one month, ‹ › to step) with six cards for that month: prints and failed prints, print time and filament, customers, friends & family, costs (material + power + wear) and profit with % of income.
   - **Printer:** every saved quote keeps its printer. Quotes saved before there were several printers count as your first printer. With 2 or more printers, the list gets a **Printer** column and a **Printer** filter. With one printer picked, the cards show that printer's totals (**All months** = all time). With **All printers**, the Profit card's tooltip lists the profit per printer. A removed printer is shown as "(removed)".
   - Profit per printer = price − material − power − that printer's wear. A failed print counts as a loss on its own printer.
-  - You can search and filter the list. One **Price** column shows the friends & family or the customer price, following each row's **For** choice (Customer by default). **Esc** in the search box clears it.
-  - **For** and **Note** can be edited in the list and are saved at once.
-  - **Printed** and **Failed** are tick columns. Click to tick. Quotes saved before **Printed** existed count as printed. Failed quotes feed the payback (see Failed prints payback above).
-  - **Views:** the switch top right shows a **List**, **Medium pictures** or **Large pictures**. Ctrl+1, 2, 3 or Ctrl+mouse wheel switch too. The view is remembered. **For** and **Note** are edited in the list view.
-  - **Select several:** Ctrl+click, Shift+click or Ctrl+A. **Delete** (or the Delete key) deletes the selected quotes. In the right-click menu, **For**, **Printed** and **Failed** change all selected quotes.
+  - You can search (model, customer name, link or note) and filter the list. One **Price** column shows the friends & family or the customer price, following each row's **For** choice (Customer by default). **Esc** in the search box clears it.
+  - **For**, **Customer** and **Note** can be edited in the list and are saved at once.
+  - **Customer:** the name from a quote or invoice. Type it in the cell like a note, or click the small ▾ in the cell for earlier names. In the right-click menu, **Customer name…** sets the name of all selected quotes, and **Select all quotes for <name>** selects that customer's quotes.
+  - **Printed** and **Failed** are tick columns. Click to tick. Quotes saved before **Printed** existed count as printed. Failed quotes feed the payback (see Failed prints payback above). A quote set to **Printing now** shows an amber clock in **Printed** (tooltip "Printing, done about 16:40") until its print time has passed. Then it counts as printed.
+  - **Views:** the switch top right shows a **List**, **Medium pictures** or **Large pictures**. Ctrl+1, 2, 3 or Ctrl+mouse wheel switch too. The view is remembered. Medium pictures show the customer's name instead of time and grams. Large pictures show it before the note. **For**, **Customer** and **Note** are edited in the list view.
+  - **Select several:** Ctrl+click, Shift+click or Ctrl+A. **Delete** (or the Delete key) deletes the selected quotes. In the right-click menu, **For**, **Customer name…**, **Printed** and **Failed** change all selected quotes.
   - **Clear all…** deletes every quote, also the ones the filters hide. It first saves a safety copy with all pictures: `%APPDATA%\PrintPrice\history.before-clear-<date>-<time>.printprice-backup`. Every copy is kept. Later, **Backup…** › **Restore** › **Browse…** opens at the newest copy.
   - Delete and Clear all ask first. Afterwards a line says what was deleted (for example "✓ 3 quotes deleted."), with **Undo**. Undo brings back the last delete while the window is open (a new delete or **Backup…** ends it). After Clear all, **Open folder** shows the safety copy.
   - Deleting a failed print that isn't earned back yet stops the payback for it. Deleting a quote that paid back part of a failed print makes that amount owed again.
-  - **Quote…** opens the quote page of a saved quote with its saved prices.
-  - **Invoice…** makes a bill: the title is Invoice, with a random invoice code (for example 2026-K7Q4), the invoice date and a due date. A customer name is required ("Bill to"). A **Payment** block with MobilePay and/or bank details shows only if you set them in Settings. Making an invoice ticks **Printed**. The code shows in the **Invoice** column. The due date and payment details are kept with the invoice.
+  - **Quote…** opens the quote page of a saved quote with its saved prices. It shows the same rows as when it was made: the machine wear split, nozzle, build plate, name on the quote and valid days. Quotes saved by older versions show one wear line and today's settings.
+  - **Invoice…** makes a bill: the title is Invoice, with a random invoice code (the year and 5 digits, for example 2026-48213), the invoice date and a due date. Older invoices keep their codes. A customer name is required ("Bill to"). A **Payment** block with MobilePay and/or bank details shows only if you set them in Settings. Making an invoice ticks **Printed**. The code shows in the **Invoice** column. The due date and payment details are kept with the invoice.
+  - A made invoice keeps the name it was made out to: **Invoice…** on it shows that name, read-only, even if **Customer** was changed later.
   - **Repeat print** prices the same print again with today's filament and electricity prices and slices the saved link or file again. If that isn't possible, the saved time and weight are used, with a note. The info box shows "Was … → now …". A repeat is never merged with its original. A job with several files slices each file again with its saved filament and colour, and together on one plate if it was before. The plates link comes back too.
   - **Open again** (or double-click, or Enter) puts the inputs back, including the filament name and colour, and recalculates with today's settings. The model box shows the saved price next to today's. Open again and **Repeat print** switch back to the quote's printer, if you still have it.
   - **Picture:** each saved job keeps a small picture (256 px) of the model in `%APPDATA%\PrintPrice\pictures`. The list shows it (point at it for a bigger one), and so do **Open again**, **Repeat print** and a saved job's **Quote…** / **Invoice…**. A job without a picture shows a cube. A deleted job's picture goes once the delete can't be undone any more.
@@ -168,6 +172,7 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Backup…** opens the Backup window (also in Settings > App as **Back up…** and **Restore…**). See Backup and restore below.
 
 <p align="center"><img src="assets/screenshot-history.png" width="480" alt="Screenshot of the History window"></p>
+<p align="center"><sub>Model pictures: Printables models by their authors, under their own licences (not the app's). See <a href="assets/history-samples/credits.txt">credits</a>.</sub></p>
 
 - **Backup and restore:** the Backup window has two tabs.
   - **Back up** saves the price history and your settings to a `.printprice-backup` file. The file is not locked with a code, and it holds customer names and payment details, so keep it somewhere private.
@@ -280,7 +285,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/PowerPrice.cs` | Energi Data Service spot prices |
 | `src/Updater.cs` | Update check and install from GitHub releases |
 | `src/History.cs` | Saved quotes (price history) |
-| `src/HistoryForm.cs`, `src/HistoryViews.cs` | The History window; its pictures and List / Medium / Large views |
+| `src/HistoryForm.cs`, `src/HistoryViews.cs`, `src/HistoryCustomer.cs` | The History window; its pictures, List / Medium / Large views and Customer column |
 | `src/Backup.cs`, `src/BackupForm.cs` | Backup codes and the Backup window |
 | `src/OnlineBackup.cs` | Online backup: encrypt, upload, download, delete |
 | `worker/` | The Cloudflare relay: online backup and the website's live electricity price |

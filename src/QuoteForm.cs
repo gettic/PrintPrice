@@ -19,6 +19,9 @@ namespace PrintPrice
         readonly TableLayoutPanel root, right;
         readonly ToolTip zoomTip;   // dark (owner-drawn) "Click to zoom…" on the preview
         readonly TextBox txtCustomer;
+        readonly Label lblCustomer;   // "Customer (required)" / "(optional)" / a made invoice's "Bill to (kept)"
+        readonly Label lblStatus;     // "Print status" (hidden in the invoice window)
+        readonly ComboBox cmbStatus;  // Not printed yet / Printing now / Printed / Failed (= PrintState)
         readonly Button btnRecent, btnCopyPic, btnSavePic, btnPdf, btnText, btnHistory, btnClose;
         readonly Choice rbCustomers, rbFriends, rbDark, rbLight;
         readonly InfoBox info;
@@ -67,9 +70,10 @@ namespace PrintPrice
             };
 
             // customer: text box + ▾ for recent names (dark menu)
-            right.Controls.Add(Heading(invoice ? L.S("Customer (required)", "Kunde (skal udfyldes)") : L.S("Customer (optional)", "Kunde (valgfrit)"), 0));
+            lblCustomer = Heading(invoice ? L.S("Customer (required)", "Kunde (skal udfyldes)") : L.S("Customer (optional)", "Kunde (valgfrit)"), 0);
+            right.Controls.Add(lblCustomer);
             var custRow = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = Padding.Empty };
-            txtCustomer = new TextBox { Width = 214, Margin = Padding.Empty, MaxLength = 60, Text = customer ?? "" };
+            txtCustomer = new TextBox { Width = 214, Margin = Padding.Empty, MaxLength = History.MaxCustomer, Text = customer ?? "" };
             btnRecent = new Button { Size = new Size(26, 25), Margin = Padding.Empty, Text = "", TabStop = true,
                                      AccessibleName = L.S("Recent customers", "Seneste kunder") };
             btnRecent.Enabled = this.recent.Count > 0;
@@ -91,7 +95,7 @@ namespace PrintPrice
             right.Controls.Add(grpPrice);
 
             // light or dark (the PDF is always light)
-            right.Controls.Add(Heading(L.S("Look", "Udseende"), 12));
+            right.Controls.Add(Heading(L.S("Look of the picture", "Billedets udseende"), 12));
             var grpLook = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             rbDark = new Choice { Text = L.S("Dark", "Mørk"), Checked = dark };
             rbLight = new Choice { Text = L.S("Light", "Lys"), Checked = !dark };
@@ -103,6 +107,20 @@ namespace PrintPrice
                 Text = L.S("The PDF is always light (for printing).", "PDF'en er altid lys (til print)."), AutoSize = true, UseMnemonic = false,
                 Tag = "muted", Font = new Font("Segoe UI", 9f), Margin = new Padding(22, 0, 0, 12)
             });
+            // print status (quotes only): saved with the quote on every export (History.AddFor / SetPrintState)
+            lblStatus = Heading(L.S("Print status", "Printstatus"), 0);
+            right.Controls.Add(lblStatus);
+            cmbStatus = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 240, Margin = new Padding(0, 0, 0, 12),
+                                       AccessibleName = L.S("Print status", "Printstatus") };
+            // the order = PrintState's values
+            cmbStatus.Items.AddRange(new object[]
+            {
+                L.S("Not printed yet", "Ikke printet endnu"), L.S("Printing now", "Printer nu"),
+                L.S("Printed", "Printet"), L.S("Failed", "Fejlet")
+            });
+            cmbStatus.SelectedIndex = (int)PrintState.NotPrinted;
+            right.Controls.Add(cmbStatus);
+            lblStatus.Visible = cmbStatus.Visible = !invoice;   // an invoice ticks Printed itself
             // the zoom hint as a dark tooltip on the page (no extra line: the right column must fit a 768 px laptop screen)
             zoomTip = new ToolTip { OwnerDraw = true, InitialDelay = 600 };
             zoomTip.Draw += (s, e) =>
@@ -159,6 +177,8 @@ namespace PrintPrice
             Load += delegate
             {
                 btnRecent.Size = new Size(Px(26), txtCustomer.Height);
+                int frame = cmbStatus.Height - cmbStatus.ItemHeight;   // the status box as tall as the name box
+                if (txtCustomer.Height - frame > 0) cmbStatus.ItemHeight = txtCustomer.Height - frame;
                 FitWindow();
                 ready = true;
                 Redraw();
@@ -222,6 +242,16 @@ namespace PrintPrice
         bool Dark { get { return rbDark.Checked; } }
         string Customer { get { return txtCustomer.Text.Trim(); } }
 
+        // --test-invoice (MainForm.TestInvoiceFlow): press an action as the button does, read the result
+        /// Runs the action button's own Export(kind) (the window needn't be shown); returns the info box text after it.
+        internal string TestExport(QuoteExport kind) { Export(kind); return info.Text; }
+        /// The info box's kind after the last action (Error = it failed).
+        internal InfoKind TestInfoKind { get { return info.Kind; } }
+        /// The name box is read-only (LockCustomer: a made invoice).
+        internal bool TestCustomerLocked { get { return txtCustomer.ReadOnly; } }
+        /// The four export buttons are on (an invoice: only with a name).
+        internal bool TestActionsOn { get { return btnPdf.Enabled; } }
+
         Button ActionButton(string text, QuoteExport kind, Padding margin)
         {
             var b = new Button { Text = text, Size = new Size(117, 32), Margin = margin, Padding = Padding.Empty, UseMnemonic = false };
@@ -235,6 +265,31 @@ namespace PrintPrice
             bool on = !invoice || Customer.Length > 0;
             foreach (var b in new[] { btnCopyPic, btnSavePic, btnPdf, btnText })
                 if (b.Enabled != on) b.Enabled = on;
+        }
+
+        /// The print status chosen in the box (saved with the quote by every export; quotes only).
+        public PrintState PrintStatus
+        {
+            get { int i = cmbStatus.SelectedIndex; return i >= 0 && i <= (int)PrintState.Failed ? (PrintState)i : PrintState.NotPrinted; }
+            set { cmbStatus.SelectedIndex = (int)value; }
+        }
+
+        /// A line in the info box under the actions (e.g. the invoice of a failed print: Warning).
+        public void ShowNote(string text, InfoKind kind)
+        {
+            ShowInfo(text, kind);
+        }
+
+        /// A made invoice (History's Invoice… on a billed quote): the name it was made out to stays; the box is read-only
+        /// (Muted text, still selectable / copyable), ▾ greyed out, heading "Bill to (kept)". Call before the window shows.
+        public void LockCustomer()
+        {
+            lblCustomer.Text = L.S("Bill to (kept on the invoice)", "Kunde (står på fakturaen)");
+            txtCustomer.ReadOnly = true;
+            txtCustomer.BackColor = Theme.Input;   // ReadOnly would turn it Windows grey
+            txtCustomer.ForeColor = Theme.Muted;
+            btnRecent.Enabled = false;
+            btnRecent.TabStop = false;
         }
 
         void ChoiceChanged()

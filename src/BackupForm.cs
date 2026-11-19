@@ -1178,7 +1178,7 @@ namespace PrintPrice
         internal void SampleDone()
         {
             var r = new RestoreResult { Added = 12, Same = 1234, Updated = 2, PrintersMoved = 1, SettingsRestored = true, Settings = settings };
-            r.InvoiceClashes.Add("2026-K7Q4");
+            r.InvoiceClashes.Add("2026-48213");
             for (int i = 0; i < 1260; i++) r.Quotes.Add(null);   // only the count is shown
             ShowDone(r, null, Path.Combine(Path.GetTempPath(), "history.before-restore-20261110-1405.json"));
         }

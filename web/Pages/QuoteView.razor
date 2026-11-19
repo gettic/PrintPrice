@@ -16,7 +16,7 @@
         <div class="qv-side">
             <label class="qv-head" for="qv-name">@(Invoice ? L.S("Customer (required)", "Kunde (skal udfyldes)") : L.S("Customer (optional)", "Kunde (valgfrit)"))</label>
             <input id="qv-name" type="text" class="left" list="qv-recent" maxlength="80" value="@customer" autocomplete="off"
-                   @oninput="NameTyped" />
+                   readonly="@NameLocked" @oninput="NameTyped" />
             <datalist id="qv-recent">
                 @foreach (var n in Recent) { <option value="@n"></option> }
             </datalist>
@@ -33,7 +33,7 @@
                     <span>@L.S("Friends & family", "Venner og familie")</span><b class="green">@Num.Kr(FriendsPrice)</b></button>
             </div>
 
-            <div class="qv-head">@L.S("Look", "Udseende")</div>
+            <div class="qv-head">@L.S("Look on screen", "Udseende på skærmen")</div>
             <div class="qv-look" role="radiogroup">
                 <button class="@(dark ? "on" : "")" role="radio" aria-checked="@dark" @onclick="() => SetDark(true)">@L.S("Dark", "Mørk")</button>
                 <button class="@(dark ? "" : "on")" role="radio" aria-checked="@(!dark)" @onclick="() => SetDark(false)">@L.S("Light", "Lys")</button>
@@ -64,6 +64,8 @@
     [Parameter] public bool StartFriends { get; set; }
     [Parameter] public bool StartDark { get; set; }
     [Parameter] public string StartCustomer { get; set; }
+    /// A made invoice: the name it was made out to stays (read-only box), as on the desktop.
+    [Parameter] public bool NameLocked { get; set; }
     /// The page for (friends, customer).
     [Parameter] public Func<bool, string, WebQuote.Sheet> Build { get; set; }
     /// One export ("print", "text", "history") with (friends, customer): saves what it should and says what to print / copy.
@@ -90,6 +92,7 @@
 
     void NameTyped(ChangeEventArgs e)
     {
+        if (NameLocked) return;
         customer = (string)e.Value ?? "";
         Rebuild();
     }

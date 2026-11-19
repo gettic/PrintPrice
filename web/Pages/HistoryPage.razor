@@ -800,7 +800,7 @@ else if (Quotes.Count > 0)
     async Task TogglePrinted(QuoteRecord r)
     {
         selected = r;
-        r.Printed = !r.Printed;
+        History.SetPrinted(r, !r.Printed);   // unticking also ends "Printing now"
         await Changed.InvokeAsync();
     }
 

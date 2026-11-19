@@ -10,7 +10,7 @@ using System.Windows.Forms;
 namespace PrintPrice
 {
     /// Hidden picture mode: "PrintPrice.exe --screenshots <folder>" draws the app's windows off-screen
-    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, quote.pdf + quote_pdf.png, invoice_light.png, quote_window.png, main_reopened.png, repeat.png, history.png, backup*.png / restore*.png (Backup window), ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; idea 21: main_parts.png, main_plates.png, main_plates_menu.png, main_makerworld.png, picker.png, picker_colour_menu.png; a model.png / model2.png in the folder is used as
+    /// into PNGs and exits (main_empty.png, main.png, main_payback.png, main_multi.png, quote_light.png, quote_dark.png, quote.pdf + quote_pdf.png, invoice_light.png, quote_window.png, main_invoice.png + invoice_window.png + settings_quote_invoice.png (Show invoice… setting),main_reopened.png, repeat.png, history.png, backup*.png / restore*.png (Backup window), ..., several printers: printers_one.png, printers.png, printers_focus.png, printers_many.png, settings_printers.png, settings_add_menu.png, history_printers.png, main_printer_changed.png; idea 21: main_parts.png, main_plates.png, main_plates_menu.png, main_makerworld.png, picker.png, picker_colour_menu.png; a model.png / model2.png in the folder is used as
     /// the sample model picture of the single / 4-colour example). Add "--lang da" for Danish pictures (English otherwise, whatever the Windows language). Uses default settings in memory (settings.ini is never read or written)
     /// and never goes online (no power price, no update check). The windows are never activated.
     static class Screenshots
@@ -68,6 +68,22 @@ namespace PrintPrice
                             Snap(qf, folder, "quote_window.png");
                             qf.Hide();
                         }
+                    // Settings > Quote & invoice "Show invoice… instead of Show quote…" on: the button and its window
+                    main.SampleMainInvoice(true);
+                    Snap(main, folder, "main_invoice.png");
+                    using (var jf = main.SampleJobInvoiceWindow("Mette Hansen"))
+                        if (jf != null)
+                        {
+                            Place(jf);
+                            jf.Show();
+                            Snap(jf, folder, "invoice_window.png");
+                            jf.Hide();
+                        }
+                    var invSettings = s.Clone();   // the Quote & invoice tab with the box ticked (never saved)
+                    invSettings.MainInvoice = 1;
+                    using (var set = new SettingsForm(invSettings, 0, SettingsForm.TabQuote))
+                        SnapForm(set, folder, "settings_quote_invoice.png");
+                    main.SampleMainInvoice(false);   // back to the default for the other pictures
                     // sliced G-code files put in the folder (idea 14): main_gcode_<name>.png each, read as a dropped file would be
                     foreach (string g in Directory.GetFiles(folder, "*.gcode"))
                     {
@@ -87,11 +103,20 @@ namespace PrintPrice
                     main.SampleRepeat(quotes[1]);
                     main.SetSamplePicture(Path.Combine(folder, "model2.png"));
                     Snap(main, folder, "repeat.png");
+                    // Invoice… on a made invoice (Lene Hansen's phone stand): the name it was made out to, read-only
+                    using (var mf = main.SampleMadeInvoiceWindow(quotes[2]))
+                        if (mf != null)
+                        {
+                            Place(mf);
+                            mf.Show();
+                            Snap(mf, folder, "invoice_window_made.png");
+                            mf.Hide();
+                        }
                     using (var hist = new HistoryForm(quotes, null, true))
                     {
                         hist.QuoteRequested = (owner, rec, isInvoice) => { };   // shows Quote… / Invoice… (never clicked here)
                         hist.BackupRequested = owner => false;                  // shows Backup… (never clicked here)
-                        hist.SamplePicturesForMode = HistoryForm.SamplePictures();   // made-up pictures (one quote without)
+                        hist.SamplePicturesForMode = HistoryForm.SamplePictures(folder);   // real model pictures (assets\history-samples)
                         Place(hist);
                         hist.Show();
                         hist.SelectMonth(new DateTime(2026, 10, 1));   // October: billed, failed and not-printed quotes
