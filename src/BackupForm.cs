@@ -168,8 +168,6 @@ namespace PrintPrice
             // after a restore from a code: back up to that code from now on (sets the remembered code)
             chkKeep = new Tick { Text = L.S("Keep backing up to this code", "Bliv ved med at tage kopi til denne kode"), Checked = true,
                                  Margin = new Padding(Indent, 2, 0, 0) };
-            string remembered = settings.GetBackupCode();
-            if (remembered.Length > 0) txtCode.Text = Backup.Format(remembered);
             grpFrom.Controls.Add(rbFromFile);
             grpFrom.Controls.Add(rowFile);
             grpFrom.Controls.Add(rbFromCode);
@@ -225,6 +223,9 @@ namespace PrintPrice
             lblCode.BackColor = Theme.InfoBack;
             foreach (var p in pages) p.ResumeLayout(true);
             ResumeLayout(true);
+            // after everything is built: txtCode.TextChanged runs UpdateRestore (issue #2)
+            string remembered = settings.GetBackupCode();
+            if (remembered.Length > 0) txtCode.Text = Backup.Format(remembered);
             UpdateBackup();
             UpdateRestore();
             strip.Selected = tab;
@@ -886,6 +887,7 @@ namespace PrintPrice
         /// Restore tab state: which source row is on, the summary (or error), the How choices, the note under them.
         void UpdateRestore()
         {
+            if (btnAction == null) return;   // still being built (a handler fired early, issue #2)
             bool fromFile = rbFromFile.Checked;
             txtFile.Enabled = btnBrowse.Enabled = fromFile;
             txtCode.Enabled = !fromFile && OnlineReady;
@@ -1140,6 +1142,21 @@ namespace PrintPrice
             codeData = d;
             codeLoaded = Backup.Normalize(SampleCodeText) ?? "";
             rbMerge.Checked = true;
+            UpdateRestore();
+        }
+
+        /// Picture mode (issue #2 check): remembers the sample code in these (copied) settings before a window is built.
+        internal static void SampleRemember(AppSettings s)
+        {
+            s.SetBackupCode(SampleCodeText);
+            s.SetLastOnlineBackup(SampleTime);
+        }
+
+        /// Restore tab, "An online code" chosen, the remembered code in the box (nothing fetched).
+        internal void SampleRememberedRestore()
+        {
+            SelectedTab = TabRestore;
+            rbFromCode.Checked = true;
             UpdateRestore();
         }
 

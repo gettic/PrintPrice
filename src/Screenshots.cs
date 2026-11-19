@@ -138,6 +138,17 @@ namespace PrintPrice
                         Snap(bf, folder, "restore_done.png");          // the result
                         bf.Hide();
                     }
+                    // issue #2: a code remembered before the window is built (this used to crash while the window was built)
+                    var sr = s.Clone();
+                    BackupForm.SampleRemember(sr);
+                    using (var bf = new BackupForm(quotes, sr, BackupForm.TabRestore, true))
+                    {
+                        Place(bf);
+                        bf.Show();
+                        bf.SampleRememberedRestore();
+                        Snap(bf, folder, "restore_remembered.png");    // the remembered code filled in, "An online code"
+                        bf.Hide();
+                    }
                     using (var ask = BackupForm.NewReplaceAsk(312))
                         SnapForm(ask, folder, "restore_ask.png");     // the question before Replace
                     // the dark error window (issue #2) with a made-up error: first time, keeps happening

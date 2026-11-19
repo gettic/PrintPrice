@@ -21,3 +21,4 @@ plans/
 *.keystore
 credentials*.json
 .dev.vars
+.starter kit source (old local)/
