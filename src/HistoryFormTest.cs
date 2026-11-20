@@ -32,6 +32,9 @@ namespace PrintPrice
             arg = sp < 0 ? "" : line.Substring(sp + 1).Trim();
         }
 
+        /// "quote <id>" / "invoice <id>" -> the drawn page's model name (MainForm.TestHistoryFlow), for "expect model".
+        public static readonly Dictionary<string, string> PageModels = new Dictionary<string, string>();
+
         public static string Command(string line)
         {
             string cmd, arg;
@@ -131,6 +134,24 @@ namespace PrintPrice
                     var now = DateTime.Now;
                     string m = r != null ? names[(int)History.PrintStateOf(r, now)] : "-", fs = fr != null ? names[(int)History.PrintStateOf(fr, now)] : "-";
                     log.Check(w.Length == 2 && m == w[1] && fs == w[1], "status " + (w.Length > 0 ? w[0] : "?") + ": memory " + m + ", file " + fs + " (expected " + rest + ")");
+                    break;
+                }
+                case "model":
+                {
+                    // model <id> "<text>": the model name on the pages drawn by "quote <id>" / "invoice <id>" (each one drawn)
+                    int sp = rest.IndexOf(' ');
+                    string id = sp < 0 ? rest : rest.Substring(0, sp), want = sp < 0 ? "" : rest.Substring(sp + 1).Trim().Trim('"');
+                    var seen = new List<string>();
+                    bool ok = true;
+                    foreach (var kind in new[] { "quote", "invoice" })
+                    {
+                        string m;
+                        if (!PageModels.TryGetValue(kind + " " + id, out m)) continue;
+                        seen.Add(kind + " \"" + m + "\"");
+                        ok &= m == want;
+                    }
+                    log.Check(ok && seen.Count > 0, "model on " + id + "'s pages: " + (seen.Count > 0 ? string.Join(", ", seen) : "none drawn (quote / invoice <id> first)") +
+                                                    " (expected \"" + want + "\")");
                     break;
                 }
                 case "invoice":

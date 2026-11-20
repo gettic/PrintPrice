@@ -52,6 +52,12 @@ namespace PrintPrice
                     using (var sw = main.SampleScaleWindow("150")) if (sw != null) SnapForm(sw, folder, "scale.png");
                     using (var sw = main.SampleScaleWindow("500")) if (sw != null) SnapForm(sw, folder, "scale_toobig.png");
                     using (var sw = main.SampleScaleWindow("5")) if (sw != null) SnapForm(sw, folder, "scale_bad.png");
+                    // step 2: X / Y / Z (the lock off, 150 × 100 × 50 %), a height typed in mm (36 mm = 75 %), a STEP job
+                    // (the lock forced on, its note), a typed mm too big for 500 %
+                    using (var sw = main.SampleScaleWindowXyz(new double[] { 150, 100, 50 }, -1, 0, false)) if (sw != null) SnapForm(sw, folder, "scale_xyz.png");
+                    using (var sw = main.SampleScaleWindowXyz(new double[] { 100, 100, 101 }, 2, 36, false)) if (sw != null) SnapForm(sw, folder, "scale_xyz_mm.png");
+                    using (var sw = main.SampleScaleWindowXyz(null, -1, 0, true)) if (sw != null) SnapForm(sw, folder, "scale_locked.png");
+                    using (var sw = main.SampleScaleWindowXyz(new double[] { 100, 100, 101 }, 2, 900, false)) if (sw != null) SnapForm(sw, folder, "scale_xyz_mm_bad.png");
                     main.SetSampleScaledJob();
                     Snap(main, folder, "main_scaled.png");
                     main.SetSampleJob();   // back to 100 %

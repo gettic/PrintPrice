@@ -511,8 +511,18 @@ namespace PrintPrice
         public static SliceResult SliceFile(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament, CancellationToken ct,
                                             double scalePct = 100)
         {
-            if (IsScaled(scalePct) && IsGcodeFile(model)) throw new SliceException(ScaleGcodeText());
-            var scaleArgs = ScaleArgs(scalePct);
+            return SliceFile(exe, model, workDir, printer, nozzleSize, defaultFilament, ct, ScaleXyz.Uniform(scalePct));
+        }
+
+        /// Step 2: X/Y/Z. Uniform = --scale as above; different axes = a scaled copy of the model in workDir
+        /// (PrepareScaled: STL, OBJ, 3MF; STEP/AMF throw ScaleXyzFormatText) + "--ensure-on-bed". null = not scaled.
+        public static SliceResult SliceFile(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament, CancellationToken ct,
+                                            ScaleXyz scale)
+        {
+            scale = scale ?? ScaleXyz.None;
+            if (scale.IsScaled && IsGcodeFile(model)) throw new SliceException(ScaleGcodeText());
+            var scaleArgs = ScaleArgs(scale);
+            model = PrepareScaled(model, scale, workDir);
             printer = string.IsNullOrEmpty(printer) ? WorkDirPrinter(workDir) : FindPrinter(printer).Key;
             string outDir = Path.Combine(workDir, "out_" + Guid.NewGuid().ToString("N").Substring(0, 8));
             Directory.CreateDirectory(outDir);
@@ -844,10 +854,33 @@ namespace PrintPrice
                                                string nozzleSize, string defaultFilament, IProgress<string> progress, CancellationToken ct,
                                                double scalePct = 100)
         {
+            return SliceColours(exe, models, slots, colours, together, workDir, printer, nozzleSize, defaultFilament, progress, ct,
+                                ScaleXyz.Uniform(scalePct));
+        }
+
+        /// Step 2: the same with X/Y/Z (one scale for every file of the job; null = not scaled). Different axes: every
+        /// file must be STL / OBJ / 3MF (else ScaleXyzFormatText, before anything runs); plain files are sliced from their
+        /// scaled copies (PrepareScaled), projects through SliceFile.
+        public static SliceResult SliceColours(string exe, IList<KeyValuePair<string, string>> models, IList<int> slots,
+                                               IList<ColourChoice> colours, bool together, string workDir, string printer,
+                                               string nozzleSize, string defaultFilament, IProgress<string> progress, CancellationToken ct,
+                                               ScaleXyz scale)
+        {
             if (models == null || models.Count == 0) throw new SliceException(L.S("No model file to slice.", "Ingen modelfil at slice."));
+            scale = scale ?? ScaleXyz.None;
             // issue #8: one scale for every file of the job (refused for a G-code, checked before anything runs)
-            if (IsScaled(scalePct) && models.Any(m => IsGcodeFile(m.Value))) throw new SliceException(ScaleGcodeText());
-            var scaleArgs = ScaleArgs(scalePct);
+            if (scale.IsScaled && models.Any(m => IsGcodeFile(m.Value))) throw new SliceException(ScaleGcodeText());
+            if (scale.IsScaled && !scale.IsUniform)
+                foreach (var m in models)
+                    if (!CanScaleXyz(m.Value)) throw new SliceException(ScaleXyzFormatText(m.Key));
+            var scaleArgs = ScaleArgs(scale);
+            var scaledCopies = new Dictionary<int, string>();
+            Func<int, string> plainPath = i =>
+            {
+                string p;
+                if (!scaledCopies.TryGetValue(i, out p)) { p = PrepareScaled(models[i].Value, scale, workDir); scaledCopies[i] = p; }
+                return p;
+            };
             colours = colours ?? new List<ColourChoice>();
             printer = string.IsNullOrEmpty(printer) ? WorkDirPrinter(workDir) : FindPrinter(printer).Key;
             var colourFiles = PrepareColours(exe, printer, nozzleSize, colours, defaultFilament, workDir);
@@ -878,7 +911,7 @@ namespace PrintPrice
                         foreach (var p in colourFiles) types.Add(FilamentTypeOf(p));
                         string outDir = NewOutDir(workDir);
                         string load = string.Join(";", colourFiles);
-                        var r = RunSlice(exe, plain.Select(i => models[i].Value).ToList(), workDir, printer, load, load,
+                        var r = RunSlice(exe, plain.Select(plainPath).ToList(), workDir, printer, load, load,
                                          TogetherArgs(plain.Select(slotOf).ToList(), types).Concat(scaleArgs).ToList(), outDir,
                                          string.Join(", ", plain.Select(i => models[i].Key)), ct);
                         // too big for one plate: the CLI makes 2+ plates and puts plate 2 on filament 1 (wrong colours),
@@ -921,13 +954,13 @@ namespace PrintPrice
                     int slot = slotOf(i);
                     Report(progress, name, i, models.Count);
                     string cf = colourFiles[slot - 1];
-                    r = RunSlice(exe, new[] { path }, workDir, printer, cf, cf, scaleArgs.Count > 0 ? scaleArgs : null, NewOutDir(workDir), Path.GetFileName(path), ct);
+                    r = RunSlice(exe, new[] { plainPath(i) }, workDir, printer, cf, cf, scaleArgs.Count > 0 ? scaleArgs : null, NewOutDir(workDir), Path.GetFileName(path), ct);
                     offset = slot - 1;   // the run's slot 1 = this colour
                 }
                 else
                 {
-                    if (ReadAsSliced(path, scalePct)) { r = ReadSliceInfo(path, defaultFilament); r.FromSlicedFile = true; }
-                    else { Report(progress, name, i, models.Count); r = SliceFile(exe, path, workDir, printer, nozzleSize, defaultFilament, ct, scalePct); }
+                    if (ReadAsSliced(path, scale)) { r = ReadSliceInfo(path, defaultFilament); r.FromSlicedFile = true; }
+                    else { Report(progress, name, i, models.Count); r = SliceFile(exe, path, workDir, printer, nozzleSize, defaultFilament, ct, scale); }
                     offset = colourFiles.Count;
                 }
                 AddResult(total, r, name, offset);
@@ -1137,6 +1170,303 @@ namespace PrintPrice
         {
             return L.S("A G-code file can't be scaled; it is already sliced. Scale the model file instead.",
                        "En G-code-fil kan ikke skaleres, den er allerede slicet. Skalér modelfilen i stedet.");
+        }
+
+        // ---------- X/Y/Z scaling (issue #8 step 2) ----------
+        // Bambu Studio's CLI only scales uniformly. Different axes are written into a copy of the model in the work folder:
+        // 3MF = each <build><item transform>'s 3x3 part times the scale per bed axis (translation kept, meshes untouched),
+        // STL / OBJ = scaled vertices (normals n / s, normalised). Then "--ensure-on-bed" as for uniform scaling.
+
+        /// Same as IsScaled(pct) for an X/Y/Z scale (null = not scaled).
+        public static bool IsScaled(ScaleXyz s) { return s != null && s.IsScaled; }
+
+        /// Pure: the CLI arguments for an X/Y/Z scale: none when not scaled; uniform = ScaleArgs(pct) ("--scale f
+        /// --ensure-on-bed"); different axes = only "--ensure-on-bed" (the file is scaled by PrepareScaled). An axis outside
+        /// MinScalePct..MaxScalePct throws SliceException (ScaleRangeText).
+        public static List<string> ScaleArgs(ScaleXyz s)
+        {
+            if (!IsScaled(s)) return new List<string>();
+            if (!s.InRange) throw new SliceException(ScaleRangeText());
+            if (s.IsUniform) return ScaleArgs(s.Pct);
+            return new List<string> { "--ensure-on-bed" };
+        }
+
+        /// As ReadAsSliced(path, pct) for an X/Y/Z scale.
+        public static bool ReadAsSliced(string path, ScaleXyz s)
+        {
+            return IsSlicedProject(path) && !IsScaled(s);
+        }
+
+        /// Files that can get different X/Y/Z: .stl, .obj, .3mf (also sliced .gcode.3mf). STEP / AMF / G-code can't.
+        public static bool CanScaleXyz(string path)
+        {
+            string p = (path ?? "").Trim().ToLowerInvariant();
+            return p.EndsWith(".stl") || p.EndsWith(".obj") || p.EndsWith(".3mf");
+        }
+
+        /// "<name> can only be scaled the same in every direction (…)" (both languages).
+        public static string ScaleXyzFormatText(string name)
+        {
+            return L.F("{0} can only be scaled the same in every direction. Use the same % for X, Y and Z, or use an STL, OBJ or 3MF file.",
+                       "{0} kan kun skaleres ens i alle retninger. Brug samme % for X, Y og Z, eller brug en STL-, OBJ- eller 3MF-fil.",
+                       string.IsNullOrEmpty(name) ? L.S("This file", "Denne fil") : name);
+        }
+
+        /// The file to slice for this scale: the file itself when not scaled or uniform (--scale does it); else a scaled
+        /// copy with the same file name in workDir\scaled_<id>\ (STL, OBJ, 3MF; else SliceException ScaleXyzFormatText).
+        /// Read/write problems throw SliceException with the file's name.
+        public static string PrepareScaled(string path, ScaleXyz s, string workDir)
+        {
+            if (!IsScaled(s) || s.IsUniform) return path;
+            if (!s.InRange) throw new SliceException(ScaleRangeText());
+            string name = Path.GetFileName(path);
+            if (!CanScaleXyz(path)) throw new SliceException(ScaleXyzFormatText(name));
+            string dir = Path.Combine(workDir, "scaled_" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            string target = Path.Combine(dir, name);
+            try
+            {
+                string ext = Path.GetExtension(path).ToLowerInvariant();
+                if (ext == ".3mf") Scale3mfFile(path, target, s);
+                else if (ext == ".obj")
+                {
+                    using (var r = new StreamReader(path, System.Text.Encoding.UTF8, true))
+                    using (var w = new StreamWriter(target, false, new System.Text.UTF8Encoding(false)))
+                    {
+                        string line;
+                        while ((line = r.ReadLine()) != null) w.WriteLine(ScaleObjLine(line, s));
+                    }
+                }
+                else
+                {
+                    using (var inp = File.OpenRead(path))
+                    using (var outp = File.Create(target))
+                        ScaleStl(inp, outp, s);
+                }
+            }
+            catch (SliceException) { throw; }
+            catch (Exception ex)
+            {
+                throw new SliceException(L.F("Could not make the scaled copy of {0}: {1}", "Kunne ikke lave den skalerede kopi af {0}: {1}",
+                                             name, ex.Message));
+            }
+            return target;
+        }
+
+        /// Pure: a normal for a model scaled by (fx, fy, fz) = (nx/fx, ny/fy, nz/fz) normalised; a zero normal stays zero.
+        internal static double[] ScaleNormal(double nx, double ny, double nz, double fx, double fy, double fz)
+        {
+            double x = nx / fx, y = ny / fy, z = nz / fz;
+            double len = Math.Sqrt(x * x + y * y + z * z);
+            if (!(len > 1e-12)) return new[] { 0.0, 0.0, 0.0 };
+            return new[] { x / len, y / len, z / len };
+        }
+
+        /// Pure: true when the stream is a binary STL (length = 84 + 50 × the triangle count in bytes 80-83); else ASCII.
+        internal static bool IsBinaryStl(long length, byte[] first84)
+        {
+            if (first84 == null || first84.Length < 84 || length < 84) return false;
+            long count = BitConverter.ToUInt32(first84, 80);
+            return 84 + 50 * count == length;
+        }
+
+        /// Pure (streams): writes `input` (a binary or ASCII STL, must be seekable) scaled by s to `output`. Binary: the
+        /// 80-byte header, count and each triangle's 2 attribute bytes are kept; normals = ScaleNormal. ASCII: ScaleStlLine.
+        public static void ScaleStl(Stream input, Stream output, ScaleXyz s)
+        {
+            double fx = s.X / 100.0, fy = s.Y / 100.0, fz = s.Z / 100.0;
+            var head = new byte[84];
+            int got = 0;
+            while (got < 84) { int n = input.Read(head, got, 84 - got); if (n <= 0) break; got += n; }
+            bool binary = got == 84 && IsBinaryStl(input.Length, head);
+            long count = got == 84 ? BitConverter.ToUInt32(head, 80) : 0;
+            if (!binary && got == 84 && !StartsWithSolid(head))
+            {
+                // not "solid…" text and the count doesn't match the length: a binary STL whose count field is wrong (some
+                // exporters write 0) when the rest is whole triangles, else a broken file
+                if ((input.Length - 84) % 50 != 0) throw new InvalidDataException("not a complete STL file");
+                count = (input.Length - 84) / 50;
+                binary = true;
+            }
+            if (!binary)
+            {
+                input.Seek(0, SeekOrigin.Begin);
+                var r = new StreamReader(input, new System.Text.UTF8Encoding(false), false, 65536, true);
+                var w = new StreamWriter(output, new System.Text.UTF8Encoding(false), 65536, true);
+                string line;
+                while ((line = r.ReadLine()) != null) w.WriteLine(ScaleStlLine(line, s));
+                w.Flush();
+                return;
+            }
+            output.Write(head, 0, 80);
+            output.Write(BitConverter.GetBytes((uint)count), 0, 4);
+            var tri = new byte[50];
+            for (long t = 0; t < count; t++)
+            {
+                int k = 0;
+                while (k < 50) { int n = input.Read(tri, k, 50 - k); if (n <= 0) throw new InvalidDataException("STL ends early"); k += n; }
+                var nn = ScaleNormal(BitConverter.ToSingle(tri, 0), BitConverter.ToSingle(tri, 4), BitConverter.ToSingle(tri, 8), fx, fy, fz);
+                PutFloat(tri, 0, nn[0]); PutFloat(tri, 4, nn[1]); PutFloat(tri, 8, nn[2]);
+                for (int v = 0; v < 3; v++)
+                {
+                    int o = 12 + v * 12;
+                    PutFloat(tri, o, BitConverter.ToSingle(tri, o) * fx);
+                    PutFloat(tri, o + 4, BitConverter.ToSingle(tri, o + 4) * fy);
+                    PutFloat(tri, o + 8, BitConverter.ToSingle(tri, o + 8) * fz);
+                }
+                output.Write(tri, 0, 50);
+            }
+        }
+
+        /// The first non-space bytes are "solid" (an ASCII STL).
+        static bool StartsWithSolid(byte[] b)
+        {
+            int i = 0;
+            while (i < b.Length && (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' || b[i] == '\n' || b[i] == 0xEF || b[i] == 0xBB || b[i] == 0xBF)) i++;
+            return i + 5 <= b.Length && System.Text.Encoding.ASCII.GetString(b, i, 5).Equals("solid", StringComparison.OrdinalIgnoreCase);
+        }
+
+        static void PutFloat(byte[] b, int at, double v)
+        {
+            var x = BitConverter.GetBytes((float)v);
+            Buffer.BlockCopy(x, 0, b, at, 4);
+        }
+
+        static readonly Regex StlVertexRx = new Regex(@"^(\s*)(vertex|facet\s+normal)(\s+)(\S+)(\s+)(\S+)(\s+)(\S+)(.*)$", RegexOptions.IgnoreCase);
+        static readonly Regex ObjVertexRx = new Regex(@"^(\s*)(v|vn)(\s+)(\S+)(\s+)(\S+)(\s+)(\S+)(.*)$");
+
+        /// Pure: one ASCII STL line scaled: "vertex x y z" × (X, Y, Z) %, "facet normal …" = ScaleNormal; other lines (and
+        /// lines whose numbers don't parse) unchanged. Spacing kept; numbers written with an invariant dot ("R").
+        public static string ScaleStlLine(string line, ScaleXyz s)
+        {
+            var m = StlVertexRx.Match(line ?? "");
+            if (!m.Success) return line;
+            bool normal = !m.Groups[2].Value.Equals("vertex", StringComparison.OrdinalIgnoreCase);
+            return ScaleTriple(m, normal, s) ?? line;
+        }
+
+        /// Pure: one OBJ line scaled: "v x y z [w / colours…]" × (X, Y, Z) %, "vn x y z" = ScaleNormal; everything else
+        /// ("vt", "f", "o", comments, …) unchanged.
+        public static string ScaleObjLine(string line, ScaleXyz s)
+        {
+            var m = ObjVertexRx.Match(line ?? "");
+            if (!m.Success) return line;
+            return ScaleTriple(m, m.Groups[2].Value == "vn", s) ?? line;
+        }
+
+        static string ScaleTriple(Match m, bool normal, ScaleXyz s)
+        {
+            double x, y, z;
+            var inv = CultureInfo.InvariantCulture;
+            if (!double.TryParse(m.Groups[4].Value, NumberStyles.Float, inv, out x) ||
+                !double.TryParse(m.Groups[6].Value, NumberStyles.Float, inv, out y) ||
+                !double.TryParse(m.Groups[8].Value, NumberStyles.Float, inv, out z)) return null;
+            double fx = s.X / 100.0, fy = s.Y / 100.0, fz = s.Z / 100.0;
+            double[] v = normal ? ScaleNormal(x, y, z, fx, fy, fz) : new[] { x * fx, y * fy, z * fz };
+            return m.Groups[1].Value + m.Groups[2].Value + m.Groups[3].Value + v[0].ToString("R", inv) + m.Groups[5].Value +
+                   v[1].ToString("R", inv) + m.Groups[7].Value + v[2].ToString("R", inv) + m.Groups[9].Value;
+        }
+
+        /// Pure: a 3MF transform ("m00 m01 m02 m10 m11 m12 m20 m21 m22 tx ty tz", row vectors: p' = p·M + t) scaled along
+        /// the bed's X/Y/Z around the object's position: column j of the 3x3 part × the scale of axis j, translation kept.
+        /// null / empty = the identity. Not 12 numbers = null.
+        public static string ScaleTransform(string transform, ScaleXyz s)
+        {
+            var inv = CultureInfo.InvariantCulture;
+            string t = (transform ?? "").Trim();
+            if (t.Length == 0) t = "1 0 0 0 1 0 0 0 1 0 0 0";
+            var parts = t.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 12) return null;
+            var m = new double[12];
+            for (int i = 0; i < 12; i++)
+                if (!double.TryParse(parts[i], NumberStyles.Float, inv, out m[i])) return null;
+            var f = new[] { s.X / 100.0, s.Y / 100.0, s.Z / 100.0 };
+            for (int row = 0; row < 3; row++)
+                for (int col = 0; col < 3; col++)
+                    m[row * 3 + col] *= f[col];
+            return string.Join(" ", m.Select(v => v.ToString("0.#########", inv)));
+        }
+
+        static readonly Regex BuildRx = new Regex(@"<(?:\w+:)?build\b[^>]*?(?:/>|>.*?</(?:\w+:)?build>)", RegexOptions.Singleline);
+        static readonly Regex ItemRx = new Regex(@"<(?:\w+:)?item\b[^>]*?/?>", RegexOptions.Singleline);
+        static readonly Regex TransformAttrRx = new Regex(@"\btransform\s*=\s*(""([^""]*)""|'([^']*)')");
+
+        /// Pure: the 3MF root model's XML with every <build><item> scaled (ScaleTransform; an item without a transform
+        /// gets one). Only the <build> part is touched. Throws SliceException when there is no build item or a
+        /// transform can't be read.
+        public static string ScaleBuildItems(string modelXml, ScaleXyz s)
+        {
+            var b = BuildRx.Match(modelXml ?? "");
+            if (!b.Success) throw new SliceException(L.S("The 3MF file has no objects to scale.", "3MF-filen har ingen objekter at skalere."));
+            int items = 0;
+            bool bad = false;
+            string build = ItemRx.Replace(b.Value, im =>
+            {
+                items++;
+                string tag = im.Value;
+                var tm = TransformAttrRx.Match(tag);
+                string old = tm.Success ? (tm.Groups[2].Success && tm.Groups[2].Value.Length > 0 ? tm.Groups[2].Value : tm.Groups[3].Value) : null;
+                string scaled = ScaleTransform(old, s);
+                if (scaled == null) { bad = true; return tag; }
+                if (tm.Success) return tag.Substring(0, tm.Index) + "transform=\"" + scaled + "\"" + tag.Substring(tm.Index + tm.Length);
+                int end = tag.EndsWith("/>") ? tag.Length - 2 : tag.Length - 1;
+                return tag.Substring(0, end).TrimEnd() + " transform=\"" + scaled + "\"" + tag.Substring(end);
+            });
+            if (items == 0 || bad) throw new SliceException(L.S("The 3MF file's objects could not be scaled.", "3MF-filens objekter kunne ikke skaleres."));
+            return modelXml.Substring(0, b.Index) + build + modelXml.Substring(b.Index + b.Length);
+        }
+
+        const long MaxRootModelBytes = 256L * 1048576;   // a root model holding the whole mesh (some slicers) up to 256 MB
+
+        /// Pure: the root model part of a 3MF from _rels/.rels (the Target of the 3dmodel relationship), "3D/3dmodel.model"
+        /// when not found. Without the leading "/".
+        internal static string RootModelPath(string relsXml)
+        {
+            var m = Regex.Match(relsXml ?? "", @"<Relationship\b[^>]*Type\s*=\s*""[^""]*3dmodel""[^>]*>", RegexOptions.IgnoreCase);
+            if (m.Success)
+            {
+                var t = Regex.Match(m.Value, @"Target\s*=\s*""([^""]+)""");
+                if (t.Success) return t.Groups[1].Value.TrimStart('/');
+            }
+            return "3D/3dmodel.model";
+        }
+
+        /// Copies a 3MF to target with its root model's build items scaled (ScaleBuildItems); every other part is copied
+        /// as it is (meshes, colours, plates, settings).
+        static void Scale3mfFile(string path, string target, ScaleXyz s)
+        {
+            using (var src = ZipFile.OpenRead(path))
+            {
+                var relsEntry = src.GetEntry("_rels/.rels");
+                string rels = null;
+                if (relsEntry != null && relsEntry.Length < 1048576)
+                    using (var r = new StreamReader(relsEntry.Open())) rels = r.ReadToEnd();
+                string rootName = RootModelPath(rels);
+                var root = src.Entries.FirstOrDefault(e => string.Equals(e.FullName, rootName, StringComparison.OrdinalIgnoreCase));
+                if (root == null) throw new SliceException(L.S("The 3MF file has no model part.", "3MF-filen har ingen modeldel."));
+                if (root.Length > MaxRootModelBytes)
+                    throw new SliceException(L.S("The 3MF file is too big to scale X, Y and Z separately. Use the same % for all three.",
+                                                 "3MF-filen er for stor til at skalere X, Y og Z hver for sig. Brug samme % for alle tre."));
+                string xml;
+                using (var r = new StreamReader(root.Open(), System.Text.Encoding.UTF8, true)) xml = r.ReadToEnd();
+                string scaled = ScaleBuildItems(xml, s);
+                using (var dst = ZipFile.Open(target, ZipArchiveMode.Create))
+                {
+                    foreach (var e in src.Entries)
+                    {
+                        var ne = dst.CreateEntry(e.FullName, CompressionLevel.Fastest);
+                        using (var o = ne.Open())
+                        {
+                            if (e == root)
+                            {
+                                var bytes = new System.Text.UTF8Encoding(false).GetBytes(scaled);
+                                o.Write(bytes, 0, bytes.Length);
+                            }
+                            else using (var i = e.Open()) i.CopyTo(o);
+                        }
+                    }
+                }
+            }
         }
 
         /// Pure: the object sizes from result.json -> res.SizeX/Y/Z (the biggest by box volume) and SizeObjects.

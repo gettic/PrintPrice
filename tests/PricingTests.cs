@@ -3668,7 +3668,9 @@ namespace PrintPrice.Tests
             PrintStateTests();
             StatusFilterTests();
             ScaleTests();
+            ScaleXyzTests();
             ScaleSlicerTests();
+            ScaleFileTests();
             InvoiceListTests();
             CombinedBillTests();
             ReviewFixTests();
@@ -4852,6 +4854,230 @@ namespace PrintPrice.Tests
             // replace restore takes the backup's record as it is
             res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, true, false);
             True("Scale restore (replace): 150", res.Quotes.Count == 1 && res.Quotes[0].Scale == 150);
+        }
+
+        // ---------- issue #8 step 2: separate X/Y/Z scale on History records (QuoteRecord.ScaleX/Y/Z) ----------
+
+        static string Xyz(QuoteRecord r) { var a = History.ScaleXyzOf(r); return a[0] + "/" + a[1] + "/" + a[2]; }
+
+        static void ScaleXyzTests()
+        {
+            var t = new DateTime(2026, 11, 20, 12, 0, 0);
+            // old records: no axes = the uniform Scale on every axis
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\"},{\"Id\":\"b\",\"Scale\":150}]}");
+            True("ScaleXyz: old records uniform 100/100/100 and 150/150/150", History.IsUniformScale(old[0]) && Xyz(old[0]) == "100/100/100"
+                 && History.IsUniformScale(old[1]) && Xyz(old[1]) == "150/150/150" && old[1].ScaleX == 0);
+            // X/Y/Z: axes stored, Scale = X for older versions, text "150 × 100 × 50 %"
+            var r = HistRecord(t);
+            History.SetScale(r, 150, 100, 50);
+            True("ScaleXyz: 150/100/50 stored, not uniform, Scale = X = 150", Xyz(r) == "150/100/50" && !History.IsUniformScale(r)
+                 && r.Scale == 150 && History.ScaleOf(r) == 150);
+            True("ScaleXyz: text \"150 × 100 × 50 %\", name \"3D Benchy (150 × 100 × 50 %)\"", History.ScaleText(r) == "150 × 100 × 50 %"
+                 && History.WithScale("3D Benchy", r) == "3D Benchy (150 × 100 × 50 %)");
+            // JSON round trip; the file still has "Scale":150 for older versions; CopyQuotes keeps the axes
+            string json = History.ToJson(new List<QuoteRecord> { r });
+            var back = History.ParseJson(json);
+            True("ScaleXyz: JSON round trip + \"Scale\":150 written", Xyz(back[0]) == "150/100/50" && json.Contains("\"Scale\":150"));
+            True("ScaleXyz: CopyQuotes keeps 150/100/50", Xyz(History.CopyQuotes(new List<QuoteRecord> { r })[0]) == "150/100/50");
+            // equal axes fold into the uniform scale; all 100 = not scaled; uniform SetScale clears the axes
+            var u = HistRecord(t); History.SetScale(u, 120, 120, 120);
+            True("ScaleXyz: 120/120/120 -> uniform 120 %, axes 0", History.IsUniformScale(u) && u.Scale == 120 && u.ScaleX == 0 && u.ScaleZ == 0
+                 && History.ScaleText(u) == "120 %");
+            var n = HistRecord(t); History.SetScale(n, 100, 100, 100);
+            True("ScaleXyz: 100/100/100 -> \"\"", n.Scale == 100 && n.ScaleX == 0 && History.ScaleText(n) == "" && History.WithScale("Vase", n) == "Vase");
+            var c = HistRecord(t); History.SetScale(c, 150, 100, 50); History.SetScale(c, 80);
+            True("ScaleXyz: uniform SetScale 80 clears the axes", Xyz(c) == "80/80/80" && c.ScaleX == 0 && c.ScaleY == 0 && c.ScaleZ == 0);
+            // bad axes read as 100: 0 / 5000 -> 100 (X kept 150); all bad -> uniform 100
+            var bad = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Scale\":150,\"ScaleX\":150,\"ScaleY\":0,\"ScaleZ\":5000},"
+                                        + "{\"Id\":\"b\",\"ScaleX\":-1,\"ScaleY\":2000,\"ScaleZ\":0.5}]}");
+            True("ScaleXyz: 150/0/5000 -> 150/100/100, \"150 × 100 × 100 %\"", Xyz(bad[0]) == "150/100/100" && History.ScaleText(bad[0]) == "150 × 100 × 100 %");
+            True("ScaleXyz: -1/2000/0,5 -> uniform 100", History.IsUniformScale(bad[1]) && bad[1].Scale == 100 && bad[1].ScaleX == 0 && History.ScaleText(bad[1]) == "");
+            // texts: one decimal at most; rounding to all 100 = ""
+            True("ScaleText xyz: 12,5 × 100 × 33,3 %; 100,04/100/99,96 -> \"\"; 150/150,04/150 -> 150 %", History.ScaleText(12.5, 100, 33.333) == "12,5 × 100 × 33,3 %"
+                 && History.ScaleText(100.04, 100, 99.96) == "" && History.ScaleText(150, 150.04, 150) == "150 %");
+            // a different X/Y/Z is a different quote (same numbers, 2 min apart)
+            var a1 = HistRecord(t); var a2 = HistRecord(t.AddMinutes(2));
+            History.SetScale(a1, 150, 100, 50); History.SetScale(a2, 150, 100, 50);
+            bool same = History.SameQuote(a1, a2);
+            History.SetScale(a2, 150, 100, 60);
+            bool otherZ = History.SameQuote(a1, a2);
+            History.SetScale(a2, 150);
+            True("ScaleXyz: same X/Y/Z = same quote; other Z or uniform 150 = not", same && !otherZ && !History.SameQuote(a1, a2));
+            // merge: an older version kept only Scale = 150 here -> the backup's axes come back; none here -> filled; own axes stay
+            var theirs = BRec("X", "2026-11-20 12:00:00"); History.SetScale(theirs, 150, 100, 50);
+            var mine = BRec("X", "2026-11-20 12:00:00"); History.SetScale(mine, 150);
+            var res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("ScaleXyz merge: X only here (older version) -> 150/100/50", res.Updated == 1 && Xyz(res.Quotes[0]) == "150/100/50");
+            var plain = BRec("X", "2026-11-20 12:00:00");
+            res = History.Combine(new List<QuoteRecord> { plain }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("ScaleXyz merge: none here -> 150/100/50", Xyz(res.Quotes[0]) == "150/100/50");
+            var own = BRec("X", "2026-11-20 12:00:00"); History.SetScale(own, 80, 90, 100);
+            res = History.Combine(new List<QuoteRecord> { own }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("ScaleXyz merge: own 80/90/100 stays", Xyz(res.Quotes[0]) == "80/90/100");
+        }
+
+        // ---------- issue #8 step 2, online's X/Y/Z helpers (ScaleXyz in SliceInfo.cs, file scaling in Slicer.cs) ----------
+
+        // a stream that says it is longer than it is (a binary STL cut off after its size was checked)
+        class LongerStream : System.IO.MemoryStream
+        {
+            readonly long fake;
+            public LongerStream(byte[] b, long fakeLength) : base(b) { fake = fakeLength; }
+            public override long Length { get { return fake; } }
+        }
+
+        static byte[] StlTriangle(float[] n, float[] v, byte a0, byte a1)
+        {
+            var b = new byte[50];
+            for (int i = 0; i < 3; i++) Buffer.BlockCopy(BitConverter.GetBytes(n[i]), 0, b, i * 4, 4);
+            for (int i = 0; i < 9; i++) Buffer.BlockCopy(BitConverter.GetBytes(v[i]), 0, b, 12 + i * 4, 4);
+            b[48] = a0; b[49] = a1;
+            return b;
+        }
+
+        static float F32(byte[] b, int at) { return BitConverter.ToSingle(b, at); }
+
+        static void ScaleFileTests()
+        {
+            ScaleXyz s;
+            // ---- ScaleXyz.TryParse
+            True("ScaleXyz.TryParse: \"150\" / \"150 %\" -> uniform 150", ScaleXyz.TryParse("150", out s) && s.IsUniform && s.X == 150
+                 && ScaleXyz.TryParse("150 %", out s) && s.IsUniform && s.X == 150);
+            True("ScaleXyz.TryParse: \"87,5\" -> uniform 87,5", ScaleXyz.TryParse("87,5", out s) && s.IsUniform && s.X == 87.5);
+            bool allXyz = true;
+            foreach (var txt in new[] { "150,100,50", "150 × 100 × 50", "150x100x50", "150;100;50", "150 100 50" })
+                if (!ScaleXyz.TryParse(txt, out s) || s.X != 150 || s.Y != 100 || s.Z != 50) allXyz = false;
+            True("ScaleXyz.TryParse: 150,100,50 / × / x / ; / spaces -> 150 100 50", allXyz);
+            True("ScaleXyz.TryParse: 9 / 501 / abc / \"\" / 150,100,600 rejected", !ScaleXyz.TryParse("9", out s) && !ScaleXyz.TryParse("501", out s)
+                 && !ScaleXyz.TryParse("abc", out s) && !ScaleXyz.TryParse("", out s) && !ScaleXyz.TryParse("150,100,600", out s));
+            True("ScaleXyz.TryParse: \"150,100\" refused (two numbers, not 150,1 %)", !ScaleXyz.TryParse("150,100", out s));
+            True("ScaleXyz.TryParse: \"87,25\" -> uniform 87,3 (1 decimal)", ScaleXyz.TryParse("87,25", out s) && s.IsUniform && Math.Abs(s.X - 87.3) < 1e-9);
+            // ---- ScaleXyz
+            var z = new ScaleXyz(0, -5, double.NaN);
+            True("ScaleXyz: 0 / -5 / NaN -> 100/100/100, not scaled", z.X == 100 && z.Y == 100 && z.Z == 100 && !z.IsScaled && z.IsUniform);
+            True("ScaleXyz: Uniform(150) uniform, text \"150 %\"", ScaleXyz.Uniform(150).IsUniform && ScaleXyz.Uniform(150).Text == "150 %");
+            True("ScaleXyz: texts \"150 × 100 × 50 %\", \"87,5 × 100 × 100 %\"", new ScaleXyz(150, 100, 50).Text == "150 × 100 × 50 %"
+                 && new ScaleXyz(87.5, 100, 100).Text == "87,5 × 100 × 100 %" && !new ScaleXyz(150, 100, 50).IsUniform);
+            True("ScaleXyz: InRange false for 600, true for 150/100/50", !new ScaleXyz(600, 100, 100).InRange && new ScaleXyz(150, 100, 50).InRange);
+            // ---- ScaleArgs(ScaleXyz)
+            True("ScaleArgs xyz: None -> none; Uniform(150) -> --scale 1.5 --ensure-on-bed; 150/100/50 -> --ensure-on-bed",
+                 BambuSlicer.ScaleArgs(ScaleXyz.None).Count == 0 && string.Join(" ", BambuSlicer.ScaleArgs(ScaleXyz.Uniform(150))) == "--scale 1.5 --ensure-on-bed"
+                 && string.Join(" ", BambuSlicer.ScaleArgs(new ScaleXyz(150, 100, 50))) == "--ensure-on-bed");
+            bool threw = false;
+            try { BambuSlicer.ScaleArgs(new ScaleXyz(600, 100, 100)); } catch (SliceException) { threw = true; }
+            True("ScaleArgs xyz: 600/100/100 throws SliceException", threw);
+            // ---- CanScaleXyz
+            True("CanScaleXyz: .stl .OBJ .3mf .gcode.3mf yes", BambuSlicer.CanScaleXyz(@"C:\x\a.stl") && BambuSlicer.CanScaleXyz(@"C:\x\a.OBJ")
+                 && BambuSlicer.CanScaleXyz(@"C:\x\a.3mf") && BambuSlicer.CanScaleXyz(@"C:\x\x.gcode.3mf"));
+            True("CanScaleXyz: .step .stp .amf .gcode no", !BambuSlicer.CanScaleXyz(@"C:\x\a.step") && !BambuSlicer.CanScaleXyz(@"C:\x\a.stp")
+                 && !BambuSlicer.CanScaleXyz(@"C:\x\a.amf") && !BambuSlicer.CanScaleXyz(@"C:\x\a.gcode"));
+            // ---- PrepareScaled: uniform / none = same path, nothing written; X/Y/Z on STEP refused before writing
+            string work = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-scale-work-not-made");
+            string step = @"C:\x\part.step";
+            True("PrepareScaled: Uniform(150) and None = same path, no folder", BambuSlicer.PrepareScaled(step, ScaleXyz.Uniform(150), work) == step
+                 && BambuSlicer.PrepareScaled(step, ScaleXyz.None, work) == step && !System.IO.Directory.Exists(work));
+            threw = false;
+            try { BambuSlicer.PrepareScaled(step, new ScaleXyz(150, 100, 50), work); } catch (SliceException) { threw = true; }
+            True("PrepareScaled: 150/100/50 on .step throws SliceException, no folder", threw && !System.IO.Directory.Exists(work));
+            // ---- ScaleNormal: (0,0,1) at 100/100/50 -> (0,0,2) -> (0,0,1); (1,1,0) at 2/1/1 -> (0,5; 1; 0) / √1,25 = (0,4472; 0,8944; 0)
+            var n1 = BambuSlicer.ScaleNormal(0, 0, 1, 1, 1, 0.5);
+            var n2 = BambuSlicer.ScaleNormal(1, 1, 0, 2, 1, 1);
+            var n0 = BambuSlicer.ScaleNormal(0, 0, 0, 2, 1, 1);
+            True("ScaleNormal: (0,0,1) stays; (1,1,0) at X 2 -> (0,4472; 0,8944; 0); zero stays zero", n1[0] == 0 && n1[1] == 0 && n1[2] == 1
+                 && Math.Abs(n2[0] - 0.4472136) < 1e-6 && Math.Abs(n2[1] - 0.8944272) < 1e-6 && n2[2] == 0 && n0[0] == 0 && n0[1] == 0 && n0[2] == 0);
+            // ---- ScaleStlLine / ScaleObjLine at 200/100/50: (1,2,3) -> (2,2,1,5)
+            var s2 = new ScaleXyz(200, 100, 50);
+            True("ScaleStlLine: \"  vertex 1 2 3\" -> \"  vertex 2 2 1.5\"", BambuSlicer.ScaleStlLine("  vertex 1 2 3", s2) == "  vertex 2 2 1.5");
+            True("ScaleStlLine: normal 0 0 1 / outer loop / solid x / vertex a b c unchanged", BambuSlicer.ScaleStlLine("facet normal 0 0 1", s2) == "facet normal 0 0 1"
+                 && BambuSlicer.ScaleStlLine("outer loop", s2) == "outer loop" && BambuSlicer.ScaleStlLine("solid x", s2) == "solid x"
+                 && BambuSlicer.ScaleStlLine("vertex a b c", s2) == "vertex a b c");
+            True("ScaleObjLine: v 1 2 3 -> v 2 2 1.5; colour tail kept; vn 1 0 0 stays", BambuSlicer.ScaleObjLine("v 1 2 3", s2) == "v 2 2 1.5"
+                 && BambuSlicer.ScaleObjLine("v 1 2 3 0.5 0.5 0.5", s2) == "v 2 2 1.5 0.5 0.5 0.5" && BambuSlicer.ScaleObjLine("vn 1 0 0", s2) == "vn 1 0 0");
+            True("ScaleObjLine: vt / f / comment unchanged", BambuSlicer.ScaleObjLine("vt 0.5 0.5", s2) == "vt 0.5 0.5" && BambuSlicer.ScaleObjLine("f 1 2 3", s2) == "f 1 2 3"
+                 && BambuSlicer.ScaleObjLine("# c", s2) == "# c");
+            // ---- ScaleStl binary: 2 triangles, header "H" x 80, attribute bytes AB CD; at 200/100/50: (1,2,3) -> (2,2,1,5), (7,8,9) -> (14,8,4,5)
+            var head = new byte[84];
+            for (int i = 0; i < 80; i++) head[i] = (byte)'H';
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)2), 0, head, 80, 4);
+            var t1 = StlTriangle(new float[] { 0, 0, 1 }, new float[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 }, 0xAB, 0xCD);
+            var stl = new byte[184];
+            Buffer.BlockCopy(head, 0, stl, 0, 84); Buffer.BlockCopy(t1, 0, stl, 84, 50); Buffer.BlockCopy(t1, 0, stl, 134, 50);
+            True("IsBinaryStl: 84 + 50 × 2 = 184 with count 2 -> binary; 144 bytes -> not", BambuSlicer.IsBinaryStl(184, head) && !BambuSlicer.IsBinaryStl(144, head));
+            var outB = new System.IO.MemoryStream();
+            BambuSlicer.ScaleStl(new System.IO.MemoryStream(stl), outB, s2);
+            var o = outB.ToArray();
+            bool headSame = o.Length == 184;
+            for (int i = 0; headSame && i < 84; i++) if (o[i] != stl[i]) headSame = false;
+            True("ScaleStl binary: same length, header + count kept, attribute bytes kept", headSame && o[84 + 48] == 0xAB && o[84 + 49] == 0xCD && o[134 + 49] == 0xCD);
+            True("ScaleStl binary: vertices (2,2,1,5) (8,5,3) (14,8,4,5), normal (0,0,1)", F32(o, 84 + 12) == 2 && F32(o, 84 + 16) == 2 && F32(o, 84 + 20) == 1.5f
+                 && F32(o, 84 + 24) == 8 && F32(o, 84 + 28) == 5 && F32(o, 84 + 32) == 3 && F32(o, 134 + 36) == 14 && F32(o, 134 + 40) == 8 && F32(o, 134 + 44) == 4.5f
+                 && F32(o, 84) == 0 && F32(o, 92) == 1);
+            // a binary STL whose triangles end early (the stream claims 184 bytes, holds 144)
+            var cut = new byte[144];
+            Buffer.BlockCopy(stl, 0, cut, 0, 144);
+            threw = false;
+            try { BambuSlicer.ScaleStl(new LongerStream(cut, 184), new System.IO.MemoryStream(), s2); }
+            catch (System.IO.InvalidDataException) { threw = true; }
+            True("ScaleStl binary: cut off -> InvalidDataException", threw);
+            // not "solid" text, count 5 but 150 bytes = 84 + 66 (66 is no whole number of 50-byte triangles) -> broken
+            var broken = new byte[150];
+            Buffer.BlockCopy(head, 0, broken, 0, 80);
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)5), 0, broken, 80, 4);
+            threw = false;
+            try { BambuSlicer.ScaleStl(new System.IO.MemoryStream(broken), new System.IO.MemoryStream(), s2); }
+            catch (System.IO.InvalidDataException) { threw = true; }
+            True("ScaleStl: binary-looking, count 5, 150 bytes -> InvalidDataException", threw);
+            // count field 0 but 184 bytes = 84 + 2 × 50: read as binary with count 2 (written as 2), vertices scaled
+            var zero = (byte[])stl.Clone();
+            Buffer.BlockCopy(BitConverter.GetBytes((uint)0), 0, zero, 80, 4);
+            var outZ = new System.IO.MemoryStream();
+            BambuSlicer.ScaleStl(new System.IO.MemoryStream(zero), outZ, s2);
+            var oz = outZ.ToArray();
+            True("ScaleStl: count 0 + 2 whole triangles -> binary, count 2, (1,2,3) -> (2,2,1,5)", oz.Length == 184 && BitConverter.ToUInt32(oz, 80) == 2
+                 && oz[0] == (byte)'H' && F32(oz, 84 + 12) == 2 && F32(oz, 84 + 20) == 1.5f && oz[134 + 49] == 0xCD);
+            // ASCII
+            string ascii = "solid t\nfacet normal 0 0 1\n outer loop\n  vertex 1 2 3\n  vertex 4 5 6\n  vertex 7 8 9\n endloop\nendfacet\nendsolid t\n";
+            var ab = System.Text.Encoding.ASCII.GetBytes(ascii);
+            var h84 = new byte[84]; Buffer.BlockCopy(ab, 0, h84, 0, 84);
+            True("IsBinaryStl: ASCII \"solid\" file -> false", !BambuSlicer.IsBinaryStl(ab.Length, h84));
+            var outA = new System.IO.MemoryStream();
+            BambuSlicer.ScaleStl(new System.IO.MemoryStream(ab), outA, s2);
+            string at = System.Text.Encoding.UTF8.GetString(outA.ToArray());
+            True("ScaleStl ASCII: all vertices scaled, rest kept", at.Contains("  vertex 2 2 1.5") && at.Contains("  vertex 8 5 3") && at.Contains("  vertex 14 8 4.5")
+                 && at.Contains("facet normal 0 0 1") && at.StartsWith("solid t") && at.Contains("endsolid t") && !at.Contains("vertex 1 2 3"));
+            // ---- ScaleTransform at 150/100/50: column j × axis j, translation kept
+            var s3 = new ScaleXyz(150, 100, 50);
+            True("ScaleTransform: none -> 1.5 0 0 0 1 0 0 0 0.5 0 0 0", BambuSlicer.ScaleTransform(null, s3) == "1.5 0 0 0 1 0 0 0 0.5 0 0 0");
+            True("ScaleTransform: Benchy item, translation kept", BambuSlicer.ScaleTransform("1 0 0 0 1 0 0 0 1 127.17549 128 0", s3)
+                 == "1.5 0 0 0 1 0 0 0 0.5 127.17549 128 0");
+            True("ScaleTransform: 90° about Z at X 200 -> world X longer (-1 -> -2)", BambuSlicer.ScaleTransform("0 1 0 -1 0 0 0 0 1 10 20 0", new ScaleXyz(200, 100, 100))
+                 == "0 1 0 -2 0 0 0 0 1 10 20 0");
+            True("ScaleTransform: 11 numbers / words -> null", BambuSlicer.ScaleTransform("1 0 0 0 1 0 0 0 1 0 0", s3) == null
+                 && BambuSlicer.ScaleTransform("a b c d e f g h i j k l", s3) == null);
+            // ---- ScaleBuildItems (trimmed 3D/3dmodel.model of plans\issue8\files\benchy_project.3mf)
+            const string model = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\" "
+                + "xmlns:p=\"http://schemas.microsoft.com/3dmanufacturing/production/2015/06\" requiredextensions=\"p\">\n <resources>\n"
+                + "  <object id=\"2\" type=\"model\">\n   <components>\n    <component p:path=\"/3D/Objects/object_1.model\" objectid=\"1\" "
+                + "transform=\"1 0 0 0 1 0 0 0 1 0.824500084 0 24\"/>\n   </components>\n  </object>\n </resources>\n"
+                + " <build p:UUID=\"2c7c17d8\">\n  <item objectid=\"2\" p:UUID=\"00000002\" transform=\"1 0 0 0 1 0 0 0 1 127.17549 128 0\" printable=\"1\"/>\n </build>\n</model>";
+            string sb = BambuSlicer.ScaleBuildItems(model, s3);
+            True("ScaleBuildItems: item scaled, component untouched", sb.Contains("transform=\"1.5 0 0 0 1 0 0 0 0.5 127.17549 128 0\" printable=\"1\"/>")
+                 && sb.Contains("transform=\"1 0 0 0 1 0 0 0 1 0.824500084 0 24\"") && !sb.Contains("\"1 0 0 0 1 0 0 0 1 127.17549 128 0\""));
+            string two = "<model><build><item objectid=\"2\"/><item objectid=\"3\" transform=\"1 0 0 0 1 0 0 0 1 5 5 0\"/></build></model>";
+            string tb = BambuSlicer.ScaleBuildItems(two, s3);
+            True("ScaleBuildItems: item without transform gets one; two items both scaled", tb.Contains("<item objectid=\"2\" transform=\"1.5 0 0 0 1 0 0 0 0.5 0 0 0\"/>")
+                 && tb.Contains("<item objectid=\"3\" transform=\"1.5 0 0 0 1 0 0 0 0.5 5 5 0\"/>"));
+            string pre = "<m:model><m:build><m:item objectid=\"1\" transform=\"1 0 0 0 1 0 0 0 1 5 5 0\"/></m:build></m:model>";
+            True("ScaleBuildItems: prefixed <m:build> / <m:item>", BambuSlicer.ScaleBuildItems(pre, s3).Contains("transform=\"1.5 0 0 0 1 0 0 0 0.5 5 5 0\""));
+            threw = false;
+            try { BambuSlicer.ScaleBuildItems("<model><resources/></model>", s3); } catch (SliceException) { threw = true; }
+            True("ScaleBuildItems: no <build> -> SliceException", threw);
+            // ---- RootModelPath
+            string rels = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\n"
+                + " <Relationship Target=\"/3D/3dmodel.model\" Id=\"rel-1\" Type=\"http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel\"/>\n</Relationships>";
+            True("RootModelPath: Bambu rels -> 3D/3dmodel.model; /3D/model.model -> 3D/model.model; null -> default",
+                 BambuSlicer.RootModelPath(rels) == "3D/3dmodel.model" && BambuSlicer.RootModelPath(rels.Replace("/3D/3dmodel.model", "/3D/model.model")) == "3D/model.model"
+                 && BambuSlicer.RootModelPath(null) == "3D/3dmodel.model");
         }
 
         // ---------- issue #8 step 1, online's pure helpers in Slicer.cs / SliceInfo.cs ----------

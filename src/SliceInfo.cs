@@ -53,6 +53,74 @@ namespace PrintPrice
         public int SizeObjects;
     }
 
+    /// Issue #8 step 2: one job's scale per axis, in percent (100 = as the file is). Uniform (X = Y = Z) slices with
+    /// Bambu Studio's --scale; different axes are written into a scaled copy of the model (BambuSlicer.PrepareScaled:
+    /// STL, OBJ, 3MF only). Pure; the website compiles it too.
+    public sealed class ScaleXyz
+    {
+        /// The Scale window's limits per axis (percent); same as BambuSlicer.MinScalePct / MaxScalePct.
+        public const double Min = 10, Max = 500;
+        public readonly double X, Y, Z;
+
+        /// Axes <= 0 / NaN / infinity count as 100 (like a record without a scale).
+        public ScaleXyz(double x, double y, double z)
+        {
+            X = Clean(x); Y = Clean(y); Z = Clean(z);
+        }
+
+        static double Clean(double v) { return double.IsNaN(v) || double.IsInfinity(v) || v <= 0 ? 100 : v; }
+
+        public static ScaleXyz Uniform(double pct) { return new ScaleXyz(pct, pct, pct); }
+        public static readonly ScaleXyz None = new ScaleXyz(100, 100, 100);
+
+        static bool Same(double a, double b) { return Math.Abs(a - b) < 0.005; }
+        /// All three axes the same (then Pct is the step-1 single scale).
+        public bool IsUniform { get { return Same(X, Y) && Same(Y, Z); } }
+        /// Any axis not 100.
+        public bool IsScaled { get { return !Same(X, 100) || !Same(Y, 100) || !Same(Z, 100); } }
+        /// The uniform percent (X when the axes differ).
+        public double Pct { get { return X; } }
+        /// Every axis within Min..Max.
+        public bool InRange { get { return In(X) && In(Y) && In(Z); } }
+        static bool In(double v) { return v >= Min - 0.005 && v <= Max + 0.005; }
+
+        /// "150 %" (uniform), "150 × 100 × 50 %" (X × Y × Z), "100 %" when not scaled. Danish comma, up to 1 decimal.
+        public string Text
+        {
+            get
+            {
+                if (IsUniform) return F(X) + " %";
+                return F(X) + " × " + F(Y) + " × " + F(Z) + " %";
+            }
+        }
+        static string F(double v) { return Math.Round(v, 1, MidpointRounding.AwayFromZero).ToString("0.#", Num.Dk); }
+
+        /// Pure: "150", "150 %", "87,5" / "87.5" = uniform; "150 × 100 × 50", "150x100x50", "150; 100; 50", "150/100/50",
+        /// "150 100 50" or "150,100,50" (exactly three comma parts, so "87,5" stays one number) = X/Y/Z; a trailing "%"
+        /// is fine. Each axis must be a number in Min..Max (rounded to 1 decimal); else false.
+        public static bool TryParse(string text, out ScaleXyz scale)
+        {
+            scale = null;
+            string s = (text ?? "").Trim().Replace("%", " ").Trim();
+            if (s.Length == 0) return false;
+            string[] parts = Regex.Split(s, @"\s*[×xX*;/]\s*|\s+");
+            if (parts.Length == 1 && s.Split(',').Length == 3) parts = s.Split(',');
+            // "150,100" is two numbers typed with a comma, not 150,1 %: a decimal comma takes at most 2 digits here
+            if (parts.Length == 1) { var c = s.Split(','); if (c.Length == 2 && c[1].Trim().Length >= 3) return false; }
+            parts = parts.Select(p => p.Trim()).Where(p => p.Length > 0).ToArray();
+            if (parts.Length != 1 && parts.Length != 3) return false;
+            var v = new double[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (!Num.TryParse(parts[i], out v[i])) return false;
+                v[i] = Math.Round(v[i], 1, MidpointRounding.AwayFromZero);
+                if (!In(v[i])) return false;
+            }
+            scale = parts.Length == 1 ? Uniform(v[0]) : new ScaleXyz(v[0], v[1], v[2]);
+            return true;
+        }
+    }
+
     /// One plate of a sliced print (idea 21): from slice_info.config (+ names from model_settings.config); G-code = one plate.
     public sealed class PlateInfo
     {

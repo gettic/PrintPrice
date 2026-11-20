@@ -593,6 +593,30 @@ namespace PrintPrice
             }
 
             /// One line, cut with "…" when too long (then remembered for the dark tooltip, in content coordinates).
+            /// The card's model name; a scaled job's " (150 × 100 × 50 %)" is always shown whole: when the name doesn't fit,
+            /// the model part gets the "…" (the full name in the dark tooltip). Too narrow for the scale alone = cut as one.
+            void DrawName(Graphics g, QuoteRecord r, Rectangle rc, Color c)
+            {
+                string full = ModelText(r), scale = History.ScaleText(r);
+                if (scale.Length == 0 || TextW(g, full, NameFont) <= rc.Width) { DrawText(g, r, full, NameFont, rc, c, false); return; }
+                // the scale whole (compact "150×100×50 %" when the full one leaves under 40 px of the name)
+                string name = History.ModelText(r), tail = null;
+                int tw = 0;
+                foreach (var t in new[] { " (" + scale + ")", " (" + scale.Replace(" × ", "×") + ")" })
+                {
+                    tw = TextW(g, t, NameFont);
+                    if (tw <= rc.Width - P(40)) { tail = t; break; }
+                }
+                if (tail == null) { DrawText(g, r, full, NameFont, rc, c, false); return; }
+                var nameRc = new Rectangle(rc.X, rc.Y, rc.Width - tw, rc.Height);
+                DrawText(g, null, name, NameFont, nameRc, c, false);
+                int nw = Math.Min(TextW(g, name, NameFont), nameRc.Width);
+                DrawText(g, null, tail, NameFont, new Rectangle(rc.X + nw, rc.Y, tw + 1, rc.Height), c, false);
+                List<KeyValuePair<Rectangle, string>> cuts;
+                if (!cutTexts.TryGetValue(r, out cuts)) cutTexts[r] = cuts = new List<KeyValuePair<Rectangle, string>>();
+                cuts.Add(new KeyValuePair<Rectangle, string>(new Rectangle(rc.X, rc.Y + scroll, rc.Width, rc.Height), full));
+            }
+
             void DrawText(Graphics g, QuoteRecord r, string s, Font f, Rectangle rc, Color c, bool right)
             {
                 if (string.IsNullOrEmpty(s) || rc.Width <= 0) return;
@@ -622,7 +646,7 @@ namespace PrintPrice
                 bool friends = r.For == History.ForFriends;
                 Color main = s ? Color.White : Theme.Text, muted = s ? Theme.Text : Theme.Muted;
                 int x = rc.X + P(8), w = rc.Width - P(16), y = well.Bottom + P(6);
-                DrawText(g, r, ModelText(r), NameFont, new Rectangle(x, y, w, NameH), main, false);
+                DrawName(g, r, new Rectangle(x, y, w, NameH), main);
                 y += NameH;
                 // price (Friends / Others, bold) + date (muted, right)
                 string date = ShortDate(r);

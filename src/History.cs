@@ -126,6 +126,9 @@ namespace PrintPrice
         // issue #8: same-size scale of the whole job in percent (Slicer --scale = Scale / 100). 100 = not scaled; a
         // missing key, 0 or a value outside 1-1000 reads as 100 (CleanQuotes). Older app versions ignore the key.
         public double Scale = History.DefaultScale;
+        // issue #8 step 2: per-axis scale in percent; all 0 (missing) = the uniform Scale. When set, Scale = ScaleX (older
+        // versions then scale the whole job by X). History.SetScale(r, x, y, z) / ScaleXyzOf / IsUniformScale.
+        public double ScaleX, ScaleY, ScaleZ;
 
         // ideas 24 + 11: the printer the quote was made for (AppSettings.ActivePrinterId when saved) and a snapshot of
         // its name and model. "" in records saved before several printers = printer "1" (History.PrinterOf).
@@ -613,7 +616,7 @@ namespace PrintPrice
             if (!TryTime(a.SavedAt, out ta) || !TryTime(b.SavedAt, out tb)) return false;
             if (Math.Abs((ta - tb).TotalMinutes) > 10) return false;
             if ((a.Model ?? "") != (b.Model ?? "") || (a.Source ?? "") != (b.Source ?? "")) return false;
-            if (!Same(ScaleOf(a), ScaleOf(b))) return false;   // issue #8: another size is another quote
+            if (!SameScale(a, b)) return false;   // issue #8: another size (also per axis) is another quote
             if (a.Hours != b.Hours || a.Minutes != b.Minutes || !Same(a.Grams, b.Grams)
                 || !Same(a.FilamentDkkPerKg, b.FilamentDkkPerKg) || !Same(a.ElectricityDkkPerKwh, b.ElectricityDkkPerKwh)
                 || !Same(a.FriendsPrice, b.FriendsPrice) || !Same(a.OthersPrice, b.OthersPrice)) return false;
@@ -1751,15 +1754,82 @@ namespace PrintPrice
             return pct;
         }
 
-        /// r's scale in percent (100 = not scaled; null r = 100).
+        /// r's uniform scale in percent (100 = not scaled; null r = 100). For an X/Y/Z record this is its X (the value
+        /// older app versions use); use ScaleXyzOf / IsUniformScale for the axes.
         public static double ScaleOf(QuoteRecord r) { return r == null ? DefaultScale : CleanScale(r.Scale); }
 
-        /// The factor for Slicer's --scale (1.5 for 150 %; 1.0 = not scaled).
+        /// The factor for Slicer's --scale (1.5 for 150 %; 1.0 = not scaled). Uniform records only (X/Y/Z: X).
         public static double ScaleFactor(QuoteRecord r) { return ScaleOf(r) / 100; }
 
-        /// Puts the job's scale on r (cleaned: bad / out of range = 100). ui calls it after FromQuote (also for a repeat print,
-        /// with the original's scale).
-        public static void SetScale(QuoteRecord r, double pct) { if (r != null) r.Scale = CleanScale(pct); }
+        /// Puts a uniform scale on r (cleaned: bad / out of range = 100; clears X/Y/Z). ui calls it after FromQuote (also for
+        /// a repeat print, with the original's scale).
+        public static void SetScale(QuoteRecord r, double pct)
+        {
+            if (r == null) return;
+            r.Scale = CleanScale(pct);
+            r.ScaleX = 0; r.ScaleY = 0; r.ScaleZ = 0;
+        }
+
+        /// Puts a per-axis scale on r (issue #8 step 2; each axis cleaned like CleanScale). All three equal = stored as the
+        /// uniform Scale (axes 0); else ScaleX/Y/Z and Scale = X (so older app versions read X).
+        public static void SetScale(QuoteRecord r, double x, double y, double z)
+        {
+            if (r == null) return;
+            r.ScaleX = x; r.ScaleY = y; r.ScaleZ = z;
+            if (x == 0 && y == 0 && z == 0) r.ScaleX = r.ScaleY = r.ScaleZ = DefaultScale;   // all "missing" asked = 100 %
+            NormalizeScale(r);
+        }
+
+        // CleanQuotes / SetScale: Scale cleaned; axes all 0 = uniform; else each axis cleaned (0 / bad -> 100), equal axes
+        // fold into Scale (axes 0), different axes keep Scale = X
+        static void NormalizeScale(QuoteRecord r)
+        {
+            r.Scale = CleanScale(r.Scale);
+            if (r.ScaleX == 0 && r.ScaleY == 0 && r.ScaleZ == 0) return;
+            double x = CleanScale(r.ScaleX), y = CleanScale(r.ScaleY), z = CleanScale(r.ScaleZ);
+            if (x == y && y == z) { r.Scale = x; r.ScaleX = 0; r.ScaleY = 0; r.ScaleZ = 0; return; }
+            r.ScaleX = x; r.ScaleY = y; r.ScaleZ = z; r.Scale = x;
+        }
+
+        /// True when r has one scale for all axes (also old records and null).
+        public static bool IsUniformScale(QuoteRecord r)
+        {
+            if (r == null || (r.ScaleX == 0 && r.ScaleY == 0 && r.ScaleZ == 0)) return true;
+            var a = ScaleXyzOf(r);
+            return a[0] == a[1] && a[1] == a[2];
+        }
+
+        /// r's scale per axis in percent: { X, Y, Z }; a uniform record gives its Scale three times. Never null.
+        public static double[] ScaleXyzOf(QuoteRecord r)
+        {
+            if (r == null) return new[] { DefaultScale, DefaultScale, DefaultScale };
+            if (r.ScaleX == 0 && r.ScaleY == 0 && r.ScaleZ == 0) { double u = ScaleOf(r); return new[] { u, u, u }; }
+            return new[] { CleanScale(r.ScaleX), CleanScale(r.ScaleY), CleanScale(r.ScaleZ) };
+        }
+
+        // the same size: all three axes equal (Same)
+        static bool SameScale(QuoteRecord a, QuoteRecord b)
+        {
+            double[] x = ScaleXyzOf(a), y = ScaleXyzOf(b);
+            return Same(x[0], y[0]) && Same(x[1], y[1]) && Same(x[2], y[2]);
+        }
+
+        // no scale at all (every axis 100)
+        static bool Unscaled(QuoteRecord r)
+        {
+            var a = ScaleXyzOf(r);
+            return a[0] == DefaultScale && a[1] == DefaultScale && a[2] == DefaultScale;
+        }
+
+        /// "150 × 100 × 50 %" (X × Y × Z, each like ScaleText: one decimal at most, da-DK); equal axes after rounding = the
+        /// uniform text ("150 %"); all 100 = "".
+        public static string ScaleText(double x, double y, double z)
+        {
+            double rx = Math.Round(CleanScale(x), 1, MidpointRounding.AwayFromZero), ry = Math.Round(CleanScale(y), 1, MidpointRounding.AwayFromZero),
+                   rz = Math.Round(CleanScale(z), 1, MidpointRounding.AwayFromZero);
+            if (rx == ry && ry == rz) return ScaleText(rx);
+            return rx.ToString("0.#", Num.Dk) + " × " + ry.ToString("0.#", Num.Dk) + " × " + rz.ToString("0.#", Num.Dk) + " %";
+        }
 
         /// "150 %" / "12,5 %" (da-DK, one decimal at most), "" when not scaled (100 % after rounding to one decimal,
         /// or a bad value). For names: "3D Benchy (150 %)" on quote, invoice and History.
@@ -1770,9 +1840,14 @@ namespace PrintPrice
             return v.ToString("0.#", Num.Dk) + " %";
         }
 
-        public static string ScaleText(QuoteRecord r) { return ScaleText(ScaleOf(r)); }
+        /// r's text: "150 %", "150 × 100 × 50 %" for X/Y/Z, "" when not scaled.
+        public static string ScaleText(QuoteRecord r)
+        {
+            var a = ScaleXyzOf(r);
+            return ScaleText(a[0], a[1], a[2]);
+        }
 
-        /// name + " (150 %)" when r is scaled, else name unchanged (null name = "").
+        /// name + " (150 %)" / " (150 × 100 × 50 %)" when r is scaled, else name unchanged (null name = "").
         public static string WithScale(string name, QuoteRecord r)
         {
             string t = ScaleText(r);
@@ -2236,7 +2311,7 @@ namespace PrintPrice
                 if (r.Customer == null) r.Customer = "";
                 if (r.FailedAt == null) r.FailedAt = "";
                 if (r.RepeatOf == null) r.RepeatOf = "";
-                r.Scale = CleanScale(r.Scale);   // issue #8: 0 / bad / outside 1-1000 -> 100
+                NormalizeScale(r);   // issue #8: 0 / bad / outside 1-1000 -> 100; X/Y/Z cleaned, equal axes = uniform
                 if (r.PrinterId == null) r.PrinterId = "";
                 if (r.PrinterName == null) r.PrinterName = "";
                 if (r.PrinterModel == null) r.PrinterModel = "";
@@ -2903,7 +2978,14 @@ namespace PrintPrice
             if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
             if (keep.Parts == null && other.Parts != null) { keep.Parts = other.Parts.Copy(); changed = true; }   // idea 21
             // issue #8: a scale lost here (e.g. resaved by an older app version) comes back from the other copy
-            if (ScaleOf(keep) == DefaultScale && ScaleOf(other) != DefaultScale) { keep.Scale = ScaleOf(other); changed = true; }
+            // (none here, or only the X value an older version kept while the other copy has the axes)
+            if ((Unscaled(keep) && !Unscaled(other))
+                || (IsUniformScale(keep) && !IsUniformScale(other) && ScaleOf(keep) == ScaleOf(other)))
+            {
+                var o = ScaleXyzOf(other);
+                if (IsUniformScale(other)) SetScale(keep, o[0]); else SetScale(keep, o[0], o[1], o[2]);
+                changed = true;
+            }
             // the bill's look then: filled when this PC's copy has none (e.g. resaved by an older app version)
             if (SavedWear(keep) == null && SavedWear(other) != null)
             {

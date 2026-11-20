@@ -412,6 +412,7 @@ namespace PrintPrice
                 ShowRowMenu(Cursor.Position);
             };
             grid.CellPainting += PaintTicks;
+            grid.CellPainting += PaintModel;   // issue #8: a scaled job's " (150 × 100 × 50 %)" never cut off
             grid.CellPainting += PaintPicture;
             HookCustomerColumn();   // ▾ on the Customer cell, its menu, Alt+Down in the editor (HistoryCustomer.cs)
             grid.SelectionChanged += delegate { if (!filling) { UpdateButtons(); UpdateCount(); } };
@@ -1207,6 +1208,46 @@ namespace PrintPrice
             var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
             if (rec == null) { e.Handled = true; return; }
             PaintStatusCell(e.Graphics, e.CellBounds, History.PrintStateOf(rec, DateTime.Now), selected, CurrentAutoScaleDimensions.Height / 96f, grid.Font);
+            e.Handled = true;
+        }
+
+        /// The Model cell of a scaled job whose name doesn't fit: the model part gets the "…", the scale " (150 × 100 × 50 %)"
+        /// is drawn whole after it (the dark tooltip still shows the full name). Other cells / names that fit: as before.
+        void PaintModel(object sender, DataGridViewCellPaintingEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex != colModel.Index) return;
+            var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
+            if (rec == null || grid.IsCurrentCellInEditMode && grid.CurrentCell != null && grid.CurrentCell.RowIndex == e.RowIndex &&
+                grid.CurrentCell.ColumnIndex == e.ColumnIndex) return;
+            string scale = History.ScaleText(rec);
+            if (scale.Length == 0) return;
+            var style = e.CellStyle;
+            var font = style.Font ?? grid.Font;
+            const TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix |
+                                          TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+            // the grid draws its text with TextRenderer's own side padding: the same left edge as the other rows
+            // (4 px at 96 dpi, measured against the other rows' text in the History picture)
+            int pad = (int)Math.Round(4 * CurrentAutoScaleDimensions.Width / 96f);
+            var area = new Rectangle(e.CellBounds.X + style.Padding.Left + pad, e.CellBounds.Y, e.CellBounds.Width - style.Padding.Horizontal - pad, e.CellBounds.Height);
+            string full = ModelText(rec);
+            if (TextRenderer.MeasureText(full, font, Size.Empty, flags).Width <= area.Width) return;   // fits: the normal drawing
+            // the scale whole ("(150 × 100 × 50 %)", or "(150×100×50 %)" when that leaves too little of the name); at least
+            // 30 px of the name stays, else the normal "…" on the whole name
+            string name = History.ModelText(rec), tail = null;
+            int tw = 0, minName = (int)Math.Round(30 * CurrentAutoScaleDimensions.Width / 96f);
+            foreach (var t in new[] { " (" + scale + ")", " (" + scale.Replace(" × ", "×") + ")" })
+            {
+                tw = TextRenderer.MeasureText(t, font, Size.Empty, flags).Width;
+                if (tw <= area.Width - minName) { tail = t; break; }
+            }
+            if (tail == null) return;
+            bool selected = (e.State & DataGridViewElementStates.Selected) != 0;
+            e.PaintBackground(e.CellBounds, selected);
+            Color fore = selected ? style.SelectionForeColor : style.ForeColor;
+            var nameRc = new Rectangle(area.X, area.Y, area.Width - tw, area.Height);
+            TextRenderer.DrawText(e.Graphics, name, font, nameRc, fore, flags | TextFormatFlags.EndEllipsis);
+            int nw = Math.Min(TextRenderer.MeasureText(name, font, Size.Empty, flags).Width, nameRc.Width);
+            TextRenderer.DrawText(e.Graphics, tail, font, new Rectangle(area.X + nw, area.Y, tw + 2, area.Height), fore, flags);
             e.Handled = true;
         }
 

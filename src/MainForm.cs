@@ -168,7 +168,7 @@ namespace PrintPrice
             txtUrl.TextChanged += delegate
             {
                 SetUrlHint(false); jobModel = null; jobParts = null; fromExample = false; SetStudioFile(null); repeatOf = null;
-                jobScale = History.DefaultScale; lastJob = null;   // issue #8: a new link / file starts at 100 %
+                jobScale = ScaleXyz.None; lastJob = null;   // issue #8: a new link / file starts at 100 %
             };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
@@ -556,7 +556,7 @@ namespace PrintPrice
             SetPowerInfo(L.S("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.",
                              "Live-pris DK1 17:45: spot 2,37 + afg. 0,55 + moms = 3,65 kr."), false);
             jobModel = "3D Benchy";   // after the link (its TextChanged clears it); the quote picture's model name
-            jobScale = History.DefaultScale;   // issue #8: not scaled (the same link doesn't fire TextChanged)
+            jobScale = ScaleXyz.None;   // issue #8: not scaled (the same link doesn't fire TextChanged)
             lastJobResult = new SliceResult { Seconds = 38 * 60, Grams = 11.8, Plates = 1, SizeX = 60, SizeY = 31, SizeZ = 48, SizeObjects = 1 };
             SetResultLinks(null, null, null);   // "Scale…" under the line, as after a real slice
             Recalculate();
@@ -567,7 +567,7 @@ namespace PrintPrice
         internal void SetSampleScaledJob()
         {
             if (!offline) return;
-            jobScale = 150;
+            jobScale = ScaleXyz.Uniform(150);
             lastJobResult = new SliceResult { Seconds = 78 * 60, Grams = 30.57, Plates = 1, SizeX = 90, SizeY = 46.5, SizeZ = 72, SizeObjects = 1 };
             txtHours.Text = "1";
             txtMinutes.Text = "18";
@@ -584,6 +584,20 @@ namespace PrintPrice
             if (!offline) return null;
             var f = NewScaleForm();
             if (typed != null) f.SampleType(typed);
+            return f;
+        }
+
+        /// Picture mode (step 2): the Scale window with "Same in every direction" off and X / Y / Z typed (pcts), or
+        /// mm typed into one axis (mmAxis 0-2, mm); stepFile = a STEP job: the lock forced on with its note.
+        internal ScaleForm SampleScaleWindowXyz(double[] pcts, int mmAxis, double mm, bool stepFile)
+        {
+            if (!offline) return null;
+            var r = lastJobResult;
+            var f = new ScaleForm(jobScale, r != null ? r.SizeX : 0, r != null ? r.SizeY : 0, r != null ? r.SizeZ : 0,
+                                  r != null ? r.SizeObjects : 0, settings.PrinterModel,
+                                  stepFile ? BambuSlicer.ScaleXyzFormatText("bracket.step") : null);
+            if (pcts != null) f.SampleType(new ScaleXyz(pcts[0], pcts[1], pcts[2]));
+            if (mmAxis >= 0) f.SampleTypeMm(mmAxis, mm);
             return f;
         }
 
@@ -1042,13 +1056,22 @@ namespace PrintPrice
         async Task<bool> AnalyzeAsync(string printablesId, List<string> localFiles, Action<SliceResult> beforeFill,
                                       List<HistoryPart> savedParts, bool savedTogether)
         {
-            return await AnalyzeAsync(printablesId, localFiles, beforeFill, savedParts, savedTogether, History.DefaultScale, null);
+            return await AnalyzeAsync(printablesId, localFiles, beforeFill, savedParts, savedTogether, ScaleXyz.None, null);
         }
 
         // ---------- issue #8: same-size scale of the whole job ----------
         /// The shown job's scale in percent (100 = not scaled). Set by a finished job (the scale it was sliced at), by Open
         /// again / Repeat print (the record's); back to 100 by a new link / file, Clear and a new job without a scale.
-        double jobScale = History.DefaultScale;
+        ScaleXyz jobScale = ScaleXyz.None;   // step 2: per axis (X = Y = Z = the step-1 uniform scale)
+        /// "150 %" / "150 × 100 × 50 %", "" when not scaled (History's text, so names match the saved record's).
+        static string ScaleLabel(ScaleXyz s) { return s == null ? "" : History.ScaleText(s.X, s.Y, s.Z); }
+        /// A record's scale per axis (old records: their uniform Scale on every axis).
+        static ScaleXyz RecordScale(QuoteRecord r) { var a = History.ScaleXyzOf(r); return new ScaleXyz(a[0], a[1], a[2]); }
+        static bool SameScale(ScaleXyz a, ScaleXyz b)
+        {
+            a = a ?? ScaleXyz.None; b = b ?? ScaleXyz.None;
+            return Math.Abs(a.X - b.X) < 0.05 && Math.Abs(a.Y - b.Y) < 0.05 && Math.Abs(a.Z - b.Z) < 0.05;
+        }
         /// What the last finished job was sliced from, so Scale… can slice the same files again without the file picker.
         sealed class JobInputs
         {
@@ -1064,7 +1087,7 @@ namespace PrintPrice
         /// scalePct = the size to slice at (100 = as the file is); rescale = the shown job again at another size (Scale…):
         /// the same files and colour plan (no picker), the picture stays, and a failed slice keeps the shown numbers.
         async Task<bool> AnalyzeAsync(string printablesId, List<string> localFiles, Action<SliceResult> beforeFill,
-                                      List<HistoryPart> savedParts, bool savedTogether, double scalePct, JobInputs rescale)
+                                      List<HistoryPart> savedParts, bool savedTogether, ScaleXyz scalePct, JobInputs rescale)
         {
             if (offline || cts != null) return false;
             // issue #8: G-code can't be scaled; say so first (not "Bambu Studio was not found" when it's missing)
@@ -1177,14 +1200,14 @@ namespace PrintPrice
 
                 var files = localFiles;
                 var colourPlan = plan;
-                double scale = scalePct;
+                var scale = scalePct;
                 var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token, scale));
                 if (plan != null)
                 {
                     jobParts = plan.Parts;   // saved with the quote (History.SetParts), so Repeat print slices it the same way
                     jobTogether = plan.Together;
                 }
-                jobScale = BambuSlicer.IsScaled(scalePct) ? scalePct : History.DefaultScale;
+                jobScale = BambuSlicer.IsScaled(scalePct) ? scalePct : ScaleXyz.None;
                 lastJob = new JobInputs
                 {
                     PrintablesId = printablesId, LocalFiles = localFiles, Chosen = chosen, Plan = plan, ModelName = modelName,
@@ -1251,7 +1274,7 @@ namespace PrintPrice
 
             string what = modelName != null ? "\"" + modelName + "\"" :
                           localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : L.F("{0} files", "{0} filer", localFiles.Count);
-            if (BambuSlicer.IsScaled(jobScale)) what += " (" + History.ScaleText(jobScale) + ")";   // issue #8: "3D Benchy" (150 %)
+            if (BambuSlicer.IsScaled(jobScale)) what += " (" + ScaleLabel(jobScale) + ")";   // issue #8: "3D Benchy" (150 %)
             // grams worked out from the filament length (e.g. Cura): shown as an estimate; a missing value is left out
             var said = new List<string>();
             if (!noTime) said.Add((totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m");
@@ -1391,11 +1414,11 @@ namespace PrintPrice
         {
             if (!CanScaleJob || cts != null) return;
             ScaleForm f = NewScaleForm();
-            double pct;
+            ScaleXyz pct;
             using (f)
             {
                 if (f.ShowDialog(this) != DialogResult.OK) return;
-                pct = f.Pct;
+                pct = f.Scale;
             }
             var _ = RescaleAsync(pct);
         }
@@ -1404,11 +1427,25 @@ namespace PrintPrice
         {
             var r = lastJobResult;
             return new ScaleForm(jobScale, r != null ? r.SizeX : 0, r != null ? r.SizeY : 0, r != null ? r.SizeZ : 0,
-                                 r != null ? r.SizeObjects : 0, settings.PrinterModel);
+                                 r != null ? r.SizeObjects : 0, settings.PrinterModel, UniformOnlyReason());
+        }
+
+        /// Step 2: null when every file of the shown job can get its own X / Y / Z (STL, OBJ, 3MF); else the note for the
+        /// first one that can't (STEP / AMF: the Scale window keeps the same % on every axis).
+        string UniformOnlyReason()
+        {
+            var job = lastJob;
+            if (job == null) return null;
+            var names = new List<string>();
+            if (job.LocalFiles != null) names.AddRange(job.LocalFiles);
+            if (job.Chosen != null) names.AddRange(job.Chosen.Where(c => c != null).Select(c => c.Name ?? ""));
+            foreach (var n in names)
+                if (!BambuSlicer.CanScaleXyz(n)) return BambuSlicer.ScaleXyzFormatText(Path.GetFileName(n));
+            return null;
         }
 
         /// Slices the shown job again at pct (same files, colour plan and model name; a failed slice keeps the job as it was).
-        async Task<bool> RescaleAsync(double pct)
+        async Task<bool> RescaleAsync(ScaleXyz pct)
         {
             var job = lastJob;
             if (job == null || !job.Scalable) return false;
@@ -1651,8 +1688,9 @@ namespace PrintPrice
         /// plate"); null = one file, or files that keep their own colours (sliced one by one, summed).
         static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
                                   string nozzle, string process, string filament, string bed, ColourPlan plan,
-                                  IProgress<string> progress, CancellationToken ct, double scalePct = 100)
+                                  IProgress<string> progress, CancellationToken ct, ScaleXyz scalePct = null)
         {
+            if (scalePct == null) scalePct = ScaleXyz.None;
             string work = Path.Combine(JobTempRoot(), Guid.NewGuid().ToString("N"));
             try
             {
@@ -3496,7 +3534,7 @@ namespace PrintPrice
         {
             // issue #8: "3D Benchy (150 %)" when the job is scaled (quote / invoice name, title, file name)
             string name = QuoteRows.ModelName(jobModel);
-            string scale = History.ScaleText(jobScale);
+            string scale = ScaleLabel(jobScale);
             return scale.Length == 0 ? name : name + " (" + scale + ")";
         }
 
@@ -4503,7 +4541,7 @@ namespace PrintPrice
             var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", LinkSource(), DateTime.Now,
                                       settings.AutoWearRate != 0 ? WearBreakdown(settings) : null);
             // issue #8: the size it was sliced at (a repeat print / Open again: the record's, set when it was filled)
-            History.SetScale(r, jobScale);
+            History.SetScale(r, jobScale.X, jobScale.Y, jobScale.Z);   // step 2: per axis (equal axes = uniform)
             // colour, type and material of each row, so "Open again" can rebuild the material rows without slicing
             var used = filaments ?? (single != null ? new List<FilamentUse> { single } : null);
             if (r.Filaments != null && used != null && r.Filaments.Count == used.Count)
@@ -4944,7 +4982,7 @@ namespace PrintPrice
                 {
                     string tag = "(" + History.ScaleText(150) + ")";
                     log.Check(setJob(38), "11 job on screen again");
-                    jobScale = 150;   // as a finished Scale… at 150 % leaves it
+                    jobScale = ScaleXyz.Uniform(150);   // as a finished Scale… at 150 % leaves it
                     log.Check(QuoteModelName().EndsWith(tag), "11a the job's quote name \"" + QuoteModelName() + "\" ends with " + tag);
                     if (f != null) { f.Dispose(); f = null; }
                     f = NewJobInvoiceForm("Skala Kunde");
@@ -4968,8 +5006,8 @@ namespace PrintPrice
                         }
                     }
                     ClearJob();   // what the Clear button runs
-                    log.Check(jobScale == History.DefaultScale && !QuoteModelName().Contains(tag),
-                              "11g Clear: the job scale is back to " + Num.Fmt(jobScale) + " %, name \"" + QuoteModelName() + "\"");
+                    log.Check(!jobScale.IsScaled && !QuoteModelName().Contains(tag),
+                              "11g Clear: the job scale is back to " + jobScale.Text + ", name \"" + QuoteModelName() + "\"");
                 }
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
@@ -5822,7 +5860,7 @@ namespace PrintPrice
                 var parts = new List<HistoryPart>();
                 bool together = false;
                 double closeAfter = 0;   // "close-after=<s>": close the window mid-slice (A5: Bambu Studio must stop too)
-                double specScale = History.DefaultScale, specRescale = 0;
+                ScaleXyz specScale = ScaleXyz.None, specRescale = null;
                 string baseDir = Path.GetDirectoryName(specFile);
                 foreach (var raw in File.ReadAllLines(specFile))
                 {
@@ -5833,12 +5871,13 @@ namespace PrintPrice
                     // the Scale window's path (RescaleAsync)
                     if (line.StartsWith("scale=", StringComparison.OrdinalIgnoreCase))
                     {
-                        double.TryParse(line.Substring(6).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out specScale);
+                        // step 2: "150" = uniform, "150,100,50" = X / Y / Z (ScaleXyz.TryParse)
+                        if (!ScaleXyz.TryParse(line.Substring(6), out specScale)) { check(false, "bad spec line: " + line); specScale = ScaleXyz.None; }
                         continue;
                     }
                     if (line.StartsWith("rescale=", StringComparison.OrdinalIgnoreCase))
                     {
-                        double.TryParse(line.Substring(8).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out specRescale);
+                        if (!ScaleXyz.TryParse(line.Substring(8), out specRescale)) { check(false, "bad spec line: " + line); specRescale = null; }
                         continue;
                     }
                     if (line.StartsWith("close-after=", StringComparison.OrdinalIgnoreCase))
@@ -5878,30 +5917,31 @@ namespace PrintPrice
                     var files = parts.Select(p => p.File).ToList();
                     txtUrl.Text = files.Count == 1 ? files[0] : L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
                     lastJobResult = null;
-                    if (specScale != History.DefaultScale || specRescale > 0)
-                        log.Add("spec: scale=" + specScale.ToString(System.Globalization.CultureInfo.InvariantCulture) +
-                                (specRescale > 0 ? ", rescale=" + specRescale.ToString(System.Globalization.CultureInfo.InvariantCulture) : ""));
+                    if (specScale.IsScaled || specRescale != null)
+                        log.Add("spec: scale: " + specScale.Text + (specRescale != null ? ", rescale: " + specRescale.Text : ""));
                     bool done = await AnalyzeAsync(null, files, null, parts, together, specScale, null);
                     check(done && lastJobResult != null, "sliced");
                     TestJobLines(log, lastJobResult);
-                    if (done && specRescale > 0)
+                    if (done && specRescale != null)
                     {
                         // the Scale window's Apply: the same files again at the new size, the ✓ line says it
                         var first = lastJobResult;
                         check(CanScaleJob, "Scale… offered after the slice");
                         using (var sf = NewScaleForm())
                         {
-                            sf.SampleType(specRescale.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                            sf.SampleType(specRescale);
                             log.Add("scale window: size " + sf.TestSizeText + " | " + sf.TestInfoText.Replace("\n", " / ") + " | Apply " + (sf.TestApplyOn ? "on" : "off"));
                         }
                         lastJobResult = null;
                         done = await RescaleAsync(specRescale);
-                        check(done && lastJobResult != null && Math.Abs(jobScale - specRescale) < 0.05, "sliced again at " + History.ScaleText(specRescale));
-                        check((lblAuto.Text ?? "").Contains("(" + History.ScaleText(specRescale) + ")"), "result line names the scale: " + lblAuto.Text);
+                        check(done && lastJobResult != null && SameScale(jobScale, specRescale), "sliced again at " + specRescale.Text);
+                        check((lblAuto.Text ?? "").Contains("(" + ScaleLabel(specRescale) + ")"), "result line names the scale: " + lblAuto.Text);
                         TestJobLines(log, lastJobResult);
                         if (first != null && lastJobResult != null && first.SizeZ > 0 && lastJobResult.SizeZ > 0)
-                            log.Add("height " + Num.Fmt(Math.Round(first.SizeZ, 1)) + " -> " + Num.Fmt(Math.Round(lastJobResult.SizeZ, 1)) + " mm (expected " +
-                                    Num.Fmt(Math.Round(BambuSlicer.SizeAt(first.SizeZ, specScale, specRescale), 1)) + ")");
+                            log.Add("size " + BambuSlicer.SizeText(first.SizeX, first.SizeY, first.SizeZ) + " -> " +
+                                    BambuSlicer.SizeText(lastJobResult.SizeX, lastJobResult.SizeY, lastJobResult.SizeZ) + " (expected " +
+                                    BambuSlicer.SizeText(BambuSlicer.SizeAt(first.SizeX, specScale.X, specRescale.X), BambuSlicer.SizeAt(first.SizeY, specScale.Y, specRescale.Y),
+                                                         BambuSlicer.SizeAt(first.SizeZ, specScale.Z, specRescale.Z)) + ")");
                     }
                     QuoteRecord rec = null;
                     string err = done ? SaveToHistory(0, null, out rec) : "not sliced";
@@ -5962,9 +6002,9 @@ namespace PrintPrice
                     var b = rec != null ? History.PartsOf(rec) : null;
                     check((a == null) == (b == null) && (a == null || a.Count == b.Count), "same parts as the original");
                     // issue #8: the repeat slices and saves at the original's size
-                    log.Add("scale: original " + History.ScaleText(History.ScaleOf(r)) + " / repeated " +
-                            (rec != null ? History.ScaleText(History.ScaleOf(rec)) : "-") + " (\"\" = 100 %)");
-                    check(rec != null && Math.Abs(History.ScaleOf(rec) - History.ScaleOf(r)) < 0.05, "same scale as the original");
+                    log.Add("scale: original " + RecordScale(r).Text + " / repeated " +
+                            (rec != null ? RecordScale(rec).Text : "-"));
+                    check(rec != null && SameScale(RecordScale(rec), RecordScale(r)), "same scale (X / Y / Z) as the original");
                 }
                 Screenshots.Snap(this, dir, "test_repeat.png");
             }
@@ -6036,6 +6076,23 @@ namespace PrintPrice
                             log.Check(saved == HistoryForm.SamplePictures().Count, "seeded " + saved + " pictures");
                             break;
                         }
+                        case "quote":
+                        case "invoice":
+                        {
+                            // quote <id> / invoice <id>: the saved record's page as History's Quote… / Invoice… builds it
+                            // (BuildRecordQuote, read-only: nothing is made or saved), drawn to test_history_<cmd>_<id>.png;
+                            // its model name is logged and kept for "expect model"
+                            var r = history.Find(x => x.Id == arg);
+                            log.Check(r != null, "quote " + arg + " in the history");
+                            if (r == null) break;
+                            var d = BuildRecordQuote(r, r.For == History.ForFriends, r.Customer, cmd == "invoice", null);
+                            string png = Path.Combine(dir, "test_history_" + cmd + "_" + arg + ".png");
+                            using (var bmp = QuotePage.Render(d, false)) bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                            HistoryTest.PageModels[cmd + " " + arg] = d.Model ?? "";
+                            log.Add("  " + cmd + " page " + Path.GetFileName(png) + ": model \"" + d.Model + "\"" +
+                                    (d.Invoice ? ", invoice " + d.InvoiceNo : ", quote " + d.Number));
+                            break;
+                        }
                         case "reopen":
                         {
                             var r = history.Find(x => x.Id == arg);
@@ -6091,7 +6148,7 @@ namespace PrintPrice
                             f.Grams.ToString("0.##", Num.Dk) + " g");
                 log.Add("together: " + res.Together + ", together problem: " + (res.TogetherProblem ?? "(none)"));
                 // issue #8: the job's scale and the measured size (0 = unknown)
-                log.Add("scale: " + jobScale.ToString("0.#", Num.Dk) + " %, size: " +
+                log.Add("scale: " + jobScale.Text + ", size: " +
                         (res.SizeX > 0 ? BambuSlicer.SizeText(res.SizeX, res.SizeY, res.SizeZ) : "(unknown)") + ", objects: " + res.SizeObjects);
                 var plates = res.PlateList ?? new List<PlateInfo>();
                 bool showFile = plates.Select(p => p.File ?? "").Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
@@ -6114,7 +6171,7 @@ namespace PrintPrice
         {
             if (r == null) { log.Add("record: (none)"); return; }
             log.Add("record " + r.Id + ": " + r.Hours + " h " + r.Minutes + " m, " + r.Grams.ToString("0.##", Num.Dk) + " g, repeat of: " +
-                    (string.IsNullOrEmpty(r.RepeatOf) ? "-" : r.RepeatOf) + ", scale: " + History.ScaleOf(r).ToString("0.#", Num.Dk) + " %");
+                    (string.IsNullOrEmpty(r.RepeatOf) ? "-" : r.RepeatOf) + ", scale: " + RecordScale(r).Text);
             var parts = History.PartsOf(r);
             if (parts == null) log.Add("record parts: (none)");
             else
@@ -6291,7 +6348,7 @@ namespace PrintPrice
                     }
                 }
                 bool done = await AnalyzeAsync(id, paths, res => KeepSavedMaterials(res, r), parts, History.PartsTogether(r),
-                                               History.ScaleOf(r), null);   // issue #8: at the saved size
+                                               RecordScale(r), null);   // issue #8: at the saved size
                 if (done) { repeatOf = r; ShowRepeatLine(r, null); return; }
                 string failed = (lblAuto.Text ?? "").Trim().TrimEnd('.');
                 FillFromRecord(r, true);
@@ -6306,7 +6363,7 @@ namespace PrintPrice
                 return;
             }
             bool ok = await AnalyzeAsync(id, local ? new List<string> { src } : null, res => KeepSavedMaterials(res, r), null, false,
-                                         History.ScaleOf(r), null);   // issue #8: at the saved size
+                                         RecordScale(r), null);   // issue #8: at the saved size
             if (ok) { repeatOf = r; ShowRepeatLine(r, null); return; }
             string why = (lblAuto.Text ?? "").Trim().TrimEnd('.');
             FillFromRecord(r, true);   // back to the saved time, grams and colours (Analyze reset the job)
@@ -6351,7 +6408,7 @@ namespace PrintPrice
             ShowLinkSource(r.Source);
             SetStudioFile(null);   // no slice from this session (also when the link was the same, so TextChanged didn't fire)
             jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)
-            jobScale = History.ScaleOf(r);   // issue #8: the saved size (also after the link: TextChanged resets it)
+            jobScale = RecordScale(r);   // issue #8: the saved size (also after the link: TextChanged resets it)
             lastJob = null;                  // nothing sliced this session: Scale… comes after a slice / Repeat print
             jobParts = History.PartsOf(r);   // a colour per file (idea 21): saving it again / a failed repeat keeps them
             jobTogether = History.PartsTogether(r);
@@ -6536,7 +6593,7 @@ namespace PrintPrice
             if (lblAuto.MutedLine.Length > 0) ShowAutoIdle();   // the "Opened from history" lines go with the job
             txtUrl.Text = "";
             jobParts = null;
-            jobScale = History.DefaultScale;   // issue #8
+            jobScale = ScaleXyz.None;   // issue #8
             lastJob = null;
             SetStudioFile(null);   // back to "Get time & weight" (also if the box was already empty)
             SetUrlHint(false);
