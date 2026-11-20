@@ -27,6 +27,9 @@ namespace PrintPrice
     public class UpdateException : Exception
     {
         public UpdateException(string message) : base(message) { }
+
+        /// True when the new version is already in place (it just didn't start), so "your version is unchanged" is wrong.
+        public bool Installed;
     }
 
     /// Updates the program from the latest GitHub release of gettic/PrintPrice.
@@ -38,6 +41,18 @@ namespace PrintPrice
         public const string ReleasesPage = "https://github.com/" + Repo + "/releases/latest";
         const string AssetName = "PrintPrice.exe";
         const string AllowedHost = "github.com";
+        const long MaxListBytes = 8 * 1048576;   // the release list (normally well under 1 MB)
+
+        /// url when it is an https page of this repo on github.com, else ReleasesPage (the notes link only opens our page).
+        public static string SafePageUrl(string url)
+        {
+            Uri uri;
+            if (Uri.TryCreate(url, UriKind.Absolute, out uri) && uri.Scheme == Uri.UriSchemeHttps &&
+                uri.Host.Equals(AllowedHost, StringComparison.OrdinalIgnoreCase) && uri.Port == 443 && string.IsNullOrEmpty(uri.UserInfo) &&
+                uri.AbsolutePath.StartsWith("/" + Repo + "/", StringComparison.OrdinalIgnoreCase))
+                return url;
+            return ReleasesPage;
+        }
 
         public static Version Current
         {
@@ -96,7 +111,7 @@ namespace PrintPrice
                 Tag = Str(d, "tag_name"),
                 Title = Str(d, "name"),
                 Notes = Str(d, "body") ?? "",
-                PageUrl = Str(d, "html_url") ?? ReleasesPage
+                PageUrl = SafePageUrl(Str(d, "html_url"))
             };
             info.Version = ParseTag(info.Tag);
             if (info.Version == null) return null;
@@ -209,8 +224,16 @@ namespace PrintPrice
                     throw new UpdateException(L.F("Couldn't reach GitHub ({0})", "Kunne ikke nå GitHub ({0})", ex.Message));
                 }
                 string json;
-                using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8)) json = sr.ReadToEnd();
-                var info = ParseReleases(json, Current);
+                using (var s = resp.GetResponseStream())
+                {
+                    try { json = Net.ReadCapped(s, MaxListBytes); }
+                    catch (InvalidDataException) { throw new UpdateException(L.S("GitHub's answer was unexpectedly large.", "GitHubs svar var uventet stort.")); }
+                    catch (IOException ex) { throw new UpdateException(L.F("Couldn't reach GitHub ({0})", "Kunne ikke nå GitHub ({0})", ex.Message)); }
+                }
+                UpdateInfo info;
+                try { info = ParseReleases(json, Current); }
+                catch (Exception) { throw new UpdateException(L.S("GitHub sent an answer PrintPrice can't read. Try again later.",
+                    "GitHub sendte et svar, som PrintPrice ikke kan læse. Prøv igen senere.")); }
                 lock (CacheLock)
                 {
                     _etag = resp.Headers["ETag"];
@@ -329,17 +352,20 @@ namespace PrintPrice
                 "Der kan ikke skrives i programmets mappe ({0}). Hent den nye version manuelt.", Path.GetDirectoryName(target))); }
 
             using (var wc = Client())
-            using (ct.Register(wc.CancelAsync))
             {
-                var done = new ManualResetEvent(false);
-                Exception error = null;
-                bool cancelled = false;
                 wc.DownloadProgressChanged += (s, e) => { if (progress != null) progress.Report(e.ProgressPercentage); };
-                wc.DownloadFileCompleted += (s, e) => { error = e.Error; cancelled = e.Cancelled; done.Set(); };
-                wc.DownloadFileAsync(new Uri(u.DownloadUrl), target);
-                done.WaitOne();
-                if (cancelled) { TryDelete(target); throw new OperationCanceledException(); }
-                if (error != null) { TryDelete(target); throw new UpdateException(L.F("Download failed ({0})", "Download mislykkedes ({0})", error.Message)); }
+                long cap = u.Size > 0 ? u.Size + 1048576 : 200L * 1048576;
+                try { Net.Run(wc, () => wc.DownloadFileTaskAsync(new Uri(u.DownloadUrl), target), ct, StallMs, cap); }
+                catch (OperationCanceledException) { TryDelete(target); throw; }
+                catch (TimeoutException)
+                {
+                    TryDelete(target);
+                    throw new UpdateException(L.S("The download stopped (no data for a minute). Check the connection and try again.",
+                        "Downloaden gik i stå (ingen data i et minut). Tjek forbindelsen og prøv igen."));
+                }
+                catch (InvalidDataException) { TryDelete(target); throw new UpdateException(L.S("The download is bigger than GitHub said, so it was stopped.",
+                    "Downloaden er større end GitHub oplyste, så den blev stoppet.")); }
+                catch (Exception ex) { TryDelete(target); throw new UpdateException(L.F("Download failed ({0})", "Download mislykkedes ({0})", ex.Message)); }
             }
 
             try
@@ -366,6 +392,20 @@ namespace PrintPrice
         {
             if (AppSettings.TestMode) throw new UpdateException(TestModeMessage());
             string exe = System.Windows.Forms.Application.ExecutablePath;
+            Swap(exe, downloaded, path =>
+            {
+                using (Process.Start(new ProcessStartInfo(path) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(path) })) { }
+            });
+        }
+
+        /// No data for this long stops the update download.
+        const int StallMs = 60000;
+
+        /// The swap behind InstallAndRestart (tests call it on plain files): exe -> exe.old, downloaded -> exe, then
+        /// start(exe). If start throws, the old program is put back (new one back to `downloaded`, then deleted) and
+        /// UpdateException says it couldn't be started; if even that fails, UpdateException.Installed = true.
+        internal static void Swap(string exe, string downloaded, Action<string> start)
+        {
             string old = exe + ".old";
             TryDelete(old);
             File.Move(exe, old);
@@ -375,7 +415,27 @@ namespace PrintPrice
                 try { File.Move(old, exe); } catch { }   // roll back
                 throw new UpdateException(L.F("Couldn't replace the program file ({0})", "Kunne ikke udskifte programfilen ({0})", ex.Message));
             }
-            Process.Start(new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(exe) });
+            try { start(exe); }
+            catch (Exception ex)
+            {
+                bool back = false;
+                try
+                {
+                    if (File.Exists(exe)) File.Move(exe, downloaded);   // gone = e.g. removed by antivirus: just put the old one back
+                    File.Move(old, exe);
+                    back = true;
+                }
+                catch { }
+                if (back)
+                {
+                    TryDelete(downloaded);
+                    throw new UpdateException(L.F("The new version couldn't be started ({0}).", "Den nye version kunne ikke startes ({0}).", ex.Message));
+                }
+                if (!File.Exists(exe) && File.Exists(downloaded))
+                    try { File.Move(downloaded, exe); } catch { }   // never leave no program file at all
+                throw new UpdateException(L.F("The new version is installed but didn't start ({0}). Start PrintPrice again.",
+                    "Den nye version er installeret, men startede ikke ({0}). Start PrintPrice igen.", ex.Message)) { Installed = true };
+            }
         }
 
         /// Removes leftovers from a previous update. Called at startup.
@@ -416,11 +476,128 @@ namespace PrintPrice
 
         public const string DefaultUserAgent = "PrintPrice/1.0 (3D print price calculator)";
 
+        /// A WebClient that only talks https (SafeWebClient) with short timeouts for blocking calls.
         public static WebClient Client(string userAgent)
         {
-            var wc = new WebClient { Encoding = Encoding.UTF8 };
+            var wc = new SafeWebClient { Encoding = Encoding.UTF8 };
             wc.Headers[HttpRequestHeader.UserAgent] = userAgent;
             return wc;
+        }
+
+        /// Tests only: also allow plain http to 127.0.0.1 (a local test server).
+        internal static bool AllowLoopbackHttp = false;
+
+        /// True for an https address (or, with AllowLoopbackHttp, http://127.0.0.1).
+        internal static bool AllowedAddress(Uri u)
+        {
+            if (u == null || !u.IsAbsoluteUri) return false;
+            if (u.Scheme == Uri.UriSchemeHttps) return true;
+            return AllowLoopbackHttp && u.Scheme == Uri.UriSchemeHttp && u.Host == "127.0.0.1";
+        }
+
+        /// WebClient with https only (file:// and others refused, also after a redirect is impossible: HttpWebRequest
+        /// only follows http(s)), 20 s connect / 30 s read-write timeouts and at most 5 redirects. The timeouts only
+        /// work for blocking calls; async calls go through Run.
+        sealed class SafeWebClient : WebClient
+        {
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                if (!AllowedAddress(address)) throw new WebException("Only https addresses are allowed.");
+                var r = base.GetWebRequest(address);
+                var h = r as HttpWebRequest;
+                if (h != null)
+                {
+                    h.Timeout = 20000;
+                    h.ReadWriteTimeout = 30000;
+                    h.MaximumAutomaticRedirections = 5;
+                }
+                return r;
+            }
+        }
+
+        /// Runs one async WebClient call (start = e.g. () => wc.DownloadFileTaskAsync(uri, path)) and waits for it.
+        /// Cancels it when ct fires, when no bytes arrive (or are sent) for stallMs, or when more than maxBytes are
+        /// received or announced (maxBytes <= 0 = no cap). Throws OperationCanceledException (ct), TimeoutException
+        /// (stalled), InvalidDataException (too big), else the call's own exception (usually WebException).
+        internal static void Run(WebClient wc, Func<System.Threading.Tasks.Task> start, CancellationToken ct, int stallMs, long maxBytes)
+        {
+            var clock = Stopwatch.StartNew();
+            long lastMs = 0;
+            int stalled = 0, tooBig = 0;
+            DownloadProgressChangedEventHandler down = (s, e) =>
+            {
+                Interlocked.Exchange(ref lastMs, clock.ElapsedMilliseconds);
+                if (maxBytes > 0 && (e.BytesReceived > maxBytes || e.TotalBytesToReceive > maxBytes))
+                {
+                    Interlocked.Exchange(ref tooBig, 1);
+                    wc.CancelAsync();
+                }
+            };
+            UploadProgressChangedEventHandler up = (s, e) =>
+            {
+                Interlocked.Exchange(ref lastMs, clock.ElapsedMilliseconds);
+                if (maxBytes > 0 && (e.BytesReceived > maxBytes || e.TotalBytesToReceive > maxBytes))
+                {
+                    Interlocked.Exchange(ref tooBig, 1);
+                    wc.CancelAsync();
+                }
+            };
+            wc.DownloadProgressChanged += down;
+            wc.UploadProgressChanged += up;
+            Exception error = null;
+            try
+            {
+                using (ct.Register(wc.CancelAsync))
+                {
+                    var task = start();
+                    bool cancelSent = false;
+                    while (true)
+                    {
+                        try { if (task.Wait(250)) break; }
+                        catch (AggregateException) { break; }   // finished with an error: read below
+                        if (!cancelSent && clock.ElapsedMilliseconds - Interlocked.Read(ref lastMs) > stallMs)
+                        {
+                            Interlocked.Exchange(ref stalled, 1);
+                            cancelSent = true;
+                            wc.CancelAsync();
+                        }
+                    }
+                    if (task.IsFaulted) error = task.Exception.InnerException ?? task.Exception;
+                    else if (task.IsCanceled) error = new OperationCanceledException();
+                }
+            }
+            finally
+            {
+                wc.DownloadProgressChanged -= down;
+                wc.UploadProgressChanged -= up;
+            }
+            if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
+            if (tooBig != 0) throw new InvalidDataException("too big");
+            if (stalled != 0) throw new TimeoutException("no data for " + stallMs + " ms");
+            if (error != null)
+            {
+                if (error is WebException && ((WebException)error).Status == WebExceptionStatus.RequestCanceled)
+                    throw new OperationCanceledException();
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+            }
+        }
+
+        /// Reads a stream as UTF-8 text, at most maxBytes; InvalidDataException when it's longer.
+        internal static string ReadCapped(Stream s, long maxBytes)
+        {
+            using (var ms = new MemoryStream())
+            {
+                var buf = new byte[16384];
+                int n;
+                while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                {
+                    ms.Write(buf, 0, n);
+                    if (ms.Length > maxBytes) throw new InvalidDataException("too big");
+                }
+                var b = ms.GetBuffer();
+                int skip = ms.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF ? 3 : 0;   // UTF-8 BOM
+                return Encoding.UTF8.GetString(b, skip, (int)ms.Length - skip);
+            }
         }
 
         public static string Str(Dictionary<string, object> d, string key)

@@ -334,6 +334,135 @@ namespace PrintPrice.Tests
             }
             True("History FilePath back to %APPDATA%", string.Equals(History.FilePath,
                  System.IO.Path.Combine(AppSettings.RealFolder, "history.json"), StringComparison.OrdinalIgnoreCase));
+            HistoryReadAheadTests();
+            OldestFirstTests();
+        }
+
+        // ---------- optimizer v1.23: History read once (ReadAhead + LoadFrom); files only in bin\test-history-read ----------
+        static void HistoryReadAheadTests()
+        {
+            string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-history-read");
+            string file = System.IO.Path.Combine(dir, "history.json");
+            try
+            {
+                True("ReadAhead UseFolder test-history-read", AppSettings.UseFolder(dir));
+                True("ReadAhead FilePath in test folder", string.Equals(History.FilePath, file, StringComparison.OrdinalIgnoreCase));
+                System.IO.Directory.CreateDirectory(dir);
+                foreach (var f in System.IO.Directory.GetFiles(dir, "history*.json*")) System.IO.File.Delete(f);
+                History.ResetBlock();
+                string problem;
+                var t0 = new DateTime(2026, 3, 1, 10, 0, 0);
+                var a1 = HistRecord(t0); a1.Id = "RA1";
+                var a2 = HistRecord(t0.AddHours(1)); a2.Id = "RA2";
+                string json = History.ToJson(new List<QuoteRecord> { a2, a1 });
+
+                // 1. missing file -> Existed false, empty list; LoadFrom hands it out, no read
+                History.FileReads = 0;
+                var miss = History.ReadAhead();
+                True("ReadAhead missing -> empty list, no read", miss != null && miss.List != null && miss.List.Count == 0
+                     && !miss.Existed && History.FileReads == 0);
+                History.SetBlock();
+                var missList = History.LoadFrom(miss, out problem);
+                True("LoadFrom missing -> empty, no problem, no read, unblocked", missList.Count == 0 && problem == null
+                     && History.FileReads == 0 && History.Save(new List<QuoteRecord>()) == null);
+                System.IO.File.Delete(file);
+
+                // 2. unchanged file -> the read-ahead list, no second read; saveBlocked cleared like a good Load
+                System.IO.File.WriteAllText(file, json);
+                History.FileReads = 0;
+                var ahead = History.ReadAhead();
+                True("ReadAhead existing -> list of 2, one read", ahead != null && ahead.List != null && ahead.List.Count == 2
+                     && History.FileReads == 1);
+                var aheadList = ahead.List;
+                History.FileReads = 0;
+                History.SetBlock();
+                var got = History.LoadFrom(ahead, out problem);
+                True("LoadFrom unchanged -> same list, no read, no problem", object.ReferenceEquals(got, aheadList)
+                     && History.FileReads == 0 && problem == null);
+                True("LoadFrom unchanged -> same content as a fresh parse",
+                     History.ToJson(got) == History.ToJson(History.ParseJson(System.IO.File.ReadAllText(file))));
+                True("LoadFrom unchanged -> List handed out once (now null)", ahead.List == null);
+                True("LoadFrom unchanged -> Save works (unblocked)", History.Save(got) == null);
+                // handed out already -> a second LoadFrom reads normally
+                History.FileReads = 0;
+                var again = History.LoadFrom(ahead, out problem);
+                True("LoadFrom used read-ahead -> reads again", History.FileReads == 1 && again.Count == 2 && problem == null);
+
+                // 3. touched file (new write time, same size) -> reads again and gets the new content
+                System.IO.File.WriteAllText(file, json);
+                var ahead3 = History.ReadAhead();
+                string json3 = json.Replace("\"RA1\"", "\"RB1\"");   // same length, one id changed
+                True("touched test: same size", json3.Length == json.Length && json3 != json);
+                System.IO.File.WriteAllText(file, json3);
+                System.IO.File.SetLastWriteTimeUtc(file, System.IO.File.GetLastWriteTimeUtc(file).AddSeconds(5));
+                History.FileReads = 0;
+                var got3 = History.LoadFrom(ahead3, out problem);
+                True("LoadFrom touched -> reads again, new content", History.FileReads == 1 && problem == null
+                     && got3.Count == 2 && got3.Exists(r => r.Id == "RB1") && !got3.Exists(r => r.Id == "RA1"));
+
+                // 4. file gone after the read-ahead -> Load: empty list, no problem
+                var ahead4 = History.ReadAhead();
+                System.IO.File.Delete(file);
+                var got4 = History.LoadFrom(ahead4, out problem);
+                True("LoadFrom file gone -> empty, no problem", got4.Count == 0 && problem == null);
+                // file appeared after a 'missing' read-ahead -> reads it
+                var ahead4b = History.ReadAhead();
+                System.IO.File.WriteAllText(file, json);
+                History.FileReads = 0;
+                var got4b = History.LoadFrom(ahead4b, out problem);
+                True("LoadFrom file appeared -> reads it", History.FileReads == 1 && got4b.Count == 2 && problem == null);
+
+                // 5. bad file -> ReadAhead null, never renames; LoadFrom(null) = Load: renamed + problem
+                System.IO.File.WriteAllText(file, "garbage{");
+                History.ResetBlock();
+                var bad = History.ReadAhead();
+                True("ReadAhead bad -> null, file kept, nothing renamed", bad == null && System.IO.File.Exists(file)
+                     && System.IO.Directory.GetFiles(dir, "history.bad-*.json").Length == 0);
+                True("ReadAhead bad -> Save not blocked", History.Save(new List<QuoteRecord> { a1 }) == null);
+                System.IO.File.WriteAllText(file, "garbage{");
+                var gotBad = History.LoadFrom(bad, out problem);
+                var bads = System.IO.Directory.GetFiles(dir, "history.bad-*.json");
+                True("LoadFrom bad -> empty + problem + renamed like Load", gotBad.Count == 0 && problem != null
+                     && bads.Length == 1 && System.IO.File.ReadAllText(bads[0]) == "garbage{" && !System.IO.File.Exists(file));
+                // newer version -> ReadAhead null too
+                System.IO.File.WriteAllText(file, "{\"Version\":2,\"Quotes\":[]}");
+                True("ReadAhead Version 2 -> null, kept", History.ReadAhead() == null && System.IO.File.Exists(file)
+                     && System.IO.Directory.GetFiles(dir, "history.bad-*.json").Length == 1);
+                History.LoadFrom(null, out problem);
+                True("LoadFrom(null) Version 2 -> problem + renamed", problem != null
+                     && System.IO.Directory.GetFiles(dir, "history.bad-*.json").Length == 2);
+            }
+            finally
+            {
+                History.ResetBlock();
+                AppSettings.ClearTestFolder();
+            }
+        }
+
+        // ---------- History.OldestFirst (shared by InvoiceGroup and the main window) ----------
+        static void OldestFirstTests()
+        {
+            var t0 = new DateTime(2026, 4, 1, 9, 0, 0);
+            var a = HistRecord(t0.AddHours(2)); a.Id = "A";   // newest
+            var b = HistRecord(t0); b.Id = "B";                 // same time as C
+            var c = HistRecord(t0); c.Id = "C";
+            var d = HistRecord(t0.AddHours(1)); d.Id = "D";
+            var x = HistRecord(t0); x.Id = "X"; x.SavedAt = "not a time";
+            var y = HistRecord(t0); y.Id = "Y"; y.SavedAt = "";
+            // list newest first: positions A0 X1 B2 D3 C4 Y5, plus a null and a repeat of B
+            var jobs = new List<QuoteRecord> { a, x, b, null, d, c, b, y };
+            var o = History.OldestFirst(jobs);
+            string ids = string.Join(",", o.ConvertAll(r => r.Id).ToArray());
+            // valid first by time: C/B at 9:00 (C later in the list -> older -> first), D 10:00, A 11:00;
+            // then unreadable times, later position first: Y, X
+            True("OldestFirst order C,B,D,A,Y,X (got " + ids + ")", ids == "C,B,D,A,Y,X");
+            True("OldestFirst leaves the input as is", jobs.Count == 8 && jobs[0] == a);
+            True("OldestFirst null -> empty", History.OldestFirst(null).Count == 0);
+            // InvoiceGroup: filter by code then the same order
+            a.InvoiceNo = "2026-12345"; b.InvoiceNo = " 2026-12345 "; c.InvoiceNo = "2026-12345"; d.InvoiceNo = "2026-99999";
+            var g = History.InvoiceGroup(new List<QuoteRecord> { a, x, b, d, c, y }, "2026-12345");
+            string gids = string.Join(",", g.ConvertAll(r => r.Id).ToArray());
+            True("InvoiceGroup = filter + OldestFirst C,B,A (got " + gids + ")", gids == "C,B,A");
         }
 
         // ---------- backup and restore (idea 27): History backup/merge/restore, Backup code + blob ----------
@@ -2077,7 +2206,7 @@ namespace PrintPrice.Tests
             True("BedErrorText \"\" -> A1", Has(BambuSlicer.BedErrorText(""), "Bambu Lab A1", "256 × 256 × 256 mm"));
             True("SliceErrorText -50 = BedErrorText", BambuSlicer.SliceErrorText(-50, "a.stl", "One of the plate is empty…", "A1M")
                  == BambuSlicer.BedErrorText("A1M"));
-            True("SliceErrorText -17 no message", BambuSlicer.SliceErrorText(-17, "a.stl", "", "A1") == "Bambu Studio could not slice a.stl: exit code -17");
+            True("SliceErrorText -17 no message", BambuSlicer.SliceErrorText(-17, "a.stl", "", "A1") == "Bambu Studio could not slice a.stl: it stopped with error -17");
             True("SliceErrorText 1 with message", BambuSlicer.SliceErrorText(1, "a.stl", "boom", "A1") == "Bambu Studio could not slice a.stl: boom");
             True("UnsupportedPrinterText X1 Carbon", Has(BambuSlicer.UnsupportedPrinterText("Bambu Lab X1 Carbon"), "Bambu Lab X1 Carbon",
                 "doesn't support yet", "https://github.com/gettic/PrintPrice/issues"));
@@ -3287,6 +3416,8 @@ namespace PrintPrice.Tests
                 Eq("ForModel A1 mini: 70 W", 70, PrinterProfile.ForModel("2", null, Wear.ModelA1Mini).Watts);
                 // 5. save/load round trip in the test folder
                 True("UseFolder test dir again", AppSettings.UseFolder(testDir));
+                if (System.IO.Directory.Exists(testDir))   // the empty-file tests below keep settings.bad-*.ini copies
+                    foreach (var f in System.IO.Directory.GetFiles(testDir, "settings.bad-*.ini")) System.IO.File.Delete(f);
                 var s5 = new AppSettings();
                 s5.FriendsMarkupPct = 37;
                 s5.Language = "da";
@@ -3535,10 +3666,496 @@ namespace PrintPrice.Tests
             SetupApplyTests();
             RecordBillTests();
             PrintStateTests();
+            StatusFilterTests();
             CombinedBillTests();
+            ReviewFixTests();
+            SettingsSafeTests();
+            OnlineHelperTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        // ---------- whole-app review fixes (2026-11-20): numbers, øre split, payback fold, Trim, texts ----------
+
+        static QuoteLine Ln(string key, long ore)
+        {
+            return new QuoteLine { Key = key, Ore = ore, Exact = ore / 100.0 };
+        }
+
+        static string Keys(List<QuoteLine> lines)
+        {
+            var k = new List<string>();
+            foreach (var l in lines) k.Add(l.Key + ":" + l.Ore);
+            return string.Join(",", k.ToArray());
+        }
+
+        static void ReviewFixTests()
+        {
+            double v;
+            // A2: Num.TryParse refuses NaN, infinity and 1e7 or more
+            True("TryParse 9999999,99 ok", Num.TryParse("9999999,99", out v) && Math.Abs(v - 9999999.99) < 1e-6);
+            True("TryParse 10000000 / 1e7 / 1e20 refused", !Num.TryParse("10000000", out v) && !Num.TryParse("1e7", out v) && !Num.TryParse("1e20", out v));
+            True("TryParse Infinity / NaN refused", !Num.TryParse("Infinity", out v) && !Num.TryParse("NaN", out v) && !Num.TryParse("-Infinity", out v));
+            // a lone dot is a decimal point: "1.200" = 1,2 (not 1200); with a comma after it the dot is a thousands dot
+            True("TryParse \"1.200\" -> 1,2", Num.TryParse("1.200", out v) && Math.Abs(v - 1.2) < 1e-12);
+            True("TryParse \"1.234,5\" -> 1234,5", Num.TryParse("1.234,5", out v) && Math.Abs(v - 1234.5) < 1e-9);
+            // Pricing.Calculate refuses non-finite and too large inputs
+            var cs = new AppSettings();
+            Func<QuoteInput, bool> throws = inp => { try { Pricing.Calculate(inp, cs); return false; } catch (ArgumentException) { return true; } };
+            True("Calculate: 1e7 g refused", throws(new QuoteInput { Hours = 1, FilamentGrams = 1e7, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2 }));
+            True("Calculate: NaN kr/kg refused", throws(new QuoteInput { Hours = 1, FilamentGrams = 10, FilamentDkkPerKg = double.NaN, ElectricityDkkPerKwh = 2 }));
+            True("Calculate: infinite kr/kWh refused", throws(new QuoteInput { Hours = 1, FilamentGrams = 10, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = double.PositiveInfinity }));
+            True("Calculate: a filament line of 1e20 g refused", throws(new QuoteInput { Hours = 1, ElectricityDkkPerKwh = 2, Filaments = new List<FilamentLine> {
+                new FilamentLine { Grams = 10, PricePerKg = 200 }, new FilamentLine { Grams = 1e20, PricePerKg = 200 } } }));
+            True("Calculate: NaN debt refused", throws(new QuoteInput { Hours = 1, FilamentGrams = 10, FilamentDkkPerKg = 200, PaybackDebt = double.NaN }));
+            True("Calculate: 9.999.999 g still works", !throws(new QuoteInput { Hours = 1, FilamentGrams = 9999999, FilamentDkkPerKg = 1, ElectricityDkkPerKwh = 0 }));
+            // ReadIni skips an infinite number: the default 50 stays
+            Eq("FromIni MinimumPrice=Infinity -> 50", 50, AppSettings.FromIni(new[] { "SettingsVersion=2", "MinimumPrice=Infinity" }).MinimumPrice);
+            Eq("FromIni MinimumPrice=NaN -> 50", 50, AppSettings.FromIni(new[] { "SettingsVersion=2", "MinimumPrice=NaN" }).MinimumPrice);
+            bool upg;
+            AppSettings.FromIni(new string[0], out upg);
+            True("FromIni with no key lines: not upgraded (nothing to store)", !upg);
+            AppSettings.FromIni(new[] { "junk", "=x", "\u0001\u0002" }, out upg);
+            True("FromIni junk lines: not upgraded", !upg);
+
+            // ShownOre limits (pinned): 9.999.999,99 -> 999.999.999; -0,004 -> 0; NaN and 1e17 (1e19 øre > long) throw
+            True("ShownOre 9.999.999,99 = 999.999.999", Pricing.ShownOre(9999999.99) == 999999999L && Pricing.ShownOre(-0.004) == 0);
+            Func<double, bool> overflow = x => { try { Pricing.ShownOre(x); return false; } catch (OverflowException) { return true; } };
+            True("ShownOre NaN / 1e17 throw OverflowException", overflow(double.NaN) && overflow(1e17));
+
+            // SplitOre: big leftover {0,01; 0,02} to 10 øre: floors 1 + 2 = 3, 7 left round-robin from the earlier tie
+            // (+4 / +3) -> 5 + 5
+            var sp = new List<QuoteLine> { new QuoteLine { Exact = 0.01 }, new QuoteLine { Exact = 0.02 } };
+            Pricing.SplitOre(sp, 10);
+            True("SplitOre big leftover -> 5 + 5", sp[0].Ore == 5 && sp[1].Ore == 5);
+            // over the total {0,50; 0,25} to 70 øre: 75 - 70 = 5 taken from the end in turn: 24, 49, 23, 48, 22 -> 48 + 22
+            sp = new List<QuoteLine> { new QuoteLine { Exact = 0.5 }, new QuoteLine { Exact = 0.25 } };
+            Pricing.SplitOre(sp, 70);
+            True("SplitOre over the total -> 48 + 22", sp[0].Ore == 48 && sp[1].Ore == 22);
+            sp = new List<QuoteLine> { new QuoteLine { Exact = -1 }, new QuoteLine { Exact = 0.3 } };
+            Pricing.SplitOre(sp, 30);
+            True("SplitOre negative exact -> 0 øre", sp[0].Ore == 0 && sp[1].Ore == 30);
+
+            // A3: ShareOre by the SHOWN prices: 10,0041 and 10,0049 both show 10,00 -> equal weights 0,5 øre each, floors
+            // 0 + 0, 1 left, tie -> the earlier job (exact prices gave it to the second)
+            var sh = Pricing.ShareOre(new[] { 10.0041, 10.0049 }, 1);
+            True("ShareOre by shown price: {1, 0}", sh[0] == 1 && sh[1] == 0);
+            True("ShareOre never throws on huge / NaN prices", Pricing.ShareOre(new[] { 1e20, double.NaN, 5 }, 100).Length == 3);
+
+            // A3: an older invoice keeps its stored top-up shares: 25,01 - 15,01 = 10,00 and 24,99 - 14,99 = 10,00;
+            // total 1000 + 1000 + 1501 + 1499 = 5000; JobOre = {1000 + 1501, 1000 + 1499} = {2501, 2499}
+            // (re-splitting 30,00 over 10 / 10 would give 2500 / 2500)
+            var o1 = new QuoteRecord { Id = "o1", SavedAt = "2026-11-01 10:00:00", InvoiceNo = "2026-22222", BilledAt = "2026-11-02 10:00:00",
+                                       OthersPrice = 25.01, FriendsPrice = 10, InvoiceTopUp = 15.01 };
+            var o2 = new QuoteRecord { Id = "o2", SavedAt = "2026-11-01 11:00:00", InvoiceNo = "2026-22222", BilledAt = "2026-11-02 10:00:00",
+                                       OthersPrice = 24.99, FriendsPrice = 10, InvoiceTopUp = 14.99 };
+            var og = History.GroupBill(new[] { o1, o2 }, new AppSettings(), false);
+            var ojo = QuoteRows.JobOre(og);
+            True("old invoice: Invoiced, total 50,00", og.Invoiced && Pricing.ShownOre(og.Total) == 5000);
+            True("old invoice: JobOre = stored 2501 / 2499", ojo[0] == 2501 && ojo[1] == 2499);
+            True("live bill: not Invoiced", !History.GroupBill(new[] { BillJob(18, new DateTime(2026, 11, 1)) }, new AppSettings(), false).Invoiced);
+
+            // A3 round trip: 3 jobs saved without rounding, 12,3349 / 12,3441 / 10,0049 kr. (shown 12,33 / 12,34 / 10,00 = 34,67);
+            // minimum 50, round 1: 50 - 34,67 = 15,33 -> 16,00 top-up; shares of 1600 by 1233 / 1234 / 1000 (Σ 3467):
+            // 569,02 / 569,48 / 461,49 -> floors 1599, 1 left -> ,49 (third) -> 569 / 569 / 462;
+            // saved 1233 + 569 = 18,02, 1234 + 569 = 18,03, 1000 + 462 = 14,62 (Σ 50,67)
+            var s0 = BillSettings(); s0.RoundTo = 0;
+            var rt = new List<QuoteRecord>();
+            double[] grams = { 12.3349, 12.3441, 10.0049 };
+            for (int i = 0; i < 3; i++)
+            {
+                var inp = new QuoteInput { Hours = 1, FilamentGrams = grams[i], FilamentDkkPerKg = 1000, ElectricityDkkPerKwh = 0 };
+                rt.Add(History.FromQuote(inp, Pricing.Calculate(inp, s0), s0, "RT" + i, "", new DateTime(2026, 11, 10, 9, i, 0)));
+            }
+            var rs = new AppSettings { MinimumPrice = 50, RoundTo = 1 };
+            var pre = QuoteRows.JobOre(History.GroupBill(rt, rs, false));
+            True("round trip preview 1802 / 1803 / 1462", pre[0] == 1802 && pre[1] == 1803 && pre[2] == 1462);
+            History.MakeInvoice(new List<QuoteRecord>(rt), rt, new DateTime(2026, 11, 10, 12, 0, 0), rs, false, Digits("33333"));
+            var after = History.GroupBill(rt, rs, false);
+            var post = QuoteRows.JobOre(after);
+            bool same = true;
+            for (int i = 0; i < 3; i++) same &= post[i] == pre[i] && post[i] == Pricing.ShownOre(rt[i].OthersPrice);
+            True("round trip: saved = preview = re-opened (18,02 / 18,03 / 14,62)", same && after.Invoiced);
+            True("round trip: jobs add up to the total 50,67", post[0] + post[1] + post[2] == 5067 && Pricing.ShownOre(after.Total) == 5067);
+
+            // 4: payback and minimum fold into Work & handling: {mat 10, pay 3, work 5, min 2} -> work 5 + 3 + 2 = 10
+            var f1 = QuoteRows.FoldMinimum(new List<QuoteLine> { Ln(QuoteLine.Material, 1000), Ln(QuoteLine.Payback, 300), Ln(QuoteLine.Work, 500), Ln(QuoteLine.Minimum, 200) });
+            True("fold payback + minimum into work: " + Keys(f1), Keys(f1) == "material:1000,work:1000");
+            // no work line: one in the first folded line's place, 0,30 + 0,50 = 0,80
+            var f2 = QuoteRows.FoldMinimum(new List<QuoteLine> { Ln(QuoteLine.Material, 100), Ln(QuoteLine.Payback, 30), Ln(QuoteLine.Minimum, 50), Ln(QuoteLine.Rounding, 20) });
+            True("fold without a work line: " + Keys(f2), Keys(f2) == "material:100,work:80,rounding:20");
+            var f3 = QuoteRows.FoldMinimum(new List<QuoteLine> { Ln(QuoteLine.Material, 100), Ln(QuoteLine.Minimum, 50) });
+            True("fold minimum only, no work line: " + Keys(f3), Keys(f3) == "material:100,work:50");
+            // the payback example (60,37): payback 5,67 + work 18,73 = 24,40 on one Work & handling row, no payback row
+            var ps = PaySettings(2); ps.AutoWearRate = 0;
+            var bp = Pricing.Breakdown(Owing(33.70), ps, false, null);
+            var prow = QuoteRows.Build(bp, null, 0, 5, 30, "");
+            QuoteRow workRow = null;
+            bool payRow = false;
+            long heads = 0;
+            foreach (var r in prow)
+            {
+                if (r.Kind != QuoteRowKind.Head) continue;
+                if (r.Label == "Work & handling") workRow = r;
+                if (r.Label.IndexOf("failed prints", StringComparison.OrdinalIgnoreCase) >= 0) payRow = true;
+                double a;
+                Num.TryParse(r.Amount.Replace(" kr.", "").Replace(".", ""), out a);
+                heads += (long)Math.Round(a * 100);
+            }
+            True("bill: no payback row, Work & handling 24,40 kr.", !payRow && workRow != null && workRow.Amount == Num.Kr(24.40));
+            True("bill: rows add up to 60,37", heads == 6037);
+            // combined bill rows: payback folded too; 8 colours with at most 6 rows -> "3 more colours" / "3 flere farver"
+            var gl = new List<QuoteLine>();
+            for (int i = 0; i < 8; i++) gl.Add(new QuoteLine { Key = QuoteLine.Material, Index = i, Ore = 100, Exact = 1, Quantity = 10 });
+            gl.Add(Ln(QuoteLine.Power, 50)); gl.Add(Ln(QuoteLine.Payback, 70)); gl.Add(Ln(QuoteLine.Work, 200)); gl.Add(Ln(QuoteLine.Other, 30));
+            var gb = new QuoteBreakdown { Lines = gl, TotalOre = 1150 };
+            var grows = QuoteRows.BuildGroup(gb, null, 2, 0, "", true, 6);
+            bool gPay = false, gMore = false, gOther = false; string gWork = "";
+            foreach (var r in grows)
+            {
+                if (r.Label.IndexOf("failed prints", StringComparison.OrdinalIgnoreCase) >= 0) gPay = true;
+                if (r.Label == "3 more colours") gMore = true;
+                if (r.Label == "Other") gOther = true;
+                if (r.Label == "Work & handling") gWork = r.Amount;
+            }
+            True("combined rows: no payback row, work 2,00 + 0,70 = 2,70, \"Other\", \"3 more colours\"", !gPay && gWork == Num.Kr(2.70) && gOther && gMore);
+            L_Danish(true);
+            try
+            {
+                bool da = false;
+                foreach (var r in QuoteRows.BuildGroup(gb, null, 2, 0, "", true, 6)) if (r.Label == "3 flere farver") da = true;
+                True("Danish: \"3 flere farver\"", da);
+                True("Danish backup code text", Backup.InvalidCodeText() == "Det er ikke en gyldig kode til kopien.");
+            }
+            finally { L_Danish(false); }
+
+            // 5: Trim keeps invoiced records beyond max (their numbers must stay taken): 4 records, max 2, the oldest
+            // but one invoiced -> kept; the oldest (plain) dropped
+            var tl = new List<QuoteRecord>();
+            for (int i = 0; i < 4; i++) tl.Add(HistRecord(new DateTime(2026, 11, 10, 12, 0, 0).AddHours(-i)));
+            tl[2].InvoiceNo = "2026-44444";
+            History.Trim(tl, 2);
+            True("Trim keeps the invoiced record beyond max", tl.Count == 3 && tl[2].InvoiceNo == "2026-44444");
+
+            // 5: NextInvoiceNo with every 5-digit try taken (pick always 0 -> 10000, used): tries 1-999 at 5 digits,
+            // try 1000 at 6 digits = 100000
+            True("NextInvoiceNo full: 2026-100000", History.NextInvoiceNo(null, 2026, "2026-10000", n => 0) == "2026-100000");
+        }
+
+        static void L_Danish(bool on) { PrintPrice.L.Danish = on; }
+
+        // A1: settings.ini is written safely and never overwritten with defaults after a failed read
+        static void SettingsSafeTests()
+        {
+            string dir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-settings-safe");
+            string file = System.IO.Path.Combine(dir, "settings.ini");
+            try
+            {
+                System.IO.Directory.CreateDirectory(dir);
+                foreach (var f in System.IO.Directory.GetFiles(dir)) System.IO.File.Delete(f);
+                True("UseFolder test-settings-safe", AppSettings.UseFolder(dir));
+
+                // Save via .tmp: file written, no .tmp left; a second Save replaces it
+                new AppSettings { FriendsMarkupPct = 33 }.Save();
+                new AppSettings { FriendsMarkupPct = 34 }.Save();
+                True("Save: file there, no .tmp left", System.IO.File.Exists(file) && !System.IO.File.Exists(file + ".tmp"));
+                var l1 = AppSettings.Load();
+                True("Save/Load round trip 34, no problem, not blocked", l1.FriendsMarkupPct == 34 && AppSettings.LoadProblem == null && !AppSettings.SaveBlocked);
+
+                // locked file: defaults in memory, saving blocked, the file keeps its bytes
+                System.IO.File.WriteAllText(file, "SettingsVersion=2\r\nFriendsMarkupPct=41\r\nMinimumPrice=0\r\n");
+                byte[] orig = System.IO.File.ReadAllBytes(file);
+                AppSettings locked;
+                using (new System.IO.FileStream(file, System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite, System.IO.FileShare.None))
+                {
+                    locked = AppSettings.Load();
+                }
+                True("locked: defaults, SaveBlocked, a problem text", locked.FriendsMarkupPct == 25 && AppSettings.SaveBlocked && AppSettings.LoadProblem != null);
+                string lp = AppSettings.LoadProblem ?? "";
+                True("locked: short 'in use' text, no path or .NET message", lp.StartsWith("settings.ini ") && lp.IndexOf('\\') < 0
+                     && lp.IndexOf(dir, StringComparison.OrdinalIgnoreCase) < 0 && lp == AppSettings.OpenProblemText(new System.IO.IOException("x")));
+                string noAccess = AppSettings.OpenProblemText(new UnauthorizedAccessException(@"Access to the path 'C:\Users\Someone\settings.ini' is denied."));
+                True("no access: plain text without the path", noAccess.StartsWith("settings.ini ") && noAccess.IndexOf('\\') < 0 && noAccess != lp);
+                locked.MinimumPrice = 50;
+                locked.Save();
+                True("locked: Save after the read failed leaves the file alone", Same(orig, System.IO.File.ReadAllBytes(file)));
+                var back = AppSettings.Load();
+                True("next Load reads it again (41, min 0), not blocked", back.FriendsMarkupPct == 41 && back.MinimumPrice == 0 && !AppSettings.SaveBlocked);
+
+                // empty file / junk: kept as settings.bad-*.ini (same bytes), defaults, no upgrade save, then Save works
+                foreach (string junk in new[] { "", "junk without keys\r\nÿþ=" })
+                {
+                    foreach (var f in System.IO.Directory.GetFiles(dir, "settings.bad-*.ini")) System.IO.File.Delete(f);
+                    System.IO.File.WriteAllText(file, junk);
+                    byte[] jb = System.IO.File.ReadAllBytes(file);
+                    var e = AppSettings.Load();
+                    var bads = System.IO.Directory.GetFiles(dir, "settings.bad-*.ini");
+                    string nm = junk.Length == 0 ? "empty file" : "junk file";
+                    True(nm + ": kept as settings.bad-*.ini, no settings.ini, not blocked", bads.Length == 1 && Same(jb, System.IO.File.ReadAllBytes(bads[0]))
+                         && !System.IO.File.Exists(file) && !AppSettings.SaveBlocked && AppSettings.LoadProblem != null);
+                    True(nm + ": defaults, existing user (SetupDone 1, Gettic), version 2", e.SetupDone == 1 && e.QuoteName == "Gettic"
+                         && e.MinimumPrice == 50 && e.SettingsVersion == 2);
+                    e.MinimumPrice = 0;
+                    e.Save();
+                    Eq(nm + ": the user's min 0 after Save stays 0", 0, AppSettings.Load().MinimumPrice);
+                }
+                // a file with one key is a settings file (read as usual)
+                System.IO.File.WriteAllText(file, "SettingsVersion=2\r\n");
+                AppSettings.Load();
+                True("one key line: read, no bad copy", System.IO.File.Exists(file) && AppSettings.LoadProblem == null);
+
+                // Restore while settings.ini couldn't be read: history only -> settings.ini untouched + a message
+                System.IO.File.WriteAllText(file, "SettingsVersion=2\r\nFriendsMarkupPct=41\r\n");
+                orig = System.IO.File.ReadAllBytes(file);
+                History.ResetBlock();
+                AppSettings.SetSettingsBlock();
+                RestoreResult rr;
+                var bd = new BackupData { Quotes = new List<QuoteRecord>() };
+                string msg = History.Restore(new List<QuoteRecord>(), new AppSettings(), bd, false, false, DateTime.Now, out rr);
+                True("Restore history only while blocked: message, settings.ini unchanged", msg != null && rr != null && Same(orig, System.IO.File.ReadAllBytes(file)));
+                AppSettings.ResetSettingsBlock();
+            }
+            finally
+            {
+                AppSettings.ResetSettingsBlock();
+                AppSettings.ClearTestFolder();
+                try { System.IO.Directory.Delete(dir, true); } catch { }
+            }
+        }
+
+        // ---------- online's pure helpers (review 2026-11-20): job folder sweep, quoting, update swap, safe links, replies,
+        // downloads (a local 127.0.0.1 server only, never a real one) ----------
+
+        static bool Throws<T>(Action a) where T : Exception
+        {
+            try { a(); return false; }
+            catch (T) { return true; }
+            catch (Exception) { return false; }
+        }
+
+        static Dictionary<string, object> JsonObj(string json)
+        {
+            return Json.Deserialize<Dictionary<string, object>>(json);
+        }
+
+        static void OnlineHelperTests()
+        {
+            // job folder sweep: 32 hex digits (any case), at least minAge old; future-dated, young and other names kept
+            var now = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+            string hex = "0123456789abcdef0123456789abcdef";
+            Func<string, double, KeyValuePair<string, DateTime>> F = (n, hoursAgo) =>
+                new KeyValuePair<string, DateTime>(@"C:\t\" + n, now.AddHours(-hoursAgo));
+            var folders = new List<KeyValuePair<string, DateTime>>
+            {
+                F(hex, 48), F(hex.ToUpperInvariant(), 48), F("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1), F("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 24),
+                F("cccccccccccccccccccccccccccccccc", -5), F(hex.Substring(1), 48), F(hex + "0", 48), F("studio", 48),
+                F("gggggggggggggggggggggggggggggggg", 48), new KeyValuePair<string, DateTime>(@"C:\t\dddddddddddddddddddddddddddddddd\", now.AddDays(-3))
+            };
+            var old = BambuSlicer.OldJobFolders(folders, now, TimeSpan.FromDays(1));
+            True("OldJobFolders: 2-day hex (both cases), exactly 24 h, trailing slash; not young / future / 31 / 33 / studio / non-hex",
+                 old.Count == 4 && old.Contains(@"C:\t\" + hex) && old.Contains(@"C:\t\" + hex.ToUpperInvariant())
+                 && old.Contains(@"C:\t\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") && old.Contains(@"C:\t\dddddddddddddddddddddddddddddddd\"));
+            True("OldJobFolders null -> empty", BambuSlicer.OldJobFolders(null, now, TimeSpan.FromDays(1)).Count == 0);
+
+            // CleanJobFolders on a test folder: only the old job folder goes
+            string root = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-jobfolders");
+            try
+            {
+                if (System.IO.Directory.Exists(root)) System.IO.Directory.Delete(root, true);
+                string oldJob = System.IO.Path.Combine(root, hex), young = System.IO.Path.Combine(root, "ffffffffffffffffffffffffffffffff"),
+                       studio = System.IO.Path.Combine(root, "studio");
+                foreach (var d in new[] { oldJob, young, studio })
+                {
+                    System.IO.Directory.CreateDirectory(d);
+                    System.IO.File.WriteAllText(System.IO.Path.Combine(d, "x.txt"), "x");
+                }
+                foreach (var d in new[] { oldJob, studio })
+                {
+                    System.IO.Directory.SetCreationTimeUtc(d, DateTime.UtcNow.AddDays(-3));
+                    System.IO.Directory.SetLastWriteTimeUtc(d, DateTime.UtcNow.AddDays(-3));
+                }
+                int gone = BambuSlicer.CleanJobFolders(root);
+                True("CleanJobFolders: 1 old job folder gone, young + studio kept", gone == 1 && !System.IO.Directory.Exists(oldJob)
+                     && System.IO.Directory.Exists(young) && System.IO.Directory.Exists(studio));
+                True("CleanJobFolders missing / null root -> 0", BambuSlicer.CleanJobFolders(System.IO.Path.Combine(root, "none")) == 0
+                     && BambuSlicer.CleanJobFolders(null) == 0);
+            }
+            finally { try { System.IO.Directory.Delete(root, true); } catch { } }
+
+            // QuoteArg (Windows' CommandLineToArgvW rules)
+            True("QuoteArg plain path", BambuSlicer.QuoteArg(@"C:\a b\x.stl") == "\"C:\\a b\\x.stl\"");
+            True("QuoteArg trailing backslash doubled", BambuSlicer.QuoteArg(@"C:\a b\") == "\"C:\\a b\\\\\"");
+            True("QuoteArg quote -> \\\"", BambuSlicer.QuoteArg("say \"hi\"") == "\"say \\\"hi\\\"\"");
+            True("QuoteArg backslash before a quote -> 3 + quote", BambuSlicer.QuoteArg("a\\\"b") == "\"a\\\\\\\"b\"");
+            True("QuoteArg null -> \"\"", BambuSlicer.QuoteArg(null) == "\"\"");
+
+            // update swap on plain text files (never an exe)
+            string sw = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test-swap");
+            try
+            {
+                if (System.IO.Directory.Exists(sw)) System.IO.Directory.Delete(sw, true);
+                System.IO.Directory.CreateDirectory(sw);
+                string exe = System.IO.Path.Combine(sw, "app.txt"), dl = System.IO.Path.Combine(sw, "app.txt.download");
+                Action reset = () =>
+                {
+                    foreach (var f in System.IO.Directory.GetFiles(sw)) System.IO.File.Delete(f);
+                    System.IO.File.WriteAllText(exe, "old");
+                    System.IO.File.WriteAllText(dl, "new");
+                };
+                Func<string, string> read = p => System.IO.File.Exists(p) ? System.IO.File.ReadAllText(p) : "(none)";
+
+                reset();
+                string started = null;
+                Updater.Swap(exe, dl, p => started = p);
+                True("Swap ok: new in place, old as .old, started", read(exe) == "new" && read(exe + ".old") == "old" && !System.IO.File.Exists(dl) && started == exe);
+
+                reset();
+                UpdateException ue = null;
+                try { Updater.Swap(exe, dl, p => { throw new InvalidOperationException("no start"); }); }
+                catch (UpdateException ex) { ue = ex; }
+                True("Swap start fails: old program back, not Installed, download removed", ue != null && !ue.Installed && read(exe) == "old"
+                     && !System.IO.File.Exists(exe + ".old") && !System.IO.File.Exists(dl));
+
+                reset();
+                ue = null;
+                try { Updater.Swap(exe, dl, p => { System.IO.File.Delete(p); throw new InvalidOperationException("removed"); }); }
+                catch (UpdateException ex) { ue = ex; }
+                True("Swap new file removed (antivirus): old program back, not Installed", ue != null && !ue.Installed && read(exe) == "old");
+
+                reset();
+                ue = null;
+                System.IO.FileStream hold = null;
+                try
+                {
+                    // the .old file is held open, so the old program can't be put back: the new one stays, Installed
+                    try { Updater.Swap(exe, dl, p => { hold = new System.IO.FileStream(p + ".old", System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.None); throw new InvalidOperationException("no start"); }); }
+                    catch (UpdateException ex) { ue = ex; }
+                }
+                finally { if (hold != null) hold.Dispose(); }
+                True("Swap can't roll back: Installed, new program in place", ue != null && ue.Installed && read(exe) == "new");
+            }
+            finally { try { System.IO.Directory.Delete(sw, true); } catch { } }
+
+            // safe release page links
+            string rp = Updater.ReleasesPage;
+            True("SafePageUrl: our https release page kept", Updater.SafePageUrl("https://github.com/gettic/PrintPrice/releases/tag/v1.23.0") == "https://github.com/gettic/PrintPrice/releases/tag/v1.23.0");
+            True("SafePageUrl: http / other host / other repo / user info / port / javascript / null -> releases page",
+                 Updater.SafePageUrl("http://github.com/gettic/PrintPrice/releases") == rp && Updater.SafePageUrl("https://evil.example/gettic/PrintPrice/x") == rp
+                 && Updater.SafePageUrl("https://github.com/other/repo/releases") == rp && Updater.SafePageUrl("https://u@github.com/gettic/PrintPrice/x") == rp
+                 && Updater.SafePageUrl("https://github.com:8443/gettic/PrintPrice/x") == rp && Updater.SafePageUrl("javascript:alert(1)") == rp
+                 && Updater.SafePageUrl(null) == rp && Updater.SafePageUrl("https://github.com/gettic/PrintPriceX/x") == rp);
+            var rel = Updater.ParseRelease("{\"tag_name\":\"v9.9.9\",\"name\":\"x\",\"html_url\":\"file:///C:/evil\",\"assets\":[{\"name\":\"PrintPrice.exe\",\"browser_download_url\":\"https://github.com/gettic/PrintPrice/releases/download/v9.9.9/PrintPrice.exe\",\"size\":10}]}");
+            True("ParseRelease odd html_url -> releases page", rel != null && rel.PageUrl == rp);
+
+            // Printables replies
+            True("ParseReply HTML -> SliceException", Throws<SliceException>(() => Printables.ParseReply("<html>502 Bad Gateway</html>")));
+            True("ParseReply null / empty -> SliceException", Throws<SliceException>(() => Printables.ParseReply(null)) && Throws<SliceException>(() => Printables.ParseReply("")));
+            True("ParseReply errors without data -> SliceException", Throws<SliceException>(() => Printables.ParseReply("{\"errors\":[{\"message\":\"x\"}]}"))
+                 && Throws<SliceException>(() => Printables.ParseReply("{\"data\":null}")) && Throws<SliceException>(() => Printables.ParseReply("[1,2]")));
+            var pd = Printables.ParseReply("{\"data\":{\"print\":{\"id\":\"5\",\"name\":\"Benchy\",\"stls\":[{\"id\":\"11\",\"name\":\"a.stl\",\"fileSize\":\"123\"},{\"id\":\"\",\"name\":\"b.stl\"},{\"id\":\"12\"},\"odd\",{\"id\":\"13\",\"name\":\"c.stl\",\"fileSize\":\"x\"}]}}}");
+            var pm = Printables.ModelFromData("5", pd);
+            True("ModelFromData: name, 2 files (no id / no name / odd skipped), size 123 and 0", pm.Name == "Benchy" && pm.Files.Count == 2
+                 && pm.Files[0].Id == "11" && pm.Files[0].Size == 123 && pm.Files[1].Id == "13" && pm.Files[1].Size == 0);
+            True("ModelFromData print null / missing / null data -> SliceException",
+                 Throws<SliceException>(() => Printables.ModelFromData("5", Printables.ParseReply("{\"data\":{\"print\":null}}")))
+                 && Throws<SliceException>(() => Printables.ModelFromData("5", JsonObj("{\"x\":1}"))) && Throws<SliceException>(() => Printables.ModelFromData("5", null)));
+            True("ModelFromData stls not a list -> no files", Printables.ModelFromData("5", JsonObj("{\"print\":{\"name\":\"n\",\"stls\":\"text\"}}")).Files.Count == 0);
+            Func<string, string> link = l => Printables.LinkFromData(JsonObj("{\"getDownloadLink\":{\"ok\":true,\"output\":" + l + "}}"));
+            True("LinkFromData https kept", link("{\"link\":\"https://files.printables.com/x.stl\"}") == "https://files.printables.com/x.stl");
+            True("LinkFromData http / file / relative / output null / no link -> null", link("{\"link\":\"http://files.printables.com/x.stl\"}") == null
+                 && link("{\"link\":\"file:///C:/x\"}") == null && link("{\"link\":\"/x.stl\"}") == null && link("null") == null && link("{}") == null
+                 && Printables.LinkFromData(null) == null);
+
+            // PowerPrice.PickCurrent: HTML -> SliceException; records without a time, with a null or text price skipped
+            var pn = new DateTime(2026, 11, 20, 10, 20, 0, DateTimeKind.Utc);
+            True("PickCurrent HTML / null / no records -> SliceException", Throws<SliceException>(() => PowerPrice.PickCurrent("<html></html>", "DK1", pn))
+                 && Throws<SliceException>(() => PowerPrice.PickCurrent(null, "DK1", pn)) && Throws<SliceException>(() => PowerPrice.PickCurrent("{\"x\":1}", "DK1", pn))
+                 && Throws<SliceException>(() => PowerPrice.PickCurrent("{\"records\":5}", "DK1", pn)));
+            var pq = PowerPrice.PickCurrent("{\"records\":[{\"TimeUTC\":\"2026-11-20T10:00:00\",\"DayAheadPriceDKK\":800.5}," +
+                "{\"TimeUTC\":\"2026-11-20T10:15:00\",\"DayAheadPriceDKK\":null},{\"DayAheadPriceDKK\":999},{\"TimeUTC\":null,\"DayAheadPriceDKK\":999}," +
+                "{\"TimeUTC\":\"2026-11-20T10:16:00\",\"DayAheadPriceDKK\":\"abc\"},{\"TimeUTC\":\"2026-11-20T10:30:00\",\"DayAheadPriceDKK\":5000},5,null]}", "DK1", pn);
+            // the 10:15 / 10:16 slots have no usable price and 10:30 hasn't started: the 10:00 slot, 800,5 kr/MWh = 0,8005 kr/kWh
+            True("PickCurrent skips bad records: 10:00 slot, 0,8005 kr/kWh", pq != null && pq.SlotStartUtc == new DateTime(2026, 11, 20, 10, 0, 0)
+                 && Math.Abs(pq.SpotDkkPerKwh - 0.8005) < 1e-12 && pq.Area == "DK1");
+            True("PickCurrent all bad / only future / older than 2 h -> SliceException",
+                 Throws<SliceException>(() => PowerPrice.PickCurrent("{\"records\":[{\"TimeUTC\":\"2026-11-20T10:00:00\",\"DayAheadPriceDKK\":null}]}", "DK1", pn))
+                 && Throws<SliceException>(() => PowerPrice.PickCurrent("{\"records\":[{\"TimeUTC\":\"2026-11-20T11:00:00\",\"DayAheadPriceDKK\":1}]}", "DK1", pn))
+                 && Throws<SliceException>(() => PowerPrice.PickCurrent("{\"records\":[{\"TimeUTC\":\"2026-11-20T08:00:00\",\"DayAheadPriceDKK\":1}]}", "DK1", pn)));
+
+            // online backup: a timed-out upload has its own text; other failures the general one
+            string slow = OnlineBackup.FailureText(System.Net.WebExceptionStatus.Timeout, true);
+            True("FailureText: timed-out PUT = upload text; GET timeout / other PUT failure = general",
+                 slow.Contains("upload") && OnlineBackup.FailureText(System.Net.WebExceptionStatus.Timeout, false) != slow
+                 && OnlineBackup.FailureText(System.Net.WebExceptionStatus.ConnectFailure, true) != slow);
+
+            NetRunTests();
+        }
+
+        // Net.Run / ReadCapped / AllowedAddress against a local 127.0.0.1 server (TinyServer): quick, no real servers
+        static void NetRunTests()
+        {
+            bool was = Net.AllowLoopbackHttp;
+            try
+            {
+                Net.AllowLoopbackHttp = false;
+                True("AllowedAddress: https yes; loopback http only when allowed; file / other http no",
+                     Net.AllowedAddress(new Uri("https://example.com/x")) && !Net.AllowedAddress(new Uri("http://127.0.0.1:5/x"))
+                     && !Net.AllowedAddress(new Uri("file:///C:/x")) && !Net.AllowedAddress(null));
+                Net.AllowLoopbackHttp = true;
+                True("AllowedAddress with AllowLoopbackHttp: 127.0.0.1 http yes, localhost / other http no",
+                     Net.AllowedAddress(new Uri("http://127.0.0.1:5/x")) && !Net.AllowedAddress(new Uri("http://localhost:5/x"))
+                     && !Net.AllowedAddress(new Uri("http://example.com/x")));
+
+                // refused before any connection is made
+                using (var wc = Net.Client("test"))
+                {
+                    True("Net.Client refuses file://", Throws<System.Net.WebException>(() => wc.DownloadData("file:///C:/Windows/win.ini")));
+                    True("Net.Client refuses non-loopback http", Throws<System.Net.WebException>(() => wc.DownloadData("http://192.0.2.1/x")));
+                }
+
+                using (var srv = new TinyServer())
+                {
+                    Func<string, long, CancellationTokenSourceBox, int, byte[]> get = (path, cap, cts, stall) =>
+                    {
+                        using (var wc = Net.Client("test"))
+                        {
+                            wc.Proxy = null;
+                            System.Threading.Tasks.Task<byte[]> call = null;
+                            Net.Run(wc, () => call = wc.DownloadDataTaskAsync(new Uri(srv.Url + path)),
+                                    cts != null ? cts.Source.Token : System.Threading.CancellationToken.None, stall, cap);
+                            return call.Result;
+                        }
+                    };
+                    byte[] ok = get("/small", 1000, null, 5000);
+                    True("Net.Run small reply read", ok != null && System.Text.Encoding.ASCII.GetString(ok) == "hello");
+                    True("Net.Run over the cap -> InvalidDataException", Throws<System.IO.InvalidDataException>(() => get("/big", 1000, null, 5000)));
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    True("Net.Run no data -> TimeoutException", Throws<TimeoutException>(() => get("/stall", 1000, null, 400)));
+                    True("Net.Run stall noticed quickly (< 3 s)", sw.ElapsedMilliseconds < 3000);
+                    var box = new CancellationTokenSourceBox();
+                    box.Source.CancelAfter(300);
+                    True("Net.Run cancel -> OperationCanceledException", Throws<OperationCanceledException>(() => get("/stall", 1000, box, 10000)));
+                }
+
+                // ReadCapped: text read (BOM dropped), over the cap -> InvalidDataException
+                var bom = new byte[] { 0xEF, 0xBB, 0xBF, (byte)'h', (byte)'i' };
+                True("ReadCapped reads text, drops the BOM", Net.ReadCapped(new System.IO.MemoryStream(bom), 10) == "hi");
+                True("ReadCapped over the cap -> InvalidDataException", Throws<System.IO.InvalidDataException>(() => Net.ReadCapped(new System.IO.MemoryStream(new byte[100]), 50)));
+            }
+            finally { Net.AllowLoopbackHttp = was; }
+        }
+
+        sealed class CancellationTokenSourceBox
+        {
+            public readonly System.Threading.CancellationTokenSource Source = new System.Threading.CancellationTokenSource();
+        }
+
+        static bool Same(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
         }
 
         // ---------- combined bill: several History jobs on one invoice, minimum price once on the whole bill ----------
@@ -4112,6 +4729,74 @@ namespace PrintPrice.Tests
             var mineP = BRec("M", "2026-11-19 10:00:00"); History.SetPrintState(mineP, PrintState.Printing, t);
             res = History.Combine(new List<QuoteRecord> { mineP }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirsF } }, false, false);
             True("PrintState merge: failed in the backup ends printing", res.Quotes[0].Failed && res.Quotes[0].PrintingSince == "");
+        }
+
+        // ---------- issue #7: History filter by the 4 print statuses + Settings "Reset to defaults" keeping personal details ----------
+
+        static void StatusFilterTests()
+        {
+            var t = new DateTime(2026, 11, 19, 10, 0, 0);
+            var none = HistRecord(t);                                                  // new record = Not printed
+            var printing = HistRecord(t); History.SetPrintState(printing, PrintState.Printing, t);           // 5 h 30 m, done 15:30
+            var done = HistRecord(t); History.SetPrintState(done, PrintState.Printed, t);
+            var ended = HistRecord(t); History.SetPrintState(ended, PrintState.Printing, t.AddHours(-6));   // 04:00 + 5 h 30 m = 09:30 < 10:00
+            var failed = HistRecord(t); History.SetPrintState(failed, PrintState.Failed, t);
+            var all = new[] { none, printing, done, ended, failed };
+            int[] states = { History.ShowStateNotPrinted, History.ShowStatePrinting, History.ShowStatePrinted, History.ShowStateFailed };
+            // expected per record (rows) and state filter (columns)
+            bool[][] want = {
+                new[] { true,  false, false, false },
+                new[] { false, true,  false, false },
+                new[] { false, false, true,  false },
+                new[] { false, false, true,  false },    // time run out = Printed
+                new[] { false, false, false, true  } };
+            bool ok = true;
+            for (int i = 0; i < all.Length; i++)
+                for (int k = 0; k < states.Length; k++)
+                    if (History.Matches(all[i], DateTime.MinValue, null, states[k], "", null, t) != want[i][k]) ok = false;
+            True("Status filter: each record in exactly its own status (finished print = Printed)", ok);
+            True("Status filter: at 16:00 the printing one is Printed", History.Matches(printing, DateTime.MinValue, null, History.ShowStatePrinted, "", null, t.AddHours(6))
+                 && !History.Matches(printing, DateTime.MinValue, null, History.ShowStatePrinting, "", null, t.AddHours(6)));
+            // old values unchanged (website): ShowNotPrinted = Printed tick off, so it also shows the failed one; ShowFailed = Failed
+            True("Status filter: old ShowNotPrinted = none + failed", History.Matches(none, DateTime.MinValue, null, History.ShowNotPrinted, "", null, t)
+                 && History.Matches(failed, DateTime.MinValue, null, History.ShowNotPrinted, "", null, t)
+                 && !History.Matches(printing, DateTime.MinValue, null, History.ShowNotPrinted, "", null, t));
+            True("Status filter: old ShowFailed = failed only", History.Matches(failed, DateTime.MinValue, null, History.ShowFailed, "", null)
+                 && !History.Matches(none, DateTime.MinValue, null, History.ShowFailed, "", null));
+            // combined with month, search and the 6-argument overload (DateTime.Now; done has no start, so Printed at any time)
+            True("Status filter: + month 2026-11 + search \"bench\"", History.Matches(done, new DateTime(2026, 11, 1), null, History.ShowStatePrinted, "bench", null));
+            True("Status filter: other month / other search -> no", !History.Matches(done, new DateTime(2026, 10, 1), null, History.ShowStatePrinted, "", null)
+                 && !History.Matches(done, DateTime.MinValue, null, History.ShowStatePrinted, "xyz", null));
+            True("Status filter: ShowAll shows every status", History.Matches(failed, DateTime.MinValue, null, History.ShowAll, "", null, t)
+                 && History.Matches(printing, DateTime.MinValue, null, History.ShowAll, "", null, t));
+            True("Status filter: null record -> false, no error", !History.Matches(null, DateTime.MinValue, null, History.ShowStateFailed, "", null, t));
+            // ShowFor / StateOfShow round trip; old values are not states
+            bool trip = true;
+            foreach (PrintState s in new[] { PrintState.NotPrinted, PrintState.Printing, PrintState.Printed, PrintState.Failed })
+            {
+                PrintState back;
+                if (!History.StateOfShow(History.ShowFor(s), out back) || back != s) trip = false;
+            }
+            PrintState dummy;
+            True("Status filter: ShowFor / StateOfShow round trip, 5..8", trip && History.ShowFor(PrintState.NotPrinted) == 5 && History.ShowFor(PrintState.Failed) == 8
+                 && !History.StateOfShow(History.ShowAll, out dummy) && !History.StateOfShow(History.ShowNotPrinted, out dummy)
+                 && !History.StateOfShow(History.ShowFailed, out dummy) && !History.StateOfShow(99, out dummy));
+
+            // Settings "Reset to defaults": personal details kept, everything else default, the original untouched
+            var mine = new AppSettings();
+            mine.QuoteName = "Test Name"; mine.PayMobilePay = "12345678"; mine.PayBank = "1234 5678901234";
+            mine.SlicerPath = @"C:\Test\bambu-studio.exe"; mine.Language = "da";
+            mine.FriendsMarkupPct = 99; mine.MinimumPrice = 7; mine.InvoiceDueDays = 30;
+            var fresh = new AppSettings();
+            var d = mine.DefaultsKeepingPersonal();
+            True("Reset keeps name, MobilePay, bank, slicer path, language", !ReferenceEquals(d, mine) && d.QuoteName == "Test Name"
+                 && d.PayMobilePay == "12345678" && d.PayBank == "1234 5678901234" && d.SlicerPath == @"C:\Test\bambu-studio.exe" && d.Language == "da");
+            True("Reset: other settings back to defaults (minimum 50)", d.FriendsMarkupPct == fresh.FriendsMarkupPct && d.MinimumPrice == 50
+                 && d.InvoiceDueDays == fresh.InvoiceDueDays);
+            True("Reset: the original is unchanged", mine.FriendsMarkupPct == 99 && mine.MinimumPrice == 7 && mine.InvoiceDueDays == 30);
+            var blank = new AppSettings(); blank.QuoteName = null; blank.PayMobilePay = null; blank.PayBank = null; blank.SlicerPath = null; blank.Language = null;
+            var db = blank.DefaultsKeepingPersonal();
+            True("Reset: null details -> \"\"", db.QuoteName == "" && db.PayMobilePay == "" && db.PayBank == "" && db.SlicerPath == "" && db.Language == "");
         }
 
         // ---------- first-time setup answers (idea 19): SetupAnswers + AppSettings.ApplySetup, shared by desktop and web ----------
@@ -4982,6 +5667,55 @@ namespace PrintPrice.Tests
             byte[] hb = System.Text.Encoding.ASCII.GetBytes(head);
             s.Write(hb, 0, hb.Length);
             s.Write(outBody, 0, outBody.Length);
+            s.Flush();
+        }
+
+        public void Dispose() { try { listener.Stop(); } catch { } }
+    }
+
+    /// A tiny HTTP server on 127.0.0.1 (random port, loopback only) for Net.Run: GET /small = "hello", /big = 5000
+    /// bytes, /stall = reads the request and sends nothing for 3 s. One thread per connection.
+    class TinyServer : IDisposable
+    {
+        readonly System.Net.Sockets.TcpListener listener;
+        public string Url { get; private set; }
+
+        public TinyServer()
+        {
+            listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            Url = "http://127.0.0.1:" + ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            new System.Threading.Thread(Loop) { IsBackground = true }.Start();
+        }
+
+        void Loop()
+        {
+            while (true)
+            {
+                System.Net.Sockets.TcpClient c;
+                try { c = listener.AcceptTcpClient(); } catch { return; }
+                new System.Threading.Thread(() => { try { using (c) Handle(c.GetStream()); } catch { } }) { IsBackground = true }.Start();
+            }
+        }
+
+        static string ReadLine(System.IO.Stream s)
+        {
+            var sb = new System.Text.StringBuilder();
+            int b;
+            while ((b = s.ReadByte()) >= 0 && b != '\n') if (b != '\r') sb.Append((char)b);
+            return sb.ToString();
+        }
+
+        static void Handle(System.Net.Sockets.NetworkStream s)
+        {
+            string[] first = ReadLine(s).Split(' ');
+            string path = first.Length > 1 ? first[1] : "/";
+            while (ReadLine(s).Length > 0) { }
+            if (path == "/stall") { System.Threading.Thread.Sleep(3000); return; }
+            byte[] body = path == "/big" ? new byte[5000] : System.Text.Encoding.ASCII.GetBytes("hello");
+            byte[] hb = System.Text.Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
+            s.Write(hb, 0, hb.Length);
+            s.Write(body, 0, body.Length);
             s.Flush();
         }
 

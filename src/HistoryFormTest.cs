@@ -109,6 +109,30 @@ namespace PrintPrice
                                   " (expected " + rest + ")");
                     break;
                 }
+                case "for":
+                {
+                    // for <id> friends|customer: the record's For (in memory and in history.json)
+                    var r = w.Length == 2 ? list.Find(x => x.Id == w[0]) : null;
+                    int want = w.Length == 2 && w[1] == "friends" ? History.ForFriends : History.ForCustomer;
+                    var f = FileRecords();
+                    var fr = f != null && w.Length > 0 ? f.Find(x => x.Id == w[0]) : null;
+                    log.Check(r != null && r.For == want && fr != null && fr.For == want,
+                              "for " + (w.Length > 0 ? w[0] : "?") + ": memory " + (r != null ? r.For.ToString() : "-") + ", file " +
+                              (fr != null ? fr.For.ToString() : "-") + " (expected " + rest + ")");
+                    break;
+                }
+                case "status":
+                {
+                    // status <id> <notprinted|printing|printed|failed>: the record's print status in memory and in history.json
+                    string[] names = { "notprinted", "printing", "printed", "failed" };
+                    var r = w.Length == 2 ? list.Find(x => x.Id == w[0]) : null;
+                    var f = FileRecords();
+                    var fr = f != null && w.Length > 0 ? f.Find(x => x.Id == w[0]) : null;
+                    var now = DateTime.Now;
+                    string m = r != null ? names[(int)History.PrintStateOf(r, now)] : "-", fs = fr != null ? names[(int)History.PrintStateOf(fr, now)] : "-";
+                    log.Check(w.Length == 2 && m == w[1] && fs == w[1], "status " + (w.Length > 0 ? w[0] : "?") + ": memory " + m + ", file " + fs + " (expected " + rest + ")");
+                    break;
+                }
                 case "shown":
                     // rows / cards the list shows now (month and printer filter applied)
                     if (form == null) { log.Check(false, "expect shown works only inside open..close"); break; }
@@ -267,6 +291,52 @@ namespace PrintPrice
                             TestClick(btnBackup, "Backup…", log);
                             BackupForm.TestDriver = null;
                             log.Check(played, "Backup window opened");
+                            break;
+                        }
+                        case "for":
+                            // for friends|customer: the row menu's For on the selected rows (invoiced rows keep theirs, A4)
+                            if (arg != "friends" && arg != "customer") { log.Check(false, "for needs friends or customer"); break; }
+                            SetFor(arg == "friends" ? History.ForFriends : History.ForCustomer);
+                            break;
+                        case "show":
+                        {
+                            // show <all|friends|customers|notprinted|printing|printed|failed>: the Show filter (issue #7);
+                            // "heading" picks the muted "Print status" line, which must move on to the next real choice
+                            string[] names = { "all", "friends", "customers", "heading", "notprinted", "printing", "printed", "failed" };
+                            int i = Array.IndexOf(names, arg);
+                            if (i < 0) { log.Check(false, "unknown show: " + arg); break; }
+                            cmbShow.SelectedIndex = i;
+                            int want = i == 3 ? 4 : i;
+                            log.Check(cmbShow.SelectedIndex == want && ShowValue == ShowValues[want],
+                                      "show " + arg + ": item " + cmbShow.SelectedIndex + " \"" + cmbShow.Text + "\" = Show value " + ShowValue);
+                            break;
+                        }
+                        case "status":
+                        {
+                            // status <notprinted|printing|printed|failed> [yes|no]: the row menu's Print status on the selected rows
+                            var w = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                            string[] names = { "notprinted", "printing", "printed", "failed" };
+                            int k = w.Length > 0 ? Array.IndexOf(names, w[0]) : -1;
+                            if (k < 0) { log.Check(false, "unknown status: " + arg); break; }
+                            if (w.Contains("yes")) answers.Enqueue(DialogResult.Yes);
+                            else if (w.Contains("no")) answers.Enqueue(DialogResult.No);
+                            miStates[k].PerformClick();
+                            break;
+                        }
+                        case "statuscell":
+                        {
+                            // statuscell <#row>: the Status cell's menu as a click opens it (four items, dot on the row's own)
+                            int row;
+                            if (!arg.StartsWith("#") || !int.TryParse(arg.Substring(1), out row) || row < 1 || row > grid.Rows.Count)
+                            { log.Check(false, "statuscell needs #row"); break; }
+                            ShowStatusMenu(row - 1);
+                            var r = grid.Rows[row - 1].Tag as QuoteRecord;
+                            int dot = -1;
+                            for (int j = 0; j < statusMenu.Items.Count; j++) if (((ToolStripMenuItem)statusMenu.Items[j]).Checked) dot = j;
+                            log.Check(statusMenu.Items.Count == 4 && r != null && dot == (int)History.PrintStateOf(r, DateTime.Now),
+                                      "Status cell menu: " + statusMenu.Items.Count + " items, dot on " + (dot >= 0 ? statusMenu.Items[dot].Text : "none"));
+                            Screenshots.Snap(this, dir, "test_history_statusmenu.png");
+                            statusMenu.Close();
                             break;
                         }
                         case "snap":

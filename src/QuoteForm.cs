@@ -20,6 +20,7 @@ namespace PrintPrice
         readonly ToolTip zoomTip;   // dark (owner-drawn) "Click to zoom…" on the preview
         readonly TextBox txtCustomer;
         readonly Label lblCustomer;   // "Customer (required)" / "(optional)" / a made invoice's "Bill to (kept)"
+        readonly Label lblPrice;      // "Price on the quote" / "Price on the invoice" (+ " (locked)" on a made invoice)
         readonly Label lblStatus;     // "Print status" (hidden in the invoice window)
         readonly ComboBox cmbStatus;  // Not printed yet / Printing now / Printed / Failed (= PrintState)
         readonly Button btnRecent, btnCopyPic, btnSavePic, btnPdf, btnText, btnHistory, btnClose;
@@ -86,7 +87,8 @@ namespace PrintPrice
             typing.Tick += delegate { typing.Stop(); Redraw(); };
 
             // which price
-            right.Controls.Add(Heading(L.S("Price on the quote", "Pris på tilbuddet"), 14));
+            lblPrice = Heading(invoice ? L.S("Price on the invoice", "Pris på fakturaen") : L.S("Price on the quote", "Pris på tilbuddet"), 14);
+            right.Controls.Add(lblPrice);
             var grpPrice = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Margin = Padding.Empty };
             rbCustomers = new Choice { Text = L.S("Customers", "Kunder"), RightText = Num.Kr(customerPrice), RightColour = Theme.Others, Checked = !friends };
             rbFriends = new Choice { Text = L.S("Friends & family", "Venner og familie"), RightText = Num.Kr(friendsPrice), RightColour = Theme.Friends, Checked = friends };
@@ -120,7 +122,8 @@ namespace PrintPrice
             });
             cmbStatus.SelectedIndex = (int)PrintState.NotPrinted;
             right.Controls.Add(cmbStatus);
-            lblStatus.Visible = cmbStatus.Visible = !invoice;   // an invoice ticks Printed itself
+            // issue #7: shown on invoices too; a user's pick raises StatusPicked (saved records save it at once)
+            cmbStatus.SelectionChangeCommitted += delegate { OnStatusPicked(); };
             // the zoom hint as a dark tooltip on the page (no extra line: the right column must fit a 768 px laptop screen)
             zoomTip = new ToolTip { OwnerDraw = true, InitialDelay = 600 };
             zoomTip.Draw += (s, e) =>
@@ -130,8 +133,7 @@ namespace PrintPrice
                 TextRenderer.DrawText(e.Graphics, e.ToolTipText, e.Font, e.Bounds, Theme.Text,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
             };
-            zoomTip.SetToolTip(preview, L.S("Click to zoom in or out, drag to move the page", "Klik for at zoome ind eller ud, træk for at flytte siden"));
-            foreach (var c in new[] { rbCustomers, rbFriends, rbDark, rbLight })
+            zoomTip.SetToolTip(preview, L.S("Click to zoom in or out, drag to move the page", "Klik for at zoome ind eller ud, træk for at flytte siden"));            foreach (var c in new[] { rbCustomers, rbFriends, rbDark, rbLight })
                 c.CheckedChanged += (s, e) => { if (((Choice)s).Checked) ChoiceChanged(); };
 
             // actions: 2 x 2, Copy picture = the accent (default) button
@@ -143,6 +145,7 @@ namespace PrintPrice
             // full-width third row: saves the quote (price + name) to the history without making a picture, file or text
             btnHistory = ActionButton(L.S("Save to history", "Gem i historik"), QuoteExport.History, Padding.Empty);
             btnHistory.Width = 117 * 2 + 6;
+            if (invoice) zoomTip.SetToolTip(btnHistory, L.S("Saves it as a quote; no invoice number.", "Gemmes som tilbud uden fakturanummer."));
             grid.Controls.Add(btnCopyPic, 0, 0);
             grid.Controls.Add(btnSavePic, 1, 0);
             grid.Controls.Add(btnPdf, 0, 1);
@@ -154,8 +157,8 @@ namespace PrintPrice
             info = new InfoBox(240, 9.5f)
             {
                 Margin = new Padding(0, 12, 0, 0),
-                Text = helpText ?? L.S("Copying or saving also puts the quote in the price history. Esc closes.",
-                                       "Når du kopierer eller gemmer, kommer tilbuddet også i prishistorikken. Esc lukker.")
+                Text = helpText ?? L.S("Copying or saving also puts the quote in the price history.",
+                                       "Når du kopierer eller gemmer, kommer tilbuddet også i prishistorikken.")
             };
             right.Controls.Add(info);
 
@@ -163,6 +166,9 @@ namespace PrintPrice
             btnClose = new Button { Text = L.S("Close", "Luk"), Size = new Size(90, 32), Anchor = AnchorStyles.Right | AnchorStyles.Bottom,
                                     Margin = Padding.Empty, DialogResult = DialogResult.Cancel };
             right.Controls.Add(btnClose);
+            // every control in its own fixed row: auto-placement skips hidden controls (the invoice window's print status),
+            // which moved Close up into an AutoSize row under the info box and left the 100 % row empty (qol #1)
+            for (int i = 0; i < right.Controls.Count; i++) right.SetCellPosition(right.Controls[i], new TableLayoutPanelCellPosition(0, i));
             right.RowCount = right.Controls.Count;
             while (right.RowStyles.Count < right.RowCount) right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             right.RowStyles[right.RowCount - 1] = new RowStyle(SizeType.Percent, 100);
@@ -258,9 +264,15 @@ namespace PrintPrice
         internal string TestCustomer { get { return Customer; } }
         /// Types a name into the name box (no effect when it is locked).
         internal void TestSetCustomer(string name) { if (!txtCustomer.ReadOnly) txtCustomer.Text = name; }
-        internal bool TestStatusShown { get { return cmbStatus.Visible; } }
+        // the box's own Visible flag (Visible reads false until the window is shown, so the tests ask this)
+        internal bool TestStatusShown { get { return statusShown; } }
+        bool statusShown = true;
         /// Picks the Customers / Friends & family price as a click would.
-        internal void TestFriends(bool friends) { if (friends) rbFriends.Checked = true; else rbCustomers.Checked = true; }
+        internal void TestFriends(bool friends)
+        {
+            var c = friends ? rbFriends : rbCustomers;
+            if (c.Enabled) c.Checked = true;   // a greyed-out (locked) choice can't be clicked
+        }
 
         Button ActionButton(string text, QuoteExport kind, Padding margin)
         {
@@ -277,12 +289,53 @@ namespace PrintPrice
                 if (b.Enabled != on) b.Enabled = on;
         }
 
-        /// The print status chosen in the box (saved with the quote by every export; quotes only).
+        /// The print status chosen in the box ("Mixed" on a combined window reads as NotPrinted: check StatusMixed).
+        /// Setting it never raises StatusPicked and removes a "Mixed" line.
         public PrintState PrintStatus
         {
             get { int i = cmbStatus.SelectedIndex; return i >= 0 && i <= (int)PrintState.Failed ? (PrintState)i : PrintState.NotPrinted; }
-            set { cmbStatus.SelectedIndex = (int)value; }
+            set
+            {
+                cmbStatus.SelectedIndex = (int)value;
+                if (cmbStatus.Items.Count > 4) cmbStatus.Items.RemoveAt(4);
+            }
         }
+
+        /// A combined window whose jobs have different states: the box shows "Mixed" / "Blandet".
+        public bool StatusMixed { get { return cmbStatus.SelectedIndex == 4; } }
+
+        /// The user picked a print status in the box (issue #7). The handler saves it (saved records) or keeps it for the
+        /// first export (a new job); it may set PrintStatus back (e.g. a "Failed" for several jobs that was not confirmed).
+        public event Action StatusPicked;
+
+        void OnStatusPicked()
+        {
+            if (StatusMixed) return;
+            if (cmbStatus.Items.Count > 4) { var s = PrintStatus; PrintStatus = s; }   // a real state chosen: "Mixed" goes
+            if (StatusPicked != null) StatusPicked();
+        }
+
+        /// A combined window (issue #7): heading "Print status (all 3 prints)"; shared = their one state, null = "Mixed".
+        public void SetGroupStatus(int n, PrintState? shared)
+        {
+            lblStatus.Text = L.F("Print status (all {0} prints)", "Printstatus (alle {0} print)", n);
+            if (shared.HasValue) PrintStatus = shared.Value;
+            else
+            {
+                if (cmbStatus.Items.Count == 4) cmbStatus.Items.Add(L.S("Mixed", "Blandet"));
+                cmbStatus.SelectedIndex = 4;
+            }
+        }
+
+        /// --test-invoice / --test-bill: picks a status as the user would (raises StatusPicked).
+        internal void TestPickStatus(PrintState state)
+        {
+            cmbStatus.SelectedIndex = (int)state;
+            OnStatusPicked();
+        }
+
+        internal string TestStatusHeading { get { return lblStatus.Text; } }
+        internal bool TestStatusMixed { get { return StatusMixed; } }
 
         /// A line in the info box under the actions (e.g. the invoice of a failed print: Warning).
         public void ShowNote(string text, InfoKind kind)
@@ -302,20 +355,40 @@ namespace PrintPrice
         /// A combined quote (several History jobs): no print status box (it would set one state on all of them).
         public void HideStatus()
         {
-            lblStatus.Visible = cmbStatus.Visible = false;
+            lblStatus.Visible = cmbStatus.Visible = statusShown = false;
         }
 
         /// A made invoice (History's Invoice… on a billed quote): the name it was made out to stays; the box is read-only
         /// (Muted text, still selectable / copyable), ▾ greyed out, heading "Bill to (kept)". Call before the window shows.
         public void LockCustomer()
         {
-            lblCustomer.Text = L.S("Bill to (kept on the invoice)", "Kunde (står på fakturaen)");
+            lblCustomer.Text = L.S("Bill to (locked)", "Kunde (låst)");
             txtCustomer.ReadOnly = true;
             txtCustomer.BackColor = Theme.Input;   // ReadOnly would turn it Windows grey
             txtCustomer.ForeColor = Theme.Muted;
             btnRecent.Enabled = false;
             btnRecent.TabStop = false;
         }
+
+        /// A made invoice (A4): the name and the billed price stay. friends = the price it was made at (the records' For);
+        /// that choice is chosen and the other one greyed out, so the same number never shows another price.
+        public void LockInvoice(bool friends)
+        {
+            LockCustomer();
+            bool was = ready;
+            ready = false;   // no remember / redraw for the forced choice; Redraw below
+            if (friends) rbFriends.Checked = true; else rbCustomers.Checked = true;
+            ready = was;
+            rbCustomers.Enabled = !friends;
+            rbFriends.Enabled = friends;
+            lblPrice.Text = L.S("Price on the invoice (locked)", "Pris på fakturaen (låst)");
+            if (ready) Redraw();
+        }
+
+        /// --test-invoice / --test-bill: the price choice is locked (LockInvoice).
+        internal bool TestPriceLocked { get { return !rbCustomers.Enabled || !rbFriends.Enabled; } }
+        /// --test-invoice / --test-bill: the chosen price (true = friends & family).
+        internal bool TestFriendsChosen { get { return Friends; } }
 
         void ChoiceChanged()
         {

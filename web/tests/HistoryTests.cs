@@ -229,7 +229,7 @@ static class HistoryTests
         History.MarkFailed(b, true, new DateTime(2026, 11, 10, 14, 0, 0));
         var pin = new QuoteInput { Hours = 5, Minutes = 30, FilamentGrams = 120, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2, PaybackDebt = History.FailedDebt(debtList, null) };
         var pr = Pricing.Calculate(pin, pay);
-        True("payback row shown with a failed print: " + WebHistory.PaybackCaption(pr), pr.PaybackCost > 0 && WebHistory.PaybackCaption(pr) == "Failed prints payback – customers only"
+        True("payback row shown with a failed print: " + WebHistory.PaybackCaption(pr), pr.PaybackCost > 0 && WebHistory.PaybackCaption(pr) == "Earning back failed prints – customers only"
              && WebHistory.PaybackAmount(pr).Contains("left"));
         pin.PaybackDebt = 0;
         True("no payback row without a debt", WebHistory.PaybackCaption(Pricing.Calculate(pin, pay)) == null);

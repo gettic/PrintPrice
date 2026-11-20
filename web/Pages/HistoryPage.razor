@@ -10,6 +10,7 @@
 
 @{
     Work();   // the sums and the filtered list, worked out again only when something they use changed
+    now = DateTime.Now;   // "Printing now" is worked out against this redraw's time
     var names = cNames;
     var allPrinters = cAllPrinters;
     bool printerMode = allPrinters.Count >= 2;
@@ -119,6 +120,11 @@ else
                 <span class="muted">· @Num.Kr(WebHistory.Total(ticked))</span>
                 <span class="grow"></span>
                 <button class="small" @onclick="ClearTicks">@L.S("Clear selection", "Fjern markering")</button>
+                @if (ticked.Count >= 2)
+                {
+                    <button class="small billbtn" @onclick="() => BillClicked(false)">@L.S("Quote…", "Tilbud…")</button>
+                    <button class="small billbtn" @onclick="() => BillClicked(true)">@L.S("Invoice…", "Faktura…")</button>
+                }
                 <button class="small accent" @onclick="() => AskDelete(rows)">@WebHistory.DeleteTickedText(ticked.Count)</button>
             }
         </div>
@@ -139,6 +145,7 @@ else
                 <th>@L.S("Date", "Dato")</th><th>@L.S("Model", "Model")</th><th class="n">@L.S("Time", "Tid")</th>
                 <th class="n">@L.S("Grams", "Gram")</th><th class="n">@L.S("Price", "Pris")</th><th>@L.S("For", "Til")</th>
                 @if (printerMode) { <th>@L.S("Printer", "Printer")</th> }
+                <th class="customer">@L.S("Customer", "Kunde")</th>
                 <th>@L.S("Note", "Note")</th><th class="c">@L.S("Printed", "Printet")</th><th class="c">@L.S("Failed", "Fejlet")</th>
                 <th>@L.S("Invoice", "Faktura")</th>
             </tr>
@@ -160,15 +167,19 @@ else
                     <td class="n">@WebHistory.TimeText(rec)</td>
                     <td class="n">@WebHistory.GramsText(rec)</td>
                     <td class="n"><b class="@(friends ? "green" : "red")">@WebHistory.PriceText(rec)</b></td>
-                    <td><select class="for @(friends ? "green" : "red")" aria-label="@L.S("For", "Til")" @onchange="e => ForChosen(rec, e)">
+                    <td><select class="for @(friends ? "green" : "red")" aria-label="@L.S("For", "Til")" @onchange="e => ForChosen(rec, e)"
+                                disabled="@WebQuote.InvoiceMade(rec)" title="@WebQuote.ForLockedText(rec)">
                             <option value="1" selected="@friends">@WebHistory.ForText(History.ForFriends)</option>
                             <option value="2" selected="@(!friends)">@WebHistory.ForText(History.ForCustomer)</option>
                         </select></td>
                     @if (printerMode) { <td class="printer" title="@WebHistory.PrinterText(rec, names)">@WebHistory.PrinterText(rec, names)</td> }
+                    <td class="customer" title="@WebHistory.CustomerTip(rec)">@WebHistory.CustomerText(rec)</td>
                     <td class="notecell"><input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" aria-label="@L.S("Note", "Note")"
                                                 title="@rec.Note" @onchange="e => NoteChanged(rec, e)" @onkeydown:stopPropagation="true" /></td>
-                    <td class="c"><button class="@(rec.Printed ? "tick on" : "tick")" aria-pressed="@rec.Printed" aria-label="@L.S("Printed", "Printet")"
-                                          @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@(rec.Printed ? "✓" : "")</button></td>
+                    @{ string printingTip = WebHistory.PrintingText(rec, now, false); }
+                    <td class="c"><button class="@(printingTip != null ? "tick on printing" : rec.Printed ? "tick on" : "tick")" aria-pressed="@rec.Printed"
+                                          aria-label="@(printingTip ?? L.S("Printed", "Printet"))" title="@printingTip"
+                                          @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@if (printingTip != null) { @Clock } else { @(rec.Printed ? "✓" : "") }</button></td>
                     <td class="c"><button class="@(rec.Failed ? "tick x" : "tick")" aria-pressed="@rec.Failed" aria-label="@L.S("Failed", "Fejlet")"
                                           @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true">@(rec.Failed ? "✗" : "")</button></td>
                     <td class="muted">@rec.InvoiceNo</td>
@@ -188,7 +199,8 @@ else
             bool friends = WebHistory.IsFriends(rec);
             bool open = rec == opened && !selectMode;
             bool isTicked = ticked.Contains(rec);
-            string extra = (printerMode ? WebHistory.PrinterText(rec, names) : "") + (printerMode && rec.Note.Length > 0 ? " · " : "") + rec.Note;
+            string extra = Joined(printerMode ? WebHistory.PrinterText(rec, names) : "", WebHistory.CustomerText(rec), rec.Note);
+            string printingChip = WebHistory.PrintingText(rec, now, true);
             <div class="@("qrow" + (open ? " open" : "") + (isTicked ? " ticked" : ""))" @key="rec" @onclick="() => PhoneTap(rec)">
                 <div class="qpic">@Pic(rec, "m")
                     @if (selectMode)
@@ -203,7 +215,14 @@ else
                 <div class="d r @(friends ? "green" : "red")">@WebHistory.ForText(rec.For)</div>
                 @if (extra.Length > 0) { <div class="d wide">@extra</div> }
                 <div class="chips">
-                    <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
+                    @if (printingChip != null)
+                    {
+                        <button class="chip printing" aria-pressed="true" title="@WebHistory.PrintingText(rec, now, false)" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@Clock @printingChip</button>
+                    }
+                    else
+                    {
+                        <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
+                    }
                     <button class="@(rec.Failed ? "chip bad" : "chip")" aria-pressed="@rec.Failed" @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true">@(rec.Failed ? "✗ " : "")@L.S("Failed", "Fejlet")</button>
                     @if (rec.InvoiceNo.Length > 0) { <span class="chip">@rec.InvoiceNo</span> }
                 </div>
@@ -241,8 +260,10 @@ else
                                    @onchange="() => Tick(rec)" @onkeydown:stopPropagation="true" /></span>
                         @if (!large && (rec.Printed || rec.Failed))
                         {
+                            string tilePrinting = WebHistory.PrintingText(rec, now, false);
                             <span class="flags">
-                                @if (rec.Printed) { <span class="flag on" title="@L.S("Printed", "Printet")">✓</span> }
+                                @if (tilePrinting != null) { <span class="flag printing" title="@tilePrinting">@Clock</span> }
+                                else if (rec.Printed) { <span class="flag on" title="@L.S("Printed", "Printet")">✓</span> }
                                 @if (rec.Failed) { <span class="flag bad" title="@L.S("Failed", "Fejlet")">✗</span> }
                             </span>
                         }
@@ -250,15 +271,21 @@ else
                     <div class="m" title="@WebHistory.ModelText(rec)">@WebHistory.ModelText(rec)</div>
                     @if (large)
                     {
-                        string extra = (printerMode ? WebHistory.PrinterText(rec, names) : "");
-                        if (rec.Note.Length > 0) extra += (extra.Length > 0 ? " · " : "") + rec.Note;
-                        if (rec.InvoiceNo.Length > 0) extra += (extra.Length > 0 ? " · " : "") + rec.InvoiceNo;
+                        string extra = Joined(printerMode ? WebHistory.PrinterText(rec, names) : "", WebHistory.CustomerText(rec), rec.Note, rec.InvoiceNo);
+                        string largePrinting = WebHistory.PrintingText(rec, now, true);
                         <div class="row"><span class="p @(friends ? "green" : "red")">@Num.Kr(History.PriceFor(rec))</span>
                             <span class="@(friends ? "green" : "red")">@WebHistory.ForText(rec.For)</span></div>
                         <div class="d">@WebHistory.DateText(rec) · @WebHistory.TimeText(rec) · @WebHistory.GramsText(rec) g</div>
                         <div class="d" title="@extra">@(extra.Length > 0 ? extra : " ")</div>
                         <div class="chips">
-                            <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
+                            @if (largePrinting != null)
+                            {
+                                <button class="chip printing" aria-pressed="true" title="@WebHistory.PrintingText(rec, now, false)" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@Clock @largePrinting</button>
+                            }
+                            else
+                            {
+                                <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
+                            }
                             <button class="@(rec.Failed ? "chip bad" : "chip")" aria-pressed="@rec.Failed" @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@(rec.Failed ? "✗ " : "")@L.S("Failed", "Fejlet")</button>
                         </div>
                     }
@@ -283,15 +310,16 @@ else
 
     @if (rows.Count > shown)
     {
-        <div class="more"><button @onclick="() => shown += WebHistory.ShowStep">@L.F("Show {0} more", "Vis {0} mere", Math.Min(WebHistory.ShowStep, rows.Count - shown))</button></div>
+        <div class="more"><button @onclick="() => shown += WebHistory.ShowStep">@L.F("Show {0} more", "Vis {0} flere", Math.Min(WebHistory.ShowStep, rows.Count - shown))</button></div>
     }
 
     <div class="actions">
         <button class="@(armed != null && armed == selected ? "accent" : "")" disabled="@(selected == null)"
                 @onclick="() => DeleteClicked(selected, rows)">@(armed != null && armed == selected ? ConfirmText : L.S("Delete", "Slet"))</button>
         <span class="grow"></span>
-        <button disabled="@(selected == null)" @onclick="() => Quote.InvokeAsync(selected)">@L.S("Quote…", "Tilbud…")</button>
-        <button disabled="@(selected == null)" @onclick="() => Invoice.InvokeAsync(selected)">@L.S("Invoice…", "Faktura…")</button>
+        @* 2+ ticked: one bill for all of them (combined bill), else the selected quote *@
+        <button disabled="@(selected == null && ticked.Count < 2)" @onclick="() => BillClicked(false)">@L.S("Quote…", "Tilbud…")</button>
+        <button disabled="@(selected == null && ticked.Count < 2)" @onclick="() => BillClicked(true)">@L.S("Invoice…", "Faktura…")</button>
         <button disabled="@(selected == null)" @onclick="() => Repeat.InvokeAsync(selected)">@L.S("Repeat print", "Print igen")</button>
         <button class="accent" disabled="@(selected == null)" @onclick="() => OpenAgain.InvokeAsync(selected)">@L.S("Open again", "Åbn igen")</button>
     </div>
@@ -350,16 +378,31 @@ else
 {
     <div class="hinfo warn" role="alert">@Problem</div>
 }
+@if (StorageFull)
+{
+    @* B: storage full - a way out: a backup first, then room by deleting the hidden safety copies *@
+    <div class="hinfo warn full" role="alert">
+        <span>@WebHistory.StorageFullText</span>
+        <span class="fullbuttons">
+            <button @onclick="() => FullBackup.InvokeAsync()">@L.S("Download a backup", "Hent en sikkerhedskopi")</button>
+            @if (DeleteSafetyText != null)
+            {
+                <button class="@(safetyArmed ? "accent" : "")" @onclick="DeleteSafetyClicked">@(safetyArmed ? L.S("Really delete them?", "Slet dem virkelig?") : DeleteSafetyText)</button>
+            }
+        </span>
+        @if (FullDone != null) { <span class="muted">@FullDone</span> }
+    </div>
+}
 @if (Quotes.Count > 0 && narrow == true)
 {
     @* phone: tap wording, no click / double-click *@
-    <div class="hinfo">@L.S("Tap a quote for its actions: Open again loads it as saved, Repeat print with today's prices (time and grams as saved), Quote… makes a quote page and Invoice… a bill (it ticks Printed). Printed and Failed change with a tap; changes are saved at once. Select ticks quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
-                           "Tryk på et tilbud for at se dets handlinger: Åbn igen henter det som gemt, Print igen med dagens priser (tid og gram som gemt), Tilbud… laver et tilbud og Faktura… en regning (den sætter Printet). Printet og Fejlet ændres med et tryk; ændringer gemmes med det samme. Vælg markerer tilbud, så du kan slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
+    <div class="hinfo">@L.S("Tap a quote for its actions: Open again loads it as saved, Repeat print with today's prices (time and grams as saved), Quote… makes a quote page and Invoice… a bill (and marks it as printed). Printed and Failed change with a tap; changes are saved at once. Select ticks quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
+                           "Tryk på et tilbud for at se dets handlinger: Åbn igen henter det som gemt, Print igen med dagens priser (tid og gram som gemt), Tilbud… laver et tilbud og Faktura… en regning (og markerer det som printet). Printet og Fejlet ændres med et tryk; ændringer gemmes med det samme. Vælg markerer tilbud, så du kan slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
 }
 else if (Quotes.Count > 0)
 {
-<div class="hinfo">@L.S("Quote… makes a quote page for the selected print, Invoice… a bill (it ticks Printed). Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them). Tick quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
-                       "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (den sætter Printet). Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem). Markér tilbud for at slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
+<div class="hinfo">@L.S("Quote… makes a quote page for the selected print, Invoice… a bill (and marks it as printed). Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them). Tick quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
+                       "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (og markerer det som printet). Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem). Markér tilbud for at slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
 }
 <div class="note">@L.S("Your history is kept in this browser only (about 1 KB per quote). Clearing the browser's site data deletes it.",
                        "Din historik gemmes kun i denne browser (ca. 1 KB pr. tilbud). Sletter du browserens webstedsdata, slettes den.")</div>
@@ -375,6 +418,20 @@ else if (Quotes.Count > 0)
     /// Quote… / Invoice…: the saved quote's page (the Calculator opens it).
     [Parameter] public EventCallback<QuoteRecord> Quote { get; set; }
     [Parameter] public EventCallback<QuoteRecord> Invoice { get; set; }
+    /// Quote… / Invoice… with 2+ quotes ticked: one combined bill (Calculator.OpenRecordsQuote), in the list's order.
+    [Parameter] public EventCallback<List<QuoteRecord>> QuoteMany { get; set; }
+    [Parameter] public EventCallback<List<QuoteRecord>> InvoiceMany { get; set; }
+
+    Task BillClicked(bool invoice)
+    {
+        if (ticked.Count >= 2)
+        {
+            var list = Quotes.FindAll(q => ticked.Contains(q));
+            return invoice ? InvoiceMany.InvokeAsync(list) : QuoteMany.InvokeAsync(list);
+        }
+        if (selected == null) return Task.CompletedTask;
+        return invoice ? Invoice.InvokeAsync(selected) : Quote.InvokeAsync(selected);
+    }
     /// WebBackup.LastBackupValue of the newest backup ("" = never) and Backup… (the Backup dialog).
     [Parameter] public string LastBackup { get; set; }
     [Parameter] public EventCallback OpenBackup { get; set; }
@@ -396,8 +453,62 @@ else if (Quotes.Count > 0)
     [Parameter] public bool StorageAvailable { get; set; } = true;
     /// After Settings.HistoryView changed (the Calculator saves the settings).
     [Parameter] public EventCallback SettingsChanged { get; set; }
+    /// The browser's storage is full (B): the box with Download a backup / Delete safety copies.
+    [Parameter] public bool StorageFull { get; set; }
+    [Parameter] public EventCallback FullBackup { get; set; }
+    /// "Delete safety copies (2, about 38 MB)"; null = none to delete.
+    [Parameter] public string DeleteSafetyText { get; set; }
+    [Parameter] public EventCallback DeleteSafety { get; set; }
+    /// "✓ 2 safety copies deleted. Try again now." (null = nothing deleted yet).
+    [Parameter] public string FullDone { get; set; }
 
     readonly WebHistory.Filter filter = new WebHistory.Filter();
+    DateTime now = DateTime.Now;
+    bool safetyArmed;   // Delete safety copies asks once more
+
+    static string Joined(params string[] parts)
+    {
+        var l = new List<string>();
+        foreach (var p in parts) if (!string.IsNullOrEmpty(p)) l.Add(p);
+        return string.Join(" · ", l);
+    }
+
+    /// The desktop's "Printing now" mark (HistoryForm: an amber clock face with two hands), drawn in the text colour of
+    /// its .printing parent (Theme.Warning).
+    static readonly RenderFragment Clock = @<svg class="clock" viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.6" /><path d="M8 8V4.2M8 8h3.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>;
+
+    async Task DeleteSafetyClicked()
+    {
+        if (!safetyArmed) { safetyArmed = true; return; }
+        safetyArmed = false;
+        await DeleteSafety.InvokeAsync();
+    }
+
+    // one redraw when the soonest running print is done (the clock turns into ✓), as the desktop's printingTimer
+    System.Threading.CancellationTokenSource printingWait;
+    DateTime? printingWaitFor;
+
+    void SchedulePrintingRedraw()
+    {
+        var next = WebHistory.NextPrintingEnd(Quotes, DateTime.Now);
+        if (next == printingWaitFor) return;
+        printingWait?.Cancel();
+        printingWait = null;
+        printingWaitFor = next;
+        if (next == null || disposed) return;
+        var cts = new System.Threading.CancellationTokenSource();
+        printingWait = cts;
+        double ms = Math.Min((next.Value - DateTime.Now).TotalMilliseconds + 1000, 3600000);
+        _ = WaitAndRedraw(Math.Max(1000, (int)ms), cts.Token);
+    }
+
+    async Task WaitAndRedraw(int ms, System.Threading.CancellationToken token)
+    {
+        try { await Task.Delay(ms, token); } catch (TaskCanceledException) { return; }
+        if (disposed || token.IsCancellationRequested) return;
+        printingWaitFor = null;
+        StateHasChanged();
+    }
     QuoteRecord selected, opened, armed;
     int shown = WebHistory.ShowStep;
     int armCount;
@@ -420,13 +531,14 @@ else if (Quotes.Count > 0)
         public int For, Hours, Minutes;
         public bool Printed, Failed;
         public double PaidBack, Grams, FriendsPrice, OthersPrice;
-        public string SavedAt, Note, Customer, InvoiceNo, FailedAt, PrinterId, PrinterName, PrinterModel;
+        public string SavedAt, Note, Customer, InvoiceNo, FailedAt, PrinterId, PrinterName, PrinterModel, PrintingSince;
 
         public Seen(QuoteRecord r)
         {
             R = r; For = r.For; Hours = r.Hours; Minutes = r.Minutes; Printed = r.Printed; Failed = r.Failed;
             PaidBack = r.PaidBack; Grams = r.Grams; FriendsPrice = r.FriendsPrice; OthersPrice = r.OthersPrice;
             SavedAt = r.SavedAt; Note = r.Note; Customer = r.Customer; InvoiceNo = r.InvoiceNo; FailedAt = r.FailedAt;
+            PrintingSince = r.PrintingSince;
             PrinterId = r.PrinterId; PrinterName = r.PrinterName; PrinterModel = r.PrinterModel;
         }
 
@@ -437,7 +549,8 @@ else if (Quotes.Count > 0)
                 && Failed == r.Failed && PaidBack.Equals(r.PaidBack) && Grams.Equals(r.Grams) && FriendsPrice.Equals(r.FriendsPrice)
                 && OthersPrice.Equals(r.OthersPrice) && ReferenceEquals(SavedAt, r.SavedAt) && ReferenceEquals(Note, r.Note)
                 && ReferenceEquals(Customer, r.Customer) && ReferenceEquals(InvoiceNo, r.InvoiceNo) && ReferenceEquals(FailedAt, r.FailedAt)
-                && ReferenceEquals(PrinterId, r.PrinterId) && ReferenceEquals(PrinterName, r.PrinterName) && ReferenceEquals(PrinterModel, r.PrinterModel);
+                && ReferenceEquals(PrinterId, r.PrinterId) && ReferenceEquals(PrinterName, r.PrinterName) && ReferenceEquals(PrinterModel, r.PrinterModel)
+                && ReferenceEquals(PrintingSince, r.PrintingSince);
         }
     }
 
@@ -528,6 +641,7 @@ else if (Quotes.Count > 0)
             }
             catch (Exception) { narrow = null; }   // no module: both lists, as always
         }
+        SchedulePrintingRedraw();
         // the confirm dialog: focus on Cancel, Tab kept inside, Esc anywhere (W2); let go when it closed
         if (module != null && !disposed)
         {
@@ -719,6 +833,7 @@ else if (Quotes.Count > 0)
     public async ValueTask DisposeAsync()
     {
         disposed = true;
+        printingWait?.Cancel();
         try
         {
             if (module != null)
@@ -783,7 +898,7 @@ else if (Quotes.Count > 0)
     async Task ForChosen(QuoteRecord r, ChangeEventArgs e)
     {
         int f = (string)e.Value == "1" ? History.ForFriends : History.ForCustomer;
-        if (f == r.For) return;
+        if (f == r.For || WebQuote.InvoiceMade(r)) return;   // a made invoice keeps its price (desktop A4)
         r.For = f;   // the price shown follows For
         await Changed.InvokeAsync();
     }

@@ -160,6 +160,11 @@ namespace PrintPrice
                 b.FlatAppearance.BorderColor = Border;
                 b.FlatAppearance.MouseOverBackColor = ButtonHover;
                 b.FlatAppearance.MouseDownBackColor = Border;
+                if (mutedDisabled.Add(b))
+                {
+                    b.Paint += PaintDisabledText;
+                    b.Disposed += delegate { mutedDisabled.Remove(b); };
+                }
             }
             else if (c is ComboBox)
             {
@@ -365,6 +370,47 @@ namespace PrintPrice
             [DllImport("user32.dll")] static extern int GetDlgCtrlID(IntPtr hwnd);
         }
 
+        // ---------- disabled buttons: text in Muted (qol #2) ----------
+        // A disabled flat button draws its text in ControlPaint.DisabledTextColor(back), which on our dark back is almost
+        // black (19,19,19) with ClearType fringes. After the button's own paint, the text area is filled with the back
+        // again and the text drawn in Muted with the same layout. Buttons with an empty Text paint themselves (icon /
+        // ▾ buttons) and are left alone; a split button's ▾ lies outside the text rectangle.
+        static readonly HashSet<Button> mutedDisabled = new HashSet<Button>();
+
+        static void PaintDisabledText(object sender, PaintEventArgs e)
+        {
+            var b = (Button)sender;
+            if (b.Enabled || string.IsNullOrEmpty(b.Text) || b.FlatStyle != FlatStyle.Flat) return;
+            int border = Math.Max(1, b.FlatAppearance.BorderSize);
+            var area = new Rectangle(border + b.Padding.Left, border + b.Padding.Top,
+                                     b.Width - 2 * border - b.Padding.Horizontal, b.Height - 2 * border - b.Padding.Vertical);
+            if (area.Width <= 0 || area.Height <= 0) return;
+            var flags = TextFormatFlags.SingleLine | TextFormatFlags.NoClipping | AlignFlags(b.TextAlign);
+            if (!b.UseMnemonic) flags |= TextFormatFlags.NoPrefix;
+            if (b.AutoEllipsis) flags |= TextFormatFlags.EndEllipsis;
+            // the old (dark) text: same layout, a little wider to catch its ClearType fringes
+            using (var br = new SolidBrush(b.BackColor)) e.Graphics.FillRectangle(br, Rectangle.Inflate(area, -1, -1));
+            TextRenderer.DrawText(e.Graphics, b.Text, b.Font, area, Muted, b.BackColor, flags);
+        }
+
+        static TextFormatFlags AlignFlags(ContentAlignment a)
+        {
+            TextFormatFlags f = 0;
+            switch (a)
+            {
+                case ContentAlignment.TopLeft: case ContentAlignment.MiddleLeft: case ContentAlignment.BottomLeft: f |= TextFormatFlags.Left; break;
+                case ContentAlignment.TopRight: case ContentAlignment.MiddleRight: case ContentAlignment.BottomRight: f |= TextFormatFlags.Right; break;
+                default: f |= TextFormatFlags.HorizontalCenter; break;
+            }
+            switch (a)
+            {
+                case ContentAlignment.TopLeft: case ContentAlignment.TopCenter: case ContentAlignment.TopRight: f |= TextFormatFlags.Top; break;
+                case ContentAlignment.BottomLeft: case ContentAlignment.BottomCenter: case ContentAlignment.BottomRight: f |= TextFormatFlags.Bottom; break;
+                default: f |= TextFormatFlags.VerticalCenter; break;
+            }
+            return f;
+        }
+
         /// Dark red call-to-action button (e.g. "Update to vX"). Call after Apply, which resets button colours.
         public static void AccentButton(Button b)
         {
@@ -376,12 +422,22 @@ namespace PrintPrice
             b.FlatAppearance.MouseDownBackColor = Color.FromArgb(120, 22, 27);
         }
 
+        /// A group heading inside a drop-down list (History's Show: "Print status"): drawn Muted and never highlighted; the
+        /// owner skips it when it gets chosen (it is not a choice).
+        internal sealed class ComboHeading
+        {
+            public readonly string Text;
+            public ComboHeading(string text) { Text = text; }
+            public override string ToString() { return Text; }
+        }
+
         static void DrawComboItem(object sender, DrawItemEventArgs e)
         {
             var cb = (ComboBox)sender;
-            bool selected = (e.State & DrawItemState.Selected) != 0 && (e.State & DrawItemState.ComboBoxEdit) == 0;
+            bool heading = e.Index >= 0 && cb.Items[e.Index] is ComboHeading;   // a muted, never highlighted group heading
+            bool selected = !heading && (e.State & DrawItemState.Selected) != 0 && (e.State & DrawItemState.ComboBoxEdit) == 0;
             Color back = selected ? InfoAccent : Input;
-            Color fore = selected ? Color.White : (e.State & DrawItemState.Disabled) != 0 || !cb.Enabled ? Muted : Text;   // greyed out when disabled
+            Color fore = selected ? Color.White : heading || (e.State & DrawItemState.Disabled) != 0 || !cb.Enabled ? Muted : Text;   // greyed out when disabled
             using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
             if (e.Index >= 0)
             {
@@ -849,6 +905,7 @@ namespace PrintPrice
                 label.Text = value ?? "";
                 label.Visible = true;
                 Visible = keepWhenEmpty || label.Text.Length > 0;
+                if (!string.IsNullOrEmpty(emptyText)) Invalidate();   // the empty-box hint comes and goes
             }
         }
 
@@ -910,13 +967,31 @@ namespace PrintPrice
             }
         }
 
+        /// Muted hint drawn (not stored as Text) while the box is empty, e.g. the main window's live-price box
+        /// ("Click Update for today's price."); only useful with KeepWhenEmpty. null / "" = nothing.
+        public string EmptyText
+        {
+            get { return emptyText; }
+            set { emptyText = value; Invalidate(); }
+        }
+        string emptyText;
+
+        /// Error box whose text stays in Text colour, with only the SetText muted line in Error red (the error itself):
+        /// the red stripe says it's an error, the explanation stays easy to read (ErrorForm, qol #17).
+        public bool ErrorLineOnly
+        {
+            get { return errorLineOnly; }
+            set { errorLineOnly = value; ApplyTheme(); }
+        }
+        bool errorLineOnly;
+
         public void ApplyTheme()
         {
             BackColor = Theme.InfoBack;
             // plain error text is red; in a table only the note underneath is coloured, so the numbers stay readable
-            Color fore = kind == InfoKind.Error && grid == null ? Theme.Error : Theme.Text;
+            Color fore = kind == InfoKind.Error && grid == null && !errorLineOnly ? Theme.Error : Theme.Text;
             ColorTree(this, fore);
-            if (note != null && noteMuted) note.ForeColor = Theme.Muted;
+            if (note != null && noteMuted) note.ForeColor = kind == InfoKind.Error && errorLineOnly ? Theme.Error : Theme.Muted;
             else if (note != null && kind != InfoKind.Info) note.ForeColor = Accent;   // warnings stand out under the table
             if (link != null) link.ForeColor = Theme.Text;
             if (linkRow != null) foreach (Control c in linkRow.Controls) c.ForeColor = Theme.Text;
@@ -939,6 +1014,9 @@ namespace PrintPrice
             g.Clear(BackColor);
             using (var pen = new Pen(Theme.Border)) g.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
             using (var accent = new SolidBrush(Accent)) g.FillRectangle(accent, 0, 0, 4, Height);
+            if (!string.IsNullOrEmpty(emptyText) && label != null && label.Visible && label.Text.Length == 0 && grid == null && link == null)
+                TextRenderer.DrawText(g, emptyText, label.Font, new Rectangle(label.Left, label.Top, Math.Max(1, Width - label.Left - Padding.Right), Math.Max(label.Height, label.Font.Height)),
+                                      Theme.Muted, BackColor, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
         }
     }
 

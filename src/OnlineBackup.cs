@@ -186,7 +186,10 @@ namespace PrintPrice
                 {
                     req.ContentType = "application/octet-stream";
                     req.ContentLength = body.Length;
-                    using (var rs = req.GetRequestStream()) rs.Write(body, 0, body.Length);
+                    // 16 KB at a time: ReadWriteTimeout counts per write, so a slow upload line doesn't time out the whole blob
+                    using (var rs = req.GetRequestStream())
+                        for (int at = 0; at < body.Length; at += UploadChunk)
+                            rs.Write(body, at, Math.Min(UploadChunk, body.Length - at));
                 }
                 else if (method != "GET") req.ContentLength = 0;
 
@@ -220,12 +223,33 @@ namespace PrintPrice
                     try { throw Failure(resp, isGet); }
                     finally { resp.Close(); }
                 }
-                throw new OnlineBackupException(ErrorText(0, isGet), 0);
+                throw new OnlineBackupException(FailureText(ex.Status, method == "PUT"), 0);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                throw new OnlineBackupException(ErrorText(0, isGet), 0);
+                // a slow write can surface as an IOException around a timed-out WebException / socket
+                bool timedOut = false;
+                for (var e = ex; e != null; e = e.InnerException)
+                {
+                    var we = e as WebException;
+                    var se = e as System.Net.Sockets.SocketException;
+                    if ((we != null && we.Status == WebExceptionStatus.Timeout) ||
+                        (se != null && se.SocketErrorCode == System.Net.Sockets.SocketError.TimedOut)) timedOut = true;
+                }
+                throw new OnlineBackupException(FailureText(timedOut ? WebExceptionStatus.Timeout : WebExceptionStatus.UnknownError,
+                                                            method == "PUT"), 0);
             }
+        }
+
+        const int UploadChunk = 16384;
+
+        /// The text for a call that got no answer: a timed-out upload (slow line) has its own text, else ErrorText(0).
+        internal static string FailureText(System.Net.WebExceptionStatus status, bool isPut)
+        {
+            if (isPut && status == System.Net.WebExceptionStatus.Timeout)
+                return L.S("The upload took too long (slow connection?). Try again later, or save a backup file.",
+                           "Upload tog for lang tid (langsom forbindelse?). Prøv igen senere, eller gem en kopi-fil.");
+            return ErrorText(0, !isPut);
         }
 
         /// A non-2xx answer as an exception. A 429 with X-Uploads-Reset is the daily cap; any other 429 is "busy".

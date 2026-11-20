@@ -80,10 +80,7 @@ namespace PrintPrice
                         rows.Add(Head(L.S("Failed-print allowance", "Tillæg for fejlprint"),
                             L.F("{0} % of material + electricity", "{0} % af materiale + strøm", Num.Fmt(l.Quantity)), l.Ore, true));
                         break;
-                    case QuoteLine.Payback:
-                        rows.Add(Head(L.S("Earlier failed prints", "Tidligere fejlprint"), "", l.Ore, true));
-                        break;
-                    case QuoteLine.Work:
+                    case QuoteLine.Work:   // also holds any minimum top-up and failed-print payback (FoldMinimum)
                         rows.Add(Head(L.S("Work & handling", "Arbejde & håndtering"), "", l.Ore, true));
                         break;
                     case QuoteLine.Rounding:
@@ -106,6 +103,14 @@ namespace PrintPrice
         /// one "N more colours" row.
         public static List<QuoteRow> BuildGroup(QuoteBreakdown b, IList<string> materialNames, int hours, int minutes, string plateName,
                                                 bool sameRates, int maxColours)
+        {
+            return BuildGroup(b, materialNames, hours, minutes, plateName, sameRates, maxColours, false);
+        }
+
+        /// As above; shortWear = the wear parts folded into one Note row under the wear head ("Printer 1,20 · Parts 0,40 ·
+        /// Nozzle 0,10 · Plate 0,05"), so a combined bill fits one A4 page (QuotePage GroupLevel 1+). Same øre either way.
+        public static List<QuoteRow> BuildGroup(QuoteBreakdown b, IList<string> materialNames, int hours, int minutes, string plateName,
+                                                bool sameRates, int maxColours, bool shortWear)
         {
             var rows = new List<QuoteRow>();
             var lines = FoldMinimum(b.Lines);   // the bill's top-up is shown inside Work & handling, never as its own row
@@ -131,7 +136,7 @@ namespace PrintPrice
                     long rest = 0;
                     double grams = 0;
                     for (int i = shown; i < mats.Count; i++) { rest += mats[i].Ore; grams += mats[i].Quantity; }
-                    rows.Add(Sub(L.F("{0} more colours", "{0} farver mere", mats.Count - shown), Num.Fmt(Math.Round(grams, 2)) + " g", rest, -1));
+                    rows.Add(Sub(L.F("{0} more colours", "{0} flere farver", mats.Count - shown), Num.Fmt(Math.Round(grams, 2)) + " g", rest, -1));
                 }
             }
             foreach (var l in lines)
@@ -148,7 +153,13 @@ namespace PrintPrice
                         bool parts = l.Parts != null && l.Parts.Count > 0;
                         rows.Add(Head(L.S("Machine wear", "Maskinslid"), rate ? Time(hours, minutes) + "  ×  " + N2(l.UnitPrice) + PerHour.TrimEnd() : Time(hours, minutes),
                                       l.Ore, !parts));
-                        if (parts)
+                        if (parts && shortWear)
+                        {
+                            var bits = new List<string>();
+                            foreach (var part in l.Parts) bits.Add(ShortPartName(part.Key) + " " + Num.N2(part.Ore / 100.0));
+                            rows.Add(new QuoteRow { Kind = QuoteRowKind.Note, Label = string.Join("  ·  ", bits), Detail = "", Amount = "", ColourIndex = -1 });
+                        }
+                        else if (parts)
                             foreach (var part in l.Parts)
                                 rows.Add(Sub(PartName(part.Key, plateName), sameRates && part.UnitPrice > 0 ? N2(part.UnitPrice) + PerHour : "", part.Ore, -1));
                         break;
@@ -156,14 +167,11 @@ namespace PrintPrice
                         rows.Add(Head(L.S("Failed-print allowance", "Tillæg for fejlprint"), l.Quantity > 0
                             ? L.F("{0} % of material + electricity", "{0} % af materiale + strøm", Num.Fmt(l.Quantity)) : "", l.Ore, true));
                         break;
-                    case QuoteLine.Payback:
-                        rows.Add(Head(L.S("Earlier failed prints", "Tidligere fejlprint"), "", l.Ore, true));
-                        break;
-                    case QuoteLine.Work:
+                    case QuoteLine.Work:   // also holds the bill's top-up and any failed-print payback (FoldMinimum)
                         rows.Add(Head(L.S("Work & handling", "Arbejde & håndtering"), "", l.Ore, true));
                         break;
                     case QuoteLine.Other:
-                        rows.Add(Head(L.S("Other (older quotes)", "Andet (ældre tilbud)"), "", l.Ore, true));
+                        rows.Add(Head(L.S("Other", "Andet"), "", l.Ore, true));
                         break;
                     case QuoteLine.Rounding:
                         rows.Add(Head(L.S("Rounding", "Afrunding"), l.Quantity > 0
@@ -177,10 +185,11 @@ namespace PrintPrice
             return rows;
         }
 
-        /// The breakdown lines as the customer sees them (the user's rule: never show the minimum-price top-up): every
-        /// "minimum" line's øre is added to the Work & handling line (copied, with no % detail left on it), or becomes a
-        /// Work & handling line in the minimum's place when there is none. The øre sum is unchanged. The saved data
-        /// (Pricing.Breakdown, History.GroupBreakdown, InvoiceTopUp) keeps its own minimum line; only the display folds it.
+        /// The breakdown lines as the customer sees them (the user's rules: never show the minimum-price top-up, and never
+        /// show the failed-print payback as its own line): every "minimum" and "payback" line's øre is added to the Work &
+        /// handling line (copied, with no % detail left on it), or becomes a Work & handling line in the first folded line's
+        /// place when there is none. The øre sum is unchanged. The saved data (Pricing.Breakdown, History.GroupBreakdown,
+        /// InvoiceTopUp) keeps its own minimum / payback lines; only the display folds them.
         public static List<QuoteLine> FoldMinimum(List<QuoteLine> lines)
         {
             var res = new List<QuoteLine>();
@@ -188,7 +197,7 @@ namespace PrintPrice
             long minOre = 0;
             int minAt = -1;
             foreach (var l in lines)
-                if (l.Key == QuoteLine.Minimum) { minOre += l.Ore; if (minAt < 0) minAt = res.Count; }
+                if (l.Key == QuoteLine.Minimum || l.Key == QuoteLine.Payback) { minOre += l.Ore; if (minAt < 0) minAt = res.Count; }
                 else res.Add(l);
             if (minAt < 0) return res;
             int work = res.FindIndex(l => l.Key == QuoteLine.Work);
@@ -203,22 +212,54 @@ namespace PrintPrice
 
         /// Each job's amount on a combined bill as the customer sees it, in øre: its line (GroupBillInfo.Prices) plus its
         /// share of the minimum top-up (Pricing.ShareOre by price, as History.MakeInvoice saves it), so the job amounts add up
-        /// to the total and no minimum line is needed. Friends / no top-up: the lines as they are.
+        /// to the total and no minimum line is needed. Friends / no top-up: the lines as they are. An invoice already made
+        /// (bill.Invoiced): each job's stored InvoiceTopUp, never split again, so the amounts are the saved ones.
         public static long[] JobOre(GroupBillInfo bill)
         {
             int n = bill.Prices.Length;
             var res = new long[n];
-            long[] share = bill.TopUp > 0 && !bill.Friends ? Pricing.ShareOre(bill.Prices, Pricing.ShownOre(bill.TopUp)) : null;
+            bool stored = bill.Invoiced && !bill.Friends;
+            long[] share = !stored && bill.TopUp > 0 && !bill.Friends ? Pricing.ShareOre(bill.Prices, Pricing.ShownOre(bill.TopUp)) : null;
             for (int i = 0; i < n; i++)
             {
                 double p = bill.Prices[i];
                 long ore = !double.IsNaN(p) && !double.IsInfinity(p) && p > 0 ? Pricing.ShownOre(p) : 0;   // as Pricing.BillTotal sums them
-                res[i] = ore + (share != null && i < share.Length ? share[i] : 0);
+                if (stored)
+                {
+                    double t = i < bill.Jobs.Count && bill.Jobs[i] != null ? bill.Jobs[i].InvoiceTopUp : 0;
+                    res[i] = ore + (!double.IsNaN(t) && !double.IsInfinity(t) && t > 0 ? Pricing.ShownOre(t) : 0);   // as History.GroupBill sums them
+                }
+                else res[i] = ore + (share != null && i < share.Length ? share[i] : 0);
             }
             return res;
         }
 
         /// The wear part's name (QuoteLine.WearPrinter / WearParts / WearHotend / WearPlate; plate = "Smooth PEI" or "").
+        /// The four print statuses as the status boxes and History show them (issue #7).
+        public static string StateName(PrintState s)
+        {
+            switch (s)
+            {
+                case PrintState.Printing: return L.S("Printing now", "Printer nu");
+                case PrintState.Printed: return L.S("Printed", "Printet");
+                case PrintState.Failed: return L.S("Failed", "Fejlet");
+                default: return L.S("Not printed yet", "Ikke printet endnu");
+            }
+        }
+
+        /// The short wear part names of BuildGroup's one-line wear note.
+        public static string ShortPartName(string key)
+        {
+            switch (key)
+            {
+                case QuoteLine.WearPrinter: return L.S("Printer", "Printer");
+                case QuoteLine.WearParts: return L.S("Parts", "Dele");
+                case QuoteLine.WearHotend: return L.S("Nozzle", "Dyse");
+                case QuoteLine.WearPlate: return L.S("Build plate", "Byggeplade");
+            }
+            return key;
+        }
+
         public static string PartName(string key, string plate)
         {
             switch (key)

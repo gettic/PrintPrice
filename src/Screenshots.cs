@@ -30,6 +30,8 @@ namespace PrintPrice
 
                 using (var main = new MainForm(s, true))
                 {
+                    // sample pictures (assets\history-samples): model.png / model2.png fallbacks and saved records' pictures
+                    main.SamplePictures = HistoryForm.SamplePictures(folder);
                     Place(main);
                     main.Show();
                     Snap(main, folder, "main_empty.png");   // fresh window: logo + "No model yet"
@@ -38,7 +40,7 @@ namespace PrintPrice
                     main.SetSampleJob();   // Benchy example with a sample live price
                     // sample model picture: <folder>\model.png if it is there (e.g. a slicer plate_1.png), else the logo stays
                     string sample = Path.Combine(folder, "model.png");
-                    main.SetSamplePicture(sample);
+                    main.SetSamplePicture(sample, "sample0");
                     Snap(main, folder, "main.png");
                     // failed prints payback on, with a made-up debt (nothing is saved): the extra Cost breakdown row
                     main.SetSamplePayback(33.70);
@@ -46,7 +48,7 @@ namespace PrintPrice
                     main.SetSamplePayback(0);   // back to the defaults (no debt) for the other pictures
                     // 4-colour Benchy: one row per colour in the Cost breakdown; picture = <folder>\model2.png if there
                     main.SetSampleMultiJob();
-                    main.SetSamplePicture(Path.Combine(folder, "model2.png"));
+                    main.SetSamplePicture(Path.Combine(folder, "model2.png"), "sample1");
                     Snap(main, folder, "main_multi.png");
                     // quote export: the customer quote page of the 4-colour example (A4 at 150 dpi): light without a
                     // customer name, dark with one; then the "Show quote…" window (made-up customer, nothing is saved)
@@ -96,12 +98,12 @@ namespace PrintPrice
                     var quotes = HistoryForm.SampleQuotes();
                     main.SetSampleJob();
                     main.Reopen(quotes[0]);   // "↻ Opened from history" + saved price next to today's
-                    main.SetSamplePicture(sample);
+                    main.SetSamplePicture(sample, "sample0");
                     Snap(main, folder, "main_reopened.png");
                     // "Repeat print" of the 4-colour quote: today's prices, no slicing in picture mode
                     main.SetSampleJob();
                     main.SampleRepeat(quotes[1]);
-                    main.SetSamplePicture(Path.Combine(folder, "model2.png"));
+                    main.SetSamplePicture(Path.Combine(folder, "model2.png"), "sample1");
                     Snap(main, folder, "repeat.png");
                     // Invoice… on a made invoice (Lene Hansen's phone stand): the name it was made out to, read-only
                     using (var mf = main.SampleMadeInvoiceWindow(quotes[2]))
@@ -138,6 +140,16 @@ namespace PrintPrice
                         Snap(hist, folder, "history_deleted.png");
                         hist.UndoClicked();
                         Snap(hist, folder, "history_undone.png");
+                        // issue #7: the Show list with the print statuses, one status filter, the Status cell's menu, the
+                        // question before several Failed
+                        Snap(hist, folder, "history_show_list.png", hist.SampleShowList);
+                        hist.SampleShow(4);   // Not printed yet
+                        Snap(hist, folder, "history_show_notprinted.png");
+                        hist.SampleShow(0);
+                        hist.SampleSelect(new int[0]);
+                        Snap(hist, folder, "history_status_menu.png", (g, o) => hist.SampleStatusMenu(1, g, o));
+                        using (var ask = HistoryForm.NewFailedAsk(3))
+                            SnapForm(ask, folder, "history_failed_ask.png");
                         hist.Hide();
                     }
                     // combined bill (Part A): three small prints for Lene Hansen on one invoice (made: one code, below the
@@ -161,6 +173,17 @@ namespace PrintPrice
                             Snap(gf, folder, "invoice_group_window.png");
                             gf.Hide();
                         }
+                    // issue #7: a combined quote whose prints differ: the one status box says "Mixed"
+                    openJobs[0].Printed = false;
+                    using (var gf = main.SampleGroupWindow(openJobs, gq, false))
+                        if (gf != null)
+                        {
+                            Place(gf);
+                            gf.Show();
+                            Snap(gf, folder, "quote_group_mixed.png");
+                            gf.Hide();
+                        }
+                    openJobs[0].Printed = true;
                     Image[] g4;
                     var jobs4 = main.SampleGroupJobs(4, true, groupPictures, out g4);
                     var pages4 = QuotePage.RenderPages(main.SampleGroupData(jobs4, g4, true), false);
@@ -231,11 +254,18 @@ namespace PrintPrice
                     using (var err = new ErrorForm(sampleError, ErrorReport.Details(sampleError, false), false, true))
                         SnapForm(err, folder, "error_repeated.png");
                     main.SetSampleJob();   // back to the single-colour example for the update picture
-                    main.SetSamplePicture(sample);
+                    main.SetSamplePicture(sample, "sample0");
                     // the single Benchy as a customer quote: below the minimum price, the top-up is inside Work & handling
                     // (the minimum is never shown on a bill)
                     using (var q = main.RenderSampleTopUpQuote())
                         if (q != null) q.Save(Path.Combine(folder, "quote_topup.png"), ImageFormat.Png);
+                    // A1: settings.ini couldn't be read at start (made-up text, nothing read): the Warning info box
+                    main.ShowSettingsProblem(L.F("The settings file was unreadable, kept as {0}. Default settings are used.",
+                                                 "Indstillingsfilen kunne ikke læses og er gemt som {0}. Standardindstillingerne bruges.",
+                                                 "settings.bad-2026-11-20-0930.ini"));   // AppSettings.Load's text for a cut-off file
+                    Snap(main, folder, "main_settings_problem.png");
+                    main.SetSampleJob();   // back to the normal ✓ line
+                    main.SetSamplePicture(sample, "sample0");
                     main.ShowUpdateButton(fake);
                     Snap(main, folder, "main_update.png");
 
@@ -259,6 +289,18 @@ namespace PrintPrice
                         Snap(set, folder, "settings_found.png");
                         set.Hide();
                     }
+                    // qol 3: OK with a bad number (-5 in Friends markup): the red box + the red bottom-row text, no Windows box
+                    using (var set = new SettingsForm(s.Clone()))
+                    {
+                        Place(set);
+                        set.Show();
+                        set.SampleBadNumber();
+                        Snap(set, folder, "settings_bad.png");
+                        set.Hide();
+                    }
+                    // issue #7: the question before "Reset to defaults" (your own details are kept)
+                    using (var ask = SettingsForm.NewResetAsk())
+                        SnapForm(ask, folder, "settings_reset_ask.png");
                     // Settings with "Earn back failed prints" ticked and a made-up debt (copy of the defaults, never saved)
                     var payback = s.Clone();
                     payback.FailedPayback = 1;
@@ -380,7 +422,7 @@ namespace PrintPrice
                         hist.Hide();
                     }
                     main.SetSampleJob();
-                    main.SetSamplePicture(sample);
+                    main.SetSamplePicture(sample, "sample0");
                     main.SampleSwitchPrinter(Wear.ModelA1Mini);   // card + warning stripe: sliced for the printer used before
                     Snap(main, folder, "main_printer_changed.png");
                     main.SampleSwitchPrinter(Wear.ModelA1);   // back to the A1 for the idea 21 pictures
@@ -500,9 +542,11 @@ namespace PrintPrice
             f.Hide();
         }
 
+        const int SettleMs = 600;   // shortest wait per picture (Snap)
+
         static void Pump()
         {
-            for (int i = 0; i < 8; i++) { Application.DoEvents(); Thread.Sleep(40); }
+            for (int i = 0; i < 4; i++) { Application.DoEvents(); Thread.Sleep(10); }   // short: Snap's capture loop is the real wait
         }
 
         internal static void Snap(Form f, string folder, string name)
@@ -513,23 +557,27 @@ namespace PrintPrice
         /// draw: paints extra things (an open menu) over the picture; its Point is the picture's top left on screen.
         static void Snap(Form f, string folder, string name, Action<Graphics, Point> draw)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             Pump();
             RedrawWindow(f.Handle, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0080 | 0x0100 | 0x0400);   // INVALIDATE|ALLCHILDREN|UPDATENOW|FRAME
             Pump();
             // PrintWindow's full-content copy comes from DWM and can lag behind a change made just before
             // (stale picture): wait for DWM to compose the new frame first
-            for (int i = 0; i < 3; i++) { try { DwmFlush(); } catch { } Pump(); }
-            // ...and keep capturing until two captures in a row are the same (up to ~3 s)
+            try { DwmFlush(); } catch { }
+            Pump();
+            // ...and keep capturing until three captures in a row are the same (two matches), and at least SettleMs
+            // have passed: a focused box's own Border-grey frame (Theme.BoxBorder) comes back only after a while, and
+            // Windows' lighter frame can stay still that long (up to ~4 s in all)
             Bitmap bmp = Capture(f);
-            for (int i = 0; i < 10; i++)
+            int matches = 0;
+            while ((matches < 2 || clock.ElapsedMilliseconds < SettleMs) && clock.ElapsedMilliseconds < 4000)
             {
                 Pump();
                 try { DwmFlush(); } catch { }
                 var next = Capture(f);
-                bool same = SamePixels(bmp, next);
+                matches = SamePixels(bmp, next) ? matches + 1 : 0;
                 bmp.Dispose();
                 bmp = next;
-                if (same) break;
             }
             if (draw != null)
             {

@@ -128,7 +128,9 @@ namespace PrintPrice
             {
                 if (IsDisposed) return;
                 string msg = ex is UpdateException ? ex.Message : L.F("The update failed ({0}).", "Opdateringen mislykkedes ({0}).", ex.Message);
-                SetStatus(msg + L.S("\nYour current version is unchanged.", "\nDin nuværende version er uændret."), InfoKind.Error);
+                // "unchanged" only when it's true: the new exe may already be in place but didn't start (A6)
+                bool installed = ex is UpdateException && ((UpdateException)ex).Installed;
+                SetStatus(installed ? msg : msg + L.S("\nYour current version is unchanged.", "\nDin nuværende version er uændret."), InfoKind.Error);
                 btnUpdate.Text = L.S("Try again", "Prøv igen");
                 btnUpdate.Enabled = true;
                 btnPage.Visible = true;
@@ -137,7 +139,7 @@ namespace PrintPrice
 
         void OpenPage()
         {
-            try { Process.Start(update.PageUrl ?? Updater.ReleasesPage); } catch { }
+            try { Process.Start(Updater.SafePageUrl(update.PageUrl)); } catch { }   // only our GitHub releases (A11)
         }
     }
 

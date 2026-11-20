@@ -63,7 +63,7 @@ namespace PrintPrice
         const int ContentW = 520, RowH = 28, MaxRows = 8, ComboW = 190;   // 96 dpi units
 
         /// Common filament colours for the swatch menu (Bambu Lab PLA Basic shades). Filament data, not UI colours.
-        static readonly string[][] FilamentColours =
+        internal static readonly string[][] FilamentColours =
         {
             new[] { "#000000", "Black", "Sort" }, new[] { "#FFFFFF", "White", "Hvid" }, new[] { "#8E9089", "Grey", "Grå" },
             new[] { "#C12E1F", "Red", "Rød" }, new[] { "#FF6A13", "Orange", "Orange" }, new[] { "#F4EE2A", "Yellow", "Gul" },
@@ -71,6 +71,23 @@ namespace PrintPrice
             new[] { "#5E43B7", "Purple", "Lilla" }, new[] { "#F55A74", "Pink", "Pink" }, new[] { "#9D432C", "Brown", "Brun" },
             new[] { "#F7E6DE", "Beige", "Beige" }
         };
+
+        /// The name (app language) of the FilamentColours entry nearest to c ("Red", "Light blue"); "" for an empty colour.
+        /// Used to tell material rows with the same profile apart (qol 8: "Bambu PLA Basic (Red)").
+        internal static string ColourName(Color c)
+        {
+            if (c == Color.Empty || c.A == 0) return "";
+            string best = "";
+            double bestD = double.MaxValue;
+            foreach (var e in FilamentColours)
+            {
+                Color k = ColorTranslator.FromHtml(e[0]);
+                double dr = c.R - k.R, dg = c.G - k.G, db = c.B - k.B;
+                double dist = 2 * dr * dr + 4 * dg * dg + 3 * db * db;   // rough eye weighting
+                if (dist < bestD) { bestD = dist; best = L.S(e[1], e[2]); }
+            }
+            return best;
+        }
 
         sealed class Row
         {

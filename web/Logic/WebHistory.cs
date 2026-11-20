@@ -140,8 +140,75 @@ namespace PrintPrice.Web
         public static string SaveProblem(string error)
         {
             return L.S("The price history couldn't be saved in this browser", "Prishistorikken kunne ikke gemmes i denne browser")
-                   + (string.IsNullOrEmpty(error) ? "." : ": " + (error == "QuotaExceededError"
+                   + (string.IsNullOrEmpty(error) ? "." : ": " + (IsQuotaError(error)
                         ? L.S("the browser's storage is full.", "browserens lager er fuldt.") : error + "."));
+        }
+
+        /// The browser's "storage is full" error: QuotaExceededError (all browsers today), Firefox's older
+        /// NS_ERROR_DOM_QUOTA_REACHED, or a message that says quota.
+        public static bool IsQuotaError(string error)
+        {
+            if (string.IsNullOrEmpty(error)) return false;
+            return error == "QuotaExceededError" || error.IndexOf("QUOTA_REACHED", StringComparison.OrdinalIgnoreCase) >= 0
+                   || error.IndexOf("quota", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// The storage-full box on the History page (with Download a backup / Delete safety copies).
+        public static string StorageFullText
+        {
+            get
+            {
+                return L.S("The browser's storage for this site is full, so changes aren't saved. Download a backup first, then delete the old safety copies to make room.",
+                           "Browserens lager til siden er fuldt, så ændringer gemmes ikke. Hent en sikkerhedskopi først, og slet så de gamle sikkerhedskopier for at gøre plads.");
+            }
+        }
+
+        /// Settings couldn't be saved (localStorage refused): the line under the buttons.
+        public static string SettingsProblem(string error)
+        {
+            return L.S("Your settings couldn't be saved in this browser", "Dine indstillinger kunne ikke gemmes i denne browser")
+                   + (IsQuotaError(error) ? ": " + L.S("the browser's storage is full.", "browserens lager er fuldt.")
+                                          : (string.IsNullOrEmpty(error) ? "." : ": " + error + "."));
+        }
+
+        /// "Printing, done about 16:40" (short = "Printing · 16:40" for a chip); another day's end gets its date
+        /// (= the desktop's HistoryViews.PrintingText, times with a literal ':'). null = not printing now.
+        public static string PrintingText(QuoteRecord r, DateTime now, bool shortForm)
+        {
+            DateTime end;
+            if (r == null || !History.IsPrinting(r, now) || !History.PrintingEnds(r, out end)) return null;
+            string at = end.Date == now.Date ? end.ToString("HH':'mm", Inv) : end.ToString("dd-MM HH':'mm", Inv);
+            return shortForm ? L.F("Printing · {0}", "Printer · {0}", at)
+                             : L.F("Printing, done about {0}", "Printer, færdig ca. {0}", at);
+        }
+
+        /// The soonest end of a print still running (for one redraw then); null = none.
+        public static DateTime? NextPrintingEnd(IEnumerable<QuoteRecord> list, DateTime now)
+        {
+            DateTime? next = null;
+            DateTime end;
+            if (list != null)
+                foreach (var r in list)
+                    if (r != null && History.IsPrinting(r, now) && History.PrintingEnds(r, out end) && end > now && (next == null || end < next.Value)) next = end;
+            return next;
+        }
+
+        /// The History list's Customer cell (read-only on the web): the record's Customer ("" = none), as the desktop.
+        public static string CustomerText(QuoteRecord r) { return r == null ? "" : (r.Customer ?? "").Trim(); }
+
+        /// The Customer cell's tooltip: the name, and when a made invoice went to another name, "Invoice … is made out to …"
+        /// (= the desktop's HistoryCustomer.BilledToNote). null = no tooltip.
+        public static string CustomerTip(QuoteRecord r)
+        {
+            string name = CustomerText(r), note = null;
+            if (r != null && !string.IsNullOrEmpty(r.InvoiceNo))
+            {
+                string bt = (r.BilledTo ?? "").Trim();
+                if (bt.Length > 0 && !string.Equals(bt, name, StringComparison.Ordinal))
+                    note = L.F("Invoice {0} is made out to {1}", "Faktura {0} er lavet til {1}", r.InvoiceNo, bt);
+            }
+            if (note == null) return name.Length > 0 ? name : null;
+            return name.Length > 0 ? name + "\n" + note : note;
         }
 
         // ---------- the list's texts (HistoryForm) ----------
@@ -437,7 +504,7 @@ namespace PrintPrice.Web
             string and = L.S(" and ", " og ");
             if (names.Count == 1) return names[0];
             if (names.Count <= 3) return string.Join(", ", names.GetRange(0, names.Count - 1)) + and + names[names.Count - 1];
-            return string.Join(", ", names.GetRange(0, 3)) + and + L.F("{0} more", "{0} mere", names.Count - 3);
+            return string.Join(", ", names.GetRange(0, 3)) + and + L.F("{0} more", "{0} flere", names.Count - 3);
         }
 
         /// The confirm dialog's title: "Delete 3 quotes?" / "Clear all 48 quotes?".
@@ -648,8 +715,8 @@ namespace PrintPrice.Web
         public static string PaybackCaption(QuoteResult r)
         {
             if (r == null || r.PaybackCost <= 0) return null;
-            return r.PaybackBothPrices ? L.S("Failed prints payback", "Fejlprint tjenes ind")
-                                       : L.S("Failed prints payback – customers only", "Fejlprint tjenes ind – kun kunder");
+            return r.PaybackBothPrices ? L.S("Earning back failed prints", "Fejlprint tjenes ind")
+                                       : L.S("Earning back failed prints – customers only", "Fejlprint tjenes ind – kun kunder");
         }
 
         public static string PaybackAmount(QuoteResult r)

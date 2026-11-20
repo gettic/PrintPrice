@@ -489,3 +489,24 @@ table.hist tr.picked.ticked td { background: var(--accent); }
     .bottom .made { flex-basis: 100%; order: 9; }   /* "Made by Gettic · GitHub" on its own line under the buttons */
     .bottom button { flex: 1 1 auto; }
 }
+
+/* ---- whole-app review (2026-11-20) ---- */
+/* D: read-only Customer column; "Printing now" = the desktop's amber clock (Theme.Warning) */
+table.hist td.customer { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the list's width: Note may shrink to 90 px (it was 140 px: the table was wider than a 900 px window), and below
+   1024 px (small laptop windows, tablets) there is no room for Customer; the search still finds names */
+table.hist td.notecell { min-width: 90px; }
+@media (max-width: 1023px) { table.hist .customer { display: none; } }
+.tick.printing, .chip.printing, .flag.printing { color: var(--warning); }
+.chip.printing { border-color: color-mix(in srgb, var(--warning) 45%, var(--back)); }
+.clock { vertical-align: -2px; }
+.flag .clock { vertical-align: -1px; }
+/* B: storage full - the way out */
+.hinfo.full { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.hinfo.full > span:first-child { flex: 1 1 320px; }
+.hinfo.full .fullbuttons { display: flex; flex-wrap: wrap; gap: 8px; }
+.hinfo.full .muted { flex-basis: 100%; }
+/* B: phones and tablets zoom in on boxes under 16 px (iPhone): 16 px on touch screens */
+@media (pointer: coarse) {
+    input[type], input:not([type]), select, textarea, table.hist select.for { font-size: 16px; }
+}

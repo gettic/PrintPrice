@@ -30,10 +30,13 @@ else
             <HistoryPage Quotes="history" Settings="settings" Problem="@historyProblem" Changed="HistoryChanged"
                          OpenAgain="r => FromHistory(r, false)" Repeat="r => FromHistory(r, true)"
                          Quote="r => OpenRecordQuote(r, false)" Invoice="r => OpenRecordQuote(r, true)"
+                         QuoteMany="l => OpenRecordsQuote(l, false)" InvoiceMany="l => OpenRecordsQuote(l, true)"
                          LastBackup="@lastBackup" OpenBackup="() => OpenBackup(history.Count == 0 ? BackupDialog.TabRestore : BackupDialog.TabBackup)"
                          DeleteMany="DeleteRecords" ClearAll="ClearHistory" Undo="UndoDelete" DismissDone="DismissDone"
                          DoneText="@(doneText == null ? null : doneText())" DoneError="doneError" CanUndo="@(undo != null)" SafetyCopy="@safetyCopyKey"
-                         DownloadSafety="DownloadClearSafety" StorageAvailable="@Histories.Available" SettingsChanged="SaveSettings" />
+                         DownloadSafety="DownloadClearSafety" StorageAvailable="@Histories.Available" SettingsChanged="SaveSettings"
+                         StorageFull="storageFull" FullBackup="DownloadFullBackup" DeleteSafetyText="@deleteSafetyText"
+                         DeleteSafety="DeleteSafetyCopies" FullDone="@fullDone" />
         }
 
         <div class="calc" hidden="@InHistory">
@@ -57,7 +60,7 @@ else
             </div>
             <div class="zone">
                 <div class="zone-row">
-                    <button @onclick="ChooseFile" disabled="@reading">@L.S("Choose file…", "Vælg fil…")</button>
+                    <button @onclick="ChooseFile" disabled="@reading">@L.S("Load file…", "Åbn fil…")</button>
                     <span class="muted">@L.S("or drop a sliced .gcode.3mf / G-code (Bambu Studio, Orca, Prusa, Cura) here", "eller slip en slicet .gcode.3mf / G-code (Bambu Studio, Orca, Prusa, Cura) her")</span>
                 </div>
                 <input type="file" @ref="fileInput" class="hidden-file" tabindex="-1" aria-hidden="true"
@@ -78,7 +81,7 @@ else
                         }
                         @if (plates.Count > MaxPlateLines)
                         {
-                            <li>@L.F("+{0} more", "+{0} mere", plates.Count - MaxPlateLines)</li>
+                            <li>@L.F("+{0} more", "+{0} flere", plates.Count - MaxPlateLines)</li>
                         }
                     </ul>
                 }
@@ -229,18 +232,18 @@ else
             <button @onclick="Clear">@L.S("Clear", "Ryd")</button>
             <button @onclick='() => OpenSettings(SettingsDialog.TabPrices)'>@L.S("Settings", "Indstillinger")</button>
             <button @onclick="SaveClicked" disabled="@(last == null)">@L.S("Save to history", "Gem i historik")</button>
-            <button class="accent" @onclick="OpenJobQuote" disabled="@(last == null)">@L.S("Show quote…", "Vis tilbud…")</button>
+            <button class="accent" @onclick="OpenJobQuote" disabled="@(last == null)">@WebQuote.QuoteButtonText(settings)</button>
         </div>
         @if (status != null)
         {
             <div class="@(statusError ? "status error" : "status")" role="status">@status</div>
         }
-        <div class="note">@L.S("Your settings, price history and files stay in this browser. Online backup sends only a locked copy, and only when you use it. The live electricity price is asked from PrintPrice's relay.",
-                               "Dine indstillinger, prishistorik og filer bliver i denne browser. Online-kopi sender kun en låst kopi, og kun når du bruger den. Den aktuelle elpris hentes via PrintPrices relæ.")</div>
+        <div class="note">@L.S("Your settings, price history and files stay in this browser. Online backup sends only a locked copy, and only when you use it. The live electricity price is asked from PrintPrice's own small server.",
+                               "Dine indstillinger, prishistorik og filer bliver i denne browser. Online-kopi sender kun en låst kopi, og kun når du bruger den. Den aktuelle elpris hentes via PrintPrices egen lille server.")</div>
         </div>
     </div>
 
-    @* outside the page: Backup's Choose file… clicks it while the page is inert *@
+    @* outside the page: Backup's Browse… clicks it while the page is inert *@
     <input type="file" id="backupFile" class="hidden-file" tabindex="-1" aria-hidden="true" accept=".printprice-backup,.json" />
 
     @if (setupOpen)
@@ -263,12 +266,22 @@ else
 
     @if (quoteOpen)
     {
-        <QuoteView @key="quoteKey" Model="@QuoteModelName" Invoice="quoteInvoice" IsRecord="quoteRecord != null"
+        bool groupMade = quoteJobs != null && quoteInvoice && WebQuote.AllMade(quoteJobs);
+        <QuoteView @key="quoteKey" Model="@QuoteModelName" Invoice="quoteInvoice" IsRecord="quoteRecord != null || quoteJobs != null"
                    Recent="History.RecentCustomers(history, 10)"
-                   CustomerPrice="@(quoteRecord != null ? quoteRecord.OthersPrice : last?.OthersPrice ?? 0)"
-                   FriendsPrice="@(quoteRecord != null ? quoteRecord.FriendsPrice : last?.FriendsPrice ?? 0)"
-                   StartFriends="@(quoteRecord != null ? quoteRecord.For == History.ForFriends : settings.QuoteFriends)"
-                   StartDark="@(settings.QuoteDark != 0)" StartCustomer="@QuoteStartName" NameLocked="@(quoteInvoice && WebQuote.InvoiceMade(quoteRecord))"
+                   CustomerPrice="@(quoteJobs != null ? GroupTotal(false) : quoteRecord != null ? quoteRecord.OthersPrice : last?.OthersPrice ?? 0)"
+                   FriendsPrice="@(quoteJobs != null ? GroupTotal(true) : quoteRecord != null ? quoteRecord.FriendsPrice : last?.FriendsPrice ?? 0)"
+                   StartFriends="@(quoteJobs != null ? WebQuote.AllFriends(quoteJobs) : quoteRecord != null ? quoteRecord.For == History.ForFriends : settings.QuoteFriends)"
+                   StartDark="@(settings.QuoteDark != 0)" StartCustomer="@QuoteStartName"
+                   NameLocked="@(quoteJobs != null ? groupMade : quoteInvoice && WebQuote.InvoiceMade(quoteRecord))"
+                   PriceLocked="@(quoteJobs != null ? groupMade : quoteInvoice && WebQuote.InvoiceMade(quoteRecord))"
+                   LockedFriends="@(quoteJobs != null ? WebQuote.AllFriends(quoteJobs) : WebQuote.BilledFriends(quoteRecord))"
+                   MadeNo="@(quoteRecord != null ? quoteRecord.InvoiceNo : null)"
+                   StartStatus="@(quoteRecord != null ? History.PrintStateOf(quoteRecord, DateTime.Now) : PrintState.NotPrinted)"
+                   NoStatus="quoteJobs != null"
+                   Warning="@(quoteJobs != null ? (quoteNoteWarn ? quoteNote : null) : quoteInvoice ? Joined(WebQuote.FailedInvoiceNote(quoteRecord), quoteNoteWarn ? quoteNote : null) : quoteNoteWarn ? quoteNote : null)"
+                   Note="@(quoteNoteWarn ? null : quoteNote)"
+                   Help="@(quoteJobs != null ? WebQuote.GroupHelpText(quoteJobs.Count, quoteInvoice, groupMade, groupMade ? quoteJobs[0].InvoiceNo.Trim() : "") : null)"
                    Build="BuildQuoteSheet" Export="ExportQuote" Remember="RememberQuoteLook" OnClose="CloseQuote" />
     }
 }
@@ -414,7 +427,48 @@ else
         await SaveSettings();
     }
 
-    Task SaveSettings() { return Store.Set(Store.SettingsKey, WebCalc.SettingsToText(settings)); }
+    /// Writes this tab's settings; what another open tab stored meanwhile (invoice codes, printer ids) is taken in first
+    /// (A8). A refused write (storage full) is said once under the buttons.
+    async Task SaveSettings()
+    {
+        WebCalc.MergeStored(settings, await Store.Get(Store.SettingsKey));
+        string err = await Store.Set(Store.SettingsKey, WebCalc.SettingsToText(settings));
+        if (err == null) { settingsError = null; return; }
+        if (err == settingsError) return;
+        settingsError = err;
+        ShowStatus(WebHistory.SettingsProblem(err), true);
+        StateHasChanged();
+    }
+
+    string settingsError;   // the last settings write error already shown (null = the last write worked)
+    bool settingsStale;     // another tab saved settings while Settings / setup was open here
+
+    /// Another open tab saved the settings (A8, the storage event): read them again, so this tab never writes old
+    /// settings back. The boxes keep what is typed. While Settings / setup is open: after it closes.
+    [JSInvokable]
+    public async Task SettingsChangedElsewhere()
+    {
+        if (settingsOpen || setupOpen) { settingsStale = true; return; }
+        await ReloadSettings();
+        StateHasChanged();
+    }
+
+    async Task ReloadSettings()
+    {
+        settingsStale = false;
+        string text = await Store.Get(Store.SettingsKey);
+        if (string.IsNullOrEmpty(text)) return;
+        bool upgraded;
+        var fresh = WebCalc.SettingsFromText(text, out upgraded);
+        WebCalc.MergeStored(fresh, WebCalc.SettingsToText(settings));   // this tab's own codes / ids stay too
+        settings = fresh;
+        History.ReservePrinterIds(history, settings);
+        WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
+        if (fileResult != null) CheckPrinter(fileResult);
+        ApplyLanguage();
+        Recalculate();
+        await Store.SetPageLanguage(L.Danish, Title);
+    }
 
     void Recalculate()
     {
@@ -444,7 +498,13 @@ else
         if (hoursState == FieldState.Invalid || minutesState == FieldState.Invalid)
             problem = L.S("Print time: hours 0–999, minutes 0–59.", "Printtid: timer 0–999, minutter 0–59.");
         else if (gramsState == FieldState.Invalid || kgState == FieldState.Invalid || elecState == FieldState.Invalid || rowsBad)
-            problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
+        {
+            // the first bad box's name in front (ui-text 9)
+            string field = gramsState == FieldState.Invalid ? L.S("Filament used", "Filamentforbrug")
+                         : kgState == FieldState.Invalid || rowsBad ? L.S("Filament price", "Filamentpris")
+                         : L.S("Electricity price", "Elpris");
+            problem = field + ": " + L.S("use numbers of 0 or more.", "brug tal på 0 eller mere.");
+        }
         if (problem != null) return;
         if (WebCalc.Incomplete(hoursState, minutesState, gramsState)) return;   // no price until the time and grams are there
         input = new QuoteInput { Hours = h, Minutes = m, FilamentGrams = g, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el, Filaments = lines };
@@ -732,19 +792,109 @@ else
     public async Task HistoryChangedElsewhere()
     {
         var fresh = await Histories.Load(p => historyProblem = p);
-        history.Clear();   // the same list object: the History page keeps its reference
-        history.AddRange(fresh);
-        if (reopened != null && !history.Exists(r => r.Id == reopened.Id)) reopened = null;
-        Recalculate();
+        AdoptHistory(fresh);
         StateHasChanged();
     }
 
+    /// The list becomes fresh (the same list object: the History page keeps its reference). Records the page holds
+    /// (Open again / Repeat print, an open quote page) point to their fresh copy by Id; an open quote page whose quote is
+    /// gone closes and says so.
+    void AdoptHistory(List<QuoteRecord> fresh)
+    {
+        history.Clear();
+        history.AddRange(fresh);
+        reopened = Fresh(reopened);
+        repeatOf = Fresh(repeatOf);
+        if (quoteRecord != null)
+        {
+            var q = Fresh(quoteRecord);
+            if (q == null && quoteOpen)
+            {
+                quoteOpen = false;
+                historyProblem = WebQuote.NotFound;
+                _ = Store.Go(quoteBackHash);
+            }
+            quoteRecord = q;
+        }
+        if (quoteJobs != null)
+        {
+            var jobsNow = new List<QuoteRecord>();
+            foreach (var j in quoteJobs) { var f = Fresh(j); if (f != null) jobsNow.Add(f); }
+            if (jobsNow.Count < quoteJobs.Count)
+            {
+                // a job of the open combined bill is gone (another tab deleted it): the window closes and says so
+                if (quoteOpen)
+                {
+                    quoteOpen = false;
+                    historyProblem = WebQuote.NotFound;
+                    _ = Store.Go(quoteBackHash);
+                }
+                quoteJobs = null;
+            }
+            else quoteJobs = jobsNow;
+        }
+        Recalculate();
+    }
+
+    QuoteRecord Fresh(QuoteRecord r)
+    {
+        if (r == null) return null;
+        if (string.IsNullOrEmpty(r.Id)) return history.Contains(r) ? r : null;
+        return history.Find(q => q.Id == r.Id);
+    }
+
+    /// A save failed (A9): the list goes back to what is really stored, so nothing shows as saved that isn't.
+    async Task RollBack(string err, List<QuoteRecord> fallback = null)
+    {
+        historyProblem = err;
+        storageFull = Histories.Full;
+        var stored = await Histories.Stored();
+        if (stored != null) AdoptHistory(stored);
+        else if (fallback != null) AdoptHistory(fallback);
+        else historyProblem = err + " " + L.S("Reload the page to see what is saved.", "Genindlæs siden for at se, hvad der er gemt.");
+        if (storageFull) await RefreshSafetyText();
+    }
+
     /// The History page changed a record or deleted one: save at once; the payback debt may have changed.
+    /// A failed save puts the change back (A9).
     async Task HistoryChanged()
     {
         string err = await Histories.Save(history);
-        historyProblem = err ?? (Histories.Available ? null : historyProblem);
+        if (err != null) await RollBack(err);
+        else SaveWorked();
         Recalculate();
+    }
+
+    /// A history save worked: an earlier save problem (and the storage-full box) goes away, as after a History edit.
+    void SaveWorked()
+    {
+        historyProblem = Histories.Available ? null : historyProblem;
+        storageFull = false;
+    }
+
+    // ---------- storage full (B): a way out ----------
+    bool storageFull;
+    string deleteSafetyText, fullDone;
+
+    async Task RefreshSafetyText()
+    {
+        deleteSafetyText = WebBackup.DeleteSafetyText(await Histories.SafetySizes());
+    }
+
+    /// The storage-full box's "Download a backup": the whole history (pictures within the budget) + settings, as Backup… makes it.
+    async Task DownloadFullBackup()
+    {
+        var now = DateTime.Now;
+        var pictures = await Histories.BackupPictures(history, WebBackup.PictureBudget);
+        if (await Store.Download(History.BackupFileName(now), WebBackup.FileText(history, settings, now, pictures)))
+            await BackedUp(false);
+    }
+
+    async Task DeleteSafetyCopies()
+    {
+        int n = await Histories.DeleteSafetyCopies();
+        fullDone = WebBackup.DeletedSafetyText(n);
+        await RefreshSafetyText();
     }
 
     // ---------- idea 22: delete several, Clear all, Undo (until the page is reloaded or the next delete) ----------
@@ -785,7 +935,13 @@ else
             var pictures = await Histories.BackupPictures(history, WebBackup.PictureBudget);
             string key = WebBackup.ClearSafetyKey(now);
             string err = await Histories.SaveSafety(key, WebBackup.FileText(history, settings, now, pictures));
-            if (err != null) { doneText = () => err; doneError = true; return; }
+            if (err != null)
+            {
+                doneText = () => err; doneError = true;
+                storageFull = WebHistory.IsQuotaError(err);
+                if (storageFull) await RefreshSafetyText();
+                return;
+            }
             safetyCopyKey = key;
         }
         var removed = WebHistory.RemoveRecords(history, new List<QuoteRecord>(history));
@@ -804,9 +960,12 @@ else
             doneText = () => err;
             doneError = true;
             safetyCopyKey = null;
+            storageFull = Histories.Full;
+            if (storageFull) await RefreshSafetyText();
         }
         else
         {
+            storageFull = false;
             undo = removed;
             int n = removed.Count; doneText = () => WebHistory.DeletedText(n, clear);
             doneError = false;
@@ -831,6 +990,8 @@ else
             WebHistory.RemoveRecords(history, back);
             undo = removed;   // still possible later
             historyProblem = err;
+            storageFull = Histories.Full;
+            if (storageFull) await RefreshSafetyText();
             doneText = () => err;
             doneError = true;
         }
@@ -864,12 +1025,14 @@ else
             ShowStatus(L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu."), true);
             return;
         }
+        string oldSavedId = savedId;
         var saved = WebHistory.Save(history, NewRecord());
         savedId = saved.Id;   // left out of the payback debt from now on (same price when saved again)
         string err = await Histories.Save(history);
-        if (err == null) await Histories.SavePicture(saved.Id, pictureUrl);
+        if (err == null) { SaveWorked(); await Histories.SavePicture(saved.Id, pictureUrl); }
+        else { savedId = oldSavedId; await RollBack(err); }   // A9: not shown as saved
         Recalculate();
-        if (err != null) { historyProblem = err; ShowStatus(err, true); }
+        if (err != null) ShowStatus(err, true);
         else if (!Histories.Available) ShowStatus(L.S("✓ Saved to history (until this page is closed: this browser keeps no storage).",
                                                       "✓ Gemt i historikken (til siden lukkes: denne browser gemmer ikke)."), false);
         else ShowStatus(L.S("✓ Saved to history.", "✓ Gemt i historikken."), false);
@@ -894,7 +1057,62 @@ else
 
     // ---------- stage 4: quote / invoice (MainForm's quote export and saved-record sections) ----------
 
-    string QuoteModelName { get { return QuoteRows.ModelName(quoteRecord != null ? quoteRecord.Model : jobModel); } }
+    string QuoteModelName
+    {
+        get { return quoteJobs != null ? QuoteRows.PrintsText(quoteJobs.Count) : QuoteRows.ModelName(quoteRecord != null ? quoteRecord.Model : jobModel); }
+    }
+
+    // ---------- combined bill: several History jobs on one quote / invoice (MainForm's combined-bill section) ----------
+
+    List<QuoteRecord> quoteJobs;                 // the combined bill's jobs (oldest first); null = one job
+    Dictionary<string, string> quotePictures;    // their small pictures by record Id
+    string quoteGroupName = "";                  // the name box at the start (made invoice: BilledTo, else the most used)
+    string quoteNote;                            // notes under the price choice (whole invoice shown, failed left out, names)
+    bool quoteNoteWarn;
+
+    double GroupTotal(bool friends) { return History.GroupBill(quoteJobs, settings, friends).Total; }
+
+    static string Joined(string a, string b)
+    {
+        if (string.IsNullOrEmpty(a)) return b;
+        if (string.IsNullOrEmpty(b)) return a;
+        return a + "\n" + b;
+    }
+
+    /// History's Quote… / Invoice… on one or several quotes (MainForm.ShowRecordsQuote): one job = its own window (an
+    /// invoice of a job on a combined invoice = the whole invoice); several = one bill, failed prints left off, a mix of
+    /// invoices refused (the reason on the History page).
+    async Task OpenRecordsQuote(List<QuoteRecord> records, bool invoice)
+    {
+        var o = WebQuote.OpenRecords(history, records, invoice, settings);
+        if (o.Problem != null) { historyProblem = o.Problem; StateHasChanged(); return; }
+        quoteNote = o.Notes.Count > 0 ? string.Join("\n", o.Notes) : null;
+        quoteNoteWarn = o.Warn;
+        if (o.Single != null)
+        {
+            quoteJobs = null;
+            quoteRecord = o.Single;
+            quoteInvoice = invoice;
+            quotePicture = await Histories.Picture(o.Single.Id);
+            await ShowQuote((invoice ? "#invoice/" : "#quote/") + o.Single.Id);
+            return;
+        }
+        if (o.Jobs == null) return;
+        quoteRecord = null;
+        quoteJobs = o.Jobs;
+        quoteInvoice = invoice;
+        quoteGroupName = o.StartName ?? "";
+        quoteWhen = DateTime.Now;
+        quotePictures = new Dictionary<string, string>();
+        foreach (var r in o.Jobs)
+        {
+            if (string.IsNullOrEmpty(r.Id) || quotePictures.ContainsKey(r.Id)) continue;
+            string pic = await Histories.Picture(r.Id);
+            if (pic != null) quotePictures[r.Id] = pic;
+        }
+        // a made combined invoice has its own address (a reload opens it again); a new one / a quote doesn't
+        await ShowQuote(o.Made ? "#invoice/" + o.Jobs[0].Id : invoice ? "#invoice" : "#quote");
+    }
 
     /// The name box at the start: a made invoice keeps the name it was made out to (BilledTo, else Customer for older
     /// invoices), else the record's name (MainForm.OpenRecordQuote).
@@ -902,6 +1120,7 @@ else
     {
         get
         {
+            if (quoteJobs != null) return quoteGroupName;
             if (quoteRecord == null) return "";
             return quoteInvoice && WebQuote.InvoiceMade(quoteRecord) ? History.InvoiceInfo(quoteRecord, settings).BilledTo ?? "" : quoteRecord.Customer ?? "";
         }
@@ -916,23 +1135,25 @@ else
     }
 
     /// "Show quote…": the page of the job on screen. Nothing is saved by opening it.
+    /// With Settings' MainInvoice on ("Show invoice…", = MainForm.NewJobInvoiceForm) the same page as an invoice: opening
+    /// it saves nothing and uses no number; the first Print / PDF or Copy text saves the job, makes the invoice and from
+    /// then on the window shows that record (quoteRecord): later exports re-issue the same invoice, name and price locked.
     async Task OpenJobQuote()
     {
         if (last == null || input == null) return;
         quoteRecord = null;
-        quoteInvoice = false;
+        quoteJobs = null;
+        quoteNote = null;
+        quoteInvoice = WebQuote.MainInvoice(settings);
         quoteWhen = DateTime.Now;
-        await ShowQuote("#quote");
+        await ShowQuote(quoteInvoice ? "#invoice" : "#quote");
     }
 
     /// History's Quote… / Invoice…: the page of a saved quote, with its saved prices and small picture.
     async Task OpenRecordQuote(QuoteRecord r, bool invoice)
     {
         if (r == null) return;
-        quoteRecord = r;
-        quoteInvoice = invoice;
-        quotePicture = await Histories.Picture(r.Id);
-        await ShowQuote((invoice ? "#invoice/" : "#quote/") + r.Id);
+        await OpenRecordsQuote(new List<QuoteRecord> { r }, invoice);   // an invoice on a combined invoice = the whole bill
     }
 
     /// A #quote/<id> or #invoice/<id> address (a link, a reload): that saved quote's page over the History page; an id
@@ -965,9 +1186,15 @@ else
 
     WebQuote.Sheet BuildQuoteSheet(bool friends, string customer)
     {
+        if (quoteJobs != null)
+        {
+            if (quoteInvoice && WebQuote.AllMade(quoteJobs)) friends = WebQuote.AllFriends(quoteJobs);   // a made invoice: its billed price
+            return WebQuote.FromRecords(quoteJobs, settings, friends, customer, quoteInvoice, quoteWhen, DateTime.Now, quotePictures);
+        }
         if (quoteRecord != null)
             return WebQuote.FromRecord(quoteRecord, settings, friends, customer, quoteInvoice, DateTime.Now, quotePicture);
         if (input == null) return null;
+        if (quoteInvoice) return WebQuote.FromJobInvoice(CurrentJob(), settings, friends, quoteWhen, customer);
         return WebQuote.FromJob(CurrentJob(), settings, friends, quoteWhen, History.QuoteNumber(quoteWhen), customer);
     }
 
@@ -975,64 +1202,137 @@ else
     {
         settings.QuoteDark = dark ? 1 : 0;
         // the job's quote remembers the price too; a saved quote's price is its own (For), not a setting
-        if (quoteRecord == null) settings.QuotePrice = friends ? AppSettings.QuotePriceFriends : AppSettings.QuotePriceCustomer;
+        if (quoteRecord == null && quoteJobs == null) settings.QuotePrice = friends ? AppSettings.QuotePriceFriends : AppSettings.QuotePriceCustomer;
         await SaveSettings();
     }
 
     /// One export (MainForm.ExportQuote / ExportRecord): the quote goes into the history with this price and name (a
     /// saved quote gets them; an invoice also its number), then the page says what to print or copy.
-    async Task<WebQuote.Done> ExportQuote(string kind, bool friends, string customer)
+    async Task<WebQuote.Done> ExportQuote(string kind, bool friends, string customer, PrintState? state)
     {
+        // A9: the history is saved first, the settings (the used invoice number) only after it worked. A failed save puts
+        // the list and the used numbers back; a NEW invoice number is then neither printed nor copied (it isn't saved).
         var d = new WebQuote.Done();
         customer = (customer ?? "").Trim();
         string err;
         string invoiceNo = null;
-        if (quoteRecord != null)
+        string usedBefore = settings.UsedInvoiceNos;
+        bool newNumber = false;
+        QuoteRecord noteOn = null;   // a quote saved as Failed: the status line says what that means (FailedSavedNote)
+        var group = quoteJobs;
+        if (group != null)
+        {
+            // combined bill (MainForm.ExportGroup): name + For on every job, an invoice made for all at once, one save
+            bool wasMade = quoteInvoice && WebQuote.AllMade(group);
+            string refused = WebQuote.ApplyGroupExport(history, group, quoteInvoice, kind == "history", ref friends, customer, DateTime.Now, settings);
+            if (refused != null) { d.Problem = refused; return d; }
+            newNumber = quoteInvoice && kind != "history" && !wasMade;
+            if (quoteInvoice) invoiceNo = (group[0].InvoiceNo ?? "").Trim();
+            if (kind != "history")
+            {
+                var sheet = BuildQuoteSheet(friends, customer);   // with the number just made
+                if (kind == "text") d.Text = WebQuote.GroupText(group, sheet, friends, settings);
+                else d.FileName = WebQuote.GroupFileName(sheet);
+            }
+            err = await Histories.Save(history);
+            if (err == null && newNumber) await SaveSettings();
+        }
+        else if (quoteRecord != null)
         {
             var r = quoteRecord;
+            // the quote window's print status (quotes only; the invoice window has none)
+            if (!quoteInvoice && state.HasValue) { History.SetPrintState(r, state.Value, DateTime.Now); noteOn = r; }
             if (kind == "history")
             {
                 if (!(quoteInvoice && WebQuote.InvoiceMade(r))) r.Customer = customer;   // a made invoice's name stays as it is
-                r.For = friends ? History.ForFriends : History.ForCustomer;
+                if (!WebQuote.InvoiceMade(r)) r.For = friends ? History.ForFriends : History.ForCustomer;   // an invoice keeps its price (A4)
             }
             else
             {
                 if (quoteInvoice && customer.Length == 0) { d.Problem = WebQuote.NeedName; return d; }
+                newNumber = quoteInvoice && !WebQuote.InvoiceMade(r);
                 WebQuote.ApplyRecordExport(history, r, friends, customer, quoteInvoice, DateTime.Now, settings);
-                if (quoteInvoice) { invoiceNo = r.InvoiceNo; await SaveSettings(); }
+                if (quoteInvoice) invoiceNo = r.InvoiceNo;
             }
+            friends = WebQuote.ExportFriends(r, quoteInvoice, friends);   // a made invoice: the price it was billed at
+            // what goes out is made now, from the record as it is about to be saved
+            if (kind == "text") d.Text = QuoteRows.RecordText(r, friends, quoteInvoice, settings, WebQuote.ShortLink(r.Source));
+            else if (kind == "print") d.FileName = WebQuote.FileName(BuildQuoteSheet(friends, customer));
             err = await Histories.Save(history);
+            if (err == null && newNumber) await SaveSettings();
         }
         else
         {
             if (last == null || input == null) { d.Problem = L.S("Nothing to send yet.", "Der er ikke noget at sende endnu."); return d; }
-            var saved = WebQuote.SaveExport(history, NewRecord(), friends, customer);
+            // "Show invoice…" (MainForm.ExportJobInvoice): Save to history = the quote only (no number); otherwise the
+            // name is required, the job is saved and the invoice made (number, date, snapshot, Printed) in one save
+            bool makeInvoice = quoteInvoice && kind != "history";
+            if (makeInvoice && customer.Length == 0) { d.Problem = WebQuote.NeedName; return d; }
+            string oldSavedId = savedId;
+            var saved = makeInvoice ? WebQuote.SaveJobInvoice(history, NewRecord(), friends, customer, DateTime.Now, settings)
+                                    : state.HasValue && !quoteInvoice ? WebQuote.SaveExport(history, NewRecord(), friends, customer, state.Value, DateTime.Now)
+                                    : WebQuote.SaveExport(history, NewRecord(), friends, customer);
+            if (!quoteInvoice) noteOn = saved;
             savedId = saved.Id;   // left out of the payback debt from now on
-            err = await Histories.Save(history);
-            if (err == null) await Histories.SavePicture(saved.Id, pictureUrl);
             DateTime when;
-            quoteWhen = History.TryTime(saved.SavedAt, out when) ? when : DateTime.Now;
+            var savedWhen = History.TryTime(saved.SavedAt, out when) ? when : DateTime.Now;
+            if (makeInvoice)
+            {
+                newNumber = true;   // a job invoice is always a new one (an invoiced record is never replaced by a save)
+                invoiceNo = saved.InvoiceNo;
+                friends = WebQuote.ExportFriends(saved, true, friends);
+                if (kind == "text") d.Text = QuoteRows.RecordText(saved, friends, true, settings, WebQuote.ShortLink(saved.Source));
+            }
+            else if (kind == "text") d.Text = QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, grams, Multi ? rows.Count : 0, last.FriendsPrice, last.OthersPrice);
+            err = await Histories.Save(history);
+            if (err == null)
+            {
+                await Histories.SavePicture(saved.Id, pictureUrl);
+                quoteWhen = savedWhen;
+                if (makeInvoice)
+                {
+                    if (newNumber) await SaveSettings();
+                    quoteRecord = saved;   // from now on this window shows the made invoice (same number on every export)
+                    quotePicture = pictureUrl;
+                }
+            }
+            else savedId = oldSavedId;
+            if (kind == "print") d.FileName = WebQuote.FileName(BuildQuoteSheet(friends, customer));
             Recalculate();
         }
-        if (err != null) historyProblem = err;
         bool ok = err == null;
+        if (ok) SaveWorked();
+        else
+        {
+            settings.UsedInvoiceNos = usedBefore;
+            await RollBack(err);
+        }
         if (kind == "history")
         {
             if (!ok) d.Problem = err;
             else d.Status = L.S("✓ Saved to history.", "✓ Gemt i historikken.");
         }
-        else if (kind == "text")
+        else if (!ok && newNumber)
         {
-            d.Text = quoteRecord != null
-                ? QuoteRows.RecordText(quoteRecord, friends, quoteInvoice, settings, WebQuote.ShortLink(quoteRecord.Source))
-                : QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, grams, Multi ? rows.Count : 0, last.FriendsPrice, last.OthersPrice);
-            d.Status = WebQuote.CopiedText(quoteInvoice, invoiceNo, ok) + (ok ? "" : " " + err);
+            d.Text = d.FileName = null;
+            d.Problem = (kind == "text" ? WebQuote.CopiedText(true, null, false) : WebQuote.PrintedText(true, null, false)) + " " + err;
         }
-        else
+        else if (kind == "text") d.Status = WebQuote.CopiedText(quoteInvoice, invoiceNo, ok || quoteInvoice) + (ok ? "" : " " + err);
+        else d.Status = WebQuote.PrintedText(quoteInvoice, invoiceNo, ok || quoteInvoice) + (ok ? "" : " " + err);
+        if (group != null && d.Problem == null)
         {
-            d.FileName = WebQuote.FileName(BuildQuoteSheet(friends, customer));
-            d.Status = WebQuote.PrintedText(quoteInvoice, invoiceNo, ok) + (ok ? "" : " " + err);
+            // the combined bill's own lines ("… is in the history (3 prints)")
+            if (kind == "history") d.Status = WebQuote.GroupSavedText(group.Count);
+            else d.Status = WebQuote.GroupDoneText(kind == "text", quoteInvoice, invoiceNo, group.Count, ok || quoteInvoice) + (ok ? "" : " " + err);
         }
+        else if (group != null && !ok && newNumber)
+            d.Problem = WebQuote.GroupDoneText(kind == "text", true, null, group.Count, false) + " " + err;
+        if (ok && d.Status != null && noteOn != null)
+        {
+            string note = WebQuote.FailedSavedNote(noteOn, settings);
+            if (note.Length > 0) d.Status += "\n" + note;
+        }
+        if (ok) Recalculate();   // a status change can change the failed-prints payback
         StateHasChanged();   // the History page and the tab count behind the window
         return d;
     }
@@ -1147,11 +1447,28 @@ else
         {
             var pictures = await Histories.BackupPictures(history, WebBackup.PictureBudget);   // a Replace drops pictures: the safety copy keeps them
             string err = await Histories.SaveSafety(safetyKey, WebBackup.FileText(history, settings, DateTime.Now, pictures));
-            if (err != null) { a.Problem = err; return a; }
+            if (err != null)
+            {
+                a.Problem = err;
+                storageFull = WebHistory.IsQuotaError(err);
+                if (storageFull) { await RefreshSafetyText(); StateHasChanged(); }
+                return a;
+            }
             a.SafetyKept = true;
         }
+        // A9: the restored list is saved first; if that fails, nothing changes here (list and settings stay as stored)
+        var before = new List<QuoteRecord>(history);
         history.Clear();
         history.AddRange(res.Quotes);
+        string saveErr = await Histories.Save(history);
+        if (saveErr != null)
+        {
+            await RollBack(saveErr, before);
+            a.Problem = saveErr;
+            StateHasChanged();
+            return a;
+        }
+        storageFull = false;
         if (res.Settings != null) settings = res.Settings;
         History.ReservePrinterIds(history, settings);
         WebCalc.ApplyAutoWear(settings, prefs.FilamentType);
@@ -1161,11 +1478,10 @@ else
         ApplyLanguage();
         Recalculate();
         a.Done = true;
-        a.Problem = await Histories.Save(history);
-        historyProblem = a.Problem;
+        if (Histories.Available) historyProblem = null;
         await SaveSettings();
         await Store.SetPageLanguage(L.Danish, Title);
-        if (a.Problem == null) await Histories.WritePictures(WebHistory.PictureWrites(res));   // the backup's pictures (Merge keeps ours)
+        await Histories.WritePictures(WebHistory.PictureWrites(res));   // the backup's pictures (Merge keeps ours)
         _ = Histories.CleanPictures(history);
         if (setupOpen)   // restored from the setup's step 1: with settings the setup is done (Combine set SetupDone 1)
         {
@@ -1225,10 +1541,12 @@ else
         if (h == "#setup") await Store.Go(view == "history" ? "#history" : "");
         if (o == null)   // a re-run cancelled: nothing changes (the language it showed goes back)
         {
+            if (settingsStale) await ReloadSettings();   // another tab saved settings meanwhile
             ApplyLanguage();
             await Store.SetPageLanguage(L.Danish, Title);
             return;
         }
+        settingsStale = false;   // the setup's answers win; SaveSettings still keeps the other tab's invoice codes
         bool powerChanged = o.Settings.PriceArea != settings.PriceArea || o.Settings.AutoPowerPrice != settings.AutoPowerPrice;
         settings = o.Settings;
         History.ReservePrinterIds(history, settings);   // a restore meanwhile may have brought printer ids
@@ -1259,7 +1577,12 @@ else
     async Task SettingsClosed(SettingsDialog.Result r)
     {
         settingsOpen = false;
-        if (r == null) return;   // cancelled
+        if (r == null)   // cancelled
+        {
+            if (settingsStale) await ReloadSettings();   // another tab saved settings meanwhile
+            return;
+        }
+        settingsStale = false;   // this Save wins; SaveSettings still keeps the other tab's invoice codes
         bool powerChanged = r.Settings.PriceArea != settings.PriceArea || r.Settings.PowerAddOn != settings.PowerAddOn
                             || r.Settings.PowerIncludeVat != settings.PowerIncludeVat || r.Settings.AutoPowerPrice != settings.AutoPowerPrice;
         settings = r.Settings;
@@ -1337,7 +1660,7 @@ else
             case QuoteLine.Material: return Multi && l.Index >= 0 && l.Index < rows.Count ? rows[l.Index].Name : L.S("Material", "Materiale");
             case QuoteLine.Power: return L.S("Electricity", "Strøm");
             case QuoteLine.Wear: return L.S("Machine wear", "Maskinslid");
-            case QuoteLine.Failed: return L.S("Failed-print allowance", "Tillæg for fejlprint");
+            case QuoteLine.Failed: return L.S("Extra for failed prints", "Tillæg for fejlprint");
             case QuoteLine.Payback: return L.S("Earlier failed prints", "Tidligere fejlprint");
             case QuoteLine.Work: return L.S("Work & handling", "Arbejde & håndtering");
             case QuoteLine.Minimum: return L.S("Minimum price top-up", "Tillæg op til minimumspris");

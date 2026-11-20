@@ -5,6 +5,8 @@ using System.IO;
 using System.Linq;
 #if !WEB
 using System.Net;
+using System.Threading;
+using System.Threading.Tasks;
 #endif
 using System.Text;
 using System.Text.RegularExpressions;
@@ -51,21 +53,88 @@ namespace PrintPrice
             return Net.Client(Net.DefaultUserAgent);
         }
 
-        static Dictionary<string, object> Query(string query)
+        const int QueryStallMs = 20000, DownloadStallMs = 30000;
+        const long MaxReplyBytes = 4 * 1048576;
+        public const long MaxModelBytes = 1024L * 1048576;   // 1 GB per file
+
+        static Dictionary<string, object> Query(string query, CancellationToken ct)
         {
             string body = Json.Serialize(new Dictionary<string, object> { { "query", query } });
-            string resp;
+            string resp = null;
             using (var wc = Client())
             {
                 wc.Headers[HttpRequestHeader.ContentType] = "application/json";
-                try { resp = wc.UploadString(Endpoint, body); }
-                catch (WebException ex) { throw new SliceException(L.F("Could not reach Printables: {0}", "Kunne ikke nå Printables: {0}", ex.Message)); }
+                try
+                {
+                    Task<string> call = null;
+                    Net.Run(wc, () => call = wc.UploadStringTaskAsync(new Uri(Endpoint), body), ct, QueryStallMs, MaxReplyBytes);
+                    resp = call.Result;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (TimeoutException) { throw new SliceException(L.S("Printables didn't answer in time. Try again.", "Printables svarede ikke i tide. Prøv igen.")); }
+                catch (InvalidDataException) { throw new SliceException(UnreadableText()); }
+                catch (Exception ex) { throw new SliceException(L.F("Could not reach Printables: {0}", "Kunne ikke nå Printables: {0}", ex.Message)); }
             }
-            var d = Json.Deserialize<Dictionary<string, object>>(resp);
+            return ParseReply(resp);
+        }
+
+        static string UnreadableText()
+        {
+            return L.S("Printables sent an answer PrintPrice can't read. Try again later.",
+                       "Printables sendte et svar, som PrintPrice ikke kan læse. Prøv igen senere.");
+        }
+
+        /// The "data" object of a GraphQL reply. SliceException for text that isn't JSON (e.g. an HTML error page)
+        /// and for a reply without data (GraphQL errors). Pure (tests).
+        internal static Dictionary<string, object> ParseReply(string text)
+        {
+            Dictionary<string, object> d = null;
+            try { d = Json.Deserialize<Dictionary<string, object>>(text ?? ""); }
+            catch (Exception) { d = null; }
+            if (d == null) throw new SliceException(UnreadableText());
             object data;
-            if (!d.TryGetValue("data", out data) || data == null)
+            var dd = d.TryGetValue("data", out data) ? data as Dictionary<string, object> : null;
+            if (dd == null)
                 throw new SliceException(L.S("Printables returned an error for this model.", "Printables svarede med en fejl for denne model."));
-            return (Dictionary<string, object>)data;
+            return dd;
+        }
+
+        /// The model (name, picture, files) from the "data" object of the print query. SliceException when the print
+        /// is missing (private or removed). Files without an id or name are left out. Pure (tests).
+        internal static RemoteModel ModelFromData(string id, Dictionary<string, object> data)
+        {
+            object o;
+            var print = data != null && data.TryGetValue("print", out o) ? o as Dictionary<string, object> : null;
+            if (print == null) throw new SliceException(L.F("Model {0} was not found on Printables (it may be private or removed).",
+                "Model {0} blev ikke fundet på Printables (den er måske privat eller fjernet).", id));
+            var model = new RemoteModel { Id = id, Name = Str(print, "name") ?? "", ImageUrl = ThumbUrl(ImagePath(print)) };
+            var stls = print.TryGetValue("stls", out o) ? o as IEnumerable : null;
+            if (stls != null && !(stls is string))
+            {
+                foreach (var x in stls)
+                {
+                    var f = x as Dictionary<string, object>;
+                    if (f == null) continue;
+                    string fid = Str(f, "id"), name = Str(f, "name");
+                    if (string.IsNullOrEmpty(fid) || string.IsNullOrEmpty(name)) continue;
+                    long size; long.TryParse(Str(f, "fileSize"), out size);
+                    model.Files.Add(new RemoteFile { Id = fid, Name = name, Size = size });
+                }
+            }
+            return model;
+        }
+
+        /// The download link from the "data" object of the getDownloadLink mutation; null when missing or not an
+        /// absolute https address (file:, http: and anything else are refused). Pure (tests).
+        internal static string LinkFromData(Dictionary<string, object> data)
+        {
+            object o;
+            var dl = data != null && data.TryGetValue("getDownloadLink", out o) ? o as Dictionary<string, object> : null;
+            var output = dl != null && dl.TryGetValue("output", out o) ? o as Dictionary<string, object> : null;
+            string link = Str(output, "link");
+            Uri uri;
+            if (string.IsNullOrEmpty(link) || !Uri.TryCreate(link, UriKind.Absolute, out uri) || uri.Scheme != Uri.UriSchemeHttps) return null;
+            return link;
         }
 
         static string Str(Dictionary<string, object> d, string key)
@@ -73,43 +142,57 @@ namespace PrintPrice
             return Net.Str(d, key);
         }
 
-        public static RemoteModel GetModel(string id)
+        public static RemoteModel GetModel(string id) { return GetModel(id, CancellationToken.None); }
+
+        /// The model's name, picture and files. ct stops the lookup (OperationCanceledException).
+        public static RemoteModel GetModel(string id, CancellationToken ct)
         {
             if (!Regex.IsMatch(id ?? "", @"^\d+$")) throw new ArgumentException("Bad model id");
-            var data = Query("query { print(id: \"" + id + "\") { id name image { filePath } images { filePath } stls { id name fileSize } } }");
-            var print = data["print"] as Dictionary<string, object>;
-            if (print == null) throw new SliceException(L.F("Model {0} was not found on Printables (it may be private or removed).",
-                "Model {0} blev ikke fundet på Printables (den er måske privat eller fjernet).", id));
-            var model = new RemoteModel { Id = id, Name = Str(print, "name"), ImageUrl = ThumbUrl(ImagePath(print)) };
-            var stls = print.ContainsKey("stls") ? print["stls"] as IEnumerable : null;
-            if (stls != null)
-            {
-                foreach (var o in stls)
-                {
-                    var f = o as Dictionary<string, object>;
-                    if (f == null) continue;
-                    long size; long.TryParse(Str(f, "fileSize"), out size);
-                    model.Files.Add(new RemoteFile { Id = Str(f, "id"), Name = Str(f, "name"), Size = size });
-                }
-            }
-            return model;
+            var data = Query("query { print(id: \"" + id + "\") { id name image { filePath } images { filePath } stls { id name fileSize } } }", ct);
+            return ModelFromData(id, data);
         }
 
-        public static void Download(string printId, RemoteFile file, string targetPath)
+        public static void Download(string printId, RemoteFile file, string targetPath) { Download(printId, file, targetPath, CancellationToken.None); }
+
+        /// Downloads one file to targetPath (https only, max 1 GB, stops after 30 s without data). ct stops it
+        /// (OperationCanceledException). On any failure the partial file is deleted.
+        public static void Download(string printId, RemoteFile file, string targetPath, CancellationToken ct)
         {
-            if (!Regex.IsMatch(file.Id ?? "", @"^\d+$")) throw new ArgumentException("Bad file id");
+            if (!Regex.IsMatch(printId ?? "", @"^\d+$")) throw new ArgumentException("Bad model id");
+            if (file == null || !Regex.IsMatch(file.Id ?? "", @"^\d+$")) throw new ArgumentException("Bad file id");
+            if (file.Size > MaxModelBytes) throw new SliceException(TooBigText(file.Name));
             var data = Query("mutation { getDownloadLink(id: \"" + file.Id + "\", printId: \"" + printId +
-                             "\", fileType: stl, source: model_detail) { ok output { link } } }");
-            var dl = data["getDownloadLink"] as Dictionary<string, object>;
-            var output = dl == null ? null : dl["output"] as Dictionary<string, object>;
-            string link = Str(output, "link");
-            if (string.IsNullOrEmpty(link)) throw new SliceException(L.F("Printables did not provide a download link for {0}.",
-                "Printables gav intet download-link til {0}.", file.Name));
+                             "\", fileType: stl, source: model_detail) { ok output { link } } }", ct);
+            string link = LinkFromData(data);
+            if (link == null) throw new SliceException(L.F("Printables did not provide a usable download link for {0}, so it wasn't downloaded.",
+                "Printables gav intet brugbart download-link til {0}, så den blev ikke hentet.", file.Name));
             using (var wc = Client())
             {
-                try { wc.DownloadFile(link, targetPath); }
-                catch (WebException ex) { throw new SliceException(L.F("Download of {0} failed: {1}", "Download af {0} mislykkedes: {1}", file.Name, ex.Message)); }
+                try { Net.Run(wc, () => wc.DownloadFileTaskAsync(new Uri(link), targetPath), ct, DownloadStallMs, MaxModelBytes); }
+                catch (OperationCanceledException) { TryDelete(targetPath); throw; }
+                catch (TimeoutException)
+                {
+                    TryDelete(targetPath);
+                    throw new SliceException(L.F("Download of {0} stopped (no data for 30 seconds). Try again.",
+                        "Download af {0} gik i stå (ingen data i 30 sekunder). Prøv igen.", file.Name));
+                }
+                catch (InvalidDataException) { TryDelete(targetPath); throw new SliceException(TooBigText(file.Name)); }
+                catch (Exception ex)
+                {
+                    TryDelete(targetPath);
+                    throw new SliceException(L.F("Download of {0} failed: {1}", "Download af {0} mislykkedes: {1}", file.Name, ex.Message));
+                }
             }
+        }
+
+        static string TooBigText(string name)
+        {
+            return L.F("{0} is bigger than 1 GB, so it wasn't downloaded.", "{0} er større end 1 GB, så den blev ikke hentet.", name);
+        }
+
+        static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); } catch { }
         }
 
         const string MediaHost = "https://media.printables.com/";
@@ -176,7 +259,9 @@ namespace PrintPrice
             {
                 using (var wc = Client())
                 {
-                    var bytes = wc.DownloadData(url);
+                    Task<byte[]> call = null;
+                    Net.Run(wc, () => call = wc.DownloadDataTaskAsync(new Uri(url)), CancellationToken.None, 15000, MaxImageBytes);
+                    var bytes = call.Result;
                     return bytes != null && bytes.Length <= MaxImageBytes && Net.IsImage(bytes) ? bytes : null;
                 }
             }

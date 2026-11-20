@@ -224,7 +224,7 @@ namespace PrintPrice
 
         public static string InvalidCodeText()
         {
-            return L.S("This is not a valid backup code.", "Det er ikke en gyldig sikkerhedskode.");
+            return L.S("This is not a valid backup code.", "Det er ikke en gyldig kode til kopien.");
         }
 
         public static string Damaged()

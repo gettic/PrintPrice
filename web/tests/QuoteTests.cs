@@ -161,6 +161,94 @@ static class QuoteTests
                  && Math.Abs(oq.Breakdown.Total - o.OthersPrice) < 0.005);
         }
 
+        // ---- "Show invoice…" (Settings' MainInvoice) and the made invoice's price lock (desktop A4) ----
+        {
+            var ms = s.Clone();
+            True("MainInvoice off by default: Show quote…", !WebQuote.MainInvoice(ms) && WebQuote.QuoteButtonText(ms) == "Show quote…");
+            ms.MainInvoice = 1;
+            True("MainInvoice on: Show invoice…", WebQuote.MainInvoice(ms) && WebQuote.QuoteButtonText(ms) == "Show invoice…");
+            var back = WebCalc.SettingsFromText(WebCalc.SettingsToText(ms), out _);
+            True("MainInvoice kept in the stored settings", back.MainInvoice == 1);
+            ms.PayMobilePay = "12 34 56 78"; ms.QuoteName = "Gettic";
+            // before it is made: (new), the window's date, due date and payment from Settings, nothing saved
+            var pre = WebQuote.FromJobInvoice(Benchy(), ms, false, when, "Lene Hansen");
+            True("job invoice before making: (new), date, due, payment, name", pre.Invoice && pre.InvoiceNo == "(new)" && pre.Date == when
+                 && pre.Due == ms.InvoiceDue(when) && WebQuote.PayLines(pre).Count == 1 && pre.Name == "Gettic" && pre.Customer == "Lene Hansen"
+                 && Math.Abs(pre.Breakdown.Total - 72.72) < 0.005 && Texts(WebQuote.Draw(pre, true)).Contains("Invoice no. (new)"));
+            True("job invoice: no file name number yet", WebQuote.FileName(pre) == "2026-11-04 Four-Color Multicolor Test Benchy - Lene Hansen");
+            // the first export: saved + made in one go
+            var jl = new List<QuoteRecord>();
+            var failedOld = History.FromQuote(Benchy().Input, Pricing.Calculate(Benchy().Input, ms), ms, "Four-Color Multicolor Test Benchy", Benchy().Source, when);
+            History.SetPrintState(failedOld, PrintState.Failed, when);
+            jl.Add(failedOld);   // the same job saved and marked failed a minute ago: the invoice replaces it as Printed
+            var jr = History.FromQuote(Benchy().Input, Pricing.Calculate(Benchy().Input, ms), ms, "Four-Color Multicolor Test Benchy", Benchy().Source, when.AddMinutes(1));
+            var made1 = WebQuote.SaveJobInvoice(jl, jr, true, " Lene Hansen ", when.AddMinutes(1), ms);
+            True("job invoice made: number, Printed (not failed), friends, Bill to, one record", jl.Count == 1 && WebQuote.InvoiceMade(made1)
+                 && made1.Printed && !made1.Failed && made1.For == History.ForFriends && made1.BilledTo == "Lene Hansen"
+                 && ms.UsedInvoiceNos.Contains(made1.InvoiceNo) && made1.InvoicePayMobilePay == "12 34 56 78");
+            True("made job invoice: file name = number - name", WebQuote.FileName(WebQuote.FromRecord(made1, ms, true, "Lene Hansen", true, when, null))
+                 == made1.InvoiceNo + " - Lene Hansen");
+            // later exports in the same window = the record path: same number, price locked
+            string no1 = made1.InvoiceNo;
+            WebQuote.ApplyRecordExport(jl, made1, false, "Lene Hansen", true, when.AddMinutes(2), ms);
+            True("re-issue: same number, price stays friends", made1.InvoiceNo == no1 && made1.For == History.ForFriends);
+            True("price lock: export uses the billed price", WebQuote.ExportFriends(made1, true, false) && !WebQuote.ExportFriends(made1, false, false)
+                 && WebQuote.ExportFriends(new QuoteRecord(), true, false) == false && WebQuote.BilledFriends(made1));
+            var lockedPage = WebQuote.FromRecord(made1, ms, false, "Lene Hansen", true, when, null);
+            True("made invoice page shows the billed (friends) price whatever the window says",
+                 Math.Abs(lockedPage.Breakdown.Total - made1.FriendsPrice) < 0.005);
+            True("a made invoice's quote page still follows the window's choice", Math.Abs(WebQuote.FromRecord(made1, ms, false, "", false, when, null).Breakdown.Total - made1.OthersPrice) < 0.005);
+            // a second Show invoice… of the same job (another customer): a new record and a new number
+            var jr2 = History.FromQuote(Benchy().Input, Pricing.Calculate(Benchy().Input, ms), ms, "Four-Color Multicolor Test Benchy", Benchy().Source, when.AddMinutes(3));
+            var made2 = WebQuote.SaveJobInvoice(jl, jr2, false, "Anden Kunde", when.AddMinutes(3), ms);
+            True("second job invoice: new record + new number", jl.Count == 2 && made2.InvoiceNo != no1 && made1.InvoiceNo == no1
+                 && made2.For == History.ForCustomer && made2.BilledTo == "Anden Kunde");
+            // History's Quote… "Save to history" on a made invoice never changes its price
+            var q = WebQuote.SaveExport(new List<QuoteRecord>(), new QuoteRecord { SavedAt = "2026-11-04 17:45:00" }, false, "x");
+            True("unmade quote: For follows the choice", q.For == History.ForCustomer);
+            True("History For box tips", WebQuote.ForLockedText(q) == null
+                 && WebQuote.ForLockedText(made1) == "Invoice " + no1 + " is made at the friends & family price and keeps it."
+                 && WebQuote.ForLockedText(made2) == "Invoice " + made2.InvoiceNo + " is made at the customer price and keeps it.");
+            True("texts", WebQuote.PriceHeading(true, true) == "Price on the invoice (locked)" && WebQuote.PriceHeading(true, false) == "Price on the invoice"
+                 && WebQuote.PriceHeading(false, false) == "Price on the quote"
+                 && WebQuote.HelpText(false, true).StartsWith("Making the invoice (Print / PDF or Copy text) gives it a number, saves it in the history")
+                 && WebQuote.HelpText(true, true, "2026-12345").StartsWith("Invoice 2026-12345 is already made and stays as it is.")
+                 && WebQuote.HelpText(true, true).StartsWith("Making the invoice (Print / PDF or Copy text) gives it a number and marks"));
+            L.Danish = true;
+            True("Danish texts", WebQuote.QuoteButtonText(ms) == "Vis faktura…" && WebQuote.PriceHeading(true, true) == "Pris på fakturaen (låst)"
+                 && WebQuote.HelpText(true, true, "2026-12345").StartsWith("Faktura 2026-12345 er allerede lavet")
+                 && WebQuote.FromJobInvoice(Benchy(), ms, false, when, "Lene").InvoiceNo == "(ny)");
+            L.Danish = false;
+        }
+
+        // ---- print status in the quote window (QuoteForm cmbStatus) ----
+        {
+            var ps = s.Clone();
+            ps.FailedPayback = 1;
+            var pl = new List<QuoteRecord>();
+            var t0 = new DateTime(2026, 11, 20, 12, 0, 0);
+            Func<DateTime, QuoteRecord> sjob = at => History.FromQuote(Benchy().Input, Pricing.Calculate(Benchy().Input, ps), ps, "Status test", "", at);
+            var a = WebQuote.SaveExport(pl, sjob(t0), false, "A", PrintState.Printing, t0);
+            True("job saved Printing now: Printed + start", a.Printed && !a.Failed && a.PrintingSince == History.Stamp(t0) && History.PrintStateOf(a, t0.AddMinutes(5)) == PrintState.Printing);
+            var b = WebQuote.SaveExport(pl, sjob(t0.AddMinutes(2)), false, "A", PrintState.Printing, t0.AddMinutes(2));
+            True("same quote saved again Printing: one record, start kept", pl.Count == 1 && b.PrintingSince == History.Stamp(t0));
+            var c = WebQuote.SaveExport(pl, sjob(t0.AddMinutes(3)), false, "A", PrintState.NotPrinted, t0.AddMinutes(3));
+            True("Not printed yet really unticks", pl.Count == 1 && !c.Printed && c.PrintingSince == "" && !c.Failed);
+            var f = WebQuote.SaveExport(pl, sjob(t0.AddMinutes(4)), false, "A", PrintState.Failed, t0.AddMinutes(4));
+            True("Failed: marked failed, not printed", f.Failed && !f.Printed && History.PrintStateOf(f, t0) == PrintState.Failed);
+            True("failed note with payback: " + WebQuote.FailedSavedNote(f, ps), WebQuote.FailedSavedNote(f, ps) == "Marked as failed: new quotes earn back " + Num.Kr(History.FailedCost(f)) && !WebQuote.FailedSavedNote(f, ps).EndsWith(".."));
+            ps.FailedPayback = 0;
+            True("failed note without payback", WebQuote.FailedSavedNote(f, ps) == "Marked as failed in the history.");
+            True("no note when not failed", WebQuote.FailedSavedNote(a, ps) == "" && WebQuote.FailedSavedNote(null, ps) == "");
+            History.SetPrintState(f, PrintState.Printed, t0.AddMinutes(6));
+            True("record set Printed clears Failed", f.Printed && !f.Failed && History.PrintStateOf(f, t0.AddMinutes(6)) == PrintState.Printed);
+            True("failed invoice note", WebQuote.FailedInvoiceNote(f) == null && WebQuote.FailedInvoiceNote(new QuoteRecord { Failed = true }) == "This print is marked as failed in the history.");
+            True("status names EN", string.Join("|", WebQuote.StatusNames) == "Not printed yet|Printing now|Printed|Failed" && WebQuote.StatusHeading == "Print status");
+            L.Danish = true;
+            True("status names DA", string.Join("|", WebQuote.StatusNames) == "Ikke printet endnu|Printer nu|Printet|Fejlet" && WebQuote.StatusHeading == "Printstatus");
+            L.Danish = false;
+        }
+
         // ---- helpers ----
         True("Printables id", WebQuote.ParsePrintablesId("https://www.printables.com/model/1648230-four-color") == "1648230"
              && WebQuote.ParsePrintablesId("https://www.printables.com/da/model/3161-3d-benchy") == "3161"

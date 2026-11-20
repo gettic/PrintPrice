@@ -30,6 +30,8 @@ namespace PrintPrice
         }
 
 #if !WEB
+        const long MaxReplyBytes = 2 * 1048576;   // a normal reply is ~2 KB
+
         /// Desktop only (WebClient); the website gets the same answer through the Worker's /power route (worker\).
         public static PowerQuote GetCurrent(string area)
         {
@@ -40,15 +42,28 @@ namespace PrintPrice
                          "&filter=" + Uri.EscapeDataString("{\"PriceArea\":[\"" + area + "\"]}") +
                          "&columns=TimeUTC,DayAheadPriceDKK&sort=TimeUTC%20asc&limit=1000";
 
-            string body;
+            string body = null;
             using (var wc = Net.Client(Net.DefaultUserAgent))
             {
-                try { body = wc.DownloadString(url); }
+                try
+                {
+                    System.Threading.Tasks.Task<byte[]> call = null;
+                    Net.Run(wc, () => call = wc.DownloadDataTaskAsync(new Uri(url)), System.Threading.CancellationToken.None, 20000, MaxReplyBytes);
+                    body = System.Text.Encoding.UTF8.GetString(call.Result).TrimStart('﻿');
+                }
                 catch (WebException ex)
                 {
                     var resp = ex.Response as HttpWebResponse;
                     if (resp != null && (int)resp.StatusCode == 429)
                         throw new SliceException(L.S("the price service is busy right now", "pristjenesten har travlt lige nu"));
+                    throw new SliceException(L.S("could not reach Energi Data Service", "kunne ikke nå Energi Data Service"));
+                }
+                catch (System.IO.InvalidDataException)
+                {
+                    throw new SliceException(L.S("unexpected answer from Energi Data Service", "uventet svar fra Energi Data Service"));
+                }
+                catch (Exception)
+                {
                     throw new SliceException(L.S("could not reach Energi Data Service", "kunne ikke nå Energi Data Service"));
                 }
             }
@@ -59,28 +74,30 @@ namespace PrintPrice
         /// Picks the latest price slot that has started at or before nowUtc.
         public static PowerQuote PickCurrent(string json, string area, DateTime nowUtc)
         {
-            var d = Json.Deserialize<Dictionary<string, object>>(json);
+            Dictionary<string, object> d = null;
+            try { d = Json.Deserialize<Dictionary<string, object>>(json); }
+            catch (Exception) { d = null; }   // HTML error page, cut-off text...
             object recs;
-            if (!d.TryGetValue("records", out recs) || !(recs is IEnumerable))
+            if (d == null || !d.TryGetValue("records", out recs) || !(recs is IEnumerable))
                 throw new SliceException(L.S("unexpected answer from Energi Data Service", "uventet svar fra Energi Data Service"));
 
             PowerQuote best = null;
             foreach (var o in (IEnumerable)recs)
             {
                 var r = o as Dictionary<string, object>;
-                if (r == null || r["TimeUTC"] == null || r["DayAheadPriceDKK"] == null) continue;
+                object time, price;
+                if (r == null || !r.TryGetValue("TimeUTC", out time) || time == null ||
+                    !r.TryGetValue("DayAheadPriceDKK", out price) || price == null) continue;
                 DateTime t;
-                if (!DateTime.TryParse(Convert.ToString(r["TimeUTC"], CultureInfo.InvariantCulture), CultureInfo.InvariantCulture,
+                if (!DateTime.TryParse(Convert.ToString(time, CultureInfo.InvariantCulture), CultureInfo.InvariantCulture,
                                        DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out t)) continue;
                 if (t > nowUtc) continue;
+                double mwh;
+                try { mwh = Convert.ToDouble(price, CultureInfo.InvariantCulture); }
+                catch (Exception) { continue; }   // not a number
+                if (double.IsNaN(mwh) || double.IsInfinity(mwh)) continue;
                 if (best == null || t > best.SlotStartUtc)
-                {
-                    best = new PowerQuote
-                    {
-                        Area = area, SlotStartUtc = t,
-                        SpotDkkPerKwh = Convert.ToDouble(r["DayAheadPriceDKK"], CultureInfo.InvariantCulture) / 1000.0
-                    };
-                }
+                    best = new PowerQuote { Area = area, SlotStartUtc = t, SpotDkkPerKwh = mwh / 1000.0 };
             }
             if (best == null || nowUtc - best.SlotStartUtc > TimeSpan.FromHours(2))
                 throw new SliceException(L.F("no current price published for {0}", "ingen aktuel pris offentliggjort for {0}", area));

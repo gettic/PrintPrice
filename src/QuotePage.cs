@@ -56,6 +56,10 @@ namespace PrintPrice
         public string TopUpAmount = "";   // its amount ("18,00 kr.")
         public bool GroupFriends;
         public double GroupTotal;
+        // the combined bill's layout step, chosen by QuotePage.ChooseGroupLevel so the whole bill fits ONE A4 page when it
+        // can (qol #6): 0 = normal, 1 = compact breakdown (wear parts on one line, at most 4 colour rows), 2 = exactly 4
+        // prints as 4 narrower cards in one row (always for 4), 3 = 4 in a row + the compact breakdown
+        internal int GroupLevel;
     }
 
     /// One job's card on a combined bill (picture, name, quote no. / date, print time, weight, print price; MainForm.BuildGroupQuote).
@@ -78,7 +82,7 @@ namespace PrintPrice
     {
         public const int PageWidth = 1240;
         const float W = 1000f;                   // layout width in page units
-        const float A4Height = W * 297f / 210f;  // 1414
+        internal const float A4Height = W * 297f / 210f;  // 1414
 
         sealed class Pal
         {
@@ -113,12 +117,14 @@ namespace PrintPrice
         public static Bitmap Render(QuoteData d, bool dark)
         {
             var p = Palette(dark, FriendsOf(d));
+            if (IsGroup(d)) ChooseGroupLevel(d, p);   // the preview shows the same layout as the PDF
             float need;
+            bool compact;
             using (var tmp = new Bitmap(1, 1))
             using (var g = Graphics.FromImage(tmp))
             {
                 Prep(g);
-                need = Draw(g, p, d, A4Height, false);
+                need = MeasureSingle(g, p, d, out compact);
             }
             float pageH = Math.Max(A4Height, need);
             float k = PageWidth / W;
@@ -129,9 +135,49 @@ namespace PrintPrice
                 g.Clear(p.Page);
                 g.ScaleTransform(k, k);
                 Prep(g);
-                Draw(g, p, d, pageH, true);
+                Draw(g, p, d, pageH, true, compact);
             }
             return bmp;
+        }
+
+        /// The height the page needs. A single page that would pass A4 is measured again in its compact form (tighter
+        /// breakdown rows and gaps, qol #5); compact = that form is used (it fits, or is at least shorter). A page that
+        /// fits A4 today is never changed.
+        static float MeasureSingle(Graphics g, Pal p, QuoteData d, out bool compact)
+        {
+            compact = false;
+            float need = Draw(g, p, d, A4Height, false);
+            if (IsGroup(d) || need <= A4Height) return need;
+            float tight = Draw(g, p, d, A4Height, false, true);
+            if (tight < need) { compact = true; return tight; }
+            return need;
+        }
+
+        /// --test-bill: a single page fits A4 (no shrinking onto the PDF page); compact = it needed the compact form.
+        internal static bool SingleFits(QuoteData d, out bool compact, out float height)
+        {
+            using (var tmp = new Bitmap(1, 1))
+            using (var g = Graphics.FromImage(tmp))
+            {
+                Prep(g);
+                height = MeasureSingle(g, Palette(false, FriendsOf(d)), d, out compact);
+            }
+            return height <= A4Height + 0.5f;
+        }
+
+        /// Picks the combined bill's layout (QuoteData.GroupLevel): the first step whose PDF plan is ONE page; none = 0
+        /// (today's layout, broken over pages).
+        static void ChooseGroupLevel(QuoteData d, Pal p)
+        {
+            // levels: 0 = as drawn before, 1 = shorter breakdown, 2 = 4 cards in one row, 3 = 4 in a row + shorter breakdown.
+            // Exactly 4 prints: always 4 in a row (the user's choice, 2026-11-20): 2, then 3, else 2 over two pages.
+            int[] order = d.Jobs.Count == 4 ? new[] { 2, 3 } : new[] { 0, 1 };
+            foreach (int level in order)
+            {
+                d.GroupLevel = level;
+                if (PagePlan(d, p).Count == 1) return;
+            }
+            d.GroupLevel = order[0];
         }
 
         // combined bill on paper: job cards side by side, at most CardCols per row (2 jobs: 2 wider cards), CardGap
@@ -142,7 +188,11 @@ namespace PrintPrice
         const float ContinueTop = 60, PageLimit = A4Height - 80, CardGap = 24, RowGap = 24, NoteH = 46;
         const int CardCols = 3, MaxGroupColours = 6;
 
-        static int Cols(QuoteData d) { return Math.Max(1, Math.Min(CardCols, d.Jobs.Count)); }
+        static int Cols(QuoteData d)
+        {
+            if (d.GroupLevel >= 2 && d.Jobs.Count == 4) return 4;   // 4 prints: always one row of 4
+            return Math.Max(1, Math.Min(CardCols, d.Jobs.Count));
+        }
 
         /// The A4 pages of a PDF: a single job = the one Render page (exactly as before; a taller one is scaled onto A4
         /// by Pdf); a combined bill = A4 pages broken between job lines, the header only on page 1, the total and payment
@@ -152,6 +202,7 @@ namespace PrintPrice
             var res = new List<Bitmap>();
             if (!IsGroup(d)) { res.Add(Render(d, dark)); return res; }
             var p = Palette(dark, FriendsOf(d));
+            ChooseGroupLevel(d, p);
             var plan = PagePlan(d, p);
             float k = PageWidth / W;
             for (int i = 0; i < plan.Count; i++)
@@ -178,8 +229,8 @@ namespace PrintPrice
             if (plan[i][2] == 1 || plan[i][1] <= plan[i][0]) return null;
             int tailPage = plan.Count;   // the breakdown part is always on the last page
             return tailPage == i + 2
-                ? L.S("Price breakdown and total on the next page →", "Prisoversigt og total på næste side →")
-                : L.F("Price breakdown and total on page {0} →", "Prisoversigt og total på side {0} →", tailPage);
+                ? L.S("Breakdown and total: next page →", "Prisoversigt og total: næste side →")
+                : L.F("Breakdown and total: page {0} →", "Prisoversigt og total: side {0} →", tailPage);
         }
 
         /// --test-bill: the PDF's pages as "from-to" job ranges, "+note" on a page with the "next page" note, "+total" on
@@ -190,6 +241,7 @@ namespace PrintPrice
             fits = true;
             if (!IsGroup(d)) return "single";
             var p = Palette(false, FriendsOf(d));
+            ChooseGroupLevel(d, p);
             var plan = PagePlan(d, p);
             var parts = new List<string>();
             int tails = 0;
@@ -213,7 +265,9 @@ namespace PrintPrice
         internal static int PageCount(QuoteData d)
         {
             if (!IsGroup(d)) return 1;
-            return PagePlan(d, Palette(false, FriendsOf(d))).Count;
+            var p = Palette(false, FriendsOf(d));
+            ChooseGroupLevel(d, p);
+            return PagePlan(d, p).Count;
         }
 
         /// Pages of a combined bill: {from job, to job (exclusive), 1 = the breakdown / total / payment part is on it}.
@@ -282,6 +336,65 @@ namespace PrintPrice
             }
         }
 
+        /// A name in up to maxLines lines of width: word wrap, but the spaces inside brackets don't break ("Benchy (0.4
+        /// nozzle)" stays together when it can); a word wider than a line is broken by characters; text left after the last
+        /// line is cut with … (FitText).
+        static List<string> WrapName(Graphics g, string text, Font font, float width, int maxLines)
+        {
+            var lines = new List<string>();
+            if (string.IsNullOrEmpty(text)) return lines;
+            using (var sf = new StringFormat { FormatFlags = StringFormatFlags.NoWrap, Trimming = StringTrimming.None })
+            {
+                Func<string, float> Wd = t => g.MeasureString(t, font, new SizeF(100000, 1000), sf).Width;
+                // words: spaces inside ( ) / [ ] kept as part of the word
+                var words = new List<string>();
+                var cur = new StringBuilder();
+                int depth = 0;
+                foreach (char c in text.Trim())
+                {
+                    if (c == '(' || c == '[') depth++;
+                    if ((c == ')' || c == ']') && depth > 0) depth--;
+                    if (c == ' ' && depth == 0) { if (cur.Length > 0) { words.Add(cur.ToString()); cur.Clear(); } continue; }
+                    cur.Append(c);
+                }
+                if (cur.Length > 0) words.Add(cur.ToString());
+                // a bracket group wider than a line: back to its own words
+                var parts = new List<string>();
+                foreach (var w in words)
+                {
+                    if (w.IndexOf(' ') >= 0 && Wd(w) > width) parts.AddRange(w.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
+                    else parts.Add(w);
+                }
+                string line = "";
+                int i = 0;
+                while (i < parts.Count)
+                {
+                    string next = line.Length == 0 ? parts[i] : line + " " + parts[i];
+                    if (Wd(next) <= width) { line = next; i++; continue; }
+                    if (lines.Count == maxLines - 1) break;   // last line: the rest is cut with … below
+                    if (line.Length == 0)
+                    {
+                        // one word wider than the line: as many characters as fit, with a hyphen
+                        string w = parts[i];
+                        int n = 1;
+                        while (n < w.Length - 1 && Wd(w.Substring(0, n + 1) + "-") <= width) n++;
+                        line = w.Substring(0, n) + (char.IsLetterOrDigit(w[n - 1]) ? "-" : "");
+                        parts[i] = w.Substring(n);
+                    }
+                    lines.Add(line);
+                    line = "";
+                }
+                if (i < parts.Count)
+                {
+                    string rest = line;
+                    for (int k = i; k < parts.Count; k++) rest = rest.Length == 0 ? parts[k] : rest + " " + parts[k];
+                    lines.Add(FitText(g, rest, font, width));
+                }
+                else if (line.Length > 0) lines.Add(line);
+            }
+            return lines;
+        }
+
         // ---------- drawing ----------
         /// Draws the page (draw = false only measures) and returns the height it needs.
         static float Draw(Graphics g, Pal p, QuoteData d, float pageH, bool draw)
@@ -289,11 +402,17 @@ namespace PrintPrice
             return Draw(g, p, d, pageH, draw, 0, d.Jobs != null ? d.Jobs.Count : 0, true, true, null);
         }
 
+        /// As above; compact = a single page in its compact form (MeasureSingle: tighter breakdown and gaps).
+        static float Draw(Graphics g, Pal p, QuoteData d, float pageH, bool draw, bool compact)
+        {
+            return Draw(g, p, d, pageH, draw, 0, d.Jobs != null ? d.Jobs.Count : 0, true, true, null, null, compact);
+        }
+
         /// As above for one page of a combined bill (RenderPages): job lines from..to (exclusive), head = the header and
         /// summary (page 1), tail = the total and payment part, pageText = "Page 1 of 2" in the footer (null = none).
         /// A single job always draws everything (from / to / tail unused).
         static float Draw(Graphics g, Pal p, QuoteData d, float pageH, bool draw, int from, int to, bool head, bool tail, string pageText,
-                          string noteText = null)
+                          string noteText = null, bool compact = false)
         {
             var fonts = new Dictionary<string, Font>();
             Func<float, bool, Font> F = (size, bold) =>
@@ -399,25 +518,30 @@ namespace PrintPrice
                 }
                 float nameW = R0 - x;
                 var nameFont = F(28, true);
-                float nameH;
-                using (var sf = new StringFormat { Trimming = StringTrimming.EllipsisWord })
-                {
-                    float line = nameFont.GetHeight(g);
-                    nameH = Math.Min(g.MeasureString(d.Model, nameFont, (int)nameW, sf).Height, line * 2);
-                    if (draw)
-                        using (var br = new SolidBrush(p.Ink))
-                            g.DrawString(d.Model, nameFont, br, new RectangleF(x, y0 - 4, nameW, nameH + 2), sf);
-                }
+                // the name: own 2-line wrap (brackets kept together, the rest cut with …)
+                var nameLines = WrapName(g, d.Model, nameFont, nameW, 2);
+                float lineH = nameFont.GetHeight(g);
+                float nameH = Math.Max(1, nameLines.Count) * lineH;
+                for (int i = 0; i < nameLines.Count; i++) T(nameLines[i], nameFont, p.Ink, x, y0 - 4 + i * lineH, 0, near);
                 float y = y0 - 4 + nameH + 8;
                 if (d.Link.Length > 0) { T(d.Link, F(16, false), p.Muted, x + 3, y, nameW - 3, near); y += 28; }
                 y = Math.Max(y + 10, y0 + 110);
-                var details = new[]
-                {
-                    new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
-                    new[] { L.S("Weight", "Vægt"), d.Weight },
-                    d.Invoice ? new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" } : new[] { L.S("Printer", "Printer"), d.Printer },
-                    new[] { L.S("Material", "Materiale"), d.Material },
-                };
+                // invoice: "Bill to" is the top line, above the print time (the user's wish); a quote keeps its Printer row
+                var details = d.Invoice
+                    ? new[]
+                    {
+                        new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" },
+                        new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
+                        new[] { L.S("Weight", "Vægt"), d.Weight },
+                        new[] { L.S("Material", "Materiale"), d.Material },
+                    }
+                    : new[]
+                    {
+                        new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
+                        new[] { L.S("Weight", "Vægt"), d.Weight },
+                        new[] { L.S("Printer", "Printer"), d.Printer },
+                        new[] { L.S("Material", "Materiale"), d.Material },
+                    };
                 float valueX = x + (L.Danish ? 140 : 130);
                 foreach (var r in details)
                 {
@@ -427,7 +551,7 @@ namespace PrintPrice
                     y += 46;
                 }
                 HLine(x, R0, y, p.Line, 1);
-                y = Math.Max(y + 58, y0 + pic + 52);
+                y = compact ? Math.Max(y + 40, y0 + pic + 36) : Math.Max(y + 58, y0 + pic + 52);
 
                 // price breakdown
                 T(L.S("Price breakdown", "Prisoversigt"), F(24, true), p.Ink, L0, y, 0, near);
@@ -435,7 +559,7 @@ namespace PrintPrice
                 HLine(L0, R0, y, p.Line, 2);
                 y += 14;
                 y = DrawRows(g, p, d, QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName),
-                             y, draw, F, T);
+                             y, draw, F, T, compact);
                 y += 4;
                 HLine(L0, R0, y, p.Line, 2);
                 y += 22;
@@ -454,7 +578,7 @@ namespace PrintPrice
                 T(d.Invoice ? L.F("Please pay by {0}", "Betales senest {0}", LongDate(d.Due)) : L.S("Shipping not included", "Fragt er ikke inkluderet"),
                   F(16, false), p.Muted, 80, y + 62, 0, near);
                 T(Num.Kr(d.Breakdown.Total), F(56, true), p.Total, 420, y + 14, 510, far);
-                y += 140;
+                y += compact ? 128 : 140;
 
                 if (d.Invoice)
                 {
@@ -511,13 +635,11 @@ namespace PrintPrice
             float y;
             if (head)
             {
-                // summary rows, two to a line (label at 43 / 503, value at 170 / 630; DA 180 / 640): Bill to (invoice),
-                // Prints, Printer and Plate when every job shares them
+                // summary rows, two to a line (label at 43 / 503, value at 170 / 630; DA 180 / 640): Bill to (invoice) and
+                // Prints; the shared printer / build plate are beside the "Price breakdown" heading (the user's wish)
                 var rows = new List<string[]>();
                 if (d.Invoice) rows.Add(new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" });
                 rows.Add(new[] { L.S("Prints", "Print"), d.Summary ?? "" });
-                if (!string.IsNullOrEmpty(d.Printer)) rows.Add(new[] { L.S("Printer", "Printer"), d.Printer });
-                if (!string.IsNullOrEmpty(d.PlateName)) rows.Add(new[] { L.S("Plate", "Plade"), d.PlateName });
                 float vx = L.Danish ? 140 : 130, mid = 500;
                 y = 214;
                 for (int k = 0; k < rows.Count; k += 2)
@@ -536,7 +658,22 @@ namespace PrintPrice
                 HLine(L0, R0, y, p.Line, 1);
                 y += 26;
             }
-            else y = ContinueTop;
+            else
+            {
+                // a later page: which bill it belongs to (qol 7), Muted 14 at the top, a rule under it
+                var bits = new List<string>();
+                if (d.Invoice) bits.Add(L.F("Invoice no. {0}", "Faktura nr. {0}", d.InvoiceNo));
+                else
+                {
+                    bits.Add(L.S("3D print quote", "Tilbud på 3D-print"));
+                    if (!string.IsNullOrEmpty(d.Number)) bits.Add(L.F("Quote no. {0}", "Tilbud nr. {0}", d.Number));
+                }
+                if (!string.IsNullOrEmpty(d.Customer)) bits.Add(d.Customer);
+                bits.Add(LongDate(d.Date));
+                T(string.Join("  ·  ", bits), F(14, false), p.Muted, L0 + 3, 20, R0 - L0 - 3, near);
+                HLine(L0, R0, 44, p.Line, 1);
+                y = ContinueTop;
+            }
 
             // the cards, row by row
             int cols = Cols(d);
@@ -565,17 +702,42 @@ namespace PrintPrice
             {
                 // the whole bill's price breakdown (History.GroupBreakdown; its minimum line is folded into Work & handling
                 // by QuoteRows.BuildGroup: the minimum is never shown), kept on one page with the total and payment
+                // the shared printer and build plate (only when every job shares them): Muted 16 right of the heading, or on
+                // its own line under it when it doesn't fit there
+                var setup = new List<string>();
+                if (!string.IsNullOrEmpty(d.Printer)) setup.Add(d.Printer);
+                if (!string.IsNullOrEmpty(d.PlateName)) setup.Add(L.F("{0} build plate", "Byggeplade {0}", d.PlateName));
+                string setupText = string.Join("  ·  ", setup);
                 if (d.Breakdown != null && d.Breakdown.Lines != null && d.Breakdown.Lines.Count > 0)
                 {
-                    T(L.S("Price breakdown", "Prisoversigt"), F(24, true), p.Ink, L0, y, 0, near);
+                    string heading = L.S("Price breakdown", "Prisoversigt");
+                    T(heading, F(24, true), p.Ink, L0, y, 0, near);
+                    if (setupText.Length > 0)
+                    {
+                        float sx = L0 + g.MeasureString(heading, F(24, true)).Width + 30;
+                        if (g.MeasureString(setupText, F(16, false)).Width <= R0 - sx)
+                            T(setupText, F(16, false), p.Muted, sx, y + 7, R0 - sx, far);
+                        else
+                        {
+                            T(setupText, F(16, false), p.Muted, L0 + 3, y + 38, R0 - L0 - 3, near);
+                            y += 28;
+                        }
+                    }
                     y += 40;
                     HLine(L0, R0, y, p.Line, 2);
                     y += 12;
+                    // GroupLevel 1 / 3: shorter breakdown (wear parts on one note line, at most 4 colour rows) so it fits one page
+                    bool shortRows = d.GroupLevel == 1 || d.GroupLevel == 3;
                     y = DrawRows(g, p, d, QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
-                                                               MaxGroupColours), y, draw, F, T, true);
+                                                               shortRows ? 4 : MaxGroupColours, shortRows), y, draw, F, T, true);
                     y += 4;
                     HLine(L0, R0, y, p.Line, 2);
                     y += 20;
+                }
+                else if (setupText.Length > 0)
+                {
+                    T(setupText, F(16, false), p.Muted, L0 + 3, y, R0 - L0 - 3, near);
+                    y += 32;
                 }
                 // total box (as a single page, the label with the number of prints)
                 if (draw)
@@ -643,7 +805,9 @@ namespace PrintPrice
                               Func<float, bool, Font> F, Action<string, Font, Color, float, float, float, StringAlignment> T,
                               Action<float, float, float, Color, float> HLine)
         {
-            const float Pad = 12, Pic = 76, BoxH = 50;
+            const float Pad = 12, BoxH = 50;
+            bool narrow = w < 250;   // 4 cards in a row (GroupLevel 2): smaller picture, short price label
+            float Pic = narrow ? 56 : 76;
             var near = StringAlignment.Near;
             var far = StringAlignment.Far;
             Action<string, Font, Color, float, float, float, StringAlignment> t = (s, f, c, px, py, pw, al) => { if (draw) T(s, f, c, px, py, pw, al); };
@@ -671,12 +835,11 @@ namespace PrintPrice
             float factsTop = Math.Max(top + Pad + Pic, ny + nf.GetHeight(g) * 2 + 4 + 2 * 17) + 10;
             if (!string.IsNullOrEmpty(job.Name))
             {
-                using (var sf = new StringFormat { Trimming = StringTrimming.EllipsisWord })
-                {
-                    float nh = Math.Min(g.MeasureString(job.Name, nf, (int)tw, sf).Height, nf.GetHeight(g) * 2);
-                    if (draw) using (var br = new SolidBrush(p.Ink)) g.DrawString(job.Name, nf, br, new RectangleF(tx, ny, tw, nh + 2), sf);
-                    ny += nh + 4;
-                }
+                // own 2-line wrap (brackets kept together, the rest cut with …)
+                var nameLines = WrapName(g, job.Name, nf, tw, 2);
+                float lh = nf.GetHeight(g);
+                for (int i = 0; i < nameLines.Count; i++) t(nameLines[i], nf, p.Ink, tx, ny + i * lh, 0, near);
+                ny += Math.Max(1, nameLines.Count) * lh + 4;
             }
             foreach (var part in (job.Sub ?? "").Split(new[] { " · " }, StringSplitOptions.RemoveEmptyEntries))
             {
@@ -714,7 +877,7 @@ namespace PrintPrice
                 using (var br = new SolidBrush(p.Stripe)) g.FillRectangle(br, x + 10, boxY + 8, 5, BoxH - 16);
             }
             float priceW = g.MeasureString(job.Amount ?? "", F(22, true)).Width;
-            t(L.S("Print price", "Printpris"), F(16, true), p.Ink, x + 26, boxY + 13, R - 24 - priceW - 8 - (x + 26), near);
+            t(narrow ? L.S("Price", "Pris") : L.S("Print price", "Printpris"), F(16, true), p.Ink, x + 26, boxY + 13, R - 24 - priceW - 8 - (x + 26), near);
             t(job.Amount, F(22, true), p.Total, R - 24 - priceW - 10, boxY + 8, priceW + 10, far);
             return boxY + BoxH + Pad - top;
         }

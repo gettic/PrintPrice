@@ -30,9 +30,9 @@
                 <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(round)" @bind="round" @bind:event="oninput" /><span>@L.S("kr. (0 = off)", "kr. (0 = fra)")</span></div>
 
                 <h3>@L.S("Failed prints", "Fejlprint")</h3>
-                <label>@L.S("Allowance", "Tillæg")</label>
+                <label>@L.S("Extra for failed prints", "Tillæg for fejlprint")</label>
                 <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(failed)" @bind="failed" @bind:event="oninput" /><span>@L.S("% (0 = off)", "% (0 = fra)")</span></div>
-                <div class="help">@L.S("Added to material + power for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler.")</div>
+                <div class="help">@L.S("Added to material + electricity for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler.")</div>
             </div>
         }
         else if (tab == TabPrinter)
@@ -60,7 +60,7 @@
                 <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(watts)" @bind="watts" @bind:event="oninput" /><span>W (@Model.Label.Replace("Bambu Lab ", ""): ~@Num.Fmt(Model.DefaultWatts))</span></div>
 
                 <h3>@L.S("Wear & tear  (both prices)", "Slid  (begge priser)")</h3>
-                <label>@L.S("Machine-time rate", "Maskintimepris")</label>
+                <label>@L.S("Wear per hour", "Slid pr. time")</label>
                 <div class="field">
                     @if (auto)
                     {
@@ -102,8 +102,8 @@
                 <label><input type="checkbox" @bind="vat" /> @L.S("Add 25 % VAT", "Læg 25 % moms til")</label>
                 <label></label>
                 <label><input type="checkbox" @bind="autoPower" /> @L.S("Fetch the live price when the page opens", "Hent den aktuelle pris, når siden åbner")</label>
-                <div class="help">@L.S("The live price comes from Energi Data Service through PrintPrice's own small relay (Cloudflare). Only the price area is sent: none of your numbers or settings. Off = the page asks only when you click Update.",
-                                       "Live-prisen kommer fra Energi Data Service gennem PrintPrices egen lille relæ-tjeneste (Cloudflare). Kun prisområdet sendes: ingen af dine tal eller indstillinger. Fra = siden spørger kun, når du klikker Opdatér.")</div>
+                <div class="help">@L.S("The live price comes from Energi Data Service through PrintPrice's own small server. Only the price area is sent: none of your numbers or settings. Off = the page asks only when you click Update.",
+                                       "Live-prisen kommer fra Energi Data Service gennem PrintPrices egen lille server. Kun prisområdet sendes: ingen af dine tal eller indstillinger. Fra = siden spørger kun, når du klikker Opdatér.")</div>
             </div>
         }
         else if (tab == TabQuote)
@@ -115,6 +115,10 @@
                 <label>@L.S("Valid for", "Gyldigt i")</label>
                 <div class="field"><input type="text" inputmode="numeric" class="mid @BadDays(validDays, 3650)" @bind="validDays" @bind:event="oninput" /><span>@L.S("days", "dage")</span></div>
                 <h3>@L.S("Invoice", "Faktura")</h3>
+                <label></label>
+                <label><input type="checkbox" @bind="mainInvoice" /> @L.S("Calculator makes invoices, not quotes", "Beregneren laver fakturaer, ikke tilbud")</label>
+                <div class="help">@L.S("On: the calculator's button makes an invoice with a number. Quotes are still made from History.",
+                                       "Til: knappen i beregneren laver en faktura med nummer. Tilbud kan stadig laves fra Historik.")</div>
                 <label>@L.S("Pay within", "Betalingsfrist")</label>
                 <div class="field"><input type="text" inputmode="numeric" class="mid @BadDays(dueDays, 365)" @bind="dueDays" @bind:event="oninput" /><span>@L.S("days", "dage")</span></div>
                 <label>@L.S("MobilePay number", "MobilePay-nummer")</label>
@@ -172,10 +176,10 @@
 
     AppSettings work;
     int tab;
-    bool auto, reset, vat, autoPower;
+    bool auto, reset, vat, autoPower, mainInvoice;
     string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays;
 
-    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), "App" }; } }
+    string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), L.S("App", "Program") }; } }
 
     Wear.Model Model { get { return Wear.FindModel(work.PrinterModel); } }
 
@@ -205,6 +209,7 @@
         auto = s.AutoWearRate != 0;
         addOn = Num.Fmt(s.PowerAddOn); vat = s.PowerIncludeVat != 0; autoPower = s.AutoPowerPrice != 0;
         validDays = Num.Fmt(s.QuoteValidDays); dueDays = Num.Fmt(s.InvoiceDueDays);
+        mainInvoice = s.MainInvoice == 1;
         problem = null;
     }
 
@@ -245,14 +250,14 @@
         if (!Ok(friends, out f) || !Ok(others, out o) || !Ok(minimum, out mi) || !Ok(round, out ro) || !Ok(failed, out fa)
             || !Ok(watts, out wa) || (!auto && !Ok(rate, out ra)) || !Ok(addOn, out ad) || !Days(validDays, 3650, out vd) || !Days(dueDays, 365, out dd))
         {
-            problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
+            problem = L.S("Use numbers of 0 or more.", "Brug tal på 0 eller mere.");
             return;
         }
         if (auto) ra = work.MachineRatePerHour; else Ok(rate, out ra);
         work.FriendsMarkupPct = f; work.OthersMarkupPct = o; work.MinimumPrice = mi; work.RoundTo = ro; work.FailedPrintPct = fa;
         work.PrinterWatts = wa; work.MachineRatePerHour = ra; work.AutoWearRate = auto ? 1 : 0;
         work.PowerAddOn = ad; work.PowerIncludeVat = vat ? 1 : 0; work.AutoPowerPrice = autoPower ? 1 : 0;
-        work.QuoteValidDays = vd; work.InvoiceDueDays = dd;
+        work.QuoteValidDays = vd; work.InvoiceDueDays = dd; work.MainInvoice = mainInvoice ? 1 : 0;
         work.QuoteName = (work.QuoteName ?? "").Trim(); work.PayMobilePay = (work.PayMobilePay ?? "").Trim(); work.PayBank = (work.PayBank ?? "").Trim();
         work.PrinterName = AppSettings.CleanPrinterName(name.Trim().Length == 0 ? Model.Label : name);
         await OnClose.InvokeAsync(new Result { Settings = work, FilamentType = type, Reset = reset });

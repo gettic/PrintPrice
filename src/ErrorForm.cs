@@ -284,6 +284,7 @@ namespace PrintPrice
             };
             info = new InfoBox(ContentW, 9.5f) { Margin = new Padding(0, 0, 0, 14) };
             info.Kind = InfoKind.Error;
+            info.ErrorLineOnly = true;   // the reassuring text in normal colour, only the error line red (qol #17)
             info.SetText(ErrorReport.MessageText(fatal, repeated), ErrorReport.Summary(ex));
             info.SetLink(L.S("Report it on GitHub", "Meld det på GitHub"), OpenIssues);
 

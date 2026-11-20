@@ -458,11 +458,12 @@ namespace PrintPrice
             string real = FullFolder(RealFolder);
             if (real != null && string.Equals(full, real, StringComparison.OrdinalIgnoreCase)) return false;
             testFolder = full;
+            saveBlocked = false;   // another file now
             return true;
         }
 
         /// Tests only: back to the real settings file.
-        internal static void ClearTestFolder() { testFolder = null; }
+        internal static void ClearTestFolder() { testFolder = null; saveBlocked = false; }
 
         // full path without trailing separators, or null if empty / relative / invalid
         static string FullFolder(string folder)
@@ -606,24 +607,90 @@ namespace PrintPrice
             return System.Text.RegularExpressions.Regex.Replace(preset ?? "", @"\s*@BBL\b.*$", "");
         }
 
+        // ---------- reading and saving settings.ini safely ----------
+        // A settings.ini that exists but can't be read (locked, IO error, or a bad file that couldn't be moved aside) blocks
+        // every Save until the next Load, so the defaults in memory never overwrite the user's real settings.
+        static bool saveBlocked;
+
+        /// True when Load couldn't read the existing settings.ini: Save does nothing until the next Load.
+        public static bool SaveBlocked { get { return saveBlocked; } }
+
+        /// A text for the ui after Load (null = fine): the file couldn't be read (saving blocked), or it held no settings
+        /// and was kept as settings.bad-*.ini (defaults in use, saving works).
+        public static string LoadProblem { get; private set; }
+
+        /// Tests only.
+        internal static void ResetSettingsBlock() { saveBlocked = false; }
+
+        /// Tests only: as if settings.ini couldn't be read.
+        internal static void SetSettingsBlock() { saveBlocked = true; }
+
+        /// Load's start-up note when settings.ini couldn't be opened or moved: short EN/DA text, never the .NET message
+        /// (it holds the full path with the Windows user folder). IOException = in use; anything else = no access.
+        internal static string OpenProblemText(Exception ex)
+        {
+            if (ex is IOException)
+                return L.S("settings.ini is in use by another program, so your settings couldn't be read. Default settings are used for now, and nothing is saved over the file.",
+                           "settings.ini bruges af et andet program, så dine indstillinger kunne ikke læses. Standardindstillingerne bruges indtil videre, og der gemmes ikke over filen.");
+            return L.S("settings.ini couldn't be opened, so your settings couldn't be read. Default settings are used for now, and nothing is saved over the file.",
+                       "settings.ini kunne ikke åbnes, så dine indstillinger kunne ikke læses. Standardindstillingerne bruges indtil videre, og der gemmes ikke over filen.");
+        }
+
         public static AppSettings Load()
         {
             var s = new AppSettings();
-            bool read = false;
+            saveBlocked = false;
+            LoadProblem = null;
+            string path = FilePath;
+            string[] lines;
             try
             {
-                if (!File.Exists(FilePath))   // no settings file: version 2 defaults
+                if (!File.Exists(path))   // no settings file: version 2 defaults
                 {
                     if (!File.Exists(History.FilePath)) s.StartNewInstall();   // nothing at all: a new user
                     else s.QuoteName = LegacyQuoteName;   // history but no settings.ini: an existing user, who had the old default
                     return s;
                 }
                 s.StartRead();   // also before reading: a file that exists but can't be read keeps these (ReadIni repeats it)
-                s.ReadIni(File.ReadAllLines(FilePath));
-                read = true;
+                lines = File.ReadAllLines(path);
             }
-            catch { /* fall back to defaults */ }
-            if (read && s.SettingsVersion < CurrentSettingsVersion)   // unreadable file: no step, nothing saved
+            catch (Exception ex)
+            {
+                saveBlocked = true;   // maybe locked: never overwrite a file we couldn't read
+                LoadProblem = OpenProblemText(ex);
+                return s;
+            }
+            int keys;
+            try { keys = s.ReadIni(lines); }
+            catch (Exception ex)
+            {
+                // a parse problem in the middle: what was read is kept, but nothing is saved over the file
+                saveBlocked = true;
+                LoadProblem = L.S("Settings could not be read, so changes won't be saved: ",
+                                  "Indstillingerne kunne ikke læses, så ændringer gemmes ikke: ") + ex.Message;
+                return s;
+            }
+            if (keys == 0)
+            {
+                // empty, cut to nothing or not a settings file: keep it aside, start from the defaults (no upgrade, no save)
+                // s holds the defaults now (+ StartRead's "existing file" values: SetupDone 1, QuoteName Gettic); the
+                // current version, so a later Save + Load doesn't run the old-defaults step over the user's new choices
+                s.SettingsVersion = CurrentSettingsVersion;
+                try
+                {
+                    string bad = History.BackupName(path, "settings.bad-", ".ini", DateTime.Now);
+                    File.Move(path, bad);
+                    LoadProblem = L.F("The settings file was unreadable, kept as {0}. Default settings are used.",
+                                      "Indstillingsfilen kunne ikke læses og er gemt som {0}. Standardindstillingerne bruges.", Path.GetFileName(bad));
+                }
+                catch (Exception ex)
+                {
+                    saveBlocked = true;
+                    LoadProblem = OpenProblemText(ex);
+                }
+                return s;
+            }
+            if (s.SettingsVersion < CurrentSettingsVersion)
             {
                 s.UpgradeOldDefaults();
                 s.Save();   // writes SettingsVersion=2, so the step runs only once
@@ -640,7 +707,7 @@ namespace PrintPrice
             var s = new AppSettings();
             if (lines == null) return s;
             bool read = false;
-            try { s.ReadIni(lines); read = true; }
+            try { read = s.ReadIni(lines) > 0; }   // no key lines (junk / empty): defaults, nothing to store again
             catch { /* fall back to what was read */ }
             if (read && s.SettingsVersion < CurrentSettingsVersion)
             {
@@ -672,10 +739,21 @@ namespace PrintPrice
             QuoteName = LegacyQuoteName;          // a file without the key had the old default name (an empty key stays empty)
         }
 
-        // parses settings.ini lines into this (fresh) object; may throw (Load / FromIni catch)
-        void ReadIni(IEnumerable<string> lines)
+        // a "key=value" line's key: letters, digits, '.' and '_' only (junk and binary text don't count as settings)
+        static bool KeyLike(string key)
+        {
+            if (key.Length == 0) return false;
+            foreach (char c in key)
+                if (!(c < 128 && (char.IsLetterOrDigit(c) || c == '.' || c == '_'))) return false;
+            return true;
+        }
+
+        // parses settings.ini lines into this (fresh) object; may throw (Load / FromIni catch). Returns the number of
+        // key=value lines (0 = not a settings file: Load keeps it aside, FromIni doesn't upgrade).
+        int ReadIni(IEnumerable<string> lines)
         {
             StartRead();
+            int keyLines = 0;
             string firstId = "1";
             var stringKeys = Strings();
             var extraIds = new List<string>();      // other printers, in file order
@@ -686,6 +764,7 @@ namespace PrintPrice
                 int eq = line.IndexOf('=');
                 if (eq <= 0) continue;
                 string key = line.Substring(0, eq).Trim(), val = line.Substring(eq + 1).Trim();
+                if (KeyLike(key)) keyLines++;
                 if (key == FilamentPriceKey) { ReadFilamentPrice(val); continue; }
                 if (key == PrinterIdKey) { if (ValidPrinterId(val)) firstId = val; continue; }
                 AppSettings target = this;
@@ -706,7 +785,7 @@ namespace PrintPrice
                 }
                 if (stringKeys.ContainsKey(key)) { target.SetString(key, val); continue; }
                 double v;
-                if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0) target.SetNumber(key, v);
+                if (double.TryParse(val, NumberStyles.Float, Inv, out v) && v >= 0 && !double.IsInfinity(v)) target.SetNumber(key, v);
             }
             // printer list: the flat keys = the first printer, then the others (a doubled id is skipped)
             printers = new List<PrinterProfile> { FromFields(firstId) };
@@ -720,16 +799,35 @@ namespace PrintPrice
             int active = PrinterIndex(ActivePrinterId);
             if (active < 0) ActivePrinterId = firstId;
             else if (active > 0) ToFields(printers[active]);
+            return keyLines;
         }
 
+        /// Writes settings.ini (via settings.ini.tmp, then replace, so a crash never leaves a cut-off file). Quiet on
+        /// failure; does nothing while SaveBlocked (Load couldn't read the existing file).
         public void Save()
         {
+            if (saveBlocked) return;
+            WriteIniFile(FilePath, ToIni());
+        }
+
+        /// Writes lines to path via path + ".tmp" and File.Replace (File.Move when there's no file yet). null = OK, else
+        /// the error text. Never throws; a failed write removes the .tmp. Also History.Restore.
+        internal static string WriteIniFile(string path, string[] lines)
+        {
+            string tmp = path + ".tmp";
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
-                File.WriteAllLines(FilePath, ToIni());
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllLines(tmp, lines);
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
+                return null;
             }
-            catch { /* non-fatal */ }
+            catch (Exception ex)
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                return ex.Message;
+            }
         }
 
         /// The settings.ini lines Save writes (also for the website's browser storage; read back with FromIni).
@@ -783,6 +881,21 @@ namespace PrintPrice
                 foreach (var p in printers) c.printers.Add(p.Clone());
             }
             return c;
+        }
+
+        /// Settings' "Reset to defaults" (issue #7): a new AppSettings at today's defaults that keeps the personal
+        /// details of this one: QuoteName, PayMobilePay, PayBank, SlicerPath, Language (null -> ""). Everything else is
+        /// the plain default (the form only shows these values; the caller keeps its own printers, history etc.).
+        /// This object is not changed; doesn't save.
+        public AppSettings DefaultsKeepingPersonal()
+        {
+            var d = new AppSettings();
+            d.QuoteName = QuoteName ?? "";
+            d.PayMobilePay = PayMobilePay ?? "";
+            d.PayBank = PayBank ?? "";
+            d.SlicerPath = SlicerPath ?? "";
+            d.Language = Language ?? "";
+            return d;
         }
 
         // ---------- first-time setup (idea 19; shared by the desktop SetupForm and the website) ----------

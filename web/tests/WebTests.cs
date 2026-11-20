@@ -104,6 +104,10 @@ static class WebTests
         // 12. first-time setup (idea 19)
         SetupTests.Run(True, Eq);
 
+        // 13. whole-app review fixes (2026-11-20): settings merge, storage full, printing now, customer, invoice names, texts
+        ReviewTests.Run(True, Eq);
+        GroupTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

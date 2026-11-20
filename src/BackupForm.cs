@@ -479,6 +479,14 @@ namespace PrintPrice
             else if (rbOnline.Checked && LimitActive) { text = CountdownText(limitUntilUtc - DateTime.UtcNow); on = false; }
             else { text = rbOnline.Checked ? OnlineText : FileText; on = rbFile.Checked || OnlineReady; }
             if (btnAction.Text != text) btnAction.Text = text;
+            if (fitted)
+            {
+                // as wide as the text it shows (qol #20), right edge fixed next to Close; the countdown measured once at
+                // its widest so the ticking seconds never move the button
+                string measure = rbOnline.Checked && LimitActive && !busy && !code && tab == TabBackup ? CountdownText(new TimeSpan(23, 59, 59)) : text;
+                int w = Math.Max(Px(90), TextRenderer.MeasureText(measure, btnAction.Font).Width + Px(28));
+                if (btnAction.Width != w) { btnAction.Width = w; PlaceAll(); }
+            }
             if (btnAction.Enabled != on) btnAction.Enabled = on;
             Theme.Apply(btnAction);
             if (on && accent) Theme.AccentButton(btnAction);
@@ -1043,10 +1051,10 @@ namespace PrintPrice
             doneClash.Kind = InfoKind.Warning;
             int nc = r.InvoiceClashes.Count;
             doneClash.Text = nc == 0 ? "" : nc == 1
-                ? L.F("Invoice code {0} is on two different quotes. Both are kept, because the customer may already have it. Search for it in the history to check them.",
+                ? L.F("Invoice no. {0} is on two different quotes. Both are kept, because the customer may already have it. Search for it in the history to check them.",
                       "Fakturanummer {0} står på to forskellige tilbud. Begge beholdes, fordi kunden måske allerede har det. Søg efter det i historikken for at tjekke dem.",
                       r.InvoiceClashes[0])
-                : L.F("Invoice codes {0} are each on two different quotes. All are kept, because the customers may already have them. Search for them in the history to check them.",
+                : L.F("Invoice nos. {0} are each on two different quotes. All are kept, because the customers may already have them. Search for them in the history to check them.",
                       "Fakturanumrene {0} står hver på to forskellige tilbud. Alle beholdes, fordi kunderne måske allerede har dem. Søg efter dem i historikken for at tjekke dem.",
                       string.Join(", ", r.InvoiceClashes.ToArray()));
 

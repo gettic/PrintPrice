@@ -71,6 +71,41 @@ namespace PrintPrice.Web
             return string.Join("\n", s.ToIni());
         }
 
+        /// Before this tab writes its settings: what another open tab stored meanwhile and must never be lost is taken
+        /// in (A8): invoice codes given out there (UsedInvoiceNos, both lists, the stored ones first, cap kept) and the
+        /// higher LastPrinterId. Everything else stays this tab's. Unreadable / empty stored text = nothing changes.
+        /// True when mine changed.
+        public static bool MergeStored(AppSettings mine, string storedText)
+        {
+            if (mine == null || string.IsNullOrEmpty(storedText)) return false;
+            AppSettings stored;
+            try { bool up; stored = SettingsFromText(storedText, out up); }
+            catch (Exception) { return false; }
+            if (stored == null) return false;
+            bool changed = false;
+            var have = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var u in (mine.UsedInvoiceNos ?? "").Split(',')) if (u.Trim().Length > 0) have.Add(u.Trim());
+            string merged = null;
+            foreach (var u in (stored.UsedInvoiceNos ?? "").Split(','))
+            {
+                string code = u.Trim();
+                if (code.Length == 0 || have.Contains(code)) continue;
+                have.Add(code);
+                merged = History.AddUsedInvoiceNo(merged ?? "", code);
+            }
+            if (merged != null)
+            {
+                // theirs first (older), then mine: the newest stay when the cap cuts
+                string all = merged;
+                foreach (var u in (mine.UsedInvoiceNos ?? "").Split(',')) if (u.Trim().Length > 0) all = History.AddUsedInvoiceNo(all, u.Trim());
+                mine.UsedInvoiceNos = all;
+                changed = true;
+            }
+            if (stored.LastPrinterId > mine.LastPrinterId && mine.ReservePrinterId(((long)stored.LastPrinterId).ToString(CultureInfo.InvariantCulture)))
+                changed = true;
+            return changed;
+        }
+
         /// null / empty = defaults. upgraded = an old settings text got the new defaults: store it again once.
         public static AppSettings SettingsFromText(string text, out bool upgraded)
         {

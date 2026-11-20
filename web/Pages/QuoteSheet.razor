@@ -3,8 +3,10 @@
    when printing (quote.css). Colours = the light or dark palette (quote.css); printing is always light. *@
 
 @{
-    var lay = WebQuote.Draw(Data, true);
+    var pages = WebQuote.DrawPages(Data, true);
 }
+@foreach (var lay in pages)
+{
 <div class="qs-box">
     <div class="qs-fit">
         <div class="qs @(Dark ? "dark" : "light") @(Data.Breakdown.Friends ? "friends" : "customers")" style="height:@Px(lay.Height)">
@@ -20,6 +22,12 @@
                         break;
                     case "round":
                         <div class="qi" style="@Box(i)border-radius:@Px(i.R);background:var(--q-@i.Role);border:@(i.Role2 == "line" ? "2px" : "1px") solid var(--q-@i.Role2)"></div>
+                        break;
+                    case "frame":
+                        <div class="qi" style="@Box(i)border-radius:@Px(i.R);border:1.5px solid var(--q-@i.Role)"></div>
+                        break;
+                    case "cube":
+                        <svg class="qi qcube" style="@Box(i)color:var(--q-@i.Role)" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 24 L72.6 37 L72.6 63 L50 76 L27.4 63 L27.4 37 Z M27.4 37 L50 50 L72.6 37 M50 50 L50 76" /></svg>
                         break;
                     case "dot":
                         <div class="qi qdot" style="@Box(i)background:@i.Colour;border-color:var(--q-@i.Role)"></div>
@@ -42,6 +50,7 @@
         </div>
     </div>
 </div>
+}
 
 @code {
     [Parameter] public WebQuote.Sheet Data { get; set; }

@@ -54,9 +54,45 @@ namespace PrintPrice.Web
         {
             if (!Available) return null;   // already told: memory only
             var a = await Call("printPrice.idbPut", WebHistory.HistoryKey, History.ToJson(list));
-            if (!a.Ok) return WebHistory.SaveProblem(a.Error);
+            if (!a.Ok)
+            {
+                Full = WebHistory.IsQuotaError(a.Error);
+                return WebHistory.SaveProblem(a.Error);
+            }
+            Full = false;
             try { await js.InvokeVoidAsync("printPrice.told"); } catch (Exception) { }
             return null;
+        }
+
+        /// The last Save failed because the browser's storage is full (the History page offers a way out).
+        public bool Full { get; private set; }
+
+        /// After a failed save (A9): the list as it is stored, so the page shows only what was really saved. null = it
+        /// couldn't be read either (the caller keeps its list). Never changes Available.
+        public async Task<List<QuoteRecord>> Stored()
+        {
+            if (!Available) return null;
+            var a = await Call("printPrice.idbGet", WebHistory.HistoryKey);
+            if (!a.Ok) return null;
+            if (string.IsNullOrEmpty(a.Value)) return new List<QuoteRecord>();
+            return History.ParseJson(a.Value);
+        }
+
+        /// The safety copies kept here (before-restore / before-clear): key -> text length. Empty on any problem.
+        public async Task<List<KeyValuePair<string, long>>> SafetySizes()
+        {
+            if (!Available) return new List<KeyValuePair<string, long>>();
+            var a = await Call("printPrice.idbSizes", WebBackup.AnySafetyPrefix);
+            return WebBackup.ParseSizes(a.Ok ? a.Value : null);
+        }
+
+        /// Deletes every safety copy (the storage-full way out, after the user's own two clicks). Returns how many went.
+        public async Task<int> DeleteSafetyCopies()
+        {
+            int n = 0;
+            foreach (var k in await SafetySizes())
+                if ((await Call("printPrice.idbDelete", k.Key)).Ok) n++;
+            return n;
         }
 
         /// Keeps the shown model picture (data URL) for a record, made small. Quietly skipped on any problem.

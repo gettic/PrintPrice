@@ -19,6 +19,14 @@ namespace PrintPrice
         string problem;
         readonly TextBox txtSearch;
         readonly ComboBox cmbShow;
+        int lastShowIndex;   // cmbShow's last real choice (the heading is skipped in the direction moved)
+        /// cmbShow's items -> History's Show values (-1 = the "Print status" heading).
+        static readonly int[] ShowValues =
+        {
+            History.ShowAll, History.ShowFriends, History.ShowCustomers, -1,
+            History.ShowStateNotPrinted, History.ShowStatePrinting, History.ShowStatePrinted, History.ShowStateFailed
+        };
+        int ShowValue { get { int i = cmbShow.SelectedIndex; return i >= 0 && i < ShowValues.Length && ShowValues[i] >= 0 ? ShowValues[i] : History.ShowAll; } }
         readonly Label lblCount;
         readonly HistoryGrid grid;
         readonly Panel gridFrame;
@@ -44,9 +52,11 @@ namespace PrintPrice
         }
         readonly DataGridViewComboBoxColumn colFor;
         readonly ToolTip modelTip;   // dark tooltip with the full model name when it is cut off
-        readonly DataGridViewCheckBoxColumn colPrinted, colFailed;   // read-only cells, toggled by click / Space, drawn in the theme (PaintTicks)
+        readonly DataGridViewTextBoxColumn colStatus;   // issue #7: the print status (read-only, drawn by PaintTicks; click / Space = its menu)
+        readonly ContextMenuStrip statusMenu;            // the Status cell's four choices (ShowStatusMenu)
         readonly ContextMenuStrip rowMenu;
-        ToolStripMenuItem miPrinted, miFailed, miDelete, miOpen, miRepeat, miQuote, miInvoice, miFriends, miCustomer, miName, miSameName;
+        ToolStripMenuItem[] miStates;   // the row menu's four print statuses (PrintState order)
+        ToolStripMenuItem miDelete, miOpen, miRepeat, miQuote, miInvoice, miFriends, miCustomer, miName, miSameName;
         bool filling, refillingMonths;
         string saveError;
         string listError;   // building the list failed (Load / after a restore): shown in the info box, details in the error window
@@ -150,13 +160,27 @@ namespace PrintPrice
             btnOlder.Click += delegate { if (cmbMonth.SelectedIndex < cmbMonth.Items.Count - 1) cmbMonth.SelectedIndex++; };
             btnNewer.Click += delegate { if (cmbMonth.SelectedIndex > 0) cmbMonth.SelectedIndex--; };
             cmbShow = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 0, 3) };
+            // issue #7: All / Friends & family / Customers, then the four print statuses under a muted heading (each job is
+            // under exactly one: History.PrintStateOf); ShowValues maps the list to History's Show values
             cmbShow.Items.AddRange(new object[]
             {
-                L.S("All quotes", "Alle tilbud"), L.S("Friends & family", "Venner og familie"),
-                L.S("Customers", "Kunder"), L.S("Failed", "Fejlede"), L.S("Not printed", "Ikke printet")
+                L.S("All quotes", "Alle tilbud"), L.S("Friends & family", "Venner og familie"), L.S("Customers", "Kunder"),
+                new Theme.ComboHeading(L.S("Print status", "Printstatus")),
+                QuoteRows.StateName(PrintState.NotPrinted), QuoteRows.StateName(PrintState.Printing),
+                QuoteRows.StateName(PrintState.Printed), QuoteRows.StateName(PrintState.Failed)
             });
             cmbShow.SelectedIndex = 0;
-            cmbShow.SelectedIndexChanged += delegate { Fill(); };
+            cmbShow.SelectedIndexChanged += delegate
+            {
+                // the heading is not a choice: go on in the direction the user moved (down from above, else up)
+                if (cmbShow.Items[cmbShow.SelectedIndex] is Theme.ComboHeading)
+                {
+                    cmbShow.SelectedIndex = lastShowIndex < cmbShow.SelectedIndex ? cmbShow.SelectedIndex + 1 : cmbShow.SelectedIndex - 1;
+                    return;
+                }
+                lastShowIndex = cmbShow.SelectedIndex;
+                Fill();
+            };
             // Printer filter (shown on Load only with 2+ printers): the cards and the list follow it
             cmbPrinter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 0, 3), Visible = false };
             cmbPrinter.SelectedIndexChanged += delegate { if (!filling) Fill(); };
@@ -250,15 +274,13 @@ namespace PrintPrice
             colNote.ReadOnly = false;
             colNote.MaxInputLength = 200;
             colNote.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;   // takes what is left (no scroll bar = a bit wider)
-            // Failed: ticking it marks the print as failed (its cost is earned back by new quotes when that is on in Settings)
-            colFailed = new DataGridViewCheckBoxColumn { HeaderText = L.S("Failed", "Fejlet"), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable };
-            colFailed.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            // Printed: the quote was really printed (counts in the month's cards); an invoice ticks it too
-            colPrinted = new DataGridViewCheckBoxColumn { HeaderText = L.S("Printed", "Printet"), ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable };
-            colPrinted.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            // Status (issue #7): one column for the one stored print status (History.PrintStateOf): not printed yet / printing
+            // now / printed (counts in the month's cards; an invoice ticks it) / failed (its cost is earned back by new quotes
+            // when that is on in Settings). Click or Space opens the four choices.
+            colStatus = TextColumn(L.S("Status", "Status"), false);
             colInvoice = TextColumn(L.S("Invoice", "Faktura"), false);   // invoice no. (muted), empty = no invoice yet
             colPic = TextColumn("", false);   // the job's picture (idea 22), drawn by GridCellPainting
-            grid.Columns.AddRange(new DataGridViewColumn[] { colPic, colDate, colModel, colTime, colGrams, colPrice, colFor, colPrinter, colCustomer, colNote, colPrinted, colFailed, colInvoice });
+            grid.Columns.AddRange(new DataGridViewColumn[] { colPic, colDate, colModel, colTime, colGrams, colPrice, colFor, colPrinter, colCustomer, colNote, colStatus, colInvoice });
 
             grid.CellFormatting += GridCellFormatting;
             grid.CurrentCellDirtyStateChanged += delegate
@@ -303,7 +325,7 @@ namespace PrintPrice
                 if (e.RowIndex < 0) return;
                 var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
                 var r = grid.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
-                if (e.ColumnIndex == colPrinted.Index)
+                if (e.ColumnIndex == colStatus.Index)
                 {
                     string printing = PrintingText(rec, false);
                     if (printing != null) modelTip.Show(printing, grid, r.Left, r.Bottom + 2, 8000);
@@ -339,10 +361,10 @@ namespace PrintPrice
                 if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
                 if ((ModifierKeys & (Keys.Control | Keys.Shift)) != 0) return;   // Ctrl / Shift + click only selects
                 var col = grid.Columns[e.ColumnIndex];
-                if (col == colFailed) { ToggleFailed(e.RowIndex); return; }
-                if (col == colPrinted) { TogglePrinted(e.RowIndex); return; }
+                if (col == colStatus) { ShowStatusMenu(e.RowIndex); return; }
                 if (col == colCustomer && OverCustomerArrow(e.RowIndex)) { ShowCustomerMenuAt(e.RowIndex); return; }
                 if (col != colFor && col != colNote && col != colCustomer) return;
+                if (col == colFor && ForLocked(grid.Rows[e.RowIndex].Tag as QuoteRecord)) { ShowForLocked(grid.Rows[e.RowIndex].Tag as QuoteRecord); return; }
                 grid.CurrentCell = grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
                 if (!grid.BeginEdit(col != colFor)) return;
                 var cb = grid.EditingControl as ComboBox;
@@ -352,18 +374,19 @@ namespace PrintPrice
             {
                 if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
                 var col = grid.Columns[e.ColumnIndex];
-                if (col == colFor || col == colNote || col == colCustomer || col == colFailed || col == colPrinted) return;   // those edit / toggle
+                if (col == colFor || col == colNote || col == colCustomer || col == colStatus) return;   // those edit / open their menu
                 OpenAgain();
             };
             grid.OpenRequested = OpenAgain;
             grid.KeyDown += (s, e) =>
             {
                 if (e.KeyCode == Keys.Delete && !grid.IsCurrentCellInEditMode) { e.Handled = true; DeleteClicked(); }
-                // Space on the Failed / Printed cell ticks / unticks it
-                if (e.KeyCode == Keys.Space && !grid.IsCurrentCellInEditMode && grid.CurrentCell != null)
+                // Space on the Status cell opens its four choices
+                if (e.KeyCode == Keys.Space && !grid.IsCurrentCellInEditMode && grid.CurrentCell != null &&
+                    grid.CurrentCell.OwningColumn == colStatus)
                 {
-                    if (grid.CurrentCell.OwningColumn == colFailed) { e.Handled = true; ToggleFailed(grid.CurrentCell.RowIndex); }
-                    else if (grid.CurrentCell.OwningColumn == colPrinted) { e.Handled = true; TogglePrinted(grid.CurrentCell.RowIndex); }
+                    e.Handled = true;
+                    ShowStatusMenu(grid.CurrentCell.RowIndex);
                 }
                 // menu key / Shift+F10: the row menu at the current row
                 if ((e.KeyCode == Keys.Apps || (e.KeyCode == Keys.F10 && e.Shift)) && !grid.IsCurrentCellInEditMode && grid.CurrentRow != null
@@ -502,7 +525,7 @@ namespace PrintPrice
             rowMenu.Items.Add(miQuote);
             rowMenu.Items.Add(miInvoice);
             rowMenu.Items.Add(new ToolStripSeparator());
-            // For / Printed / Failed act on every selected quote (round dot = all of them)
+            // For / Print status act on every selected quote (round dot = all of them)
             miFriends = Item(L.S("For friends && family", "Til venner og familie"), () => SetFor(History.ForFriends));
             miCustomer = Item(L.S("For a customer", "Til en kunde"), () => SetFor(History.ForCustomer));
             rowMenu.Items.Add(miFriends);
@@ -514,10 +537,15 @@ namespace PrintPrice
             rowMenu.Items.Add(miName);
             rowMenu.Items.Add(miSameName);
             rowMenu.Items.Add(new ToolStripSeparator());
-            miPrinted = Item(L.S("Printed", "Printet"), () => SetMarks(true));
-            miFailed = Item(L.S("Failed", "Fejlet"), () => SetMarks(false));
-            rowMenu.Items.Add(miPrinted);
-            rowMenu.Items.Add(miFailed);
+            // issue #7: the four print statuses for every selected quote, under a muted heading (round dot = all of them)
+            rowMenu.Items.Add(new ToolStripMenuItem(L.S("Print status", "Printstatus")) { Enabled = false });
+            miStates = new ToolStripMenuItem[4];
+            for (int k = 0; k < 4; k++)
+            {
+                var st = (PrintState)k;
+                miStates[k] = Item(QuoteRows.StateName(st), () => SetStatus(SelectedRecords(), st));
+                rowMenu.Items.Add(miStates[k]);
+            }
             rowMenu.Items.Add(new ToolStripSeparator());
             miDelete = Item(L.S("Delete…", "Slet…"), DeleteClicked);
             rowMenu.Items.Add(miDelete);
@@ -525,14 +553,13 @@ namespace PrintPrice
             {
                 var sel = SelectedRecords();
                 bool one = sel.Count == 1;
-                bool allPrinted = sel.Count > 0, allFailed = sel.Count > 0, allFriends = sel.Count > 0, allCustomers = sel.Count > 0;
+                bool allFriends = sel.Count > 0, allCustomers = sel.Count > 0;
                 foreach (var r in sel)
                 {
-                    allPrinted &= r.Printed; allFailed &= r.Failed;
                     allFriends &= r.For == History.ForFriends; allCustomers &= r.For != History.ForFriends;
                 }
-                miPrinted.Checked = allPrinted;
-                miFailed.Checked = allFailed;
+                PrintState? shared = SharedState(sel);
+                for (int k = 0; k < 4; k++) miStates[k].Checked = shared.HasValue && (int)shared.Value == k;
                 miFriends.Checked = allFriends;
                 miCustomer.Checked = allCustomers;
                 miOpen.Enabled = miRepeat.Enabled = one;
@@ -545,6 +572,10 @@ namespace PrintPrice
                     miSameName.Text = L.F("Select all quotes for {0}", "Vælg alle tilbud til {0}", MenuName(same, 30));
             };
             FormClosed += delegate { rowMenu.Dispose(); };
+            // the Status cell's menu (issue #7): the four statuses, round dot on the row's own
+            statusMenu = new ContextMenuStrip { ShowImageMargin = false, ShowCheckMargin = true, Renderer = new QuoteMenuRenderer(),
+                                                BackColor = Theme.Input, ForeColor = Theme.Text };
+            FormClosed += delegate { statusMenu.Dispose(); };
             // left: Delete + Backup… (6 px apart)
             var left = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = Padding.Empty, Anchor = AnchorStyles.Left };
             btnBackup = MakeButton(L.S("Backup…", "Sikkerhedskopi…"), 0);
@@ -673,23 +704,36 @@ namespace PrintPrice
                                     sample == null ? 0 : TextRenderer.MeasureText(sample, col == colPrice ? colPrice.DefaultCellStyle.Font : grid.Font).Width) + px(16);
                 return Math.Max(px(w), need);
             };
+            // qol #19: a column fits its header / sample in BOTH languages, so the window is the same rectangle in EN and DA
+            Func<DataGridViewColumn, string, string, string, int, int> both = (col, otherHeader, sample, otherSample, w) =>
+            {
+                int need = Math.Max(TextRenderer.MeasureText(otherHeader, headFont).Width,
+                                    otherSample == null ? 0 : TextRenderer.MeasureText(otherSample, grid.Font).Width) + px(16);
+                return Math.Max(width(col, sample, w), need);
+            };
+            Func<string, string, string> other = (en, da) => L.Danish ? en : da;
             colPic.Width = px(44);   // a 30 px picture well, 7 px each side
-            colDate.Width = width(colDate, "00-00-0000 00:00", 130);
+            colDate.Width = both(colDate, other("Date", "Dato"), "00-00-0000 00:00", null, 130);
             colModel.Width = px(172) - Math.Max(0, widthCut - px(45));   // "Phone stand (adjustable)" (160) + cell padding 12 fits; longer names get the dark tooltip (ModelTip)
-            colTime.Width = width(colTime, L.S("000 h 00 m", "000 t 00 m"), 92);
-            colGrams.Width = width(colGrams, "0000,00", 70);
-            colPrice.Width = width(colPrice, "0000,00", 74);
-            colFor.Width = width(colFor, L.S("Customer", "Venner"), 96);
+            colTime.Width = both(colTime, other("Time", "Tid"), L.S("000 h 00 m", "000 t 00 m"), other("000 h 00 m", "000 t 00 m"), 92);
+            colGrams.Width = both(colGrams, other("Grams", "Gram"), "0000,00", null, 70);
+            colPrice.Width = both(colPrice, other("Price", "Pris"), "0000,00", null, 74);
+            colFor.Width = both(colFor, other("For", "Til"), "Customer", "Venner", 96);
             colPrinter.Width = width(colPrinter, null, 140);   // "Bambu Lab A1 mini" fits; longer names get the dark tooltip
             // "Lene Hansen" + the ▾ fits; longer names get the dark tooltip. A narrow screen takes px 21-45 of widthCut here
             // (Note gives the first 20, Model the rest)
-            colCustomer.Width = width(colCustomer, null, 130) - Math.Max(0, Math.Min(widthCut, px(45)) - px(20));
+            colCustomer.Width = both(colCustomer, other("Customer", "Kunde"), null, null, 130) -Math.Max(0, Math.Min(widthCut, px(45)) - px(20));
             colCustomer.DefaultCellStyle.Padding = new Padding(6, 0, ArrowZone(), 0);   // the text stops before the ▾
             colNote.MinimumWidth = px(110);
-            colPrinted.Width = width(colPrinted, null, 72);
-            colFailed.Width = width(colFailed, null, 64);
+            // Status: icon (14) + 6 + the longest short status of both languages + cell padding (12)
+            {
+                int longest = 0;
+                foreach (string s in new[] { "Not printed", "Printing", "Printed", "Failed", "Ikke printet", "Printer nu", "Printet", "Fejlet", "Status" })
+                    longest = Math.Max(longest, TextRenderer.MeasureText(s, grid.Font).Width);
+                colStatus.Width = longest + px(14 + 6 + 14);
+            }
             // the widest possible code, measured: never cut (older letter codes "2026-WWWW", W = widest letter; new digit codes "2026-00000")
-            colInvoice.Width = Math.Max(width(colInvoice, "2026-WWWW", 80), width(colInvoice, "2026-00000", 80));
+            colInvoice.Width = Math.Max(both(colInvoice, other("Invoice", "Faktura"), "2026-WWWW", null, 80), width(colInvoice, "2026-00000", 80));
 
             // Month / Show combos exactly as tall as the search box (owner-drawn: height = ItemHeight + its frame, measured),
             // the ‹ › buttons too
@@ -711,7 +755,7 @@ namespace PrintPrice
             grid.ColumnHeadersHeight = textRowH + px(4);
             int cols = colPic.Width + colDate.Width + colModel.Width + colTime.Width + colGrams.Width + colPrice.Width + colFor.Width
                      + colCustomer.Width
-                     + colPrinted.Width + colFailed.Width + colInvoice.Width + px(130) - Math.Min(widthCut, px(20))    // Note gets the rest (~130 px + no-scroll-bar room)
+                     + colStatus.Width + colInvoice.Width + px(130) - Math.Min(widthCut, px(20))    // Note gets the rest (~130 px + no-scroll-bar room)
                      + (printerMode ? colPrinter.Width : 0);                              // 2+ printers: the window is wider by the Printer column
             gridFrame.Size = new Size(cols + SystemInformation.VerticalScrollBarWidth + 2,
                                       grid.ColumnHeadersHeight + rowsShown * rowH + 2);
@@ -814,8 +858,8 @@ namespace PrintPrice
 
         bool Matches(QuoteRecord r)
         {
-            return History.Matches(r, SelectedMonth, SelectedPrinter, cmbShow.SelectedIndex, txtSearch.Text,
-                                   printerMode ? (Func<QuoteRecord, string>)PrinterText : null);
+            return History.Matches(r, SelectedMonth, SelectedPrinter, ShowValue, txtSearch.Text,
+                                   printerMode ? (Func<QuoteRecord, string>)PrinterText : null, DateTime.Now);
         }
 
         /// Rebuilds the shown quotes from the list (search + filters) in the active view, keeping the selected quotes
@@ -866,6 +910,9 @@ namespace PrintPrice
                 printingTimer.Tick += delegate
                 {
                     printingTimer.Stop();
+                    // a status filter on (issue #7): a print that just ended moves from "Printing now" to "Printed"
+                    int sv = ShowValue;
+                    if (sv == History.ShowStatePrinting || sv == History.ShowStatePrinted) { Fill(); return; }
                     grid.Invalidate();   // the amber clock -> ✓
                     tiles.Invalidate();  // "Printing" -> ✓
                     SchedulePrintingRedraw();
@@ -893,7 +940,7 @@ namespace PrintPrice
                     int i = grid.Rows.Add("", DateText(r), ModelText(r), TimeText(r),
                                           Num.Fmt(r.Grams), History.PriceFor(r).ToString("0.00", Num.Dk),
                                           r.For == History.ForFriends ? History.ForFriends : History.ForCustomer,
-                                          printerMode ? PrinterText(r) : "", r.Customer ?? "", r.Note ?? "", r.Printed, r.Failed, r.InvoiceNo ?? "");
+                                          printerMode ? PrinterText(r) : "", r.Customer ?? "", r.Note ?? "", "", r.InvoiceNo ?? "");
                     grid.Rows[i].Tag = r;
                     grid.Rows[i].Height = grid.RowTemplate.Height;
                     if (r == keepCurrent) cur = i;
@@ -1142,92 +1189,199 @@ namespace PrintPrice
             else if (col == colInvoice) e.CellStyle.ForeColor = Theme.Muted;
         }
 
-        /// Printed / Failed cells: a themed box (border colour, input background) with a green ✓ (Printed) or a red ✗
-        /// (Failed) when ticked; the box frame is Text on the selected row (no pure white, style).
+        /// The Status cell (issue #7): a 14 px mark, then the short status name 6 px after it, both by History.PrintStateOf:
+        /// not printed yet = Muted hollow circle + Muted text; printing now = amber clock (tooltip: done about …); printed =
+        /// green ✓; failed = red ✗. Text colour Text (Muted when not printed); selected rows keep the marks' colours.
         void PaintTicks(object sender, DataGridViewCellPaintingEventArgs e)
         {
-            if (e.RowIndex < 0 || (e.ColumnIndex != colFailed.Index && e.ColumnIndex != colPrinted.Index)) return;
-            bool printed = e.ColumnIndex == colPrinted.Index;
-            e.PaintBackground(e.CellBounds, (e.State & DataGridViewElementStates.Selected) != 0);
+            if (e.RowIndex < 0 || e.ColumnIndex != colStatus.Index) return;
             bool selected = (e.State & DataGridViewElementStates.Selected) != 0;
-            bool on = e.Value is bool && (bool)e.Value;
-            float sc = CurrentAutoScaleDimensions.Height / 96f;
-            int size = (int)Math.Round(14 * sc);
-            var box = new Rectangle(e.CellBounds.X + (e.CellBounds.Width - size) / 2, e.CellBounds.Y + (e.CellBounds.Height - size) / 2, size - 1, size - 1);
-            using (var back = new SolidBrush(Theme.Input)) e.Graphics.FillRectangle(back, box);
-            using (var pen = new Pen(selected ? Theme.Text : Theme.Muted)) e.Graphics.DrawRectangle(pen, box);
+            e.PaintBackground(e.CellBounds, selected);
             var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
-            if (on && printed && History.IsPrinting(rec, DateTime.Now))
+            if (rec == null) { e.Handled = true; return; }
+            var state = History.PrintStateOf(rec, DateTime.Now);
+            float sc = CurrentAutoScaleDimensions.Height / 96f;
+            int size = (int)Math.Round(14 * sc), padL = (int)Math.Round(7 * sc);
+            var box = new Rectangle(e.CellBounds.X + padL, e.CellBounds.Y + (e.CellBounds.Height - size) / 2, size - 1, size - 1);
+            var g = e.Graphics;
+            var old = g.SmoothingMode;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            float w = Math.Max(1.5f, 1.5f * sc);
+            switch (state)
             {
-                // "Printing now": an amber clock instead of the ✓ until the print time has passed (tooltip: done about …)
-                var old = e.Graphics.SmoothingMode;
-                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                float w = Math.Max(1.5f, 1.5f * sc), inset = Math.Max(2f, 2.5f * sc);
-                var dial = new RectangleF(box.Left + inset, box.Top + inset, box.Width - 2 * inset, box.Height - 2 * inset);
-                float cx = dial.Left + dial.Width / 2, cy = dial.Top + dial.Height / 2;
-                using (var pen = new Pen(Theme.Warning, w))
+                case PrintState.Printing:
                 {
-                    e.Graphics.DrawEllipse(pen, dial);
-                    e.Graphics.DrawLine(pen, cx, cy, cx, dial.Top + dial.Height * 0.22f);
-                    e.Graphics.DrawLine(pen, cx, cy, dial.Right - dial.Width * 0.25f, cy);
+                    float inset = Math.Max(1f, 1f * sc);
+                    var dial = new RectangleF(box.Left + inset, box.Top + inset, box.Width - 2 * inset, box.Height - 2 * inset);
+                    float cx = dial.Left + dial.Width / 2, cy = dial.Top + dial.Height / 2;
+                    using (var pen = new Pen(Theme.Warning, w))
+                    {
+                        g.DrawEllipse(pen, dial);
+                        g.DrawLine(pen, cx, cy, cx, dial.Top + dial.Height * 0.22f);
+                        g.DrawLine(pen, cx, cy, dial.Right - dial.Width * 0.25f, cy);
+                    }
+                    break;
                 }
-                e.Graphics.SmoothingMode = old;
-                e.Handled = true;
-                return;
-            }
-            if (on)
-            {
-                var old = e.Graphics.SmoothingMode;
-                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                int m = Math.Max(3, (int)Math.Round(3f * sc));   // mark 7 px of the 13 px box at 96 dpi
-                if (printed)
+                case PrintState.Printed:
+                {
+                    int m = Math.Max(2, (int)Math.Round(2f * sc));
                     using (var pen = new Pen(Theme.Success, Math.Max(2f, 2f * sc)))
-                        e.Graphics.DrawLines(pen, new[]
+                        g.DrawLines(pen, new[]
                         {
                             new PointF(box.Left + m, box.Top + box.Height / 2f), new PointF(box.Left + box.Width * 0.42f, box.Bottom - m),
                             new PointF(box.Right - m + 0.5f, box.Top + m)
                         });
-                else
+                    break;
+                }
+                case PrintState.Failed:
+                {
+                    int m = Math.Max(3, (int)Math.Round(3f * sc));
                     using (var pen = new Pen(Theme.Error, Math.Max(2f, 2f * sc)))
                     {
-                        e.Graphics.DrawLine(pen, box.Left + m, box.Top + m, box.Right - m, box.Bottom - m);
-                        e.Graphics.DrawLine(pen, box.Right - m, box.Top + m, box.Left + m, box.Bottom - m);
+                        g.DrawLine(pen, box.Left + m, box.Top + m, box.Right - m, box.Bottom - m);
+                        g.DrawLine(pen, box.Right - m, box.Top + m, box.Left + m, box.Bottom - m);
                     }
-                e.Graphics.SmoothingMode = old;
+                    break;
+                }
+                default:
+                {
+                    float inset = Math.Max(2f, 3f * sc);
+                    using (var pen = new Pen(Theme.Muted, w))
+                        g.DrawEllipse(pen, box.Left + inset, box.Top + inset, box.Width - 2 * inset, box.Height - 2 * inset);
+                    break;
+                }
             }
+            g.SmoothingMode = old;
+            var textRect = new Rectangle(box.Right + 1 + (int)Math.Round(6 * sc), e.CellBounds.Y, e.CellBounds.Right - box.Right - (int)Math.Round(8 * sc), e.CellBounds.Height);
+            Color fore = state == PrintState.NotPrinted ? Theme.Muted : selected ? Color.White : Theme.Text;
+            TextRenderer.DrawText(g, ShortStateName(state), grid.Font, textRect, fore,
+                                  TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             e.Handled = true;
         }
 
-        /// Ticks / unticks Printed for the row's quote and saves at once (the cards follow).
-        void TogglePrinted(int rowIndex)
+        /// The Status column's short names (the menus use QuoteRows.StateName).
+        internal static string ShortStateName(PrintState s)
         {
-            if (rowIndex < 0 || rowIndex >= grid.Rows.Count) return;
-            var row = grid.Rows[rowIndex];
-            var r = row.Tag as QuoteRecord;
-            if (r == null) return;
-            History.SetPrinted(r, !r.Printed);   // unticking also ends "Printing now"
-            filling = true;
-            row.Cells[colPrinted.Index].Value = r.Printed;
-            filling = false;
-            grid.InvalidateCell(colPrinted.Index, rowIndex);
-            SaveList();
-            UpdateCards();
+            switch (s)
+            {
+                case PrintState.Printing: return L.S("Printing", "Printer nu");   // "Printer" alone reads as the device
+                case PrintState.Printed: return L.S("Printed", "Printet");
+                case PrintState.Failed: return L.S("Failed", "Fejlet");
+                default: return L.S("Not printed", "Ikke printet");
+            }
         }
 
-        /// Ticks / unticks Failed for the row's quote (History.MarkFailed) and saves at once.
-        void ToggleFailed(int rowIndex)
+        /// The one state all of these quotes share; null = none or mixed.
+        static PrintState? SharedState(List<QuoteRecord> recs)
+        {
+            if (recs == null || recs.Count == 0) return null;
+            DateTime now = DateTime.Now;
+            var first = History.PrintStateOf(recs[0], now);
+            foreach (var r in recs) if (History.PrintStateOf(r, now) != first) return null;
+            return first;
+        }
+
+        /// The Status cell's menu under the cell (click / Space): the four statuses for that row's quote.
+        void ShowStatusMenu(int rowIndex)
         {
             if (rowIndex < 0 || rowIndex >= grid.Rows.Count) return;
-            var row = grid.Rows[rowIndex];
-            var r = row.Tag as QuoteRecord;
+            var r = grid.Rows[rowIndex].Tag as QuoteRecord;
             if (r == null) return;
-            History.MarkFailed(r, !r.Failed, DateTime.Now);
-            filling = true;
-            row.Cells[colFailed.Index].Value = r.Failed;
-            filling = false;
-            grid.InvalidateCell(colFailed.Index, rowIndex);
+            FillStatusMenu(r);
+            var rc = grid.GetCellDisplayRectangle(colStatus.Index, rowIndex, false);
+            statusMenu.Show(grid, new Point(rc.Left, rc.Bottom));
+        }
+
+        void FillStatusMenu(QuoteRecord r)
+        {
+            var now = History.PrintStateOf(r, DateTime.Now);
+            statusMenu.Items.Clear();
+            for (int k = 0; k < 4; k++)
+            {
+                var st = (PrintState)k;
+                var mi = new ToolStripMenuItem(QuoteRows.StateName(st)) { ForeColor = Theme.Text, Checked = st == now };
+                mi.Click += delegate { SetStatus(new List<QuoteRecord> { r }, st); };
+                statusMenu.Items.Add(mi);
+            }
+        }
+
+        /// Picture mode: the Status cell's menu of a list row, drawn where it opens (under the cell).
+        internal void SampleStatusMenu(int rowIndex, Graphics g, Point origin)
+        {
+            if (rowIndex < 0 || rowIndex >= grid.Rows.Count) return;
+            var r = grid.Rows[rowIndex].Tag as QuoteRecord;
+            if (r == null) return;
+            FillStatusMenu(r);
+            statusMenu.PerformLayout();
+            var size = statusMenu.GetPreferredSize(Size.Empty);
+            statusMenu.Size = size;
+            using (var bmp = new Bitmap(size.Width, size.Height))
+            {
+                statusMenu.DrawToBitmap(bmp, new Rectangle(Point.Empty, size));
+                var rc = grid.GetCellDisplayRectangle(colStatus.Index, rowIndex, false);
+                var p = grid.PointToScreen(new Point(rc.Left, rc.Bottom));
+                g.DrawImage(bmp, p.X - origin.X, p.Y - origin.Y);
+            }
+        }
+
+        /// Picture mode: the Show list opened (as Theme draws it: Input back, Border frame, the heading Muted, the chosen
+        /// item InfoAccent), under the box.
+        internal void SampleShowList(Graphics g, Point origin)
+        {
+            int ih = cmbShow.ItemHeight, w = Math.Max(cmbShow.Width, cmbShow.DropDownWidth);
+            var p = cmbShow.PointToScreen(new Point(0, cmbShow.Height));
+            var box = new Rectangle(p.X - origin.X, p.Y - origin.Y, w, ih * cmbShow.Items.Count + 2);
+            using (var b = new SolidBrush(Theme.Input)) g.FillRectangle(b, box);
+            using (var pen = new Pen(Theme.Border)) g.DrawRectangle(pen, box.X, box.Y, box.Width - 1, box.Height - 1);
+            for (int i = 0; i < cmbShow.Items.Count; i++)
+            {
+                var row = new Rectangle(box.X + 1, box.Y + 1 + i * ih, w - 2, ih);
+                bool heading = cmbShow.Items[i] is Theme.ComboHeading, sel = i == cmbShow.SelectedIndex;
+                if (sel) using (var b = new SolidBrush(Theme.InfoAccent)) g.FillRectangle(b, row);
+                TextRenderer.DrawText(g, cmbShow.Items[i].ToString(), cmbShow.Font, row, sel ? Color.White : heading ? Theme.Muted : Theme.Text,
+                                      TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+            }
+        }
+
+        /// Picture mode: picks a Show item (0 All … 4-7 the print statuses).
+        internal void SampleShow(int index) { cmbShow.SelectedIndex = index; }
+
+        /// Issue #7: sets the print status of these quotes (History.SetPrintState) and saves at once; several to "Failed"
+        /// asks first (the user's choice). The list is filled again (with a status filter on, they move to their new
+        /// place) and the ✓ line says what changed.
+        internal void SetStatus(List<QuoteRecord> recs, PrintState state)
+        {
+            if (recs == null || recs.Count == 0) return;
+            int newlyFailed = 0;
+            foreach (var r in recs) if (!r.Failed) newlyFailed++;
+            if (state == PrintState.Failed && newlyFailed > 1)
+                using (var ask = NewFailedAsk(newlyFailed))
+                    if (ask.ShowDialog(this) != DialogResult.Yes) { FocusList(); return; }
+            DateTime now = DateTime.Now;
+            foreach (var r in recs) History.SetPrintState(r, state, now);
             SaveList();
-            UpdateCards();
+            Fill(recs, recs[0]);
+            string name = QuoteRows.StateName(state);
+            bool moved = false;
+            if (ShowValue >= History.ShowStateNotPrinted) foreach (var r in recs) moved |= !shown.Contains(r);
+            string text = recs.Count == 1
+                ? L.F("✓ Print status: {0}.", "✓ Printstatus: {0}.", name)
+                : L.F("✓ {0} quotes set to {1}.", "✓ {0} tilbud sat til {1}.", recs.Count, name);
+            if (moved)
+                text += " " + (recs.Count == 1
+                    ? L.S("It is now under its new status in Show.", "Det ligger nu under sin nye status i Vis.")
+                    : L.S("They are now under their new status in Show.", "De ligger nu under deres nye status i Vis."));
+            ShowDone(text, InfoKind.Success, null, null);
+        }
+
+        /// The question before setting several quotes to Failed (issue #7, the user's choice).
+        internal static BackupForm.AskForm NewFailedAsk(int n)
+        {
+            return new BackupForm.AskForm(L.S("Print status", "Printstatus"),
+                L.F("Mark {0} prints as failed?", "Markér {0} print som fejlet?", n),
+                L.S("Failed prints count as lost in the History totals, and with \"Earn back failed prints\" on, new quotes earn their cost back. You can change the status back at any time.",
+                    "Fejlede print tæller som tab i historikkens tal, og med \"Tjen fejlprint ind igen\" slået til tjener nye tilbud deres pris ind. Du kan altid ændre status tilbage."),
+                L.S("Yes", "Ja"), L.S("No", "Nej"));
         }
 
         void GridCellValueChanged(object sender, DataGridViewCellEventArgs e)
@@ -1242,6 +1396,15 @@ namespace PrintPrice
                 object v = row.Cells[e.ColumnIndex].Value;
                 int f = v is int && (int)v == History.ForFriends ? History.ForFriends : History.ForCustomer;
                 if (f == r.For) return;
+                if (ForLocked(r))
+                {
+                    // A4: an invoice keeps the price it was made at (typed in the cell by keyboard: put it back)
+                    filling = true;
+                    row.Cells[e.ColumnIndex].Value = r.For;
+                    filling = false;
+                    ShowForLocked(r);
+                    return;
+                }
                 r.For = f;
                 filling = true;
                 row.Cells[colPrice.Index].Value = History.PriceFor(r).ToString("0.00", Num.Dk);   // the price follows For
@@ -1276,18 +1439,16 @@ namespace PrintPrice
         {
             doneShown = false;
             string help = view == ViewList
-                ? L.S("Ctrl+click or Shift+click selects several quotes (Ctrl+A all), Delete deletes them. Quote… makes a quote page, Invoice… a bill " +
-                      "for all selected (it ticks Printed). Repeat print slices it with today's prices; Open again (or double-click) loads it as saved. Right-click for all of these.\n" +
-                      "Click For, Customer, Note, Printed or Failed to change them, changes are saved at once. Ctrl+1, 2, 3 or Ctrl+wheel: list, medium or large pictures.",
-                      "Ctrl+klik eller Shift+klik vælger flere tilbud (Ctrl+A alle), Slet sletter dem. Tilbud… laver et tilbud, Faktura… en regning " +
-                      "for alle valgte (den sætter Printet). Print igen slicer det med dagens priser; Åbn igen (eller dobbeltklik) henter det som gemt. Højreklik for det hele.\n" +
-                      "Klik på Til, Kunde, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Ctrl+1, 2, 3 eller Ctrl+hjul: liste, mellemstore eller store billeder.")
-                : L.S("Ctrl+click or Shift+click selects several quotes (Ctrl+A all), Delete deletes them. Double-click or Enter opens a quote again; " +
-                      "right-click for more.\n" +
-                      "Notes are changed in the list (Ctrl+1), names also by right-click. Ctrl+1, 2, 3 or Ctrl+wheel: list, medium or large pictures.",
-                      "Ctrl+klik eller Shift+klik vælger flere tilbud (Ctrl+A alle), Slet sletter dem. Dobbeltklik eller Enter åbner et tilbud igen; " +
-                      "højreklik for mere.\n" +
-                      "Noter ændres i listen (Ctrl+1), navne også med højreklik. Ctrl+1, 2, 3 eller Ctrl+hjul: liste, mellemstore eller store billeder.");
+                ? L.S("Ctrl/Shift+click selects several. Quote… or Invoice… makes one page for all selected. Repeat print uses today's prices; " +
+                      "double-click opens it as saved. Right-click for more.\n" +
+                      "Click For, Customer, Note or Status to change it (saved at once). Ctrl+1/2/3: list or pictures.",
+                      "Ctrl/Shift+klik vælger flere. Tilbud… eller Faktura… laver én side for alle valgte. Print igen bruger dagens priser; " +
+                      "dobbeltklik åbner det som gemt. Højreklik for mere.\n" +
+                      "Klik på Til, Kunde, Note eller Status for at ændre det (gemmes med det samme). Ctrl+1/2/3: liste eller billeder.")
+                : L.S("Ctrl/Shift+click selects several; double-click or Enter opens one again. Right-click for more, also the customer's name.\n" +
+                      "Notes and the other fields are changed in the list (Ctrl+1). Ctrl+1/2/3: list or pictures.",
+                      "Ctrl/Shift+klik vælger flere; dobbeltklik eller Enter åbner et igen. Højreklik for mere, også kundens navn.\n" +
+                      "Noter og de andre felter ændres i listen (Ctrl+1). Ctrl+1/2/3: liste eller billeder.");
             if (saveError != null) { info.Text = saveError; info.Kind = InfoKind.Error; }
             else if (listError != null) { info.Text = listError; info.Kind = InfoKind.Error; }
             else if (!string.IsNullOrEmpty(problem)) { info.Text = problem + "\n" + help; info.Kind = InfoKind.Warning; }
@@ -1473,31 +1634,38 @@ namespace PrintPrice
             rowMenu.Show(screen);
         }
 
-        /// Row menu Printed / Failed for every selected quote: ticked on all of them -> off, else on for all. Saved at once.
-        void SetMarks(bool printed)
-        {
-            var sel = SelectedRecords();
-            if (sel.Count == 0) return;
-            bool all = true;
-            foreach (var r in sel) all &= printed ? r.Printed : r.Failed;
-            var now = DateTime.Now;
-            foreach (var r in sel)
-            {
-                if (printed) History.SetPrinted(r, !all);
-                else if (r.Failed == all) History.MarkFailed(r, !all, now);
-            }
-            SaveList();
-            Fill();
-        }
-
         /// Row menu For: friends / customer for every selected quote (the price shown follows). Saved at once.
         void SetFor(int forWho)
         {
             var sel = SelectedRecords();
             if (sel.Count == 0) return;
-            foreach (var r in sel) r.For = forWho;
+            int kept = 0;
+            foreach (var r in sel)
+            {
+                if (ForLocked(r)) { if (r.For != forWho) kept++; continue; }   // A4: invoices keep their price
+                r.For = forWho;
+            }
             SaveList();
             Fill();
+            if (kept > 0)
+                ShowDone(kept == 1 ? L.S("1 invoiced print keeps the price it was billed at.", "1 faktureret print beholder den pris, det blev faktureret til.")
+                                   : L.F("{0} invoiced prints keep the price they were billed at.", "{0} fakturerede print beholder den pris, de blev faktureret til.", kept),
+                         InfoKind.Warning, null, null);
+        }
+
+        /// A made invoice's For (its billed price) can't change (A4): the same number must never show another price.
+        static bool ForLocked(QuoteRecord r)
+        {
+            return r != null && !string.IsNullOrEmpty(r.InvoiceNo);
+        }
+
+        void ShowForLocked(QuoteRecord r)
+        {
+            if (r == null) return;
+            ShowDone(r.For == History.ForFriends
+                         ? L.F("Invoice {0} is made at the friends & family price and keeps it.", "Faktura {0} er lavet til venne-prisen og beholder den.", r.InvoiceNo.Trim())
+                         : L.F("Invoice {0} is made at the customer price and keeps it.", "Faktura {0} er lavet til kundeprisen og beholder den.", r.InvoiceNo.Trim()),
+                     InfoKind.Warning, null, null);
         }
 
         /// kr. amount with a no-break space ("11,46 kr." never splits over two lines).
@@ -1538,15 +1706,15 @@ namespace PrintPrice
                           "De valgte tilbud og deres billeder slettes. Fortryd henter dem tilbage, mens vinduet er åbent.")
             };
             if (sum.FailedOpen > 0)
-                lines.Add(one ? L.F("It is a failed print not earned back yet ({0}): new quotes stop earning it back.",
-                                    "Det er et fejlet print, der ikke er tjent ind endnu ({0}): nye tilbud holder op med at tjene det ind.",
+                lines.Add(one ? L.F("This failed print isn't earned back yet ({0}); new quotes will stop earning it back.",
+                                    "Dette fejlede print er ikke tjent ind endnu ({0}); nye tilbud holder op med at tjene det ind.",
                                     KrNb(sum.FailedOpenAmount))
                         : sum.FailedOpen == 1
-                              ? L.F("1 of them is a failed print not earned back yet ({0}): new quotes stop earning it back.",
-                                    "1 af dem er et fejlet print, der ikke er tjent ind endnu ({0}): nye tilbud holder op med at tjene det ind.",
+                              ? L.F("1 of them is a failed print that isn't earned back yet ({0}); new quotes will stop earning it back.",
+                                    "1 af dem er et fejlet print, der ikke er tjent ind endnu ({0}); nye tilbud holder op med at tjene det ind.",
                                     KrNb(sum.FailedOpenAmount))
-                              : L.F("{0} of them are failed prints not earned back yet ({1}): new quotes stop earning that back.",
-                                    "{0} af dem er fejlede print, der ikke er tjent ind endnu ({1}): nye tilbud holder op med at tjene det ind.",
+                              : L.F("{0} of them are failed prints that aren't earned back yet ({1}); new quotes will stop earning them back.",
+                                    "{0} af dem er fejlede print, der ikke er tjent ind endnu ({1}); nye tilbud holder op med at tjene dem ind.",
                                     sum.FailedOpen, KrNb(sum.FailedOpenAmount)));
             if (sum.PayingBack > 0)
                 lines.Add(one ? L.S("It earned back part of a failed print: new quotes earn that back again.",
@@ -1633,9 +1801,9 @@ namespace PrintPrice
             int n = list.Count;
             var sum = History.SummarizeClear(list);
             string details = L.S("The whole price history and its pictures are deleted, including quotes the month, search or Show filter hide. " +
-                                 "A safety copy is saved first: Undo brings it back while this window is open, later Backup… › Restore › Browse… (it opens at the copy).",
+                                 "A safety copy is saved first: Undo brings it back while this window is open; later it can be restored under Backup… › Restore.",
                                  "Hele prishistorikken og dens billeder slettes, også tilbud, som måned, søgning eller Vis skjuler. " +
-                                 "Der gemmes først en sikkerhedskopi: Fortryd henter den tilbage, mens vinduet er åbent, senere Sikkerhedskopi… › Gendan › Gennemse… (den åbner ved kopien).");
+                                 "Der gemmes først en sikkerhedskopi: Fortryd henter den tilbage, mens vinduet er åbent; senere kan den gendannes under Sikkerhedskopi… › Gendan.");
             if (sum.FailedOpen > 0)
                 details += "\n" + L.F("Failed prints not earned back yet ({0}) are no longer earned back.",
                                       "Fejlede print, der ikke er tjent ind endnu ({0}), bliver ikke længere tjent ind.", KrNb(sum.FailedOpenAmount));

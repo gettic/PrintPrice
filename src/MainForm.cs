@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -249,6 +249,7 @@ namespace PrintPrice
             // The info box is always shown (empty = just the box with its stripe, one line tall), so the button and the
             // layout never move.
             lblPowerInfo.KeepWhenEmpty = true;
+            lblPowerInfo.EmptyText = L.S("Click Update for today's price.", "Klik Opdatér for dagens pris.");   // qol #15: never a bare empty box
             btnPower = new Button
             {
                 Text = L.S("Update", "Opdatér"), AutoSize = false, Width = 76, Margin = new Padding(0, 2, 0, 3),
@@ -458,7 +459,8 @@ namespace PrintPrice
                 box.Enter += delegate { BeginInvoke((MethodInvoker)delegate { box.SelectAll(); }); };
             }
 
-            FormClosing += delegate { if (cts != null) cts.Cancel(); SaveLastPrices(); };
+            // closing mid-slice: cancel the job and stop Bambu Studio (A5), so it doesn't keep running hidden
+            FormClosing += delegate { if (cts != null) cts.Cancel(); BambuSlicer.StopAll(); SaveLastPrices(); };
             FormClosed += delegate
             {
                 picRequest++; SetModelPicture(null);
@@ -484,8 +486,13 @@ namespace PrintPrice
             // sliced files kept for "Open in Studio" by an earlier run (off the UI thread; files Studio still has open stay)
             // (not in test mode: it uses its own temp folder, see JobTempRoot, and never touches the user's)
             if (!offline && !AppSettings.TestMode) Shown += delegate { Task.Run(() => BambuSlicer.CleanStudioFiles(null)); };
+            // job folders (Printables downloads, sliced copies) a closed run left behind, older than a day (A7); test mode
+            // too: there JobTempRoot is the test folder's own temp
+            if (!offline) Shown += delegate { string jobRoot = JobTempRoot(); Task.Run(() => BambuSlicer.CleanJobFolders(jobRoot)); };
             // leftover record pictures (issue #4): history.json read in the background, cleaned once it read fine
             if (!offline) Shown += delegate { StartupPictureClean(); };
+            // settings.ini couldn't be read (A1): say so once in the info box (Warning stripe), as History shows its own problem
+            if (!offline) Shown += delegate { ShowSettingsProblem(AppSettings.LoadProblem); };
             if (!offline) Shown += delegate { ApplySetupHint(); };   // idea 19: after "Set up later" (Program.ShowSetupHint)
             // read Bambu Studio's profile index once in the background (Settings' lists and the first slice are quicker)
             if (!offline) Shown += delegate
@@ -1032,7 +1039,7 @@ namespace PrintPrice
             if (localFiles != null && localFiles.Count == 1 && localFiles[0].EndsWith(".3mf", StringComparison.OrdinalIgnoreCase))
             {
                 string project = localFiles[0];
-                LoadModelPicture(() => BambuSlicer.FromProject(project), true);
+                var projectPicture = LoadModelPicture(() => BambuSlicer.FromProject(project), true);   // not awaited: shows when ready
             }
             try
             {
@@ -1042,13 +1049,13 @@ namespace PrintPrice
                 if (printablesId != null)
                 {
                     progress.Report(L.S("Looking up the model on Printables…", "Finder modellen på Printables…"));
-                    var model = await Task.Run(() => Printables.GetModel(printablesId));
+                    var model = await Task.Run(() => Printables.GetModel(printablesId, token));
                     token.ThrowIfCancellationRequested();
                     modelName = model.Name;
                     if (model.ImageUrl != null)
                     {
                         string imageUrl = model.ImageUrl;
-                        LoadModelPicture(() => Printables.DownloadImage(imageUrl), true);
+                        var photo = LoadModelPicture(() => Printables.DownloadImage(imageUrl), true);   // not awaited: the job goes on
                     }
                     var sliceable = model.Files.Where(f => BambuSlicer.IsModelFile(f.Name)).ToList();
                     if (sliceable.Count == 0) throw new SliceException(L.F("\"{0}\" has no STL, 3MF or STEP files to slice.",
@@ -1111,7 +1118,8 @@ namespace PrintPrice
                     // the plate render always wins: replaces the Printables photo / 3MF thumbnail; picRequest++ drops a photo
                     // still downloading (it would land after the render). The shown picture stays if the render can't be read.
                     picRequest++;
-                    LoadModelPicture(() => render, true);
+                    // awaited (idea 29): Save to history comes back on after this job and saves the picture with the quote
+                    await LoadModelPicture(() => render, true);
                 }
 
                 int parts = chosen != null ? chosen.Count : localFiles.Count;
@@ -1509,7 +1517,7 @@ namespace PrintPrice
                         ct.ThrowIfCancellationRequested();
                         progress.Report(L.S("Downloading ", "Henter ") + remote[i].Name + (remote.Count > 1 ? " (" + (i + 1) + "/" + remote.Count + ")" : "") + "…");
                         string target = Path.Combine(work, (i + 1) + "_" + Printables.SafeFileName(remote[i].Name));
-                        Printables.Download(printId, remote[i], target);
+                        Printables.Download(printId, remote[i], target, ct);
                         models.Add(new KeyValuePair<string, string>(remote[i].Name, target));
                     }
                 }
@@ -1685,7 +1693,9 @@ namespace PrintPrice
 
         /// Gets the picture bytes and prepares the bitmap off the UI thread; failures are ignored quietly.
         /// replace = false: only used if nothing is showing yet for this job (the Printables photo beats the slice render).
-        async void LoadModelPicture(Func<byte[]> source, bool replace)
+        /// The Task ends when the picture is shown (or dropped); AnalyzeAsync awaits the slice render so the quote saved right
+        /// after the job has its picture (idea 29); the other callers don't wait (never throws).
+        async Task LoadModelPicture(Func<byte[]> source, bool replace)
         {
             if (offline) return;   // picture mode never downloads
             int request = picRequest;
@@ -1701,8 +1711,21 @@ namespace PrintPrice
         /// Picture mode: shows a sample picture (a file, never a download); no file = back to the logo.
         internal void SetSamplePicture(string file)
         {
-            if (!File.Exists(file)) { ResetModelPicture(); return; }
-            try { SetModelPicture(PrepareModelPicture(File.ReadAllBytes(file))); } catch { }
+            SetSamplePicture(file, null);
+        }
+
+        /// Picture mode: the sample record pictures (HistoryForm.SamplePictures: assets\history-samples), by record Id. Used when
+        /// a sample picture file is missing and by StoredPicture (saved records' pictures; the disk is never read in picture mode).
+        internal Dictionary<string, byte[]> SamplePictures;
+
+        /// As above; no file = the sample picture fallbackId (SamplePictures), else back to the logo.
+        internal void SetSamplePicture(string file, string fallbackId)
+        {
+            byte[] bytes = null;
+            try { if (File.Exists(file)) bytes = File.ReadAllBytes(file); } catch { }
+            if (bytes == null && fallbackId != null && SamplePictures != null) SamplePictures.TryGetValue(fallbackId, out bytes);
+            if (bytes == null) { ResetModelPicture(); return; }
+            try { SetModelPicture(PrepareModelPicture(bytes)); } catch { }
         }
 
         /// Decodes the picture, cuts off transparent margins (slicer renders have lots) and scales it down to at most 384 px.
@@ -2127,15 +2150,17 @@ namespace PrintPrice
             settings.LastFilamentPrice = v;
         }
 
-        /// "incl. 124 g purge · 8,7 h colour changes"; only the parts that are known (purge only above 0,5 g). "" = no line.
+        /// "incl. 124 g and 8,7 h for colour changes" (ui-text: no "purge" jargon); only the parts that are known (purge only
+        /// above 0,5 g). "" = no line.
         static string PurgeNote(SliceResult r)
         {
-            var parts = new List<string>();
-            if (r.PurgeGrams > 0.5)
-                parts.Add(L.F("incl. {0} g purge", "heraf {0} g udskylning", r.PurgeGrams.ToString(r.PurgeGrams >= 10 ? "0" : "0.#", Num.Dk)));
-            if (r.ColourChangeHours >= 0.05)
-                parts.Add(L.F("{0} h colour changes", "{0} t farveskift", r.ColourChangeHours.ToString("0.#", Num.Dk)));
-            return string.Join(" · ", parts);
+            bool g = r.PurgeGrams > 0.5, h = r.ColourChangeHours >= 0.05;
+            string grams = g ? r.PurgeGrams.ToString(r.PurgeGrams >= 10 ? "0" : "0.#", Num.Dk) : "";
+            string hours = h ? r.ColourChangeHours.ToString("0.#", Num.Dk) : "";
+            if (g && h) return L.F("incl. {0} g and {1} h for colour changes", "heraf {0} g og {1} t til farveskift", grams, hours);
+            if (g) return L.F("incl. {0} g for colour changes", "heraf {0} g til farveskift", grams);
+            if (h) return L.F("{0} h for colour changes", "{0} t til farveskift", hours);
+            return "";
         }
 
         /// Material name of a filament: the profile's short name ("Bambu PLA Matte", "@BBL A1 …" dropped), else its type
@@ -2448,7 +2473,7 @@ namespace PrintPrice
 
             string problem = null;
             if (s1 == FieldState.Invalid || s2 == FieldState.Invalid || s3 == FieldState.Invalid)
-                problem = L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.");
+                problem = L.S("Use numbers of 0 or more in the red boxes.", "Brug tal på 0 eller mere i de røde felter.");
             else if (sh == FieldState.Invalid || sm == FieldState.Invalid)
                 problem = L.S("Print time: hours 0–999, minutes 0–59.", "Printtid: timer 0–999, minutter 0–59.");
             else if (s1 == FieldState.Empty || s2 == FieldState.Empty || s3 == FieldState.Empty ||
@@ -2509,13 +2534,17 @@ namespace PrintPrice
             }
             LayoutPrinterCard();   // the text width may have changed
             string wear = settings.MachineRatePerHour > 0 ? L.F(", {0} kr/h wear", ", {0} kr/t slid", Num.Fmt(settings.MachineRatePerHour)) : "";
-            lblFriendsInfo.Text = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.FriendsMarkupPct)) + wear;
-            // with a minimum price the line drops "markup" so "min. 50 kr." fits: "+75 %, 1,71 kr/h wear, min. 50 kr."
-            string o;
-            if (settings.MinimumPrice > 0)
-                o = L.F("+{0} %", "+{0} %", Num.Fmt(settings.OthersMarkupPct)) + wear + L.F(", min. {0} kr.", ", min. {0} kr.", Num.Fmt(settings.MinimumPrice));
-            else o = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.OthersMarkupPct)) + wear;
-            lblOthersInfo.Text = o;
+            // both lines say "markup" when the customer line fits its box with it (measured); otherwise both drop it, so the
+            // two sides always read the same way (qol #16): "+75 %, 1,71 kr/h wear, min. 50 kr."
+            string min = settings.MinimumPrice > 0 ? L.F(", min. {0} kr.", ", min. {0} kr.", Num.Fmt(settings.MinimumPrice)) : "";
+            string fLong = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.FriendsMarkupPct)) + wear;
+            string oLong = L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.OthersMarkupPct)) + wear + min;
+            // a few px spare: the grey line is drawn by GDI+ (PlainLabel), a little wider than TextRenderer measures
+            int room = Math.Min(lblOthersInfo.Width, lblFriendsInfo.Width) - lblOthersInfo.Padding.Horizontal - 10;
+            bool fits = room <= 0 || (TextRenderer.MeasureText(oLong, lblOthersInfo.Font).Width <= room
+                                      && TextRenderer.MeasureText(fLong, lblFriendsInfo.Font).Width <= room);
+            lblFriendsInfo.Text = fits ? fLong : "+" + Num.Fmt(settings.FriendsMarkupPct) + " %" + wear;
+            lblOthersInfo.Text = fits ? oLong : "+" + Num.Fmt(settings.OthersMarkupPct) + " %" + wear + min;
             UpdateFailedRow();
         }
 
@@ -2560,8 +2589,8 @@ namespace PrintPrice
             bool on = last != null && last.PaybackCost > 0;
             if (on)
             {
-                lblPaybackCap.Text = last.PaybackBothPrices ? L.S("Failed prints payback", "Fejlprint tjenes ind")
-                                                            : L.S("Failed prints payback – customers only", "Fejlprint tjenes ind – kun kunder");
+                lblPaybackCap.Text = last.PaybackBothPrices ? L.S("Earning back failed prints", "Fejlprint tjenes ind")
+                                                            : L.S("Earning back failed prints – customers only", "Fejlprint tjenes ind – kun kunder");
                 lblPayback.Text = L.F("{0}  ({1} left)", "{0}  ({1} tilbage)", Num.Kr(last.PaybackCost), Num.Kr(last.PaybackLeft));
             }
             if (on == paybackRowOn) return;
@@ -2665,6 +2694,16 @@ namespace PrintPrice
             if (!setupHintPending || cts != null) return;
             setupHintPending = false;
             lblAuto.SetLink(SetupHintText, () => { if (!offline) RunSetupAgain(); });
+        }
+
+        /// A settings.ini read problem (AppSettings.LoadProblem) in the info box with the Warning stripe; null = nothing.
+        /// The next message replaces it (it is said once per start).
+        internal void ShowSettingsProblem(string problem)
+        {
+            if (string.IsNullOrEmpty(problem) || cts != null) return;
+            SetAuto(problem, false);
+            autoWarning = true;
+            SetAutoColor();
         }
 
         /// Picture mode: the hint on the fresh window (main_setup_hint.png).
@@ -2841,7 +2880,7 @@ namespace PrintPrice
             string ver = Updater.Short(found.Version);
             string full = L.S("⬆  Update to v", "⬆  Opdatér til v") + ver;
             btnUpdate.Text = full;
-            foreach (string t in new[] { full, L.S("⬆  Update v", "⬆  Opdatér v") + ver, L.S("⬆  v" + ver, "⬆  Opdatér") })   // Danish keeps the word, not the version
+            foreach (string t in new[] { full, L.S("⬆  Update v", "⬆  Opdatér v") + ver, "⬆  v" + ver })   // shortest: the version only (DA "Opdatér" would repeat the power price's Update button, qol #10)
             {
                 btnUpdate.Text = t;
                 if (TextRenderer.MeasureText(t, btnUpdate.Font).Width + ScalePx(10) <= btnUpdate.Width) break;
@@ -3052,8 +3091,8 @@ namespace PrintPrice
             EnsureHistory();
             quoteWhen = DateTime.Now;
             var made = new QuoteRecord[1];   // the invoice's record once made (null before)
-            string help = L.S("Making the invoice (copy or save) gives it a number, saves it in the history and ticks Printed. Esc closes.",
-                              "Når fakturaen laves (kopi eller gem), får den et nummer, gemmes i historikken, og Printet bliver sat. Esc lukker.");
+            string help = L.S("Making the invoice (copy or save) gives it a number, saves it in the history and marks it as printed.",
+                              "Når fakturaen laves (kopi eller gem), får den et nummer, gemmes i historikken og markeres som printet.");
             QuoteForm f = null;
             f = new QuoteForm(QuoteModelName(), customer, settings.QuoteFriends, settings.QuoteDark != 0,
                 History.RecentCustomers(history, 10), last.OthersPrice, last.FriendsPrice,
@@ -3062,8 +3101,12 @@ namespace PrintPrice
                 (IWin32Window o, QuoteExport kind, bool friends, bool dark, string name, out bool failed) =>
                 {
                     bool before = made[0] != null;
-                    string msg = ExportJobInvoice(o, kind, friends, dark, name, made, out failed);
-                    if (!before && made[0] != null) f.LockCustomer();   // made now: its name stays
+                    string msg = ExportJobInvoice(o, kind, friends, dark, name, made, f.PrintStatus, out failed);
+                    if (!before && made[0] != null)
+                    {
+                        f.LockInvoice(BilledFriends(made[0]));   // made now: its name and price stay
+                        f.PrintStatus = History.PrintStateOf(made[0], DateTime.Now);
+                    }
                     return msg;
                 },
                 (friends, dark) =>
@@ -3073,6 +3116,10 @@ namespace PrintPrice
                     if (!offline) settings.Save();
                 },
                 true, help);
+            // issue #7: a new invoice starts at "Printed" (making it ticks Printed, as before); the pick is stored when it
+            // is made, and saved at once after that
+            f.PrintStatus = PrintState.Printed;
+            f.StatusPicked += delegate { if (made[0] != null) SaveStatusNow(f, new List<QuoteRecord> { made[0] }); };
             return f;
         }
 
@@ -3095,7 +3142,7 @@ namespace PrintPrice
         /// number). Save to history = the quote only (no number). Otherwise: name required, file dialog first (cancel =
         /// nothing saved, no number used), then the job is saved, the invoice made and the page copied / written.
         string ExportJobInvoice(IWin32Window owner, QuoteExport kind, bool friends, bool dark, string customer,
-                                QuoteRecord[] made, out bool failed)
+                                QuoteRecord[] made, PrintState state, out bool failed)
         {
             failed = false;
             if (made[0] != null)
@@ -3122,10 +3169,10 @@ namespace PrintPrice
                 if (path == null) return null;
             }
             QuoteRecord rec;
-            string err = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, PrintState.Printed, out rec);
+            string err = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, state, out rec);
             if (rec == null) { failed = true; return err ?? L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu."); }
             made[0] = rec;
-            return ExportRecordTo(rec, true, kind, friends, dark, customer, modelImage, null, path, wanted, now, out failed);
+            return ExportRecordTo(rec, true, kind, friends, dark, customer, modelImage, state, path, wanted, now, out failed);
         }
 
         /// Quote / invoice text to the clipboard (--test-invoice: to the test's own catcher instead).
@@ -3219,34 +3266,64 @@ namespace PrintPrice
             DateTime when;
             if (rec == null || !History.TryTime(rec.SavedAt, out when)) when = DateTime.Now;
             quoteWhen = when;
-            string done;
+            string copyNote;
+            string done = WriteExport(kind, false, dark, path, () => QuoteText(customer),
+                                      d => QuotePage.Render(BuildQuote(friends, when, History.QuoteNumber(when), customer), d),
+                                      null, null, out copyNote, out failed);
+            if (failed) return done;
+            if (err != null) { failed = true; return done + ". " + err; }
+            return done + L.S(" and saved to history.", " og gemt i historikken.") + FailedSavedNote(rec);
+        }
+
+        /// The shared end of every export (ExportQuote, ExportRecordTo, ExportGroup): copies the text (Text) or the
+        /// picture (Copy), or writes the PNG / PDF. A printed PDF is always light: pdfPages (A4 pages), null = render(false)
+        /// as one page. An invoice PDF also gets its copy in the Invoices folder (copyName != null: SaveInvoiceCopy).
+        /// Returns the "✓ …" text; on an error failed = true and the error text ("Clipboard: " first for Copy / Text).
+        string WriteExport(QuoteExport kind, bool invoice, bool dark, string path, Func<string> text, Func<bool, Bitmap> render,
+                           Func<List<Bitmap>> pdfPages, Func<string> copyName, out string copyNote, out bool failed)
+        {
+            failed = false;
+            copyNote = null;
             try
             {
                 if (kind == QuoteExport.Text)
                 {
-                    CopyText(QuoteText(customer));
-                    done = L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
+                    CopyText(text());
+                    return invoice ? L.S("✓ Invoice text copied", "✓ Fakturaen er kopieret som tekst") : L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
                 }
-                else
+                if (kind == QuoteExport.Pdf)
                 {
-                    var data = BuildQuote(friends, when, History.QuoteNumber(when), customer);
-                    using (var bmp = QuotePage.Render(data, dark && kind != QuoteExport.Pdf))   // a printed PDF is always light
+                    var pages = pdfPages != null ? pdfPages() : new List<Bitmap> { render(false) };
+                    try
                     {
-                        if (kind == QuoteExport.Copy) CopyPicture(bmp);
-                        else if (kind == QuoteExport.Png) bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
-                        else QuotePage.SavePdf(bmp, path);
+                        byte[] pdf = QuotePage.Pdf(pages);
+                        File.WriteAllBytes(path, pdf);
+                        if (copyName != null) copyNote = SaveInvoiceCopy(pdf, copyName());
                     }
-                    done = kind == QuoteExport.Copy ? L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede")
-                         : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
+                    finally { foreach (var b in pages) b.Dispose(); }
+                    return pages.Count > 1 ? L.F("✓ Saved {0} ({1} pages)", "✓ Gemt {0} ({1} sider)", Path.GetFileName(path), pages.Count)
+                                           : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
                 }
+                using (var bmp = render(dark))
+                {
+                    if (kind == QuoteExport.Copy) CopyPicture(bmp);
+                    else bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                return kind == QuoteExport.Copy
+                    ? (invoice ? L.S("✓ Invoice picture copied", "✓ Fakturaen er kopieret som billede") : L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede"))
+                    : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
             }
             catch (Exception ex)
             {
                 failed = true;
                 return (kind == QuoteExport.Copy || kind == QuoteExport.Text ? L.S("Clipboard: ", "Udklipsholder: ") : "") + ex.Message;
             }
-            if (err != null) { failed = true; return done + ". " + err; }
-            return done + L.S(" and saved to history.", " og gemt i historikken.") + FailedSavedNote(rec);
+        }
+
+        /// An invoice export without a customer name.
+        static string NeedCustomerText()
+        {
+            return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
         }
 
         /// After saving a quote marked Failed: a second line saying what that means for new quotes ("" otherwise).
@@ -3255,7 +3332,8 @@ namespace PrintPrice
             if (r == null || !r.Failed) return "";
             if (settings.FailedPayback == 0)
                 return "\n" + L.S("Marked as failed in the history.", "Markeret som fejlet i historikken.");
-            return "\n" + L.F("Marked as failed: new quotes earn back {0}.", "Markeret som fejlet: nye tilbud tjener {0} ind.",
+            // Num.Kr already ends in "kr.": no extra full stop after it
+            return "\n" + L.F("Marked as failed: new quotes earn back {0}", "Markeret som fejlet: nye tilbud tjener {0} ind.",
                               Num.Kr(History.FailedCost(r)).Replace(' ', ' '));
         }
 
@@ -3308,6 +3386,7 @@ namespace PrintPrice
             else d.MaterialNames.Add(BambuSlicer.ShortName(settings.FilamentPreset).Trim());
             d.Material = QuoteRows.MaterialLine(filaments != null ? filaments.Select(f => f.Type) : null,
                                                 filaments != null ? filaments.Count : 0, d.MaterialNames[0]);
+            NameByColour(d.MaterialNames, d.MaterialColours);
             return d;
         }
 
@@ -3364,13 +3443,13 @@ namespace PrintPrice
             // a made invoice keeps the name it was made out to (BilledTo, else Customer for older invoices)
             bool made = invoice && InvoiceMade(r);
             string help = made
-                ? L.F("Invoice {0} is already made: it keeps its number, date and name. Esc closes.",
-                      "Faktura {0} er allerede lavet: den beholder sit nummer, sin dato og sit navn. Esc lukker.", r.InvoiceNo)
+                ? L.F("Invoice {0} is already made and stays as it is.",
+                      "Faktura {0} er allerede lavet og forbliver uændret.", r.InvoiceNo)
                 : invoice
-                ? L.S("Making the invoice (copy or save) gives it a number and ticks Printed in the history. Esc closes.",
-                      "Når fakturaen laves (kopi eller gem), får den et nummer, og Printet bliver sat i historikken. Esc lukker.")
-                : L.S("Copying or saving puts the name and price on this quote in the history. Esc closes.",
-                      "Når du kopierer eller gemmer, kommer navn og pris på dette tilbud i historikken. Esc lukker.");
+                ? L.S("Making the invoice (copy or save) gives it a number and marks it as printed in the history.",
+                      "Når fakturaen laves (kopi eller gem), får den et nummer og markeres som printet i historikken.")
+                : L.S("Copying or saving puts the name and price on this quote in the history.",
+                      "Når du kopierer eller gemmer, kommer navn og pris på dette tilbud i historikken.");
             string billTo = made ? History.InvoiceInfo(r, settings).BilledTo : r.Customer ?? "";
             QuoteForm f = null;
             f = new QuoteForm(RecordModelName(r), billTo, r.For == History.ForFriends, settings.QuoteDark != 0,
@@ -3380,8 +3459,9 @@ namespace PrintPrice
                 {
                     bool before = InvoiceMade(r);
                     string msg = ExportRecord(o, r, invoice, kind, friends, dark, customer, pic, invoice ? (PrintState?)null : f.PrintStatus, out failed);
-                    // made now: the name it was made out to stays (as the main window's Show invoice…)
-                    if (invoice && !before && InvoiceMade(r)) f.LockCustomer();
+                    // made now: the name it was made out to stays (as the main window's Show invoice…); the status box
+                    // shows MakeInvoice's Printed tick
+                    if (invoice && !before && InvoiceMade(r)) { f.LockInvoice(BilledFriends(r)); f.PrintStatus = History.PrintStateOf(r, DateTime.Now); }
                     return msg;
                 },
                 (friends, dark) =>
@@ -3390,9 +3470,11 @@ namespace PrintPrice
                     if (!offline) settings.Save();
                 },
                 invoice, help);
-            if (made) f.LockCustomer();
-            if (!invoice) f.PrintStatus = History.PrintStateOf(r, DateTime.Now);   // the quote's status in History
-            else if (r.Failed)
+            if (made) f.LockInvoice(BilledFriends(r));
+            // the record's status in History (quote and invoice, issue #7); a pick is saved at once
+            f.PrintStatus = History.PrintStateOf(r, DateTime.Now);
+            f.StatusPicked += delegate { SaveStatusNow(f, new List<QuoteRecord> { r }); };
+            if (invoice && r.Failed)
                 f.ShowNote(help + "\n" + L.S("This print is marked as failed in the history.", "Dette print er markeret som fejlet i historikken."),
                            InfoKind.Warning);
             if (owned && pic != null) f.FormClosed += delegate { pic.Dispose(); };
@@ -3403,6 +3485,18 @@ namespace PrintPrice
         static bool InvoiceMade(QuoteRecord r)
         {
             return r != null && !string.IsNullOrEmpty(r.InvoiceNo);
+        }
+
+        /// The price a made invoice was billed at (A4): the record's For (set when it was made; History keeps it locked).
+        static bool BilledFriends(QuoteRecord r)
+        {
+            return r != null && r.For == History.ForFriends;
+        }
+
+        /// The same for a combined invoice: friends only when every job was billed at the friends price.
+        static bool BilledFriends(List<QuoteRecord> jobs)
+        {
+            return jobs != null && jobs.Count > 0 && jobs.All(r => BilledFriends(r));
         }
 
         /// The record's picture: the one saved with it (issue #4), else the model on screen when it is the same link/file,
@@ -3496,6 +3590,7 @@ namespace PrintPrice
             else d.MaterialNames.Add(savedMaterial.Length > 0 ? savedMaterial : BambuSlicer.ShortName(settings.FilamentPreset).Trim());
             d.Material = QuoteRows.MaterialLine(r.Filaments != null ? r.Filaments.Select(f => f.Type) : null,
                                                 r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
+            NameByColour(d.MaterialNames, d.MaterialColours);
         }
 
         /// One export of a record's quote / invoice: file dialog first (null = cancelled), then the record gets the name
@@ -3511,7 +3606,7 @@ namespace PrintPrice
                 // "Save to history" of a saved record: only its name and price (For); an invoice is not made by this.
                 // A made invoice's box shows its kept name (read-only): the record's Customer stays as it is.
                 if (!(invoice && InvoiceMade(r))) r.Customer = customer;
-                r.For = friends ? History.ForFriends : History.ForCustomer;
+                if (!InvoiceMade(r)) r.For = friends ? History.ForFriends : History.ForCustomer;   // A4: an invoice keeps its price
                 string e = offline ? null : History.Save(history);
                 if (e != null) { failed = true; return e; }
                 return L.S("✓ Saved to history.", "✓ Gemt i historikken.") + FailedSavedNote(r);
@@ -3519,7 +3614,7 @@ namespace PrintPrice
             if (invoice && customer.Length == 0)
             {
                 failed = true;
-                return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
+                return NeedCustomerText();
             }
             DateTime now = DateTime.Now;
             string path = null, wanted = null;
@@ -3552,47 +3647,25 @@ namespace PrintPrice
         {
             failed = false;
             if (!(invoice && InvoiceMade(r))) r.Customer = customer;   // MakeInvoice stores a new invoice's name from it (BilledTo)
-            r.For = friends ? History.ForFriends : History.ForCustomer;
-            if (state.HasValue) History.SetPrintState(r, state.Value, now);   // quotes only (the invoice window has no status)
+            // A4: a made invoice keeps the price it was billed at (same number, same amount), whatever the window says
+            if (invoice && InvoiceMade(r)) friends = BilledFriends(r);
+            if (!InvoiceMade(r)) r.For = friends ? History.ForFriends : History.ForCustomer;
+            if (state.HasValue && !invoice) History.SetPrintState(r, state.Value, now);   // the quote window's print status
             string err = null, copyNote = null;
             if (invoice)
             {
                 History.MakeInvoice(history, r, now, settings, wantedNo);   // random code (never given twice: settings.UsedInvoiceNos), date, Printed
+                // issue #7: the status chosen in the job's invoice window (state given only for its first export; a saved
+                // record's window saves its status at once and keeps MakeInvoice's Printed tick)
+                if (state.HasValue) History.SetPrintState(r, state.Value, now);
                 if (!offline) settings.Save();
             }
             if (!offline) err = History.Save(history);
-            string done;
-            try
-            {
-                if (kind == QuoteExport.Text)
-                {
-                    CopyText(RecordText(r, friends, invoice));
-                    done = invoice ? L.S("✓ Invoice text copied", "✓ Fakturaen er kopieret som tekst") : L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
-                }
-                else
-                {
-                    var data = BuildRecordQuote(r, friends, customer, invoice, pic);
-                    using (var bmp = QuotePage.Render(data, dark && kind != QuoteExport.Pdf))   // a printed PDF is always light
-                    {
-                        if (kind == QuoteExport.Copy) CopyPicture(bmp);
-                        else if (kind == QuoteExport.Png) bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
-                        else
-                        {
-                            byte[] pdf = QuotePage.Pdf(bmp);
-                            File.WriteAllBytes(path, pdf);
-                            if (invoice) copyNote = SaveInvoiceCopy(pdf, QuoteRows.InvoiceFileName(r.InvoiceNo, InvoiceName(r, customer)));
-                        }
-                    }
-                    done = kind == QuoteExport.Copy
-                        ? (invoice ? L.S("✓ Invoice picture copied", "✓ Fakturaen er kopieret som billede") : L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede"))
-                        : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
-                }
-            }
-            catch (Exception ex)
-            {
-                failed = true;
-                return (kind == QuoteExport.Copy || kind == QuoteExport.Text ? L.S("Clipboard: ", "Udklipsholder: ") : "") + ex.Message;
-            }
+            string done = WriteExport(kind, invoice, dark, path, () => RecordText(r, friends, invoice),
+                                      d => QuotePage.Render(BuildRecordQuote(r, friends, customer, invoice, pic), d), null,
+                                      invoice ? (Func<string>)(() => QuoteRows.InvoiceFileName(r.InvoiceNo, InvoiceName(r, customer))) : null,
+                                      out copyNote, out failed);
+            if (failed) return done;
             if (err != null) { failed = true; return done + ". " + err; }
             return done + (invoice ? L.F(". Invoice no. {0} is in the history.", ". Faktura nr. {0} er gemt i historikken.", r.InvoiceNo)
                                    : L.S(" and saved to history.", " og gemt i historikken."))
@@ -3650,8 +3723,8 @@ namespace PrintPrice
             }
             catch (Exception ex)
             {
-                return L.F("The backup copy in PrintPrice's Invoices folder could not be saved: {0}",
-                           "Sikkerhedskopien i PrintPrices fakturamappe kunne ikke gemmes: {0}", ex.Message);
+                return L.F("The copy in the Invoices folder couldn't be saved: {0}",
+                           "Kopien i mappen Invoices kunne ikke gemmes: {0}", ex.Message);
             }
         }
 
@@ -3715,13 +3788,13 @@ namespace PrintPrice
             {
                 var check = History.BillProblem(sel);
                 if (invoice && check.Clash != null)
-                    return L.F("\"{0}\" is already on invoice {1}. Select only prints that aren't billed yet, or only the prints of that invoice.",
-                               "\"{0}\" er allerede på faktura {1}. Vælg kun print, der ikke er faktureret endnu, eller kun printene på den faktura.",
+                    return L.F("\"{0}\" is already on invoice {1}. Pick only unbilled prints, or only that invoice's prints.",
+                               "\"{0}\" er allerede på faktura {1}. Vælg kun print uden faktura, eller kun den fakturas print.",
                                RecordModelName(check.Clash), check.ClashCode);
                 if (check.Jobs.Count == 0)
-                    return L.S("All the selected prints are marked as failed: failed prints don't go on a bill.",
-                               "Alle de valgte print er markeret som fejlet: fejlede print kommer ikke på en regning.");
-                jobs = OldestFirst(check.Jobs);
+                    return L.S("Failed prints can't go on a bill, and all the selected ones failed.",
+                               "Fejlede print kan ikke faktureres, og alle de valgte er fejlet.");
+                jobs = History.OldestFirst(check.Jobs);
                 if (check.FailedLeftOut > 0) { warn = true; notes.Add(FailedLeftOutText(check.FailedLeftOut)); }
                 if (invoice && check.Code.Length > 0)
                 {
@@ -3738,7 +3811,15 @@ namespace PrintPrice
                     return null;
                 }
             }
-            f = NewGroupQuoteForm(jobs, invoice, notes, warn, null);
+            try { f = NewGroupQuoteForm(jobs, invoice, notes, warn, null); }
+            catch (Exception ex)
+            {
+                // a record with an absurd number (e.g. a hand-edited history.json): the bill can't be worked out
+                if (!(ex is OverflowException || ex is ArgumentException || ex is InvalidOperationException)) throw;
+                f = null;
+                return L.S("These prints can't go on one bill: one of them has a price or amount too large to work with. Check their time and grams.",
+                           "Disse print kan ikke komme på én regning: et af dem har en pris eller mængde, der er for stor. Tjek deres tid og gram.");
+            }
             return null;
         }
 
@@ -3748,22 +3829,6 @@ namespace PrintPrice
                           : L.F("{0} failed prints are left off the bill.", "{0} fejlede print er udeladt af regningen.", n);
         }
 
-        /// Oldest first by SavedAt (same time: the older list position first), as History.InvoiceGroup orders a bill.
-        static List<QuoteRecord> OldestFirst(List<QuoteRecord> jobs)
-        {
-            var pos = new Dictionary<QuoteRecord, int>();
-            var res = new List<QuoteRecord>();
-            foreach (var r in jobs) if (!pos.ContainsKey(r)) { pos[r] = res.Count; res.Add(r); }
-            res.Sort(delegate(QuoteRecord a, QuoteRecord b)
-            {
-                DateTime ta, tb;
-                bool ga = History.TryTime(a.SavedAt, out ta), gb = History.TryTime(b.SavedAt, out tb);
-                if (ga != gb) return ga ? -1 : 1;
-                int k = ga ? ta.CompareTo(tb) : 0;
-                return k != 0 ? k : pos[b].CompareTo(pos[a]);   // the selection is newest first: a later position is older
-            });
-            return res;
-        }
 
         /// The jobs' names (trimmed, not empty), the most used first (same count: the first seen first).
         static List<string> JobNames(List<QuoteRecord> jobs)
@@ -3798,13 +3863,13 @@ namespace PrintPrice
             DateTime when = Screenshots.Active ? new DateTime(2026, 11, 19, 10, 30, 0) : DateTime.Now;   // a combined quote's number and date
             string code = made ? (jobs[0].InvoiceNo ?? "").Trim() : "";
             string help = made
-                ? L.F("Invoice {0} for {1} prints is already made: it keeps its number, date, name and prices. Esc closes.",
-                      "Faktura {0} for {1} print er allerede lavet: den beholder sit nummer, sin dato, sit navn og sine priser. Esc lukker.", code, n)
+                ? L.F("Invoice {0} ({1} prints) is already made and stays as it is.",
+                      "Faktura {0} ({1} print) er allerede lavet og forbliver uændret.", code, n)
                 : invoice
-                ? L.F("Making the invoice (copy or save) gives all {0} prints one number and ticks Printed in the history. Esc closes.",
-                      "Når fakturaen laves (kopi eller gem), får alle {0} print ét nummer, og Printet bliver sat i historikken. Esc lukker.", n)
-                : L.F("Copying or saving puts the name and price on these {0} quotes in the history. Esc closes.",
-                      "Når du kopierer eller gemmer, kommer navn og pris på disse {0} tilbud i historikken. Esc lukker.", n);
+                ? L.F("Making the invoice (copy or save) gives all {0} prints one number and marks them as printed in the history.",
+                      "Når fakturaen laves (kopi eller gem), får alle {0} print ét nummer og markeres som printet i historikken.", n)
+                : L.F("Copying or saving puts the name and price on these {0} quotes in the history.",
+                      "Når du kopierer eller gemmer, kommer navn og pris på disse {0} tilbud i historikken.", n);
             var names = JobNames(jobs);
             string billTo = made ? History.InvoiceInfo(jobs[0], settings).BilledTo : names.Count > 0 ? names[0] : "";
             if (!made && names.Count > 1)
@@ -3825,8 +3890,9 @@ namespace PrintPrice
                 {
                     bool before = jobs.All(r => InvoiceMade(r));
                     string msg = ExportGroup(o, jobs, invoice, kind, fr, dark, customer, pics, when, out failed);
-                    // made now: the name it was made out to stays (as the main window's Show invoice…)
-                    if (invoice && !before && jobs.All(r => InvoiceMade(r))) f.LockCustomer();
+                    // made now: the name it was made out to stays (as the main window's Show invoice…); the status box
+                    // shows MakeInvoice's Printed ticks
+                    if (invoice && !before && jobs.All(r => InvoiceMade(r))) { f.LockInvoice(BilledFriends(jobs)); ShowGroupStatus(f, jobs); }
                     return msg;
                 },
                 (fr, dark) =>
@@ -3835,11 +3901,42 @@ namespace PrintPrice
                     if (!offline) settings.Save();
                 },
                 invoice, help);
-            if (made) f.LockCustomer();
-            if (!invoice) f.HideStatus();   // one status for several quotes would overwrite theirs
+            if (made) f.LockInvoice(BilledFriends(jobs));
+            // issue #7: one status box for all of them ("Mixed" when they differ); a pick is saved on every job at once
+            ShowGroupStatus(f, jobs);
+            f.StatusPicked += delegate { SaveStatusNow(f, jobs); };
             foreach (var note in notes) f.AddNote(note, warn ? InfoKind.Warning : InfoKind.Info);
             f.Disposed += delegate { for (int i = 0; i < n; i++) if (owned[i] && pics[i] != null) pics[i].Dispose(); };
             return f;
+        }
+
+        /// A combined window's status box: their one state, or "Mixed" when they differ.
+        static void ShowGroupStatus(QuoteForm f, List<QuoteRecord> jobs)
+        {
+            DateTime now = DateTime.Now;
+            var states = jobs.Select(r => History.PrintStateOf(r, now)).Distinct().ToList();
+            f.SetGroupStatus(jobs.Count, states.Count == 1 ? (PrintState?)states[0] : null);
+        }
+
+        /// Issue #7: a status picked in a saved record's window (quote or invoice, one job or a combined window) is saved
+        /// at once on every record (History.SetPrintState, one Save). Several jobs to "Failed" asks first (the user's
+        /// choice); No = the box goes back. The ✓ / error line shows in the window's info box.
+        void SaveStatusNow(QuoteForm f, List<QuoteRecord> recs)
+        {
+            if (recs == null || recs.Count == 0) return;
+            var state = f.PrintStatus;
+            DateTime now = DateTime.Now;
+            Action back = () => { if (recs.Count > 1) ShowGroupStatus(f, recs); else f.PrintStatus = History.PrintStateOf(recs[0], now); };
+            if (state == PrintState.Failed && recs.Count(r => !r.Failed) > 1)
+                using (var ask = HistoryForm.NewFailedAsk(recs.Count(r => !r.Failed)))
+                    if (ask.ShowDialog(f) != DialogResult.Yes) { back(); return; }
+            foreach (var r in recs) History.SetPrintState(r, state, now);
+            string e = offline ? null : History.Save(history);
+            if (e != null) { f.ShowNote(e, InfoKind.Error); return; }
+            back();   // "Printing now" that is already over reads as Printed
+            string text = L.F("✓ Print status saved: {0}.", "✓ Printstatus gemt: {0}.", QuoteRows.StateName(state));
+            if (state == PrintState.Failed) text += FailedSavedNote(recs[0]);
+            f.ShowNote(text, InfoKind.Success);
         }
 
         /// Names and colour dots of GroupBreakdownInfo.Materials (by the material lines' Index).
@@ -3851,6 +3948,21 @@ namespace PrintPrice
                 // older quotes saved without a filament name: Settings' filament, as their single page shows
                 names.Add(unnamed ? BambuSlicer.ShortName(settings.FilamentPreset ?? "").Trim() : MaterialName(new FilamentUse { Profile = m.Name ?? "", Type = m.Type ?? "", Colour = m.Colour ?? "" }));
                 colours.Add(ParseColour(m.Colour));
+            }
+            NameByColour(names, colours);
+        }
+
+        /// qol 8: material rows with the same name get their colour's name ("Bambu PLA Basic (Red)", FilePickerForm.
+        /// ColourName), so 4 rows of one profile can be told apart. Unique names and rows without a colour stay as they are.
+        static void NameByColour(List<string> names, List<Color> colours)
+        {
+            var count = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var n in names) { int c; count.TryGetValue(n ?? "", out c); count[n ?? ""] = c + 1; }
+            for (int i = 0; i < names.Count && i < colours.Count; i++)
+            {
+                if (count[names[i] ?? ""] < 2) continue;
+                string colour = FilePickerForm.ColourName(colours[i]);
+                if (colour.Length > 0) names[i] = (names[i] ?? "") + " (" + colour + ")";
             }
         }
 
@@ -3952,12 +4064,13 @@ namespace PrintPrice
             failed = false;
             customer = (customer ?? "").Trim();
             bool made = invoice && jobs.All(r => InvoiceMade(r));
+            if (made) friends = BilledFriends(jobs);   // A4: a made invoice keeps the price it was billed at
             int forWho = friends ? History.ForFriends : History.ForCustomer;
             string prints = QuoteRows.PrintsText(jobs.Count);
             if (kind == QuoteExport.History)
             {
-                // only the name and price (For) on each job; never makes an invoice
-                foreach (var r in jobs) { if (!made) r.Customer = customer; r.For = forWho; }
+                // only the name and price (For) on each job; never makes an invoice; invoiced jobs keep their For (A4)
+                foreach (var r in jobs) { if (!made) r.Customer = customer; if (!InvoiceMade(r)) r.For = forWho; }
                 string e = offline ? null : History.Save(history);
                 if (e != null) { failed = true; return e; }
                 return L.F("✓ Saved to history ({0}).", "✓ Gemt i historikken ({0}).", prints);
@@ -3965,7 +4078,7 @@ namespace PrintPrice
             if (invoice && customer.Length == 0)
             {
                 failed = true;
-                return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
+                return NeedCustomerText();
             }
             DateTime now = DateTime.Now;
             string path = null, wanted = null;
@@ -3992,7 +4105,7 @@ namespace PrintPrice
                         : L.S("No prints to invoice.", "Ingen print at fakturere.");
                 }
             }
-            foreach (var r in jobs) { if (!made) r.Customer = customer; r.For = forWho; }   // MakeInvoice takes the name from Customer
+            foreach (var r in jobs) { if (!made) r.Customer = customer; if (!InvoiceMade(r)) r.For = forWho; }   // MakeInvoice takes the name from Customer
             string err = null, copyNote = null;
             if (invoice)
             {
@@ -4000,47 +4113,20 @@ namespace PrintPrice
                 if (!offline) settings.Save();
             }
             if (!offline) err = History.Save(history);
-            string done;
-            try
-            {
-                var data = BuildGroupQuote(jobs, friends, customer, invoice, pics, when);
-                if (kind == QuoteExport.Text)
+            QuoteData data = null;   // built once, inside WriteExport (an error there is its error text)
+            Func<QuoteData> getData = () => data ?? (data = BuildGroupQuote(jobs, friends, customer, invoice, pics, when));
+            string done = WriteExport(kind, invoice, dark, path,
+                () =>
                 {
                     var bill = History.GroupBill(jobs, settings, friends);
-                    CopyText(QuoteRows.GroupText(bill, invoice, invoice ? data.InvoiceNo : data.Number, customer, data.Date,
-                                                 invoice ? History.InvoiceInfo(jobs[0], settings, data.Date) : null));
-                    done = invoice ? L.S("✓ Invoice text copied", "✓ Fakturaen er kopieret som tekst") : L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
-                }
-                else if (kind == QuoteExport.Pdf)
-                {
-                    var pages = QuotePage.RenderPages(data, false);   // a printed PDF is always light; A4 pages
-                    try
-                    {
-                        byte[] pdf = QuotePage.Pdf(pages);
-                        File.WriteAllBytes(path, pdf);
-                        if (invoice) copyNote = SaveInvoiceCopy(pdf, QuoteRows.InvoiceFileName(jobs[0].InvoiceNo, InvoiceName(jobs[0], customer)));
-                    }
-                    finally { foreach (var b in pages) b.Dispose(); }
-                    done = pages.Count > 1 ? L.F("✓ Saved {0} ({1} pages)", "✓ Gemt {0} ({1} sider)", Path.GetFileName(path), pages.Count)
-                                           : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
-                }
-                else
-                {
-                    using (var bmp = QuotePage.Render(data, dark))
-                    {
-                        if (kind == QuoteExport.Copy) CopyPicture(bmp);
-                        else bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
-                    }
-                    done = kind == QuoteExport.Copy
-                        ? (invoice ? L.S("✓ Invoice picture copied", "✓ Fakturaen er kopieret som billede") : L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede"))
-                        : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
-                }
-            }
-            catch (Exception ex)
-            {
-                failed = true;
-                return (kind == QuoteExport.Copy || kind == QuoteExport.Text ? L.S("Clipboard: ", "Udklipsholder: ") : "") + ex.Message;
-            }
+                    return QuoteRows.GroupText(bill, invoice, invoice ? getData().InvoiceNo : getData().Number, customer, getData().Date,
+                                               invoice ? History.InvoiceInfo(jobs[0], settings, getData().Date) : null);
+                },
+                d => QuotePage.Render(getData(), d),
+                () => QuotePage.RenderPages(getData(), false),   // A4 pages
+                invoice ? (Func<string>)(() => QuoteRows.InvoiceFileName(jobs[0].InvoiceNo, InvoiceName(jobs[0], customer))) : null,
+                out copyNote, out failed);
+            if (failed) return done;
             if (err != null) { failed = true; return done + ". " + err; }
             return done + (invoice ? L.F(". Invoice no. {0} is in the history ({1}).", ". Faktura nr. {0} er gemt i historikken ({1}).", jobs[0].InvoiceNo, prints)
                                    : L.F(" and saved to history ({0}).", " og gemt i historikken ({0}).", prints))
@@ -4072,7 +4158,7 @@ namespace PrintPrice
                 if (History.TryTime(src.SavedAt, out t)) r.SavedAt = History.Stamp(t.AddDays(16 + i / order.Length));
                 jobs.Add(r);
             }
-            jobs = OldestFirst(jobs);
+            jobs = History.OldestFirst(jobs);
             pics = new Image[jobs.Count];
             for (int i = 0; i < jobs.Count; i++)
             {
@@ -4206,33 +4292,37 @@ namespace PrintPrice
         {
             if (history != null) return;
             if (offline) { history = new List<QuoteRecord>(); return; }
-            history = History.Load(out historyProblem);
+            // the start-up read (StartupPictureClean) when history.json hasn't changed since, else a normal Load
+            history = History.LoadFrom(historyAhead, out historyProblem);
+            historyAhead = null;
             History.ReservePrinterIds(history, settings);   // a new printer never reuses an id from the history
             if (historyProblem == null && !picturesCleaned) { picturesCleaned = true; History.CleanPictures(history); }   // once per run
         }
 
         bool picturesCleaned;   // History.CleanPictures ran this run (StartupPictureClean or EnsureHistory)
+        History.HistoryReadAhead historyAhead;   // StartupPictureClean's read, used by EnsureHistory if the file is unchanged
+        Task startupRead;                        // StartupPictureClean's run (--test-history-read waits for it)
 
-        /// At start (Shown): reads and parses history.json off the UI thread (no Load: that renames bad files and blocks
-        /// saving), then cleans leftover pictures on the UI thread, only when the file read fine and the history hasn't been
-        /// loaded meanwhile (a save loads it first, so a just-saved picture is never in danger; EnsureHistory cleans then).
-        async void StartupPictureClean()
+        /// At start (Shown): reads and parses history.json off the UI thread (History.ReadAhead, no Load: that renames bad
+        /// files and blocks saving) and keeps it for EnsureHistory, then cleans leftover pictures on the UI thread, only
+        /// when the file read fine and the history hasn't been loaded meanwhile (a save loads it first, so a just-saved
+        /// picture is never in danger; EnsureHistory cleans then).
+        void StartupPictureClean()
         {
             if (offline || picturesCleaned) return;
-            List<QuoteRecord> list = null;
-            try
-            {
-                list = await Task.Run(() =>
-                {
-                    string path = History.FilePath;
-                    if (!File.Exists(path)) return new List<QuoteRecord>();
-                    return History.ParseJson(File.ReadAllText(path, System.Text.Encoding.UTF8));   // null = not readable: skip
-                });
-            }
+            startupRead = StartupPictureCleanAsync();
+        }
+
+        async Task StartupPictureCleanAsync()
+        {
+            History.HistoryReadAhead ahead;
+            try { ahead = await Task.Run(() => History.ReadAhead()); }
             catch { return; }   // locked / unreadable: EnsureHistory decides later
-            if (list == null || IsDisposed || history != null || picturesCleaned) return;
+            if (ahead == null || ahead.List == null || IsDisposed || history != null) return;   // null = not readable: Load later
+            historyAhead = ahead;
+            if (picturesCleaned) return;
             picturesCleaned = true;
-            try { History.CleanPictures(list); } catch { }
+            try { History.CleanPictures(ahead.List); } catch { }
         }
 
         /// Adds the quote on screen to the history and writes the file. null = OK, else the error text.
@@ -4315,8 +4405,15 @@ namespace PrintPrice
         /// The picture saved with a record (History.LoadPicture) as a Bitmap; null = none, not decodable (WebP) or picture mode.
         Bitmap StoredPicture(QuoteRecord r)
         {
-            if (offline || r == null || string.IsNullOrEmpty(r.Id)) return null;
-            var img = History.PictureImage(History.LoadPicture(r.Id));
+            if (r == null || string.IsNullOrEmpty(r.Id)) return null;
+            byte[] bytes;
+            if (offline)
+            {
+                // picture mode: the sample pictures only (never the user's pictures folder)
+                if (SamplePictures == null || !SamplePictures.TryGetValue(r.Id, out bytes)) return null;
+            }
+            else bytes = History.LoadPicture(r.Id);
+            var img = History.PictureImage(bytes);
             if (img == null) return null;
             var bmp = img as Bitmap;
             if (bmp != null) return bmp;
@@ -4395,7 +4492,8 @@ namespace PrintPrice
                     else
                     {
                         var minLine = lines.FirstOrDefault(l => l.Key == QuoteLine.Minimum);
-                        long workOre = lines.Where(l => l.Key == QuoteLine.Work).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
+                        // payback is folded into Work & handling too (pricing, whole-app review)
+                        long workOre = lines.Where(l => l.Key == QuoteLine.Work || l.Key == QuoteLine.Payback).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
                         var shown = QuoteRows.FoldMinimum(lines);
                         var rows = QuoteRows.Build(qd.Breakdown, qd.MaterialNames, qd.PurgeGrams, qd.Hours, qd.Minutes, qd.PlateName);
                         var workRow = rows.FirstOrDefault(r => r.Kind == QuoteRowKind.Head && r.Label == L.S("Work & handling", "Arbejde & håndtering"));
@@ -4453,6 +4551,19 @@ namespace PrintPrice
                 log.Check(f.TestInfoKind == InfoKind.Success && clip != null && no.Length > 0 && clip.Contains(no),
                           "2m Copy text: invoice text with " + no + " (" + msg + ")");
                 log.Check(clip != null && clip.IndexOf("inimum", StringComparison.OrdinalIgnoreCase) < 0, "2n Copy text names no minimum price");
+                {
+                    // A4: the made invoice keeps the price it was billed at; Friends can't be picked, nothing changes
+                    int forBefore = made != null ? made.For : 0;
+                    double othersBefore = made != null ? made.OthersPrice : 0;
+                    log.Check(f.TestPriceLocked && !f.TestFriendsChosen, "2p price choice locked at Customers after the invoice is made");
+                    f.TestFriends(true);
+                    log.Check(!f.TestFriendsChosen, "2q a Friends click is ignored (still Customers)");
+                    clip = null;
+                    msg = f.TestExport(QuoteExport.Text);
+                    log.Check(made != null && made.For == forBefore && made.OthersPrice == othersBefore && made.InvoiceNo == no,
+                              "2r record unchanged: For " + (made != null ? made.For : 0) + ", customer price " + Num.Kr(othersBefore));
+                    log.Check(clip != null && clip.Contains(Num.N2(othersBefore)), "2s Copy text holds the customer amount " + Num.Kr(othersBefore));
+                }
 
                 // 3. another export from the same window: same number, nothing new
                 msg = f.TestExport(QuoteExport.Pdf);
@@ -4566,7 +4677,7 @@ namespace PrintPrice
                         var made5 = history.FirstOrDefault(r => r.BilledTo == "Femte Kunde");
                         string no5 = made5 != null ? made5.InvoiceNo ?? "" : "";
                         log.Check(f.TestInfoKind == InfoKind.Success && no5.Length > 0 && File.Exists(Path.Combine(dir, no5 + " - Femte Kunde.pdf")) &&
-                                  msg.Contains(L.S("Invoices folder could not be saved", "fakturamappe kunne ikke gemmes")),
+                                  msg.Contains(L.S("The copy in the Invoices folder couldn't be saved", "Kopien i mappen Invoices kunne ikke gemmes")),
                                   "8g copy failed: PDF still saved, not an error, with the note (" + msg.Replace("\n", " / ") + ")");
                         f.Dispose(); f = null;
                     }
@@ -4576,6 +4687,104 @@ namespace PrintPrice
                         try { Directory.Move(moved, invDir); } catch { }
                     }
                     log.Check(Directory.Exists(invDir) && File.Exists(copy1), "8h Invoices folder back as it was");
+                }
+
+                // 9. the other export kinds through the shared WriteExport (optimizer finding 4)
+                {
+                    bool failed9;
+                    clip = null;
+                    msg = ExportQuote(this, QuoteExport.Copy, true, true, "", out failed9);
+                    log.Check(!failed9 && clip == "[picture]" && msg.StartsWith(L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede")),
+                              "9a quick Copy picture: " + msg.Replace("\n", " / "));
+                    msg = ExportQuote(this, QuoteExport.Png, true, true, "", out failed9);
+                    log.Check(!failed9 && askedName != null && File.Exists(Path.Combine(dir, askedName + ".png")),
+                              "9b quick Save picture \"" + askedName + ".png\": " + msg.Replace("\n", " / "));
+                    clip = null;
+                    f = NewJobInvoiceForm("Sjette Kunde");
+                    msg = f.TestExport(QuoteExport.Copy);
+                    var made6 = history.FirstOrDefault(r => r.BilledTo == "Sjette Kunde");
+                    log.Check(f.TestInfoKind == InfoKind.Success && clip == "[picture]" && made6 != null && !string.IsNullOrEmpty(made6.InvoiceNo) &&
+                              msg.StartsWith(L.S("✓ Invoice picture copied", "✓ Fakturaen er kopieret som billede")),
+                              "9c invoice Copy picture: " + msg.Replace("\n", " / "));
+                    f.Dispose(); f = null;
+                }
+
+                // 10. issue #7: the invoice window's print status box
+                {
+                    BackupForm.AskForm.TestAnswers = new Queue<DialogResult>();
+                    BackupForm.AskForm.TestLog = log;
+                    Func<QuoteRecord, string> savedState = r =>
+                    {
+                        string p;
+                        var back = History.Load(out p);
+                        var s = back == null || r == null ? null : back.FirstOrDefault(x => x.Id == r.Id);
+                        return s == null ? "missing" : History.PrintStateOf(s, DateTime.Now).ToString();
+                    };
+                    // a new job invoice: the box is there, starts at Printed; a pick before it is made saves nothing
+                    int c10 = history.Count;
+                    f = NewJobInvoiceForm("Syvende Kunde");
+                    log.Check(f.TestStatusShown && f.PrintStatus == PrintState.Printed, "10a new invoice window: status box shown, starts at " + QuoteRows.StateName(f.PrintStatus));
+                    f.TestPickStatus(PrintState.Printing);
+                    log.Check(history.Count == c10, "10b picking Printing now before the invoice is made saves nothing");
+                    msg = f.TestExport(QuoteExport.Text);
+                    var made7 = history.FirstOrDefault(r => r.BilledTo == "Syvende Kunde");
+                    log.Check(made7 != null && !string.IsNullOrEmpty(made7.InvoiceNo) && History.PrintStateOf(made7, DateTime.Now) == PrintState.Printing &&
+                              savedState(made7) == "Printing" && f.PrintStatus == PrintState.Printing,
+                              "10c made with the chosen status: " + (made7 != null ? History.PrintStateOf(made7, DateTime.Now).ToString() : "none") +
+                              ", saved " + savedState(made7));
+                    // once made: a pick saves at once (one job: no question, even for Failed)
+                    f.TestPickStatus(PrintState.Failed);
+                    log.Check(made7 != null && made7.Failed && savedState(made7) == "Failed" && BackupForm.AskForm.TestAnswers.Count == 0 &&
+                              f.TestInfoText.StartsWith(L.S("✓ Print status saved: Failed", "✓ Printstatus gemt: Fejlet")),
+                              "10d Failed saved at once, no question: " + f.TestInfoText.Replace("\n", " / "));
+                    f.Dispose(); f = null;
+                    // the saved invoice opened from History: the record's status, a pick saves at once
+                    f = NewRecordQuoteForm(made7, true);
+                    log.Check(f.TestStatusShown && f.PrintStatus == PrintState.Failed, "10e record invoice window shows the saved status " + QuoteRows.StateName(f.PrintStatus));
+                    f.TestPickStatus(PrintState.Printed);
+                    log.Check(made7.Printed && !made7.Failed && savedState(made7) == "Printed", "10f Printed picked: saved " + savedState(made7));
+                    f.Dispose(); f = null;
+                    // a saved quote: the same
+                    QuoteRecord q10;
+                    SaveToHistory(History.ForCustomer, "Otte Kunde", out q10);   // the invoices above took over the plain quotes
+                    if (q10 != null && string.IsNullOrEmpty(q10.InvoiceNo))
+                    {
+                        History.SetPrintState(q10, PrintState.NotPrinted, DateTime.Now);
+                        f = NewRecordQuoteForm(q10, false);
+                        f.TestPickStatus(PrintState.Printed);
+                        log.Check(savedState(q10) == "Printed", "10g record quote window: Printed saved at once (" + savedState(q10) + ")");
+                        f.Dispose(); f = null;
+                    }
+                    else log.Check(false, "10g no plain saved quote to open");
+
+                    // Settings "Reset to defaults": asks first; No changes nothing; Yes keeps your own details, resets the rest
+                    var s10 = settings.Clone();
+                    s10.QuoteName = "Test Navn";
+                    s10.PayMobilePay = "12 34 56 78";
+                    s10.PayBank = "reg. 1234";
+                    s10.OthersMarkupPct = s10.OthersMarkupPct + 17;
+                    var def = new AppSettings();
+                    using (var sf = new SettingsForm(s10))   // OK closes the window: one window per answer
+                    {
+                        BackupForm.AskForm.TestAnswers.Enqueue(DialogResult.No);
+                        sf.TestReset();
+                        var r1 = sf.TestAccept();
+                        log.Check(r1 != null && r1.OthersMarkupPct == s10.OthersMarkupPct && r1.QuoteName == "Test Navn",
+                                  "10h Reset to defaults, No: nothing changed (customer markup " + (r1 != null ? Num.Fmt(r1.OthersMarkupPct) : "-") + ")");
+                    }
+                    using (var sf = new SettingsForm(s10))
+                    {
+                        BackupForm.AskForm.TestAnswers.Enqueue(DialogResult.Yes);
+                        sf.TestReset();
+                        var r2 = sf.TestAccept();
+                        log.Check(r2 != null && r2.OthersMarkupPct == def.OthersMarkupPct && r2.QuoteName == "Test Navn" &&
+                                  r2.PayMobilePay == "12 34 56 78" && r2.PayBank == "reg. 1234",
+                                  "10i Reset, Yes: markup back to " + (r2 != null ? Num.Fmt(r2.OthersMarkupPct) : "-") + " (default " + Num.Fmt(def.OthersMarkupPct) +
+                                  "), name / MobilePay / bank kept (" + (r2 != null ? r2.QuoteName + " / " + r2.PayMobilePay + " / " + r2.PayBank : "-") + ")");
+                        log.Check(BackupForm.AskForm.TestAnswers.Count == 0, "10j the reset asked both times");
+                    }
+                    BackupForm.AskForm.TestAnswers = null;
+                    BackupForm.AskForm.TestLog = null;
                 }
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
@@ -4638,7 +4847,7 @@ namespace PrintPrice
                 log.Check(topUp ? mins == 1 && Num.Kr(minLine.Amount) == d.TopUpAmount : mins == 0,
                           step + " saved minimum line " + (minLine != null ? Num.Kr(minLine.Amount) : "none") + ", top-up " + (topUp ? d.TopUpAmount : "none"));
                 var shown = QuoteRows.FoldMinimum(lines);
-                long workOre = lines.Where(l => l.Key == QuoteLine.Work).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
+                long workOre = lines.Where(l => l.Key == QuoteLine.Work || l.Key == QuoteLine.Payback).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
                 var workShown = shown.FirstOrDefault(l => l.Key == QuoteLine.Work);
                 log.Check(!shown.Any(l => l.Key == QuoteLine.Minimum) && shown.Sum(l => l.Ore) == sum &&
                           (workOre == 0 ? workShown == null || workShown.Ore == 0 : workShown != null && workShown.Ore == workOre),
@@ -4834,7 +5043,10 @@ namespace PrintPrice
                 {
                     log.Check(f.TestInfoText.Contains("Lene Hansen") && f.TestInfoText.Contains("Lene H."), "3a different names warned: " + f.TestInfoText.Replace("\n", " / "));
                     log.Check(f.TestCustomer == "Lene Hansen", "3b name box starts with \"" + f.TestCustomer + "\"");
-                    log.Check(!f.TestStatusShown, "3c no print status box on a combined quote");
+                    // issue #7: one status box for both (they share "Not printed yet")
+                    log.Check(f.TestStatusShown && !f.TestStatusMixed && f.PrintStatus == PrintState.NotPrinted &&
+                              f.TestStatusHeading == L.F("Print status (all {0} prints)", "Printstatus (alle {0} print)", 2),
+                              "3c combined quote: status box \"" + f.TestStatusHeading + "\" = " + QuoteRows.StateName(f.PrintStatus));
                     var d = f.TestData();
                     double pa = Pricing.PriceWithoutMinimum(History.ToInput(a), History.SavedSettings(a, settings));
                     double pb = Pricing.PriceWithoutMinimum(History.ToInput(b), History.SavedSettings(b, settings));
@@ -4857,6 +5069,10 @@ namespace PrintPrice
                     f.TestFriends(false);
                     string msg = f.TestExport(QuoteExport.History);
                     log.Check(f.TestInfoKind == InfoKind.Success, "3g Save to history: " + msg);
+                    askedName = null;
+                    msg = f.TestExport(QuoteExport.Png);   // the shared WriteExport (optimizer finding 4)
+                    log.Check(f.TestInfoKind == InfoKind.Success && askedName != null && File.Exists(Path.Combine(dir, askedName + ".png")),
+                              "3g2 quote Save picture \"" + askedName + ".png\": " + msg.Replace("\n", " / "));
                 });
                 log.Check(ok && a.Customer == "Lene Hansen" && b.Customer == "Lene Hansen" && string.IsNullOrEmpty(a.InvoiceNo) && string.IsNullOrEmpty(b.InvoiceNo),
                           "3h quote: the name on both, no invoice");
@@ -4885,6 +5101,17 @@ namespace PrintPrice
                     log.Check(ore(d.GroupTotal) == ore(liveTotal) && d.InvoiceNo == a.InvoiceNo, "4d same total " + Num.Kr(d.GroupTotal) + " and number " + d.InvoiceNo);
                     log.Check(bdText(d) == liveBd, "4g same breakdown rows as when it was made (" + bdText(d) + " / then " + liveBd + ")");
                     checkBd("4h", d, new List<QuoteRecord> { a, b });
+                    // A4: the made combined invoice keeps its billed price; Friends can't be picked, nothing changes
+                    int forA = a.For, forB = b.For;
+                    double oa = a.OthersPrice, ob = b.OthersPrice;
+                    log.Check(f.TestPriceLocked && !f.TestFriendsChosen, "4j price choice locked at Customers");
+                    f.TestFriends(true);
+                    log.Check(!f.TestFriendsChosen && ore(f.TestData().GroupTotal) == ore(liveTotal), "4k a Friends click is ignored, total still " + Num.Kr(liveTotal));
+                    clip = null;
+                    string msg4 = f.TestExport(QuoteExport.Text);
+                    log.Check(a.For == forA && b.For == forB && a.OthersPrice == oa && b.OthersPrice == ob && a.InvoiceNo == d.InvoiceNo,
+                              "4l records unchanged after Copy text (For " + a.For + "/" + b.For + ", " + Num.Kr(oa) + " + " + Num.Kr(ob) + ")");
+                    log.Check(clip != null && clip.Contains(Num.Kr(liveTotal)), "4m Copy text holds the customer total " + Num.Kr(liveTotal) + " (" + msg4 + ")");
                 });
                 log.Check(ok, "4 reopened");
                 ok = run(new List<QuoteRecord> { e1, e2 }, true, f =>
@@ -4971,11 +5198,45 @@ namespace PrintPrice
                         bool fitsN;
                         string layN = QuotePage.PageLayout(dq, out fitsN);
                         // 3: one page, or (a long breakdown) the cards + note, then the breakdown page
-                        bool okN = fitsN && notesRight(layN) &&
-                                   (cnt <= 3 ? layN == "0-3+total" || layN == "0-3+note | 3-3+total" : layN == "0-4+note | 4-4+total");
+                        // qol 6: 3 and 4 prints fit ONE page (GroupLevel: shorter breakdown, 4 cards in a row)
+                        bool okN = fitsN && notesRight(layN) && layN == "0-" + cnt + "+total" &&
+                                   (cnt != 4 || dq.GroupLevel >= 2);   // 4 prints: always 4 cards in one row (user's choice)
                         log.Check(okN, "8g " + cnt + " prints (" + (inv ? "invoice" : "quote") + ") = " + QuotePage.PageCount(dq) +
-                                  " A4 page(s): " + layN);
+                                  " A4 page(s): " + layN + " (layout step " + dq.GroupLevel + ")");
                     }
+                }
+                {
+                    // qol 5: the 4-colour single invoice (with a picture) fits A4, so the PDF page isn't shrunk
+                    var r4 = new SliceResult { Seconds = 38566, Grams = 135.85, Plates = 1, PurgeGrams = 124.0, ColourChangeHours = 31450 / 3600.0 };
+                    string[] cols4 = { "#118002", "#FFFF0A", "#074080", "#ED1C24" };
+                    double[] g4 = { 33.04, 55.99, 17.28, 29.54 }, m4 = { 5.04, 0.38, 5.87, 0.56 };
+                    for (int i = 0; i < 4; i++)
+                        r4.Filaments.Add(new FilamentUse { Slot = i + 1, Colour = cols4[i], Type = "PLA", Profile = "Bambu PLA Basic @BBL A1", Grams = g4[i], ModelGrams = m4[i] });
+                    txtUrl.Text = SingleBenchyLink;
+                    txtHours.Text = "10";
+                    txtMinutes.Text = "43";
+                    txtElecPrice.Text = "3,65";
+                    SetColours(r4);
+                    for (int i = 0; i < colourRows; i++) rowPrice[i].Text = "200";
+                    txtGrams.Text = "135,85";
+                    jobModel = "Four-Color Multicolor Test Benchy (0.4 nozzle)";
+                    SetJobLoaded(true);
+                    Recalculate();
+                    var d4 = BuildQuote(false, DateTime.Now, History.QuoteNumber(DateTime.Now), "Test Kunde");
+                    d4.Picture = Logo;
+                    d4.Invoice = true;
+                    d4.InvoiceNo = "2026-12345";
+                    d4.Due = settings.InvoiceDue(DateTime.Now);
+                    d4.PayMobilePay = "12 34 56 78";
+                    d4.PayBank = "reg. 1234, account 0012345678";
+                    bool compact4;
+                    float h4;
+                    bool fits4 = QuotePage.SingleFits(d4, out compact4, out h4);
+                    log.Check(fits4, "8h 4-colour single invoice with a picture fits A4: " + Num.Fmt(Math.Round(h4)) + " of " + Num.Fmt(QuotePage.A4Height) +
+                              (compact4 ? " (compact form)" : ""));
+                    // qol 8: four rows of one profile are told apart by colour name
+                    log.Check(d4.MaterialNames.Count == 4 && d4.MaterialNames.Distinct().Count() == 4 && d4.MaterialNames[0].Contains("("),
+                              "8i colour names on same-profile rows: " + string.Join(" | ", d4.MaterialNames));
                 }
                 ok = run(pages, false, f =>
                 {
@@ -5020,6 +5281,59 @@ namespace PrintPrice
                 string copyS = Path.Combine(invDir, (single.InvoiceNo ?? "") + " - Test Kunde.pdf");
                 log.Check(File.Exists(copyS) && sameFile(copyS, pdfS), "9i single invoice copy: Invoices\\" + Path.GetFileName(copyS));                log.Check(History.InvoiceGroup(history, single.InvoiceNo).Count == 1, "9e its number is on that job only");
                 log.Check(asked.Count == 1 && ReferenceEquals(asked[0], single), "9f History handed over the selected record");
+
+                // 10. issue #7: one status box for a combined window, saved on every job at once; several to Failed asks
+                {
+                    BackupForm.AskForm.TestAnswers = new Queue<DialogResult>();
+                    BackupForm.AskForm.TestLog = log;
+                    var three = pages.Take(3).ToList();
+                    DateTime n10 = DateTime.Now;
+                    foreach (var r in three) History.SetPrintState(r, PrintState.NotPrinted, n10);
+                    History.SetPrintState(three[0], PrintState.Printed, n10);
+                    History.Save(history);
+                    Func<string> states = () => string.Join(",", three.Select(r => History.PrintStateOf(r, DateTime.Now).ToString()));
+                    Func<string> savedStates = () =>
+                    {
+                        string p;
+                        var back = History.Load(out p);
+                        if (back == null) return "unreadable";
+                        return string.Join(",", three.Select(r => { var s = back.FirstOrDefault(x => x.Id == r.Id); return s == null ? "missing" : History.PrintStateOf(s, DateTime.Now).ToString(); }));
+                    };
+                    ok = run(three, false, f =>
+                    {
+                        log.Check(f.TestStatusShown && f.TestStatusMixed, "10a 1 printed + 2 not: the box says Mixed (" + f.TestStatusHeading + ")");
+                        f.TestPickStatus(PrintState.Printing);
+                        log.Check(states() == "Printing,Printing,Printing" && savedStates() == states() && !f.TestStatusMixed &&
+                                  f.TestInfoText.StartsWith(L.S("✓ Print status saved", "✓ Printstatus gemt")),
+                                  "10b Printing now: on all 3 and saved at once (" + savedStates() + "; " + f.TestInfoText + ")");
+                        BackupForm.AskForm.TestAnswers.Enqueue(DialogResult.No);
+                        f.TestPickStatus(PrintState.Failed);
+                        log.Check(states() == "Printing,Printing,Printing" && f.PrintStatus == PrintState.Printing &&
+                                  BackupForm.AskForm.TestAnswers.Count == 0,
+                                  "10c Failed for 3 asked, No: nothing changed, the box back at " + QuoteRows.StateName(f.PrintStatus));
+                        BackupForm.AskForm.TestAnswers.Enqueue(DialogResult.Yes);
+                        f.TestPickStatus(PrintState.Failed);
+                        log.Check(states() == "Failed,Failed,Failed" && savedStates() == states() && f.PrintStatus == PrintState.Failed,
+                                  "10d Failed for 3 asked, Yes: all failed and saved (" + savedStates() + ")");
+                        f.TestPickStatus(PrintState.NotPrinted);
+                        log.Check(states() == "NotPrinted,NotPrinted,NotPrinted" && savedStates() == states() && BackupForm.AskForm.TestAnswers.Count == 0,
+                                  "10e back to Not printed yet: no question, saved (" + savedStates() + ")");
+                    });
+                    log.Check(ok, "10 the combined quote window opened");
+                    // a combined invoice: the box is there and shows the Printed ticks once made
+                    var two = pages.Skip(3).Take(2).ToList();
+                    ok = run(two, true, f =>
+                    {
+                        log.Check(f.TestStatusShown && f.PrintStatus == PrintState.NotPrinted, "10f combined invoice: status box shown (" + QuoteRows.StateName(f.PrintStatus) + ")");
+                        f.TestSetCustomer("Test Kunde");
+                        f.TestExport(QuoteExport.Text);
+                        log.Check(!f.TestStatusMixed && f.PrintStatus == PrintState.Printed && two.All(r => r.Printed),
+                                  "10g made: both Printed, the box shows " + QuoteRows.StateName(f.PrintStatus));
+                    });
+                    log.Check(ok, "10 the combined invoice window opened");
+                    BackupForm.AskForm.TestAnswers = null;
+                    BackupForm.AskForm.TestLog = null;
+                }
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
             finally
@@ -5030,6 +5344,88 @@ namespace PrintPrice
                 if (hist != null) { try { hist.Close(); hist.Dispose(); } catch { } }
             }
             try { File.WriteAllLines(Path.Combine(dir, "test_bill.txt"), log.Lines); } catch { }
+            Program.EndTestRun(log.Ok ? 0 : 4);
+        }
+
+        /// --test-history-read (test mode + --hidden only, alone; optimizer finding 2): history.json is read once per run.
+        /// Each case writes made-up quotes (HistoryForm.SampleQuotes) to the test folder's history.json, runs the start-up
+        /// read (StartupPictureCleanAsync), maybe changes the file, then EnsureHistory, and checks History.FileReads and
+        /// the content. Results in <folder>\test_history_read.txt; exit 0 / 4.
+        internal async void TestHistoryReadFlow()
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            string dir = AppSettings.Folder;
+            string path = History.FilePath;
+            var log = new TestLog();
+            try
+            {
+                if (startupRead != null) await startupRead;   // the Shown run on the empty test folder
+                var sample = HistoryForm.SampleQuotes();
+                string sampleJson = History.ToJson(sample);
+                int moved = 0;
+                // fresh start for a case: history.json = text (null = no file; an old one is moved aside, never deleted)
+                Func<string, Task> start = async text =>
+                {
+                    history = null; historyProblem = null; historyAhead = null;
+                    if (File.Exists(path)) File.Move(path, Path.Combine(dir, "history.moved-" + (++moved) + ".json"));
+                    if (text != null) File.WriteAllText(path, text, new System.Text.UTF8Encoding(false));
+                    await StartupPictureCleanAsync();
+                };
+                Func<string> fileJson = () => History.ToJson(History.ParseJson(File.ReadAllText(path, System.Text.Encoding.UTF8)));
+                int reads;
+
+                // 1. unchanged file: the start-up read is used, no second read, same content, saving allowed
+                await start(sampleJson);
+                log.Check(historyAhead != null && historyAhead.List != null, "1a start-up read kept (" + sample.Count + " quotes)");
+                reads = History.FileReads;
+                EnsureHistory();
+                log.Check(History.FileReads == reads, "1b EnsureHistory read the file " + (History.FileReads - reads) + " more times (want 0)");
+                log.Check(historyProblem == null, "1c no problem" + (historyProblem != null ? " (" + historyProblem + ")" : ""));
+                log.Check(history != null && History.ToJson(history) == fileJson(), "1d same content as the file (" + (history != null ? history.Count : -1) + " quotes)");
+                log.Check(historyAhead == null, "1e start-up read handed out once");
+                log.Check(History.Save(history) == null, "1f saving works afterwards");
+
+                // 2. file touched after the start-up read (new write time): read again
+                await start(sampleJson);
+                File.SetLastWriteTimeUtc(path, File.GetLastWriteTimeUtc(path).AddMinutes(1));
+                reads = History.FileReads;
+                EnsureHistory();
+                log.Check(History.FileReads == reads + 1, "2a touched file read again (" + (History.FileReads - reads) + " reads)");
+                log.Check(historyProblem == null && history != null && History.ToJson(history) == fileJson(), "2b same content, no problem");
+
+                // 3. same size, one letter changed (new write time): read again, the change shows
+                await start(sampleJson);
+                var changed = HistoryForm.SampleQuotes();
+                int ci = changed.FindIndex(r => !string.IsNullOrEmpty(r.Customer) && r.Customer[0] < 128);
+                string name = ci >= 0 ? changed[ci].Customer : "";
+                if (ci >= 0) changed[ci].Customer = (name[0] == 'X' ? "Y" : "X") + name.Substring(1);
+                string changedJson = History.ToJson(changed);
+                File.WriteAllText(path, changedJson, new System.Text.UTF8Encoding(false));
+                File.SetLastWriteTimeUtc(path, File.GetLastWriteTimeUtc(path).AddMinutes(1));
+                log.Check(ci >= 0 && changedJson.Length == sampleJson.Length,
+                          "3a changed file has the same size (customer \"" + (ci >= 0 ? changed[ci].Customer : "none") + "\")");
+                reads = History.FileReads;
+                EnsureHistory();
+                log.Check(History.FileReads == reads + 1, "3b changed file read again (" + (History.FileReads - reads) + " reads)");
+                log.Check(ci >= 0 && history != null && history.Count > ci && history[ci].Customer == changed[ci].Customer, "3c the change shows");
+
+                // 4. bad file: no start-up read; Load renames it and gives the problem text, as before
+                await start("{ not a history");
+                log.Check(historyAhead == null, "4a bad file: start-up read not kept");
+                EnsureHistory();
+                bool kept = Directory.GetFiles(dir, "history.bad-*.json").Length > 0;
+                log.Check(historyProblem != null && kept && history != null && history.Count == 0,
+                          "4b renamed to history.bad-* with a problem text (" + (historyProblem ?? "none") + ")");
+
+                // 5. no file: an empty list, no problem, no read
+                await start(null);
+                reads = History.FileReads;
+                EnsureHistory();
+                log.Check(History.FileReads == reads && historyProblem == null && history != null && history.Count == 0,
+                          "5 no file: empty list, no problem, " + (History.FileReads - reads) + " reads");
+            }
+            catch (Exception ex) { log.Check(false, "error: " + ex.Message); }
+            try { File.WriteAllLines(Path.Combine(dir, "test_history_read.txt"), log.Lines); } catch { }
             Program.EndTestRun(log.Ok ? 0 : 4);
         }
 
@@ -5132,12 +5528,18 @@ namespace PrintPrice
             {
                 var parts = new List<HistoryPart>();
                 bool together = false;
+                double closeAfter = 0;   // "close-after=<s>": close the window mid-slice (A5: Bambu Studio must stop too)
                 string baseDir = Path.GetDirectoryName(specFile);
                 foreach (var raw in File.ReadAllLines(specFile))
                 {
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("//")) continue;
                     if (line.StartsWith("together=", StringComparison.OrdinalIgnoreCase)) { together = line.Substring(9).Trim() == "1"; continue; }
+                    if (line.StartsWith("close-after=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        double.TryParse(line.Substring(12).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out closeAfter);
+                        continue;
+                    }
                     var f = line.Split('|');
                     string file = f[0].Trim().Trim('"');
                     if (!Path.IsPathRooted(file)) file = Path.GetFullPath(Path.Combine(baseDir, file));
@@ -5145,6 +5547,26 @@ namespace PrintPrice
                 }
                 log.Add("spec: " + parts.Count + " file(s), together=" + (together ? 1 : 0));
                 check(parts.Count > 0 && parts.All(p => File.Exists(p.File)), "spec files exist");
+                if (ok && closeAfter > 0)
+                {
+                    // start the job without waiting, close the window through the real close path after N s
+                    var files = parts.Select(p => p.File).ToList();
+                    txtUrl.Text = files.Count == 1 ? files[0] : L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
+                    var job = AnalyzeAsync(null, files, null, parts, together);
+                    await Task.Delay(TimeSpan.FromSeconds(closeAfter));
+                    var ids = BambuSlicer.StartedIds;
+                    log.Add("close-after=" + closeAfter.ToString(System.Globalization.CultureInfo.InvariantCulture) + " s; job finished before close: " + job.IsCompleted);
+                    log.Add("started ids: " + string.Join(",", ids));
+                    log.Add("running before close: " + ids.Count(RunningProcess));
+                    Close();   // FormClosing: cts.Cancel + BambuSlicer.StopAll + SaveLastPrices
+                    int left = ids.Count(RunningProcess);
+                    log.Add("running after close: " + left);
+                    check(ids.Count > 0, "Bambu Studio was started");
+                    check(left == 0, "no Bambu Studio left running after close");
+                    try { File.WriteAllLines(Path.Combine(dir, "test_slice.txt"), log); } catch { }
+                    Program.EndTestRun(ok ? 0 : 4);
+                    return;
+                }
                 if (ok)
                 {
                     var files = parts.Select(p => p.File).ToList();
@@ -5157,6 +5579,8 @@ namespace PrintPrice
                     string err = done ? SaveToHistory(0, null, out rec) : "not sliced";
                     if (err != null) rec = null;
                     check(err == null && rec != null, "saved to history" + (err != null ? ": " + err : ""));
+                    // idea 29: the slice render is shown before the job ends, so the quote saved right after has it
+                    check(rec != null && History.HasPicture(rec.Id), "record saved with its plate picture");
                     TestRecordLines(log, rec);
                     var savedParts = rec != null ? History.PartsOf(rec) : null;
                     check(savedParts != null && savedParts.Count == parts.Count, "record keeps the " + parts.Count + " part(s)");
@@ -5166,6 +5590,13 @@ namespace PrintPrice
             catch (Exception ex) { check(false, "exception: " + ex); }
             try { File.WriteAllLines(Path.Combine(dir, "test_slice.txt"), log); } catch { }
             Program.EndTestRun(ok ? 0 : 4);
+        }
+
+        /// A process id that is still running (gone / exited / not ours to read = false). Test hooks only.
+        static bool RunningProcess(int id)
+        {
+            try { using (var p = Process.GetProcessById(id)) return !p.HasExited; }
+            catch { return false; }
         }
 
         /// "--test-repeat": Repeat print of the newest history record (the saved parts slice again without the picker),
@@ -5197,6 +5628,7 @@ namespace PrintPrice
                     if (err != null) rec = null;
                     check(err == null && rec != null, "saved to history" + (err != null ? ": " + err : ""));
                     check(rec != null && rec.RepeatOf == (r.Id ?? ""), "saved as a repeat of the original");
+                    check(rec != null && History.HasPicture(rec.Id), "record saved with its plate picture");   // idea 29
                     TestRecordLines(log, rec);
                     var a = History.PartsOf(r);
                     var b = rec != null ? History.PartsOf(rec) : null;
@@ -5587,11 +6019,12 @@ namespace PrintPrice
             SetJobLoaded(true);   // no picture (Printables link, missing file) = logo without "No model yet"
             string src = (r.Source ?? "").Trim().Trim('"');
             var stored = StoredPicture(r);   // the picture saved with the record (issue #4) comes first
+            Task picture = null;   // not awaited: the picture shows when ready
             if (stored != null) SetModelPicture(stored);
             else if (!offline && src.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase) && File.Exists(src))
-                LoadModelPicture(() => BambuSlicer.FromProject(src), true);   // a local project still has its own picture
+                picture = LoadModelPicture(() => BambuSlicer.FromProject(src), true);   // a local project still has its own picture
             else if (!offline && BambuSlicer.IsGcodeFile(src) && File.Exists(src))
-                LoadModelPicture(() => BambuSlicer.ReadGcodeFile(src).Picture, true);   // a G-code's thumbnail (errors = none)
+                picture = LoadModelPicture(() => BambuSlicer.ReadGcodeFile(src).Picture, true);   // a G-code's thumbnail (errors = none)
 
             SliceResult slice = null;
             var one = History.SingleLine(r);   // one colour saved with its material (null: old record or 2+ colours)

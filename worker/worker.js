@@ -61,8 +61,8 @@ async function backup(request, env, id, cors) {
     if (!(await allowed(env.PUT_LIMIT, "w:" + ip))) return minuteLimit(cors);
     const declared = parseInt(request.headers.get("Content-Length") || "0", 10);
     if (declared > MAX_BLOB) return text(413, "too big", cors);
-    const buf = await request.arrayBuffer();
-    if (buf.byteLength > MAX_BLOB) return text(413, "too big", cors);
+    const buf = await readCapped(request, MAX_BLOB);   // null = over the cap (also without a Content-Length)
+    if (!buf) return text(413, "too big", cors);
     if (!looksLikeBlob(new Uint8Array(buf))) return text(400, "not a PrintPrice backup", cors);
     try { await env.BACKUPS.put(id, buf, { expirationTtl: TTL_SECONDS }); }   // overwrite = renew the 400 days
     catch (e) { return busy(cors); }                                         // e.g. the free plan's 1,000 writes/day
@@ -102,6 +102,25 @@ async function dailyCounter(env, ip) {
            retryAfter: Math.max(1, Math.ceil((reset.getTime() - now.getTime()) / 1000)) };
 }
 
+// The request body as an ArrayBuffer, read piece by piece; stops and returns null as soon as it passes max bytes.
+async function readCapped(request, max) {
+  if (!request.body) return new ArrayBuffer(0);
+  const reader = request.body.getReader();
+  const parts = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { try { await reader.cancel(); } catch (e) { } return null; }
+    parts.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.byteLength; }
+  return out.buffer;
+}
+
 function minuteLimit(cors) { return text(429, "too many requests", cors, { "Retry-After": "60" }); }
 
 // Shape check only (the Worker can't and shouldn't verify the HMAC).
@@ -138,9 +157,16 @@ async function power(url, env, ctx, cors) {
   }
 
   let r = null;
-  try { r = await fetch(upstream, { headers: { "User-Agent": "PrintPrice-Worker", "Accept": "application/json" } }); }
+  // 8 s at most: a hanging Energi Data Service falls through to the last good copy below
+  try { r = await fetch(upstream, { headers: { "User-Agent": "PrintPrice-Worker", "Accept": "application/json" },
+                                    signal: AbortSignal.timeout(8000) }); }
   catch (e) { r = null; }
-  if (!r || !r.ok) {
+  let body = null;
+  if (r && r.ok) {
+    try { body = await r.text(); }        // the 8 s also covers the body; cut off = treated as down
+    catch (e) { body = null; }
+  }
+  if (body === null) {
     // Energi Data Service busy (429, it often limits Cloudflare's shared addresses) or down: serve the last good copy,
     // from this isolate's memory, else from KV, with X-Price-Stale = when that copy was fetched.
     if (memo) return json(200, memo.body, cors, "STALE", { "X-Price-Stale": iso(memo.t) });
@@ -152,7 +178,6 @@ async function power(url, env, ctx, cors) {
     return r && r.status === 429 ? text(429, "price service busy", cors, { "Retry-After": "60" })
                                  : text(502, "price service unavailable", cors);
   }
-  const body = await r.text();
   powerMemo[area] = { t: now, body: body };
   ctx.waitUntil(cache.put(cacheKey, new Response(body, {
     headers: { "Content-Type": "application/json", "Cache-Control": "max-age=300" } })));

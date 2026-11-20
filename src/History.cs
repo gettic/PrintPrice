@@ -348,6 +348,7 @@ namespace PrintPrice
         public double Minimum;         // the minimum price the top-up reaches (for the line's label)
         public double Total;           // Sum + TopUp
         public bool Friends;
+        public bool Invoiced;          // every job already invoiced: stored numbers (TopUp = Σ InvoiceTopUp), nothing recomputed
     }
 
     /// One price breakdown for a whole combined bill (History.GroupBreakdown): rows summed by kind, whole øre.
@@ -1095,12 +1096,24 @@ namespace PrintPrice
             var res = new List<QuoteRecord>();
             string want = (code ?? "").Trim();
             if (list == null || want.Length == 0) return res;
+            foreach (var r in list)
+                if (r != null && string.Equals((r.InvoiceNo ?? "").Trim(), want, StringComparison.OrdinalIgnoreCase)) res.Add(r);
+            return OldestFirst(res);
+        }
+
+        /// A copy of jobs oldest first by SavedAt: readable times first; same time (or both unreadable): the later list
+        /// position first (lists are newest first). Nulls and repeats of the same record dropped (first kept). null -> empty.
+        public static List<QuoteRecord> OldestFirst(List<QuoteRecord> jobs)
+        {
+            var res = new List<QuoteRecord>();
+            if (jobs == null) return res;
             var pos = new Dictionary<QuoteRecord, int>();
-            for (int i = 0; i < list.Count; i++)
+            for (int i = 0; i < jobs.Count; i++)
             {
-                var r = list[i];
+                var r = jobs[i];
                 if (r == null || pos.ContainsKey(r)) continue;
-                if (string.Equals((r.InvoiceNo ?? "").Trim(), want, StringComparison.OrdinalIgnoreCase)) { pos[r] = i; res.Add(r); }
+                pos[r] = i;
+                res.Add(r);
             }
             res.Sort(delegate(QuoteRecord a, QuoteRecord b)
             {
@@ -1155,6 +1168,7 @@ namespace PrintPrice
             g.Sum = sumOre / 100.0;
             if (billed)
             {
+                g.Invoiced = true;
                 g.TopUp = topOre / 100.0;
                 g.Minimum = minSaved;
                 g.Total = (sumOre + topOre) / 100.0;
@@ -1463,7 +1477,8 @@ namespace PrintPrice
             return code;
         }
 
-        /// Keeps the newest max entries (list is newest first). Older failed ones not yet made back are kept too; what the
+        /// Keeps the newest max entries (list is newest first). Older invoiced ones (their numbers must stay taken) and older
+        /// failed ones not yet made back are kept too; what the
         /// dropped quotes paid towards them goes into their PaidBack, so FailedDebt is the same before and after.
         public static void Trim(List<QuoteRecord> list, int max)
         {
@@ -1479,7 +1494,9 @@ namespace PrintPrice
                 if (r == null) continue;
                 if (r.Failed && byDropped[i] > 0) r.PaidBack = Math.Max(0, r.PaidBack) + byDropped[i];
                 if (i < max) { keep.Add(r); continue; }
-                // beyond max: only failed ones that dropped quotes haven't fully paid back
+                // beyond max: invoices (so their numbers can never be handed out again) and failed ones that dropped
+                // quotes haven't fully paid back
+                if (!string.IsNullOrEmpty(r.InvoiceNo)) { keep.Add(r); continue; }
                 if (r.Failed && FailedCost(r) - Math.Max(0, r.PaidBack) > 1e-9) keep.Add(r);
             }
             list.Clear();
@@ -1576,6 +1593,36 @@ namespace PrintPrice
         /// "Show" choices: all quotes, friends & family, customers, failed, not printed.
         public const int ShowAll = 0, ShowFriends = 1, ShowCustomers = 2, ShowFailed = 3, ShowNotPrinted = 4;
 
+        /// The 4 print statuses as Show choices (issue #7), by PrintStateOf(r, now): exactly one of them matches each
+        /// record. The old ShowFailed / ShowNotPrinted (Printed tick off) stay as they were, for the website.
+        public const int ShowStateNotPrinted = 5, ShowStatePrinting = 6, ShowStatePrinted = 7, ShowStateFailed = 8;
+
+        /// The Show value of a print status (ShowStateNotPrinted…ShowStateFailed).
+        public static int ShowFor(PrintState state)
+        {
+            switch (state)
+            {
+                case PrintState.Printing: return ShowStatePrinting;
+                case PrintState.Printed: return ShowStatePrinted;
+                case PrintState.Failed: return ShowStateFailed;
+                default: return ShowStateNotPrinted;
+            }
+        }
+
+        /// true and the status when show is one of ShowStateNotPrinted…ShowStateFailed; else false (NotPrinted).
+        public static bool StateOfShow(int show, out PrintState state)
+        {
+            state = PrintState.NotPrinted;
+            switch (show)
+            {
+                case ShowStateNotPrinted: return true;
+                case ShowStatePrinting: state = PrintState.Printing; return true;
+                case ShowStatePrinted: state = PrintState.Printed; return true;
+                case ShowStateFailed: state = PrintState.Failed; return true;
+                default: return false;
+            }
+        }
+
         /// The model's name, else the file name of the link/file (after the last \ or / for a file path, the whole link
         /// for a web address), else "(no name)".
         public static string ModelText(QuoteRecord r)
@@ -1592,10 +1639,21 @@ namespace PrintPrice
         }
 
         /// True when the record passes the list's filters: month (1st of it; MinValue = all months), printer id (null =
-        /// all), Show (ShowAll…ShowNotPrinted) and the search text (model, link, note, name, customer, invoice number and,
-        /// with printerText not null, the printer's name; case-insensitive).
+        /// all), Show (ShowAll…ShowNotPrinted, or ShowStateNotPrinted…ShowStateFailed) and the search text (model, link, note, name, customer, invoice number and,
+        /// with printerText not null, the printer's name; case-insensitive). The print-status Show values use DateTime.Now;
+        /// pass the time yourself with the overload below.
         public static bool Matches(QuoteRecord r, DateTime month, string printerId, int show, string query, Func<QuoteRecord, string> printerText)
         {
+            return Matches(r, month, printerId, show, query, printerText, DateTime.Now);
+        }
+
+        /// Matches with the time used for "Printing now" (ShowStatePrinting / ShowStatePrinted: a print whose time has
+        /// run out counts as Printed).
+        public static bool Matches(QuoteRecord r, DateTime month, string printerId, int show, string query, Func<QuoteRecord, string> printerText, DateTime now)
+        {
+            if (r == null) return false;
+            PrintState wanted;
+            if (StateOfShow(show, out wanted) && PrintStateOf(r, now) != wanted) return false;
             if (month != DateTime.MinValue)
             {
                 DateTime t;
@@ -1767,7 +1825,8 @@ namespace PrintPrice
             return DateTime.MinValue;
         }
 
-        // remaining[i] = left of failure i; byDropped[i] = paid to failure i by records with index >= dropFrom. Returns the debt.
+        // remaining[i] = left of failure i; byDropped[i] = paid to failure i by records with index >= dropFrom that Trim
+        // drops (not invoiced). Returns the debt.
         static double RunDebt(List<QuoteRecord> list, string excludeId, int dropFrom, double[] remaining, double[] byDropped)
         {
             bool exclude = !string.IsNullOrEmpty(excludeId);
@@ -1801,7 +1860,7 @@ namespace PrintPrice
                     int f = open[0];
                     double pay = Math.Min(x, remaining[f]);
                     remaining[f] -= pay;
-                    if (e.Index >= dropFrom) byDropped[f] += pay;
+                    if (e.Index >= dropFrom && string.IsNullOrEmpty(list[e.Index].InvoiceNo)) byDropped[f] += pay;   // Trim keeps invoices
                     x -= pay;
                     if (remaining[f] <= 1e-9) { remaining[f] = 0; open.RemoveAt(0); }
                 }
@@ -2039,6 +2098,7 @@ namespace PrintPrice
             {
                 if (!File.Exists(path)) return new List<QuoteRecord>();
                 text = File.ReadAllText(path, Encoding.UTF8);
+                CountRead();
             }
             catch (Exception ex)
             {
@@ -2062,6 +2122,81 @@ namespace PrintPrice
                 problem = L.S("Price history could not be read: ", "Prishistorikken kunne ikke læses: ") + ex.Message;
             }
             return new List<QuoteRecord>();
+        }
+
+        /// A history.json read off the UI thread (ReadAhead), handed to LoadFrom later.
+        public sealed class HistoryReadAhead
+        {
+            public List<QuoteRecord> List;   // parsed records (null = already handed out)
+            internal bool Existed;           // false = there was no history.json (List = empty list)
+            internal long Size;              // history.json's length when read
+            internal DateTime WriteUtc;      // history.json's LastWriteTimeUtc when read
+        }
+
+        /// Tests only: how many times history.json was read (Load, SavedEmpty, ReadAhead).
+        internal static int FileReads;
+
+        static void CountRead() { System.Threading.Interlocked.Increment(ref FileReads); }
+
+        /// Background-safe read of history.json for LoadFrom later. Notes size and write time (UTC), reads and parses,
+        /// checks them again: changed during the read -> null. Missing file -> Existed false, List empty. Bad or newer-version
+        /// file, or any exception -> null (Load handles it later). Never renames, never sets saveBlocked, never throws.
+        public static HistoryReadAhead ReadAhead()
+        {
+            try
+            {
+                string path = FilePath;
+                var before = new FileInfo(path);
+                if (!before.Exists)
+                {
+                    var none = new HistoryReadAhead();
+                    none.List = new List<QuoteRecord>();
+                    none.Existed = false;
+                    return none;
+                }
+                long size = before.Length;
+                DateTime time = before.LastWriteTimeUtc;
+                string text = File.ReadAllText(path, Encoding.UTF8);
+                CountRead();
+                var list = ParseJson(text);
+                if (list == null) return null;
+                var after = new FileInfo(path);
+                if (!after.Exists || after.Length != size || after.LastWriteTimeUtc != time) return null;
+                var a = new HistoryReadAhead();
+                a.List = list;
+                a.Existed = true;
+                a.Size = size;
+                a.WriteUtc = time;
+                return a;
+            }
+            catch { return null; }
+        }
+
+        /// UI thread. ahead usable and history.json unchanged since (same existence; when it exists, same size and write
+        /// time) -> problem = null, saveBlocked = false (as a good Load), returns ahead.List and sets ahead.List = null
+        /// (never handed out twice). Otherwise Load(out problem).
+        public static List<QuoteRecord> LoadFrom(HistoryReadAhead ahead, out string problem)
+        {
+            if (ahead != null && ahead.List != null)
+            {
+                bool same;
+                try
+                {
+                    var fi = new FileInfo(FilePath);
+                    same = fi.Exists == ahead.Existed
+                        && (!fi.Exists || (fi.Length == ahead.Size && fi.LastWriteTimeUtc == ahead.WriteUtc));
+                }
+                catch { same = false; }
+                if (same)
+                {
+                    problem = null;
+                    saveBlocked = false;
+                    var list = ahead.List;
+                    ahead.List = null;
+                    return list;
+                }
+            }
+            return Load(out problem);
         }
 
         /// history.bad-yyyyMMdd-HHmmss.json in the same folder, with -2, -3... if taken.
@@ -2323,7 +2458,9 @@ namespace PrintPrice
             try
             {
                 if (!File.Exists(FilePath)) return false;
-                var l = ParseJson(File.ReadAllText(FilePath, Encoding.UTF8));
+                string text = File.ReadAllText(FilePath, Encoding.UTF8);
+                CountRead();
+                var l = ParseJson(text);
                 return l != null && l.Count == 0;
             }
             catch { return false; }
@@ -2796,12 +2933,17 @@ namespace PrintPrice
             if (problem != null) return problem;
             result = r;
             foreach (var p in r.Pictures) SavePicture(p.Key, p.Value);   // quiet: a missing picture never fails a restore
-            try { File.WriteAllLines(ini, r.Settings.ToIni()); }
-            catch (Exception ex)
-            {
+            // settings.ini couldn't be read at start: only a restore WITH settings may write it (the old file is in the
+            // safety copy); a history-only restore would write the defaults in memory over it
+            if (AppSettings.SaveBlocked && !withSettings)
                 return L.S("Price history restored, but the settings could not be saved: ",
-                           "Prishistorikken er gendannet, men indstillingerne kunne ikke gemmes: ") + ex.Message;
-            }
+                           "Prishistorikken er gendannet, men indstillingerne kunne ikke gemmes: ") +
+                       L.S("the settings file could not be read.", "indstillingsfilen kunne ikke læses.");
+            string err = AppSettings.WriteIniFile(ini, r.Settings.ToIni());
+            if (err != null)
+                return L.S("Price history restored, but the settings could not be saved: ",
+                           "Prishistorikken er gendannet, men indstillingerne kunne ikke gemmes: ") + err;
+            if (withSettings) AppSettings.ResetSettingsBlock();   // the file holds the restored settings now
             return null;
         }
 

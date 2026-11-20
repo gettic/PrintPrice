@@ -19,17 +19,24 @@
         // small helpers for the C# side (Store.cs); this site's localStorage only, nothing leaves the browser
         window.printPrice = {
             get: function (k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
-            set: function (k, v) { try { localStorage.setItem(k, v); } catch (e) { } },
+            // '' = saved, else the error's name (QuotaExceededError when the storage is full; old Firefox NS_ERROR_DOM_QUOTA_REACHED)
+            set: function (k, v) { try { localStorage.setItem(k, v); return ''; } catch (e) { return (e && (e.name || e.message)) || 'error'; } },
             remove: function (k) { try { localStorage.removeItem(k); } catch (e) { } },
             lang: function () { return navigator.language || ''; },
             hash: function () { return location.hash || ''; },
             page: function (lang, title) { document.documentElement.lang = lang; if (title) document.title = title; },
             // ---- files (stage 2): the chosen / dropped file stays in the browser; C# reads only the byte ranges it needs ----
             file: null, fileId: 0, dotnet: null,
+            // iPhone / iPad grey out .3mf / .gcode / .printprice-backup in their picker when the input lists file types,
+            // so there the list goes (the names are checked anyway); other browsers keep the filter
+            appleTouch: function () {
+                return /iPhone|iPad|iPod/.test(navigator.userAgent || '') || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+            },
             hookFiles: function (dotnet, input) {
                 var pp = window.printPrice;
                 pp.dotnet = dotnet;
                 pp.input = input;
+                if (pp.appleTouch()) input.removeAttribute('accept');
                 input.addEventListener('change', function () { if (input.files.length) pp.useFile(input.files[0], input.files.length); input.value = ''; });
                 var hasFiles = function (e) { return e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types, 'Files') >= 0; };
                 document.addEventListener('dragover', function (e) { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; document.body.classList.add('dragging'); } });
@@ -106,6 +113,22 @@
                 return pp.wrap(pp.req('readonly', function (s) { return s.getAllKeys(IDBKeyRange.bound(prefix, prefix + '￿')); })
                     .then(function (keys) { return (keys || []).join('\n'); }));
             },
+            // keys with this prefix and their text length ("key\tlength" lines), without sending the texts over
+            idbSizes: function (prefix) {
+                var pp = window.printPrice;
+                return pp.wrap(pp.db().then(function (db) {
+                    return new Promise(function (ok, fail) {
+                        var tx = db.transaction('kv', 'readonly'), out = [];
+                        var rq = tx.objectStore('kv').openCursor(IDBKeyRange.bound(prefix, prefix + '￿'));
+                        rq.onsuccess = function () {
+                            var c = rq.result;
+                            if (c) { out.push(c.key + '\t' + (c.value == null ? 0 : String(c.value).length)); c.continue(); }
+                        };
+                        tx.oncomplete = function () { ok(out.join('\n')); };
+                        tx.onerror = tx.onabort = function () { fail(tx.error || new Error('failed')); };
+                    });
+                }));
+            },
             persist: function () {
                 try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function () { }); } catch (e) { }
             },
@@ -179,6 +202,10 @@
                     pp.channel = new BroadcastChannel('PrintPrice');
                     pp.channel.onmessage = function (e) { if (e.data === 'history') dotnet.invokeMethodAsync('HistoryChangedElsewhere'); };
                 } catch (e) { }
+                // another tab saved the settings (the storage event fires only in the other tabs): read them again
+                window.addEventListener('storage', function (e) {
+                    if (e.key === 'PrintPrice.settings' && e.storageArea === localStorage) dotnet.invokeMethodAsync('SettingsChangedElsewhere');
+                });
                 window.addEventListener('hashchange', function () { dotnet.invokeMethodAsync('HashChanged', location.hash || ''); });
             },
             told: function () { try { if (window.printPrice.channel) window.printPrice.channel.postMessage('history'); } catch (e) { } },
@@ -216,6 +243,7 @@
                 var i = document.getElementById('backupFile'), pp = window.printPrice;
                 if (!i || i.hooked) return;
                 i.hooked = true;
+                if (pp.appleTouch()) i.removeAttribute('accept');
                 i.addEventListener('change', function () { if (i.files.length) pp.useFile(i.files[0], 1); });
             },
             // AES-256-CBC (PKCS7, = .NET's Aes) for the online backup; .NET in the browser has no AES. Key and data stay here.
@@ -265,7 +293,37 @@
                 if (title) document.title = title;   // "Save as PDF" suggests this name
                 var back = function () { document.title = old; window.removeEventListener('afterprint', back); };
                 window.addEventListener('afterprint', back);
-                setTimeout(function () { window.print(); setTimeout(back, 1000); }, 50);
+                // straight away (no timer): browsers that want the print tied to the click (Safari) still see it
+                try { window.print(); } catch (e) { }
+                setTimeout(back, 1000);
+            },
+            // Copy text in two halves, so the click still counts after the save (Safari and Firefox only copy during a
+            // click): copyStart runs inside the click and hands the browser a promise of the text; copyFinish gives the
+            // text once the save is done (or falls back to copyText), copyCancel copies nothing (a failed invoice save).
+            copyJob: null,
+            copyStart: function () {
+                var pp = window.printPrice;
+                pp.copyJob = null;
+                try {
+                    if (!window.ClipboardItem || !navigator.clipboard || !navigator.clipboard.write) return false;
+                    var job = {};
+                    var text = new Promise(function (ok, fail) { job.ok = ok; job.fail = fail; });
+                    var item = new ClipboardItem({ 'text/plain': text.then(function (t) { return new Blob([t], { type: 'text/plain' }); }) });
+                    job.done = navigator.clipboard.write([item]).then(function () { return true; }, function () { return false; });
+                    pp.copyJob = job;
+                    return true;
+                } catch (e) { return false; }
+            },
+            copyFinish: async function (text) {
+                var pp = window.printPrice, job = pp.copyJob;
+                pp.copyJob = null;
+                if (job) { job.ok(text); if (await job.done) return true; }
+                return pp.copyText(text);
+            },
+            copyCancel: function () {
+                var pp = window.printPrice, job = pp.copyJob;
+                pp.copyJob = null;
+                if (job) { job.fail(new Error('cancelled')); job.done.catch(function () { }); }
             },
             copyText: async function (text) {
                 try { await navigator.clipboard.writeText(text); return true; } catch (e) { }

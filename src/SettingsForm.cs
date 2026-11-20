@@ -73,6 +73,7 @@ namespace PrintPrice
 
         // layout (96 dpi units)
         // 560 wide (was 520): room for the Printer row (drop-down with "Bambu Lab A1 mini" + Add… + Remove)
+        const int CheckIndent = 5;   // tick boxes' left margin: the box frame where the captions' text starts (qol #13)
         const int WindowW = 560, MinWindowH = 534, Edge = 14, StripTop = 6, StripH = 28, PageTop = 44,
                   PageGap = 16, SepGap = 9, ButtonH = 32, ButtonMinW = 75, NumberBoxW = 70, UnitGap = 6;
 
@@ -129,9 +130,9 @@ namespace PrintPrice
             txtRound = Row(t, L.S("Round up to nearest", "Rund op til nærmeste"), L.S("kr. (0 = off)", "kr. (0 = fra)"));
 
             Section(t, L.S("Failed prints", "Fejlprint"));
-            txtFailed = Row(t, L.S("Allowance", "Tillæg"), L.S("% (0 = off)", "% (0 = fra)"));   // not "Failed prints" twice (heading)
+            txtFailed = Row(t, L.S("Extra for failed prints", "Tillæg for fejlprint"), L.S("% (0 = off)", "% (0 = fra)"));
             // the hint's grey second line = failed prints marked in the price history that new quotes haven't made back yet
-            Hint(t, "").SetText(L.S("Added to material + power for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler."),
+            Hint(t, "").SetText(L.S("Added to material + electricity for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler."),
                                 L.F("Not made back yet: {0} kr.", "Ikke tjent ind endnu: {0} kr.", failedDebt.ToString("N2", Num.Dk)));
             // earn back failed prints: the checkbox is the caption of its % row; % and "paid by" only work while ticked
             int pr = t.RowCount++;
@@ -144,7 +145,7 @@ namespace PrintPrice
             cmbPaybackWho.Items.Add(L.S("Customers only", "Kun kunder"));
             cmbPaybackWho.Items.Add(L.S("Both prices", "Begge priser"));
             chkPayback.CheckedChanged += delegate { txtPayback.Enabled = cmbPaybackWho.Enabled = chkPayback.Checked; };
-            Hint(t, L.S("Adds this % of material + power to new quotes until failed prints are made back.",
+            Hint(t, L.S("Adds this % of material + electricity to new quotes until failed prints are made back.",
                         "Lægger denne % af materiale + strøm på nye tilbud, til fejlprint er tjent ind."));
 
             // ----- Printer -----
@@ -180,7 +181,7 @@ namespace PrintPrice
             lblWattsUnit = (Label)t.GetControlFromPosition(2, t.RowCount - 1);   // the note follows the printer's model
 
             Section(t, L.S("Wear && tear  (both prices)", "Slid  (begge priser)"));
-            txtRate = Row(t, L.S("Machine-time rate", "Maskintimepris"), L.S("kr/h", "kr/t"));
+            txtRate = Row(t, L.S("Wear per hour", "Slid pr. time"), L.S("kr/h", "kr/t"));
             chkAutoWear = Check(t, L.S("Calculate from the printer above", "Beregn ud fra printeren ovenfor"));
             lblWear = Hint(t, "");
 
@@ -205,8 +206,8 @@ namespace PrintPrice
             txtQuoteName = TextRow(t, L.S("Name on the quote", "Navn på tilbuddet"), null, 40);
             txtQuoteDays = Row(t, L.S("Valid for", "Gyldigt i"), L.S("days", "dage"));   // valid until = quote date + days
             Section(t, L.S("Invoice", "Faktura"));
-            chkMainInvoice = Check(t, L.S("Main window: Show invoice… instead of Show quote…",
-                                          "Hovedvinduet: Vis faktura… i stedet for Vis tilbud…"));
+            chkMainInvoice = Check(t, L.S("Main window makes invoices, not quotes",
+                                          "Hovedvinduet laver fakturaer, ikke tilbud"));
             tip = new ToolTip { OwnerDraw = true, InitialDelay = 400, AutoPopDelay = 15000 };
             tip.Draw += MainForm.DrawDarkTip;
             Disposed += delegate { tip.Dispose(); };
@@ -224,7 +225,7 @@ namespace PrintPrice
             t.Controls.Add(copyFlow, 0, ic);
             t.SetColumnSpan(copyFlow, 3);
             tip.SetToolTip(chkInvoiceCopies, L.S("Every invoice PDF you save is also copied\ninto PrintPrice's Invoices folder.\nA copy is never overwritten.",
-                                                 "Hver faktura-PDF, du gemmer, kopieres også\ntil PrintPrices fakturamappe.\nEn kopi overskrives aldrig."));
+                                                 "Hver faktura-PDF, du gemmer, kopieres også\ntil mappen Invoices.\nEn kopi overskrives aldrig."));
             tip.SetToolTip(btnInvoiceFolder, L.S("Open the Invoices folder\n", "Åbn fakturamappen\n") + MainForm.InvoicesFolder);
             txtDueDays = Row(t, L.S("Pay within", "Betalingsfrist"), L.S("days", "dage"));
             txtMobilePay = TextRow(t, L.S("MobilePay number", "MobilePay-nummer"), L.S("optional", "valgfrit"), 40);
@@ -302,11 +303,11 @@ namespace PrintPrice
                 SetCheckText("v" + Updater.CurrentText + L.S(" – check off in test mode", " – tjek slået fra i testtilstand"), null, null);
             else
                 SetCheckText("v" + Updater.CurrentText + " –", L.S("check now", "tjek nu"), null);
-            reset = new Button { Text = L.S("Defaults", "Standard"), TabIndex = 7 };
+            reset = new Button { Text = L.S("Reset to defaults", "Nulstil til standard"), TabIndex = 7 };
             ok = new Button { Text = "OK", TabIndex = 8 };
             cancel = new Button { Text = L.S("Cancel", "Annullér"), DialogResult = DialogResult.Cancel, TabIndex = 9 };
             ok.Click += delegate { Accept(); };
-            reset.Click += delegate { Defaults(); };   // every tab (the shown printer: its model's defaults)
+            reset.Click += delegate { AskReset(); };   // issue #7: asks first; every tab (the shown printer: its model's defaults)
             root.Controls.Add(reset);
             root.Controls.Add(ok);
             root.Controls.Add(cancel);
@@ -357,11 +358,21 @@ namespace PrintPrice
             Width = Px(WindowW);
             int cw = ClientSize.Width - 2 * Px(Edge);
             // one caption column for every tab: the longest caption (or the payback checkbox) + its right margin (LabelGap)
+            // qol #13: tick boxes start where the captions' text starts (the box frame was 5 px left of it)
+            foreach (var cb in new[] { chkPayback, chkAutoWear, chkVat, chkAutoPower, chkMainInvoice, chkInvoiceCopies, chkAutoUpdate })
+                cb.Margin = new Padding(Px(CheckIndent), cb.Margin.Top, cb.Margin.Right, cb.Margin.Bottom);
+            // qol #12: measured to the end of the caption's TEXT (its preferred width ends with GDI's trailing text padding),
+            // then a 30 px clear gap to the boxes, as in the main window (PreferredSize + LabelGap gave 27 / 26 px)
             int col = 0;
             foreach (var p in pages)
                 foreach (Control c in p.Controls)
                     if (p.GetColumn(c) == 0 && p.GetColumnSpan(c) == 1)
-                        col = Math.Max(col, c.GetPreferredSize(Size.Empty).Width + c.Margin.Horizontal);
+                    {
+                        int pad = 0;
+                        if (!string.IsNullOrEmpty(c.Text))
+                            pad = (TextRenderer.MeasureText(c.Text, c.Font).Width - TextRenderer.MeasureText(c.Text, c.Font, Size.Empty, TextFormatFlags.NoPadding).Width) / 2;
+                        col = Math.Max(col, c.Margin.Left + c.GetPreferredSize(Size.Empty).Width - pad + Px(30));
+                    }
             foreach (var p in pages)
             {
                 p.SuspendLayout();
@@ -378,9 +389,11 @@ namespace PrintPrice
             }
             FitCombos(this);
             int bw = Px(ButtonMinW);
-            foreach (var b in new[] { reset, ok, cancel })
+            foreach (var b in new[] { ok, cancel })
                 bw = Math.Max(bw, TextRenderer.MeasureText(b.Text, b.Font).Width + Px(20));
-            foreach (var b in new[] { reset, ok, cancel }) b.Size = new Size(bw, Px(ButtonH));
+            foreach (var b in new[] { ok, cancel }) b.Size = new Size(bw, Px(ButtonH));
+            // "Reset to defaults" (issue #7): its own width (text + 24), OK / Cancel stay equal
+            reset.Size = new Size(Math.Max(bw, TextRenderer.MeasureText(reset.Text, reset.Font).Width + Px(24)), Px(ButtonH));
             // Add… / Remove: box height, each its text + 24 px (flat buttons draw with inner padding), so the printer
             // drop-down keeps room for "Bambu Lab A1 mini"; its open list is as wide as the longest name
             foreach (var b in new[] { btnAddPrinter, btnRemovePrinter, btnBackupTo, btnRestoreFrom, btnSetupAgain, btnInvoiceFolder })
@@ -897,11 +910,41 @@ namespace PrintPrice
             ShowPrinterNow(work.ActivePrinterId);
         }
 
+        /// "Reset to defaults" (issue #7): asks first (dark AskForm), then Defaults and a muted note at the bottom left.
+        void AskReset()
+        {
+            using (var ask = NewResetAsk())
+                if (ask.ShowDialog(this) != DialogResult.Yes) return;
+            Defaults();
+            SetCheckText(L.S("Defaults filled in. OK saves them.", "Standarder udfyldt. OK gemmer dem."), null, null);
+        }
+
+        /// The question before "Reset to defaults" (also settings_reset_ask.png).
+        internal static BackupForm.AskForm NewResetAsk()
+        {
+            return new BackupForm.AskForm(L.S("Reset to defaults", "Nulstil til standard"),
+                L.S("Reset to defaults?", "Nulstil til standard?"),
+                L.S("All settings on every tab go back to their defaults. Your name, payment details, Bambu Studio path and language " +
+                    "are kept, and your price history, invoices and customers are not touched. Nothing is saved until you press OK; " +
+                    "Cancel undoes it.",
+                    "Alle indstillinger på alle faner sættes tilbage til standard. Dit navn, dine betalingsoplysninger, Bambu Studio-stien " +
+                    "og sproget beholdes, og din prishistorik, dine fakturaer og kunder røres ikke. Intet gemmes, før du trykker OK; " +
+                    "Annullér fortryder det."),
+                L.S("Reset", "Nulstil"), L.S("Cancel", "Annullér"));
+        }
+
+        /// --test-history: the reset as the button does it, the question answered by AskForm.TestAnswers.
+        internal void TestReset() { AskReset(); }
+        /// --test-invoice: OK as the user would press it (Result = the settings OK would save; nothing is saved here).
+        internal AppSettings TestAccept() { Accept(); return Result; }
+
         /// Defaults: every tab's defaults; the printer the Printer tab shows gets its model's defaults (name, other
         /// printers and the list stay).
         void Defaults()
         {
-            var d = new AppSettings();
+            // issue #7 (the user's choice): your own details stay (name on quotes / invoices, MobilePay, bank, Bambu Studio
+            // path, language: AppSettings.DefaultsKeepingPersonal)
+            var d = work.DefaultsKeepingPersonal();
             FillGeneral(d);
             var p = work.FindPrinter(shownId);
             if (p != null)
@@ -1196,11 +1239,8 @@ namespace PrintPrice
                     bad.Focus();
                     break;
                 }
-                string msg = L.S("Please enter valid, non-negative numbers in the highlighted fields.",
-                                 "Indtast gyldige tal, ikke negative, i de markerede felter.");
-                // hidden test start: no message box (it would pop up on screen), red text in the bottom row instead
-                if (Program.Hidden) SetCheckText(msg, null, Theme.Error);
-                else MessageBox.Show(this, msg, Text);
+                // red text in the bottom row (never Windows' light message box, qol #3)
+                SetCheckText(BadNumbersText, null, Theme.Error);
                 return;
             }
             StorePrinter();   // the shown printer's boxes are valid (checked above)
@@ -1234,6 +1274,18 @@ namespace PrintPrice
             Close();
         }
 
+        internal static string BadNumbersText
+        {
+            get { return L.S("Use numbers of 0 or more in the red boxes.", "Brug tal på 0 eller mere i de røde felter."); }
+        }
+
+        /// Picture mode: OK pressed with a bad number in the Prices tab (settings_bad.png).
+        internal void SampleBadNumber()
+        {
+            txtFriends.Text = "-5";
+            Accept();
+        }
+
         // ---------- "check now" (only when clicked; never in picture mode) ----------
         /// Text bottom left, then an optional clickable part ("check now" / "try again"); colour null = muted.
         internal void SetCheckText(string text, string link, Color? colour)
@@ -1242,6 +1294,7 @@ namespace PrintPrice
             lblCheck.ForeColor = colour ?? Theme.Muted;
             lnkCheck.Text = link ?? "";
             lnkCheck.Visible = link != null;
+            if (fitted) PlaceAll();   // a longer text (e.g. the red bad-number line) stays centred on the button row
         }
 
         /// "vX is out – see main window" (also used by picture mode as the longest result text).

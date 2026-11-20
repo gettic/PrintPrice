@@ -226,11 +226,17 @@ namespace PrintPrice
                 throw new ArgumentException("Print time must be >= 0 and minutes 0-59.");
             if (input.FilamentGrams < 0 || input.FilamentDkkPerKg < 0 || input.ElectricityDkkPerKwh < 0)
                 throw new ArgumentException("Values cannot be negative.");
+            if (TooBig(input.FilamentGrams) || TooBig(input.FilamentDkkPerKg) || TooBig(input.ElectricityDkkPerKwh) ||
+                double.IsNaN(input.PaybackDebt) || double.IsInfinity(input.PaybackDebt))
+                throw new ArgumentException(TooBigText);
             bool multi = input.Filaments != null && input.Filaments.Count >= 2;
             if (multi)
                 foreach (var f in input.Filaments)
+                {
                     if (f == null || f.Grams < 0 || f.PricePerKg < 0)
                         throw new ArgumentException("Values cannot be negative.");
+                    if (TooBig(f.Grams) || TooBig(f.PricePerKg)) throw new ArgumentException(TooBigText);
+                }
 
             var r = new QuoteResult();
             r.PrintHours = input.Hours + input.Minutes / 60.0;
@@ -276,6 +282,14 @@ namespace PrintPrice
             r.FriendsPrice = RoundUp(r.FriendsPrice, s.RoundTo);
             r.OthersPrice = RoundUp(r.OthersPrice, s.RoundTo);
             return r;
+        }
+
+        const string TooBigText = "Values must be finite numbers below 10.000.000.";
+
+        // NaN, infinity or Num.MaxValue (1e7) and up: an input Calculate refuses (Num.TryParse refuses it too)
+        static bool TooBig(double v)
+        {
+            return double.IsNaN(v) || double.IsInfinity(v) || v >= Num.MaxValue;
         }
 
         public static double RoundUp(double value, double step)
@@ -449,8 +463,9 @@ namespace PrintPrice
             return (sum + top) / 100.0;
         }
 
-        /// Splits amountOre (e.g. a bill's top-up in øre) over the jobs by their prices, in whole øre that add up exactly
-        /// (largest remainder, SplitOre; ties: the earlier job). All prices 0 = equal parts. Same order as prices.
+        /// Splits amountOre (e.g. a bill's top-up in øre) over the jobs by their prices AS SHOWN (whole øre, ShownOre), so
+        /// the split only depends on the numbers on the bill; whole øre that add up exactly (largest remainder, SplitOre;
+        /// ties: the earlier job). All shown prices 0 = equal parts. Same order as prices. Never throws.
         public static long[] ShareOre(IList<double> prices, long amountOre)
         {
             int n = prices == null ? 0 : prices.Count;
@@ -461,7 +476,7 @@ namespace PrintPrice
             for (int i = 0; i < n; i++)
             {
                 double v = prices[i];
-                p[i] = double.IsNaN(v) || double.IsInfinity(v) || v < 0 ? 0 : v;
+                p[i] = double.IsNaN(v) || double.IsInfinity(v) || v < 0 ? 0 : (v < 1e15 ? ShownOre(v) : v * 100.0);
                 total += p[i];
             }
             var lines = new List<QuoteLine>(n);

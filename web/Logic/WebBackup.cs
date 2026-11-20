@@ -191,10 +191,10 @@ namespace PrintPrice.Web
             int nc = r.InvoiceClashes.Count;
             if (nc == 0) return null;
             return nc == 1
-                ? L.F("Invoice code {0} is on two different quotes. Both are kept, because the customer may already have it. Search for it in the history to check them.",
+                ? L.F("Invoice no. {0} is on two different quotes. Both are kept, because the customer may already have it. Search for it in the history to check them.",
                       "Fakturanummer {0} står på to forskellige tilbud. Begge beholdes, fordi kunden måske allerede har det. Søg efter det i historikken for at tjekke dem.",
                       r.InvoiceClashes[0])
-                : L.F("Invoice codes {0} are each on two different quotes. All are kept, because the customers may already have them. Search for them in the history to check them.",
+                : L.F("Invoice nos. {0} are each on two different quotes. All are kept, because the customers may already have them. Search for them in the history to check them.",
                       "Fakturanumrene {0} står hver på to forskellige tilbud. Alle beholdes, fordi kunderne måske allerede har dem. Søg efter dem i historikken for at tjekke dem.",
                       string.Join(", ", r.InvoiceClashes.ToArray()));
         }
@@ -223,6 +223,41 @@ namespace PrintPrice.Web
 
         /// "PrintPrice before-restore 2026-11-10 14.05.09.printprice-backup" (or "before-clear") for a safety copy's key
         /// (seconds: two in one minute differ).
+        /// printPrice.idbSizes' answer ("key\tlength" lines) -> safety copy key and size; only keys with AnySafetyPrefix.
+        public static List<KeyValuePair<string, long>> ParseSizes(string lines)
+        {
+            var res = new List<KeyValuePair<string, long>>();
+            if (string.IsNullOrEmpty(lines)) return res;
+            foreach (var line in lines.Split('\n'))
+            {
+                int tab = line.LastIndexOf('\t');
+                if (tab <= 0) continue;
+                string key = line.Substring(0, tab);
+                long n;
+                if (!key.StartsWith(AnySafetyPrefix, StringComparison.Ordinal)
+                    || !long.TryParse(line.Substring(tab + 1), NumberStyles.None, CultureInfo.InvariantCulture, out n)) continue;
+                res.Add(new KeyValuePair<string, long>(key, n));
+            }
+            return res;
+        }
+
+        /// The storage-full box's button: "Delete safety copies (2, about 38 MB)"; null = none to delete. Text length
+        /// counts as bytes (the stored backups are mostly plain ASCII), rounded up to whole MB.
+        public static string DeleteSafetyText(List<KeyValuePair<string, long>> sizes)
+        {
+            if (sizes == null || sizes.Count == 0) return null;
+            long total = 0;
+            foreach (var s in sizes) total += Math.Max(0, s.Value);
+            long mb = Math.Max(1, (total + 1024 * 1024 - 1) / (1024 * 1024));
+            return L.F("Delete safety copies ({0}, about {1} MB)", "Slet sikkerhedskopier ({0}, ca. {1} MB)", sizes.Count, mb);
+        }
+
+        public static string DeletedSafetyText(int n)
+        {
+            return n == 1 ? L.S("✓ 1 safety copy deleted. Try again now.", "✓ 1 sikkerhedskopi slettet. Prøv igen nu.")
+                          : L.F("✓ {0} safety copies deleted. Try again now.", "✓ {0} sikkerhedskopier slettet. Prøv igen nu.", n);
+        }
+
         public static string SafetyFileName(string key)
         {
             string prefix = key != null && key.StartsWith(ClearSafetyPrefix, StringComparison.Ordinal) ? ClearSafetyPrefix : SafetyPrefix;

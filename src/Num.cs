@@ -12,7 +12,11 @@ namespace PrintPrice
     {
         public static readonly CultureInfo Dk = new CultureInfo("da-DK");
 
-        /// Accepts "12,5", "12.5", "1.234,5", "1,234.5". Rejects negatives.
+        /// Numbers at or above this are refused by TryParse (also SetupAnswers.ReadNumber and Pricing.Calculate).
+        public const double MaxValue = 1e7;
+
+        /// Accepts "12,5", "12.5", "1.234,5", "1,234.5". Rejects negatives, NaN, infinity and values of MaxValue (1e7)
+        /// or more. A lone dot is a decimal point: "1.200" = 1,2 (pinned by a test).
         public static bool TryParse(string text, out double value)
         {
             value = 0;
@@ -26,7 +30,9 @@ namespace PrintPrice
                 else s = s.Replace(",", "");
             }
             else s = s.Replace(',', '.');
-            return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && value >= 0;
+            if (!double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value)) return false;
+            if (double.IsNaN(value) || double.IsInfinity(value) || value < 0 || value >= MaxValue) { value = 0; return false; }
+            return true;
         }
 
 #if !WEB

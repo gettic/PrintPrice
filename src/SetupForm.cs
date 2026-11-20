@@ -425,7 +425,7 @@ namespace PrintPrice
             choiceFixed.CheckedChanged += delegate { if (!filling && choiceFixed.Checked) { live = false; UpdatePower(); UpdateExample(); } };
             Box(t, L.S("A print uses little power (an A1 about 0,1 kWh an hour), so this is a small part of the price.",
                        "Et print bruger lidt strøm (en A1 omkring 0,1 kWh i timen), så det er en lille del af prisen."),
-                   L.S("Tariffs, VAT and the start-up fetch are in Settings > Electricity.",
+                   L.S("Tariffs, VAT and fetching the price at start are in Settings > Electricity.",
                        "Afgifter, moms og hentning ved start ligger i Indstillinger > Elpris."), 0);
         }
 
@@ -730,7 +730,8 @@ namespace PrintPrice
                                          : L.F("Fixed, {0} kr/kWh", "Fast, {0} kr/kWh", Num.N2(s.LastElectricityPrice)), StepCosts);
             set(5, L.F("Friends & family {0} % · customers {1} %", "Venner og familie {0} % · kunder {1} %", Num.Fmt(s.FriendsMarkupPct), Num.Fmt(s.OthersMarkupPct)), StepPrices);
             set(6, s.MinimumPrice > 0 ? L.F("{0} kr. (customers)", "{0} kr. (kunder)", Num.Fmt(s.MinimumPrice)) : L.S("Off", "Fra"), StepPrices);
-            set(7, s.QuoteName.Length > 0 ? s.QuoteName : L.S("none", "intet"), StepPrices);
+            set(7, s.QuoteName.Length > 0 ? s.QuoteName : L.S("(none)", "(intet)"), StepPrices);
+            if (s.QuoteName.Length == 0) sumValue[7].ForeColor = Theme.Muted;   // no answer = muted, like the skipped ones (qol #18)
 
             bool restart = again && AppSettings.IsDanish(lang) != L.Danish;
             if (again)

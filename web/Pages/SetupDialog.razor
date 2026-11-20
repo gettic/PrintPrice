@@ -99,13 +99,13 @@
                 <label for="setup-elec" class="@(answers.LivePower ? "muted" : "")">@L.S("Electricity price", "Elpris")</label>
                 <div class="field"><input id="setup-elec" type="text" inputmode="decimal" class="mid @(answers.LivePower ? "" : Bad("elec"))" @bind="answers.ElecText" @bind:event="oninput" disabled="@answers.LivePower" @onkeydown="BoxKey" /><span class="@(answers.LivePower ? "muted" : "")">kr/kWh</span></div>
             </div>
-            <div class="muted small">@L.S("The live price comes through PrintPrice's own small relay; only the price area is sent. Tariffs, VAT and the start-up fetch are in Settings > Electricity.",
-                                          "Den aktuelle pris kommer gennem PrintPrices egen lille relætjeneste; kun prisområdet sendes. Afgifter, moms og hentning ved start ligger i Indstillinger > Elpris.")</div>
+            <div class="muted small">@L.S("The live price comes through PrintPrice's own small server; only the price area is sent. Tariffs, VAT and fetching the price at start are in Settings > Electricity.",
+                                          "Den aktuelle pris kommer gennem PrintPrices egen lille server; kun prisområdet sendes. Afgifter, moms og hentning af prisen ved start ligger i Indstillinger > Elpris.")</div>
         }
         else if (step == SetupAnswers.StepPrices)
         {
             <div class="hinfo">@L.S("Every print gets two prices: one for friends & family, one for customers.", "Hvert print får to priser: en til venner og familie og en til kunder.")
-                <div class="muted">@L.S("Failed-print allowance, rounding and invoice details keep their defaults (Settings).", "Tillæg for fejlprint, afrunding og fakturaoplysninger beholder deres standard (Indstillinger).")</div>
+                <div class="muted">@L.S("Extra for failed prints, rounding and invoice details keep their defaults (Settings).", "Tillæg for fejlprint, afrunding og fakturaoplysninger beholder deres standard (Indstillinger).")</div>
             </div>
             <div class="sgrid">
                 <label for="setup-friends">@L.S("Friends & family markup", "Avance, venner og familie")</label>
@@ -148,7 +148,7 @@
         }
         @if (problem && WebSetup.BadBoxes(answers, step).Count > 0)
         {
-            <div class="problem" role="alert">@L.S("Please enter valid, non-negative numbers.", "Indtast gyldige tal, ikke negative.")</div>
+            <div class="problem" role="alert">@L.S("Use numbers of 0 or more.", "Brug tal på 0 eller mere.")</div>
         }
         </div>
 

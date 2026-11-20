@@ -68,7 +68,7 @@ namespace PrintPrice
         {
             if (exitCode == -50) return BedErrorText(model);
             return L.F("Bambu Studio could not slice {0}: {1}", "Bambu Studio kunne ikke slice {0}: {1}",
-                fileName, string.IsNullOrEmpty(cliError) ? L.F("exit code {0}", "fejlkode {0}", exitCode) : cliError);
+                fileName, string.IsNullOrEmpty(cliError) ? L.F("it stopped with error {0}", "den stoppede med fejl {0}", exitCode) : cliError);
         }
 
         /// As above, plus the plate/filament clash ("Filaments are not compatible with the plate type", CLI -61):
@@ -400,7 +400,8 @@ namespace PrintPrice
         /// The CLI does not resolve "inherits" chains, so merge parent → child ourselves.
         static Dictionary<string, object> Flatten(List<string> roots, string kind, string name, int depth)
         {
-            if (depth > 25) throw new SliceException(L.F("Profile inheritance too deep: {0}", "Profilen arver i for mange led: {0}", name));
+            if (depth > 25) throw new SliceException(L.F("This Bambu Studio profile can't be read ({0}). Pick another in Settings.",
+                "Denne Bambu Studio-profil kan ikke læses ({0}). Vælg en anden i Indstillinger.", name));
             var own = Serializer().Deserialize<Dictionary<string, object>>(File.ReadAllText(FindProfile(roots, kind, name)));
             var merged = new Dictionary<string, object>();
             object parent;
@@ -445,7 +446,59 @@ namespace PrintPrice
 
         static string Quote(string a)
         {
-            return "\"" + a.Replace("\"", "\\\"") + "\"";
+            return QuoteArg(a);
+        }
+
+        /// One command-line argument in quotes, by Windows' rules (CommandLineToArgvW): backslashes before a quote or
+        /// before the closing quote are doubled, a quote becomes \". "C:\a b\" -> "\"C:\\a b\\\\\"". Pure (tests).
+        internal static string QuoteArg(string a)
+        {
+            var sb = new System.Text.StringBuilder("\"");
+            int slashes = 0;
+            foreach (char c in a ?? "")
+            {
+                if (c == '\\') { slashes++; continue; }
+                if (c == '"') { sb.Append('\\', slashes * 2 + 1); sb.Append('"'); }
+                else { sb.Append('\\', slashes); sb.Append(c); }
+                slashes = 0;
+            }
+            sb.Append('\\', slashes * 2);
+            return sb.Append('"').ToString();
+        }
+
+        // ---------- running Bambu Studio processes (killed when the app closes) ----------
+
+        static readonly object RunningLock = new object();
+        static readonly List<Process> Running = new List<Process>();
+        static readonly List<int> StartedIdList = new List<int>();
+        static volatile bool stopping;
+
+        /// Process ids of the last (up to 20) Bambu Studio runs started by RunSlice (test hooks only).
+        internal static List<int> StartedIds
+        {
+            get { lock (RunningLock) return new List<int>(StartedIdList); }
+        }
+
+        /// Kills every running Bambu Studio started by this app and waits for each (3 s at most); after this no new run
+        /// starts (RunSlice throws OperationCanceledException). Call when the app closes. Never throws.
+        public static void StopAll()
+        {
+            List<Process> list;
+            lock (RunningLock)
+            {
+                stopping = true;
+                list = new List<Process>(Running);
+            }
+            foreach (var p in list)
+            {
+                try { if (!p.HasExited) { p.Kill(); p.WaitForExit(3000); } } catch { }
+            }
+        }
+
+        /// Slicing went over TimeoutMinutes (SliceColours doesn't retry the files one by one after this).
+        sealed class SliceTimeout : SliceException
+        {
+            public SliceTimeout(string message) : base(message) { }
         }
 
         /// Slices one model file (all plates) with the profiles written by PrepareProfiles. A project .3mf with 2+ filament
@@ -487,20 +540,36 @@ namespace PrintPrice
 
             int exit;
             var sw = Stopwatch.StartNew();
-            using (var proc = Process.Start(psi))
+            Process proc;
+            lock (RunningLock)
+            {
+                // the app is closing (StopAll): don't start another Bambu Studio
+                if (stopping) throw new OperationCanceledException();
+                proc = Process.Start(psi);
+                Running.Add(proc);
+                try { StartedIdList.Add(proc.Id); if (StartedIdList.Count > 20) StartedIdList.RemoveAt(0); } catch { }
+            }
+            try
             {
                 while (!proc.WaitForExit(250))
                 {
                     if (ct.IsCancellationRequested || sw.Elapsed.TotalMinutes > TimeoutMinutes)
                     {
-                        try { proc.Kill(); } catch { }
+                        // wait for it, so the work folder's files are free to delete
+                        try { proc.Kill(); proc.WaitForExit(5000); } catch { }
                         ct.ThrowIfCancellationRequested();
-                        throw new SliceException(L.F("Slicing took longer than {0} minutes and was stopped.",
+                        throw new SliceTimeout(L.F("Slicing took longer than {0} minutes and was stopped.",
                             "Slicing tog mere end {0} minutter og blev stoppet.", TimeoutMinutes));
                     }
                 }
                 exit = proc.ExitCode;
             }
+            finally
+            {
+                lock (RunningLock) Running.Remove(proc);
+                proc.Dispose();
+            }
+            if (stopping) throw new OperationCanceledException();   // killed by StopAll: not a slicing error
 
             string error = null;
             string resultText = null;
@@ -545,10 +614,8 @@ namespace PrintPrice
                                                       && e.FullName.EndsWith(".gcode", StringComparison.OrdinalIgnoreCase));
                     if (!hasGcode) return false;
                     // = ReadSliceInfo(path) != null, without the picture and project_settings it would also read
-                    var entry = zip.GetEntry("Metadata/slice_info.config");
-                    if (entry == null) return false;
-                    string xml;
-                    using (var sr = new StreamReader(entry.Open())) xml = sr.ReadToEnd();
+                    string xml = EntryText(zip, "Metadata/slice_info.config");   // null = missing, empty or over 64 MB
+                    if (xml == null) return false;
                     return ParseSliceInfo(xml) != null;
                 }
             }
@@ -601,9 +668,8 @@ namespace PrintPrice
             string xml, settings, modelSettings;
             using (var zip = ZipFile.OpenRead(path3mf))
             {
-                var entry = zip.GetEntry("Metadata/slice_info.config");
-                if (entry == null) return null;
-                using (var sr = new StreamReader(entry.Open())) xml = sr.ReadToEnd();
+                xml = EntryText(zip, "Metadata/slice_info.config");   // null = missing, empty or over 64 MB
+                if (xml == null) return null;
                 settings = ProjectSettings(zip);
                 modelSettings = EntryText(zip, "Metadata/model_settings.config");
             }
@@ -814,6 +880,7 @@ namespace PrintPrice
                         separate.Clear();
                     }
                     catch (OperationCanceledException) { throw; }
+                    catch (SliceTimeout) { throw; }   // 15 minutes already: don't start the separate runs too
                     catch (TogetherDoesNotFit)
                     {
                         ct.ThrowIfCancellationRequested();
@@ -1065,6 +1132,53 @@ namespace PrintPrice
                 list.Add(f);
             }
             return list;
+        }
+
+        // ---------- old job folders (MainForm.RunJob's %TEMP%\PrintPrice\<guid>) ----------
+
+        static readonly Regex JobFolderRx = new Regex("^[0-9a-fA-F]{32}$");
+
+        /// Pure: of (folder path, newest of its creation / last-write time in UTC), the paths to delete: the folder's name
+        /// is 32 hex digits (a job folder) and that time is at least minAge before nowUtc. "studio", other names, young
+        /// and future-dated folders are kept.
+        public static List<string> OldJobFolders(IEnumerable<KeyValuePair<string, DateTime>> folders, DateTime nowUtc, TimeSpan minAge)
+        {
+            var list = new List<string>();
+            if (folders == null) return list;
+            foreach (var f in folders)
+            {
+                if (string.IsNullOrEmpty(f.Key)) continue;
+                if (!JobFolderRx.IsMatch(Path.GetFileName(TrimSlash(f.Key)) ?? "")) continue;
+                if (f.Value > nowUtc || nowUtc - f.Value < minAge) continue;
+                list.Add(f.Key);
+            }
+            return list;
+        }
+
+        /// Deletes job folders under root left by earlier runs (crash, Bambu Studio still holding a file) that are at
+        /// least a day old, so another running copy of the app is never hit. Never throws; returns how many went.
+        public static int CleanJobFolders(string root)
+        {
+            int n = 0;
+            try
+            {
+                if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return 0;
+                var folders = new List<KeyValuePair<string, DateTime>>();
+                foreach (var dir in Directory.GetDirectories(root))
+                {
+                    try
+                    {
+                        var info = new DirectoryInfo(dir);
+                        DateTime t = info.LastWriteTimeUtc > info.CreationTimeUtc ? info.LastWriteTimeUtc : info.CreationTimeUtc;
+                        folders.Add(new KeyValuePair<string, DateTime>(dir, t));
+                    }
+                    catch { }
+                }
+                foreach (var dir in OldJobFolders(folders, DateTime.UtcNow, TimeSpan.FromDays(1)))
+                    try { Directory.Delete(dir, true); n++; } catch { }
+            }
+            catch { }
+            return n;
         }
 
         static string TrimSlash(string p)

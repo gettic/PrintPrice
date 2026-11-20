@@ -20,10 +20,16 @@ namespace PrintPrice.Web
             catch (Exception) { return null; }   // storage blocked (private mode etc.): defaults
         }
 
-        public async Task Set(string key, string value)
+        /// Saves a value. null = saved, else the browser's error name (WebHistory.IsQuotaError = storage full); the page
+        /// still works either way.
+        public async Task<string> Set(string key, string value)
         {
-            try { await js.InvokeVoidAsync("printPrice.set", key, value); }
-            catch (Exception) { /* not saved; the page still works */ }
+            try
+            {
+                string err = await js.InvokeAsync<string>("printPrice.set", key, value);
+                return string.IsNullOrEmpty(err) ? null : err;
+            }
+            catch (Exception e) { return e.Message; }
         }
 
         public async Task Remove(string key)
@@ -114,7 +120,7 @@ namespace PrintPrice.Web
             catch (Exception) { return false; }
         }
 
-        /// Restore > Choose file…: the backup file input; its file comes back through FileChosen like a dropped one.
+        /// Restore > Browse…: the backup file input; its file comes back through FileChosen like a dropped one.
         public async Task PickBackup()
         {
             try { await js.InvokeVoidAsync("printPrice.hookBackupInput"); await js.InvokeVoidAsync("printPrice.pickBackup"); }
@@ -177,6 +183,32 @@ namespace PrintPrice.Web
         {
             try { return await js.InvokeAsync<bool>("printPrice.copyText", text); }
             catch (Exception) { return false; }
+        }
+
+        /// Copy text, first half: call it first thing in the click handler (synchronously, so Safari / Firefox still count
+        /// the click); the text follows with CopyFinish after the save, or CopyCancel copies nothing.
+        public void CopyStart()
+        {
+            try
+            {
+                var inProcess = js as IJSInProcessRuntime;
+                if (inProcess != null) inProcess.InvokeVoid("printPrice.copyStart");
+                else _ = js.InvokeVoidAsync("printPrice.copyStart").AsTask();
+            }
+            catch (Exception) { }
+        }
+
+        /// Copy text, second half: the text goes to the clipboard (the started copy, else the normal way). false = refused.
+        public async Task<bool> CopyFinish(string text)
+        {
+            try { return await js.InvokeAsync<bool>("printPrice.copyFinish", text); }
+            catch (Exception) { return false; }
+        }
+
+        public async Task CopyCancel()
+        {
+            try { await js.InvokeVoidAsync("printPrice.copyCancel"); }
+            catch (Exception) { }
         }
 
         /// First-time setup: focus the box (CSS selector) with its text selected. always = false skips touch screens.

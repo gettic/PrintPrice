@@ -25,11 +25,11 @@
                 <div class="qv-recent muted">@L.S("Recent: ", "Seneste: ")@string.Join(", ", Recent.Count > 3 ? Recent.GetRange(0, 3) : Recent)</div>
             }
 
-            <div class="qv-head">@L.S("Price on the quote", "Pris på tilbuddet")</div>
+            <div class="qv-head">@WebQuote.PriceHeading(Invoice, PriceLocked)</div>
             <div class="qv-choices" role="radiogroup">
-                <button class="@(friends ? "qv-choice" : "qv-choice on")" role="radio" aria-checked="@(!friends)" @onclick="() => SetFriends(false)">
+                <button class="@(friends ? "qv-choice" : "qv-choice on")" role="radio" aria-checked="@(!friends)" disabled="@(PriceLocked && friends)" @onclick="() => SetFriends(false)">
                     <span>@L.S("Customers", "Kunder")</span><b class="red">@Num.Kr(CustomerPrice)</b></button>
-                <button class="@(friends ? "qv-choice on" : "qv-choice")" role="radio" aria-checked="@friends" @onclick="() => SetFriends(true)">
+                <button class="@(friends ? "qv-choice on" : "qv-choice")" role="radio" aria-checked="@friends" disabled="@(PriceLocked && !friends)" @onclick="() => SetFriends(true)">
                     <span>@L.S("Friends & family", "Venner og familie")</span><b class="green">@Num.Kr(FriendsPrice)</b></button>
             </div>
 
@@ -40,6 +40,15 @@
             </div>
             <div class="muted small">@L.S("The PDF is always light (for printing).", "PDF'en er altid lys (til print).")</div>
 
+            @if (!Invoice && !NoStatus)
+            {
+                @* print status (quotes only, QuoteForm): saved with the quote on every export *@
+                <label class="qv-head" for="qv-status">@WebQuote.StatusHeading</label>
+                <select id="qv-status" class="qv-status" @bind="status_">
+                    @for (int i = 0; i < 4; i++) { int k = i; <option value="@k">@WebQuote.StatusNames[k]</option> }
+                </select>
+            }
+
             <div class="qv-actions">
                 <button class="accent" disabled="@(busy || NeedsName)" @onclick='() => Run("print")'>@L.S("Print / PDF…", "Print / PDF…")</button>
                 <button disabled="@(busy || NeedsName)" @onclick='() => Run("text")'>@L.S("Copy text", "Kopiér tekst")</button>
@@ -49,7 +58,15 @@
             {
                 <div class="@(statusError ? "hinfo error" : "hinfo ok")" style="white-space:pre-wrap" role="status">@status</div>
             }
-            <div class="hinfo">@WebQuote.HelpText(IsRecord, Invoice)</div>
+            @if (!string.IsNullOrEmpty(Warning))
+            {
+                <div class="hinfo warn" style="white-space:pre-wrap">@Warning</div>
+            }
+            @if (!string.IsNullOrEmpty(Note))
+            {
+                <div class="hinfo note" style="white-space:pre-wrap">@Note</div>
+            }
+            <div class="hinfo">@(Help ?? WebQuote.HelpText(IsRecord, Invoice, PriceLocked ? MadeNo : null))</div>
         </div>
     </div>
 </div>
@@ -66,10 +83,27 @@
     [Parameter] public string StartCustomer { get; set; }
     /// A made invoice: the name it was made out to stays (read-only box), as on the desktop.
     [Parameter] public bool NameLocked { get; set; }
+    /// A made invoice: its price stays the one it was billed at (LockedFriends), as QuoteForm.LockInvoice. Can turn on
+    /// while the window is open (the first export of "Show invoice…" makes the invoice).
+    [Parameter] public bool PriceLocked { get; set; }
+    [Parameter] public bool LockedFriends { get; set; }
+    /// The made invoice's number (for the help line).
+    [Parameter] public string MadeNo { get; set; }
+    /// The print status the window starts with (quotes: the job = Not printed yet, a saved quote = History.PrintStateOf).
+    [Parameter] public PrintState StartStatus { get; set; }
+    /// A warning line above the help (an invoice of a print marked as failed); null = none.
+    [Parameter] public string Warning { get; set; }
+    /// An info line above the help (combined bill: "the whole invoice is shown"); null = none.
+    [Parameter] public string Note { get; set; }
+    /// The help text (null = WebQuote.HelpText; combined bill: GroupHelpText).
+    [Parameter] public string Help { get; set; }
+    /// No print status box (a combined quote: one status would overwrite each quote's own).
+    [Parameter] public bool NoStatus { get; set; }
     /// The page for (friends, customer).
     [Parameter] public Func<bool, string, WebQuote.Sheet> Build { get; set; }
-    /// One export ("print", "text", "history") with (friends, customer): saves what it should and says what to print / copy.
-    [Parameter] public Func<string, bool, string, Task<WebQuote.Done>> Export { get; set; }
+    /// One export ("print", "text", "history") with (friends, customer, print status; null for an invoice): saves what it
+    /// should and says what to print / copy.
+    [Parameter] public Func<string, bool, string, PrintState?, Task<WebQuote.Done>> Export { get; set; }
     /// The price and look chosen (the job's quote remembers both in Settings, a saved quote only the look).
     [Parameter] public Func<bool, bool, Task> Remember { get; set; }
     [Parameter] public EventCallback OnClose { get; set; }
@@ -77,6 +111,7 @@
     WebQuote.Sheet sheet;
     string customer = "", status, printTitle;
     bool friends, dark, busy, statusError, zoomed;
+    int status_;   // the Print status box (PrintState as int; "status" is the message line)
 
     bool NeedsName { get { return Invoice && customer.Trim().Length == 0; } }
 
@@ -85,7 +120,14 @@
         friends = StartFriends;
         dark = StartDark;
         customer = StartCustomer ?? "";
+        status_ = (int)StartStatus;
         Rebuild();
+    }
+
+    protected override void OnParametersSet()
+    {
+        // locked (now or since opening): the billed price is the only choice
+        if (PriceLocked && friends != LockedFriends) { friends = LockedFriends; Rebuild(); }
     }
 
     void Rebuild() { sheet = Build(friends, customer); }
@@ -97,7 +139,11 @@
         Rebuild();
     }
 
-    async Task SetFriends(bool f) { friends = f; Rebuild(); await Remember(friends, dark); }
+    async Task SetFriends(bool f)
+    {
+        if (PriceLocked && f != LockedFriends) return;
+        friends = f; Rebuild(); await Remember(friends, dark);
+    }
 
     async Task SetDark(bool d)
     {
@@ -110,15 +156,19 @@
         if (busy) return;
         if (kind != "history" && NeedsName) { status = WebQuote.NeedName; statusError = true; return; }
         busy = true;
+        // Copy text: the clipboard write starts here, inside the click (Safari / Firefox copy only then); the text
+        // follows once the save is done, or nothing is copied when an invoice couldn't be saved
+        if (kind == "text") Store.CopyStart();
         try
         {
-            var done = await Export(kind, friends, customer);
+            var done = await Export(kind, friends, customer, Invoice || NoStatus ? (PrintState?)null : (PrintState)status_);
             Rebuild();   // a saved quote's number and date, an invoice's number
             statusError = done.Problem != null;
             status = done.Problem ?? done.Status;
+            if (done.Problem != null && kind == "text") await Store.CopyCancel();
             if (done.Problem == null)
             {
-                if (kind == "text" && !await Store.CopyText(done.Text))
+                if (kind == "text" && !await Store.CopyFinish(done.Text))
                 {
                     statusError = true;
                     status = L.S("The browser didn't allow copying. Select the text below and copy it yourself.",

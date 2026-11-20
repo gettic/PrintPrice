@@ -10,7 +10,7 @@ namespace PrintPrice.Web
     /// plain texts come from the linked src\QuoteRows.cs, the prices from Pricing.Breakdown, a saved quote's bill from
     /// History.RecordBreakdown / RecordQuoteInfo / InvoiceInfo (as it was made). Pages\QuoteSheet.razor draws it in the same 1000-unit layout
     /// as QuotePage.
-    public static class WebQuote
+    public static partial class WebQuote
     {
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
@@ -27,6 +27,13 @@ namespace PrintPrice.Web
             public QuoteBreakdown Breakdown;
             public bool Invoice;
             public string InvoiceNo = "", PayMobilePay = "", PayBank = "";
+            // combined bill (2+ Jobs, WebQuoteGroup.cs = QuoteData's group fields): cards, summary, the whole bill's
+            // Breakdown (History.GroupBreakdown; MaterialNames / MaterialColours by its Materials), its total
+            public List<Card> Jobs;
+            public string Summary = "", TopUpLabel = "", TopUpAmount = "";
+            public bool GroupSameRates, GroupFriends;
+            public double GroupTotal;
+            public int GroupLevel;   // set by Draw (QuotePage.ChooseGroupLevel)
         }
 
         /// The job on the calculator (MainForm.BuildQuote's inputs on the web).
@@ -73,6 +80,22 @@ namespace PrintPrice.Web
             var types = new List<string>();
             if (j.Colours != null) foreach (var f in j.Colours) types.Add(f.Type);
             d.Material = QuoteRows.MaterialLine(j.Colours != null ? types : null, j.Colours != null ? j.Colours.Count : 0, d.MaterialNames[0]);
+            NameByColour(d.MaterialNames, d.MaterialColours);
+            return d;
+        }
+
+        /// "Show invoice…" before the invoice is made (MainForm.BuildJobInvoice): the job's page with number "(new)", the
+        /// date when the window opened, the due date, payment ways and name from Settings (History.InvoiceInfo without a record).
+        public static Sheet FromJobInvoice(Job j, AppSettings s, bool friends, DateTime date, string customer)
+        {
+            var d = FromJob(j, s, friends, date, History.QuoteNumber(date), customer);
+            var inv = History.InvoiceInfo(null, s, date);
+            d.Invoice = true;
+            d.InvoiceNo = L.S("(new)", "(ny)");
+            d.Due = inv.Due;
+            d.PayMobilePay = (inv.MobilePay ?? "").Trim();
+            d.PayBank = (inv.Bank ?? "").Trim();
+            d.Name = (inv.FromName ?? "").Trim();
             return d;
         }
 
@@ -83,6 +106,7 @@ namespace PrintPrice.Web
         {
             DateTime saved;
             if (!History.TryTime(r.SavedAt, out saved)) saved = now;
+            friends = ExportFriends(r, invoice, friends);   // a made invoice shows the price it was billed at
             var quote = History.RecordQuoteInfo(r, s, saved);
             var d = new Sheet
             {
@@ -100,22 +124,7 @@ namespace PrintPrice.Web
                 // the saved price, with the saved wear split as sub-rows (older records: one wear line)
                 Breakdown = History.RecordBreakdown(r, s, friends)
             };
-            // a typed job (no slice) whose one line has no name: the filament preset saved with it
-            string savedMaterial = BambuSlicer.FilamentBaseName(r.MaterialName ?? "").Trim();
-            bool typedLine = r.Filaments != null && r.Filaments.Count == 1 && string.IsNullOrEmpty(r.Filaments[0].Name)
-                             && string.IsNullOrEmpty(r.Filaments[0].Type);
-            var types = new List<string>();
-            if (r.Filaments != null)
-                for (int k = 0; k < r.Filaments.Count; k++)
-                {
-                    var f = r.Filaments[k];
-                    d.MaterialNames.Add(typedLine && savedMaterial.Length > 0 ? savedMaterial
-                        : WebHistory.MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
-                    d.MaterialColours.Add(ColourCss(f.Colour));
-                    types.Add(f.Type);
-                }
-            else d.MaterialNames.Add(savedMaterial.Length > 0 ? savedMaterial : DefaultMaterial(s));
-            d.Material = QuoteRows.MaterialLine(r.Filaments != null ? types : null, r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
+            FillRecordMaterial(d, r, s);
             if (invoice)
             {
                 DateTime billed = DateTime.MinValue;
@@ -132,6 +141,83 @@ namespace PrintPrice.Web
                 if (made) d.Customer = (inv.BilledTo ?? "").Trim();   // a made invoice keeps the name it was made out to
             }
             return d;
+        }
+
+        /// A saved quote's material names / colour dots / Material line (MainForm.FillRecordMaterial; shared by the single
+        /// page and the combined bill's cards).
+        static void FillRecordMaterial(Sheet d, QuoteRecord r, AppSettings s)
+        {
+            // a typed job (no slice) whose one line has no name: the filament preset saved with it
+            string savedMaterial = BambuSlicer.FilamentBaseName(r.MaterialName ?? "").Trim();
+            bool typedLine = r.Filaments != null && r.Filaments.Count == 1 && string.IsNullOrEmpty(r.Filaments[0].Name)
+                             && string.IsNullOrEmpty(r.Filaments[0].Type);
+            var types = new List<string>();
+            if (r.Filaments != null)
+                for (int k = 0; k < r.Filaments.Count; k++)
+                {
+                    var f = r.Filaments[k];
+                    d.MaterialNames.Add(typedLine && savedMaterial.Length > 0 ? savedMaterial
+                        : WebHistory.MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
+                    d.MaterialColours.Add(ColourCss(f.Colour));
+                    types.Add(f.Type);
+                }
+            else d.MaterialNames.Add(savedMaterial.Length > 0 ? savedMaterial : DefaultMaterial(s));
+            d.Material = QuoteRows.MaterialLine(r.Filaments != null ? types : null, r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
+            NameByColour(d.MaterialNames, d.MaterialColours);
+        }
+
+        // ---------- colour names (FilePickerForm.FilamentColours / ColourName, MainForm.NameByColour) ----------
+
+        /// Common filament colours (Bambu Lab PLA Basic shades; = the desktop's list): hex, English, Danish.
+        static readonly string[][] FilamentColours =
+        {
+            new[] { "#000000", "Black", "Sort" }, new[] { "#FFFFFF", "White", "Hvid" }, new[] { "#8E9089", "Grey", "Grå" },
+            new[] { "#C12E1F", "Red", "Rød" }, new[] { "#FF6A13", "Orange", "Orange" }, new[] { "#F4EE2A", "Yellow", "Gul" },
+            new[] { "#00AE42", "Green", "Grøn" }, new[] { "#0A2989", "Blue", "Blå" }, new[] { "#0086D6", "Light blue", "Lyseblå" },
+            new[] { "#5E43B7", "Purple", "Lilla" }, new[] { "#F55A74", "Pink", "Pink" }, new[] { "#9D432C", "Brown", "Brun" },
+            new[] { "#F7E6DE", "Beige", "Beige" }
+        };
+
+        /// The nearest FilamentColours name (app language) to a "#rrggbb" colour; "" for none (= FilePickerForm.ColourName).
+        public static string ColourName(string css)
+        {
+            int r, g, b;
+            if (!Rgb(css, out r, out g, out b)) return "";
+            string best = "";
+            double bestD = double.MaxValue;
+            foreach (var e in FilamentColours)
+            {
+                int kr, kg, kb;
+                Rgb(e[0], out kr, out kg, out kb);
+                double dr = r - kr, dg = g - kg, db = b - kb;
+                double dist = 2 * dr * dr + 4 * dg * dg + 3 * db * db;   // rough eye weighting
+                if (dist < bestD) { bestD = dist; best = L.S(e[1], e[2]); }
+            }
+            return best;
+        }
+
+        static bool Rgb(string css, out int r, out int g, out int b)
+        {
+            r = g = b = 0;
+            string h = (css ?? "").Trim().TrimStart('#');
+            int v;
+            if (h.Length < 6 || !int.TryParse(h.Substring(0, 6), NumberStyles.HexNumber, Inv, out v)) return false;
+            r = (v >> 16) & 255; g = (v >> 8) & 255; b = v & 255;
+            return true;
+        }
+
+        /// Material rows with the same name get their colour's name ("Bambu PLA Basic (Red)"), so rows of one profile can
+        /// be told apart (MainForm.NameByColour). Unique names and rows without a colour stay as they are.
+        public static void NameByColour(List<string> names, List<string> colours)
+        {
+            var count = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var n in names) { int c; count.TryGetValue(n ?? "", out c); count[n ?? ""] = c + 1; }
+            for (int i = 0; i < names.Count && i < colours.Count; i++)
+            {
+                if (count[names[i] ?? ""] < 2) continue;
+                string colour = ColourName(colours[i]);
+                if (colour.Length > 0) names[i] = (names[i] ?? "") + " (" + colour + ")";
+            }
         }
 
         static string DefaultMaterial(AppSettings s) { return BambuSlicer.FilamentBaseName(s.FilamentPreset); }
@@ -222,14 +308,23 @@ namespace PrintPrice.Web
             return l;
         }
 
-        /// The details table: Print time, Weight, Printer (invoice: Bill to), Material.
+        /// The details table (QuotePage): a quote Print time, Weight, Printer, Material; an invoice "Bill to" as the top line,
+        /// then Print time, Weight, Material.
         public static List<string[]> Details(Sheet d)
         {
+            if (d.Invoice)
+                return new List<string[]>
+                {
+                    new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" },
+                    new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
+                    new[] { L.S("Weight", "Vægt"), d.Weight },
+                    new[] { L.S("Material", "Materiale"), d.Material },
+                };
             return new List<string[]>
             {
                 new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
                 new[] { L.S("Weight", "Vægt"), d.Weight },
-                d.Invoice ? new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" } : new[] { L.S("Printer", "Printer"), d.Printer },
+                new[] { L.S("Printer", "Printer"), d.Printer },
                 new[] { L.S("Material", "Materiale"), d.Material },
             };
         }
@@ -283,8 +378,21 @@ namespace PrintPrice.Web
             return (name ?? "").Length * 28 * 0.56 > w ? 2 : 1;
         }
 
-        public static Layout Draw(Sheet d, bool logo)
+        /// Page 1 of the sheet (a single job: its only page).
+        public static Layout Draw(Sheet d, bool logo) { List<Layout> pages; return Draw(d, logo, out pages); }
+
+        /// All A4 pages: a single job = one page (taller when it must be, scaled onto A4 in print); a combined bill = its
+        /// pages (GroupPages).
+        public static List<Layout> DrawPages(Sheet d, bool logo)
         {
+            List<Layout> pages;
+            var first = Draw(d, logo, out pages);
+            return pages ?? new List<Layout> { first };
+        }
+
+        static Layout Draw(Sheet d, bool logo, out List<Layout> pages)
+        {
+            pages = null;
             var lay = new Layout();
             var it = lay.Items;
             Action<string, double, bool, string, double, double, double, string> T = (text, size, bold, role, x, y, w, align) =>
@@ -326,6 +434,8 @@ namespace PrintPrice.Web
                 T(QuoteRows.LongDate(d.Date), 17, false, "headmuted", 560, forLine ? 100 : 80, 400, "r");
             }
 
+            if (IsGroup(d)) { pages = GroupPages(d, lay); return pages[0]; }   // combined bill: its pages
+
             // model: picture box (if any) + name, link and details
             double y0 = 214, pic = 300, x = L0;
             if (d.Picture != null)
@@ -356,43 +466,7 @@ namespace PrintPrice.Web
             y += 44;
             HLine(L0, R0, y, "line", 2);
             y += 14;
-            QuoteRowKind prev = QuoteRowKind.Rule;
-            foreach (var r in Rows(d))
-            {
-                switch (r.Kind)
-                {
-                    case QuoteRowKind.Rule:
-                        if (prev == QuoteRowKind.Sub) y += 10;
-                        HLine(L0, R0, y, "line", 1);
-                        y += 14;
-                        break;
-                    case QuoteRowKind.Head:
-                        T(r.Label, 19, true, "ink", L0 + 3, y, 420, "l");
-                        T(r.Detail, 16, false, "muted", 470, y + 2, 240, "l");
-                        T(r.Amount, 19, true, "ink", 700, y, R0 - 700, "r");
-                        y += r.Alone ? 44 : 36;
-                        break;
-                    case QuoteRowKind.Sub:
-                        double lx = 70;
-                        string dot = r.ColourIndex >= 0 && r.ColourIndex < d.MaterialColours.Count ? d.MaterialColours[r.ColourIndex] : "";
-                        if (dot.Length > 0)
-                        {
-                            it.Add(new Item { Kind = "dot", X = 70, Y = y + 5, W = 15, H = 15, Colour = dot, Role = "dotring" });
-                            lx = 94;
-                        }
-                        T(r.Label, 17, false, "ink", lx, y, 465 - lx, "l");
-                        T(r.Detail, 16, false, "muted", 470, y + 1, 240, "l");
-                        T(r.Amount, 17, false, "ink", 700, y, R0 - 30 - 700, "r");
-                        y += 32;
-                        break;
-                    default:
-                        T(r.Label, 15, false, "faint", 70, y, R0 - 70, "l");
-                        y += 34;
-                        break;
-                }
-                prev = r.Kind;
-            }
-            if (prev == QuoteRowKind.Sub) y += 10;
+            y = DrawRows(it, d, Rows(d), y, false);
             y += 4;
             HLine(L0, R0, y, "line", 2);
             y += 22;
@@ -445,9 +519,21 @@ namespace PrintPrice.Web
         /// The help box: the desktop's text, with "Print / PDF" for the web's one way out.
         public static string HelpText(bool record, bool invoice)
         {
+            return HelpText(record, invoice, null);
+        }
+
+        /// madeNo = a made invoice's number (it is re-issued as it is); job invoice ("Show invoice…") = invoice, not record.
+        public static string HelpText(bool record, bool invoice, string madeNo)
+        {
+            if (invoice && !string.IsNullOrEmpty(madeNo))
+                return L.F("Invoice {0} is already made and stays as it is. Print / PDF opens the browser's print window: choose \"Save as PDF\" for a file.",
+                           "Faktura {0} er allerede lavet og forbliver uændret. Print / PDF åbner browserens printvindue: vælg \"Gem som PDF\" for en fil.", madeNo);
+            if (invoice && !record)
+                return L.S("Making the invoice (Print / PDF or Copy text) gives it a number, saves it in the history and marks it as printed. Save to history saves a quote without a number. Print / PDF opens the browser's print window: choose \"Save as PDF\" for a file. The page is A4 and always prints light.",
+                           "Når fakturaen laves (Print / PDF eller Kopiér tekst), får den et nummer, gemmes i historikken og markeres som printet. Gem i historik gemmer et tilbud uden nummer. Print / PDF åbner browserens printvindue: vælg \"Gem som PDF\" for en fil. Siden er A4 og printes altid lys.");
             if (invoice)
-                return L.S("Making the invoice (Print / PDF or Copy text) gives it a number and ticks Printed in the history. Print / PDF opens the browser's print window: choose \"Save as PDF\" for a file. The page is A4 and always prints light.",
-                           "Når fakturaen laves (Print / PDF eller Kopiér tekst), får den et nummer, og Printet bliver sat i historikken. Print / PDF åbner browserens printvindue: vælg \"Gem som PDF\" for en fil. Siden er A4 og printes altid lys.");
+                return L.S("Making the invoice (Print / PDF or Copy text) gives it a number and marks it as printed in the history. Print / PDF opens the browser's print window: choose \"Save as PDF\" for a file. The page is A4 and always prints light.",
+                           "Når fakturaen laves (Print / PDF eller Kopiér tekst), får den et nummer og markeres som printet i historikken. Print / PDF åbner browserens printvindue: vælg \"Gem som PDF\" for en fil. Siden er A4 og printes altid lys.");
             if (record)
                 return L.S("Print / PDF or Copy text puts the name and price on this quote in the history. Print / PDF opens the browser's print window: choose \"Save as PDF\" for a file. The page is A4 and always prints light.",
                            "Print / PDF eller Kopiér tekst sætter navn og pris på dette tilbud i historikken. Print / PDF åbner browserens printvindue: vælg \"Gem som PDF\" for en fil. Siden er A4 og printes altid lys.");
@@ -477,12 +563,62 @@ namespace PrintPrice.Web
             return saved;
         }
 
+        /// The quote's export with the window's print status (QuoteForm cmbStatus; MainForm.SaveToHistory -> History.AddFor
+        /// with a state): the chosen state wins over a replaced same quote's.
+        public static QuoteRecord SaveExport(List<QuoteRecord> list, QuoteRecord r, bool friends, string customer, PrintState state, DateTime now)
+        {
+            var saved = History.AddFor(list, r, friends ? History.ForFriends : History.ForCustomer, state, now);
+            saved.Customer = (customer ?? "").Trim();
+            return saved;
+        }
+
+        /// The quote window's "Print status" choices, in PrintState's order (QuoteForm).
+        public static string[] StatusNames
+        {
+            get
+            {
+                return new[] { L.S("Not printed yet", "Ikke printet endnu"), L.S("Printing now", "Printer nu"),
+                               L.S("Printed", "Printet"), L.S("Failed", "Fejlet") };
+            }
+        }
+
+        public static string StatusHeading { get { return L.S("Print status", "Printstatus"); } }
+
+        /// After saving a quote marked Failed: what that means for new quotes ("" otherwise; = MainForm.FailedSavedNote,
+        /// without its leading line break).
+        public static string FailedSavedNote(QuoteRecord r, AppSettings s)
+        {
+            if (r == null || !r.Failed) return "";
+            if (s == null || s.FailedPayback == 0) return L.S("Marked as failed in the history.", "Markeret som fejlet i historikken.");
+            // Num.Kr ends with "kr.": no second full stop after it
+            string kr = Num.Kr(History.FailedCost(r));
+            return L.F("Marked as failed: new quotes earn back {0}", "Markeret som fejlet: nye tilbud tjener {0} ind.", kr)
+                   + (L.Danish || kr.EndsWith(".", StringComparison.Ordinal) ? "" : ".");
+        }
+
+        /// History's Invoice… of a print marked as failed (MainForm.NewRecordQuoteForm's warning).
+        public static string FailedInvoiceNote(QuoteRecord r)
+        {
+            return r != null && r.Failed ? L.S("This print is marked as failed in the history.", "Dette print er markeret som fejlet i historikken.") : null;
+        }
+
+        /// "Show invoice…"'s first Print / PDF or Copy text (MainForm.ExportJobInvoice): the job is saved (SaveExport, print
+        /// state Printed as SaveToHistory(..., PrintState.Printed)) and its invoice made (number, date, snapshot, BilledTo).
+        /// Returns the record now in the list. The caller saves the history, then the settings (UsedInvoiceNos).
+        public static QuoteRecord SaveJobInvoice(List<QuoteRecord> list, QuoteRecord r, bool friends, string customer, DateTime now, AppSettings s)
+        {
+            var saved = SaveExport(list, r, friends, customer);
+            History.SetPrintState(saved, PrintState.Printed, now);
+            ApplyRecordExport(list, saved, friends, customer, true, now, s);
+            return saved;
+        }
+
         /// A record's export (MainForm.ExportRecord): the typed name and the chosen price go on it; an invoice gets its
         /// number, date and snapshot (History.MakeInvoice, settings.UsedInvoiceNos). The caller saves both.
         public static void ApplyRecordExport(List<QuoteRecord> list, QuoteRecord r, bool friends, string customer, bool invoice, DateTime now, AppSettings s)
         {
             if (!(invoice && InvoiceMade(r))) r.Customer = (customer ?? "").Trim();   // MakeInvoice stores a new invoice's name (BilledTo)
-            r.For = friends ? History.ForFriends : History.ForCustomer;
+            if (!InvoiceMade(r)) r.For = friends ? History.ForFriends : History.ForCustomer;   // a made invoice keeps its price (desktop A4)
             if (invoice) History.MakeInvoice(list, r, now, s);
         }
 
@@ -492,12 +628,61 @@ namespace PrintPrice.Web
             return r != null && !string.IsNullOrEmpty(r.InvoiceNo);
         }
 
+        /// The price a made invoice was billed at (MainForm.BilledFriends): its For. The window's price choice is locked to it.
+        public static bool BilledFriends(QuoteRecord r)
+        {
+            return r != null && r.For == History.ForFriends;
+        }
+
+        /// History's For box on a made invoice (read-only; = HistoryForm.ShowForLocked's text); null = not locked, no tip.
+        public static string ForLockedText(QuoteRecord r)
+        {
+            if (!InvoiceMade(r)) return null;
+            return BilledFriends(r)
+                ? L.F("Invoice {0} is made at the friends & family price and keeps it.", "Faktura {0} er lavet til venne-prisen og beholder den.", r.InvoiceNo.Trim())
+                : L.F("Invoice {0} is made at the customer price and keeps it.", "Faktura {0} er lavet til kundeprisen og beholder den.", r.InvoiceNo.Trim());
+        }
+
+        /// The price an export of r uses: a made invoice always its billed price (desktop A4), else the window's choice.
+        public static bool ExportFriends(QuoteRecord r, bool invoice, bool friends)
+        {
+            return invoice && InvoiceMade(r) ? BilledFriends(r) : friends;
+        }
+
+        /// Calculator "Show invoice…" (Settings' MainInvoice on, = MainForm.MainInvoice).
+        public static bool MainInvoice(AppSettings s) { return s != null && s.MainInvoice == 1; }
+
+        /// The calculator's quote button: "Show quote…" or, with MainInvoice on, "Show invoice…" (MainForm.QuoteButtonText).
+        public static string QuoteButtonText(AppSettings s)
+        {
+            return MainInvoice(s) ? L.S("Show invoice…", "Vis faktura…") : L.S("Show quote…", "Vis tilbud…");
+        }
+
+        /// The quote window's price heading (QuoteForm: "(locked)" on a made invoice).
+        public static string PriceHeading(bool invoice, bool locked)
+        {
+            if (invoice && locked) return L.S("Price on the invoice (locked)", "Pris på fakturaen (låst)");
+            return invoice ? L.S("Price on the invoice", "Pris på fakturaen") : L.S("Price on the quote", "Pris på tilbuddet");
+        }
+
         /// The PDF's suggested name (the page title while printing): "2026-11-04 3D Benchy - Mette Hansen"; a record: the
         /// quote's date, an invoice its date (today while it isn't made yet).
-        public static string FileName(Sheet d) { return QuoteRows.FileName(d.Date, d.Model, d.Customer); }
+        /// A made invoice (issue #6, = the desktop): "2026-48213 - Mette Hansen" (QuoteRows.InvoiceFileName).
+        public static string FileName(Sheet d)
+        {
+            if (d.Invoice && IsInvoiceCode(d.InvoiceNo)) return QuoteRows.InvoiceFileName(d.InvoiceNo, d.Customer);
+            return QuoteRows.FileName(d.Date, d.Model, d.Customer);
+        }
+
+        /// A real invoice number (not "" or the "(new)" placeholder of an invoice not made yet).
+        static bool IsInvoiceCode(string no)
+        {
+            return !string.IsNullOrEmpty(no) && no.Trim().Length > 0 && no.IndexOf('(') < 0;
+        }
 
         public static string PrintedText(bool invoice, string invoiceNo, bool saved)
         {
+            if (invoice && !saved) return L.S("Not printed: the invoice couldn't be saved.", "Ikke printet: fakturaen kunne ikke gemmes.");
             if (invoice) return L.F("✓ Print window opened. Invoice no. {0} is in the history.", "✓ Printvinduet er åbnet. Faktura nr. {0} er gemt i historikken.", invoiceNo);
             return saved ? L.S("✓ Print window opened, and the quote is saved to history.", "✓ Printvinduet er åbnet, og tilbuddet er gemt i historikken.")
                          : L.S("✓ Print window opened.", "✓ Printvinduet er åbnet.");
@@ -505,6 +690,7 @@ namespace PrintPrice.Web
 
         public static string CopiedText(bool invoice, string invoiceNo, bool saved)
         {
+            if (invoice && !saved) return L.S("Not copied: the invoice couldn't be saved.", "Ikke kopieret: fakturaen kunne ikke gemmes.");
             if (invoice) return L.F("✓ Invoice text copied. Invoice no. {0} is in the history.", "✓ Fakturaen er kopieret som tekst. Faktura nr. {0} er gemt i historikken.", invoiceNo);
             return saved ? L.S("✓ Quote text copied and saved to history.", "✓ Tilbuddet er kopieret som tekst og gemt i historikken.")
                          : L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
