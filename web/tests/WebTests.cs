@@ -109,6 +109,9 @@ static class WebTests
         GroupTests.Run(True, Eq);
         StatusTests.Run(True, Eq);
 
+        // 14. issue #8 step 3: prime tower (read files, note, quotes / invoices, JSON)
+        TowerTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

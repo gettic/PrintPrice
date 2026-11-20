@@ -1,0 +1,1086 @@
+; trimmed sample (issue #8 step 3 tower test, all relative E / M83): header filament lines, T / M82 / M83 / G92, feature markers;
+; inside each tower block the printing moves (G0-G3 with E > 0 and X or Y) are summed into one G1 per tool run
+; filament_density: 1.26,1.26,1.32
+; filament_diameter: 1.75,1.75,1.75
+; filament_density = 1.26,1.26,1.32
+; filament_diameter = 1.75,1.75,1.75
+; FEATURE: Custom
+G92 E0
+G92 E0
+G92 E0
+M83
+; FEATURE: Prime tower
+G1 X1 Y1 E37.6534
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E20.3341
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E29.0569
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E27.5461
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E22.6543
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E17.8729
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E13.1873
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E8.6185
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1589
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1581
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.161
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E2.8124
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.1569
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T2
+G92 E0
+G92 E0
+G1 X1 Y1 E19.5454
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.297
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9842
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9846
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9836
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.985
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9842
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9846
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9836
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.985
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9842
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9846
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9836
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.985
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9842
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9846
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9836
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.985
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9842
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9846
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9836
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.985
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9842
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9846
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9836
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+G1 X1 Y1 E4.985
+; FEATURE: Prime tower
+T1
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Inner wall
+; FEATURE: Prime tower
+T0
+G92 E0
+G92 E0
+G1 X1 Y1 E13.6732
+G92 E0
+; FEATURE: Prime tower
+G1 X1 Y1 E4.9842
+; FEATURE: Inner wall
+G92 E0
+T255

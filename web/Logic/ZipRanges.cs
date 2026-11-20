@@ -135,6 +135,22 @@ namespace PrintPrice.Web
             catch (InvalidDataException) { return null; }
         }
 
+        /// Issue #8 step 3: the entry as a stream for one pass (the prime tower count in a plate G-code): only the
+        /// compressed bytes are held (fetched in ChunkBytes pieces), the text is inflated while it is read, never whole.
+        /// Null when missing, compressed bigger than maxCompressed, another method, or unreadable. The caller disposes it.
+        public async Task<Stream> OpenStream(string name, long maxCompressed)
+        {
+            var e = Find(name);
+            if (e == null || e.CompressedSize > maxCompressed || e.Size == 0xFFFFFFFF) return null;
+            if (e.Method != 0 && e.Method != 8) return null;
+            byte[] head = await src.Read(e.HeaderOffset, 30);
+            if (head.Length < 30 || U32(head, 0) != 0x04034b50) return null;
+            long dataStart = e.HeaderOffset + 30 + U16(head, 26) + U16(head, 28);
+            var data = await ChunkStream.Read(src, dataStart, e.CompressedSize);
+            if (data == null) return null;
+            return e.Method == 0 ? (Stream)data : new DeflateStream(data, CompressionMode.Decompress);
+        }
+
         public async Task<string> ReadText(string name, long maxSize)
         {
             var b = await ReadEntry(name, maxSize);
@@ -145,5 +161,55 @@ namespace PrintPrice.Web
 
         static int U16(byte[] b, int i) { return b[i] | (b[i + 1] << 8); }
         static long U32(byte[] b, int i) { return (uint)(b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)); }
+    }
+
+    /// A read-only, forward-only stream over byte pieces fetched by ranges (no single huge array, no copy into one).
+    public sealed class ChunkStream : Stream
+    {
+        public const int ChunkBytes = 8 * 1048576;   // one File.slice per 8 MB
+        readonly List<byte[]> chunks;
+        int at, pos;
+
+        public ChunkStream(List<byte[]> chunks) { this.chunks = chunks ?? new List<byte[]>(); }
+
+        /// length bytes from offset, fetched ChunkBytes at a time; null when the source gives fewer (file changed / gone).
+        public static async Task<ChunkStream> Read(IRangeSource src, long offset, long length)
+        {
+            var list = new List<byte[]>();
+            long done = 0;
+            while (done < length)
+            {
+                int n = (int)Math.Min(ChunkBytes, length - done);
+                byte[] b = await src.Read(offset + done, n);
+                if (b == null || b.Length == 0) return null;
+                list.Add(b);
+                done += b.Length;
+            }
+            return new ChunkStream(list);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int total = 0;
+            while (count > 0 && at < chunks.Count)
+            {
+                var c = chunks[at];
+                int n = Math.Min(count, c.Length - pos);
+                if (n <= 0) { at++; pos = 0; continue; }
+                Buffer.BlockCopy(c, pos, buffer, offset, n);
+                pos += n; offset += n; count -= n; total += n;
+            }
+            return total;
+        }
+
+        public override bool CanRead { get { return true; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return false; } }
+        public override long Length { get { throw new NotSupportedException(); } }
+        public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+        public override void SetLength(long value) { throw new NotSupportedException(); }
+        public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
     }
 }

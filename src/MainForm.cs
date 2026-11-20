@@ -54,6 +54,7 @@ namespace PrintPrice
         string historyProblem;          // load problem, shown once in the history window
         string jobModel;                // model name of the current job (Printables name / file name), null = none
         double jobPurge = -1;           // purge grams of the current multi-colour job (-1 = unknown)
+        double jobTowerGrams = -1, jobTowerSeconds = -1;   // issue #8 step 3: its prime tower (-1 = unknown, 0 = none)
         QuoteRecord reopened;           // quote opened from the history (its line stays in the model info box)
         QuoteRecord repeatOf;           // "Repeat print": the original (saving sets RepeatOf + its For); cleared by a new link, Clear, Open again
         QuoteRecord repeatLine;         // the repeat's "Was → now" lines in the model info box (cleared by SetAuto)
@@ -168,7 +169,7 @@ namespace PrintPrice
             txtUrl.TextChanged += delegate
             {
                 SetUrlHint(false); jobModel = null; jobParts = null; fromExample = false; SetStudioFile(null); repeatOf = null;
-                jobScale = ScaleXyz.None; lastJob = null;   // issue #8: a new link / file starts at 100 %
+                jobScale = ScaleXyz.None; lastJob = null; jobTower = SettingsTower; jobTowerKnown = true;   // issue #8: a new link / file starts at 100 %
             };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
@@ -556,7 +557,7 @@ namespace PrintPrice
             SetPowerInfo(L.S("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.",
                              "Live-pris DK1 17:45: spot 2,37 + afg. 0,55 + moms = 3,65 kr."), false);
             jobModel = "3D Benchy";   // after the link (its TextChanged clears it); the quote picture's model name
-            jobScale = ScaleXyz.None;   // issue #8: not scaled (the same link doesn't fire TextChanged)
+            jobScale = ScaleXyz.None; jobTower = true; jobTowerKnown = true;   // issue #8: not scaled (the same link doesn't fire TextChanged)
             lastJobResult = new SliceResult { Seconds = 38 * 60, Grams = 11.8, Plates = 1, SizeX = 60, SizeY = 31, SizeZ = 48, SizeObjects = 1 };
             SetResultLinks(null, null, null);   // "Scale…" under the line, as after a real slice
             Recalculate();
@@ -608,8 +609,8 @@ namespace PrintPrice
         {
             if (!offline) return;
             txtUrl.Text = ExampleLink;   // the 4-colour Benchy
-            SetAuto(L.S("✓ \"Four-Color Multicolor Test benchy\": 10 h 43 m, 135,85 g (0.16mm Optimal · 4 colours).",
-                        "✓ \"Four-Color Multicolor Test benchy\": 10 t 43 m, 135,85 g (0.16mm Optimal · 4 farver)."), false);
+            SetAuto(L.S("✓ \"Four-Color Multicolor Test benchy\": 10 h 43 m, 135,85 g (0.16mm Optimal · 4\u00A0colours).",
+                        "✓ \"Four-Color Multicolor Test benchy\": 10 t 43 m, 135,85 g (0.16mm Optimal · 4\u00A0farver)."), false);
             var r = new SliceResult { Seconds = 38566, Grams = 135.85, Plates = 1, PurgeGrams = 124.0, ColourChangeHours = 31450 / 3600.0 };
             string[] colours = { "#118002", "#FFFF0A", "#074080", "#ED1C24" };
             string[] profiles = { "Bambu PLA Basic", "Bambu PLA Matte", "Bambu PLA Silk+", "Bambu PETG Translucent" };
@@ -628,6 +629,34 @@ namespace PrintPrice
             SetStudioFile(Path.Combine(BambuSlicer.StudioRoot, "sample", "Multicolor_Benchy.3mf"));
             jobModel = "Four-Color Multicolor Test Benchy";   // the quote picture's model name
             SetResultLinks(null, null, null);   // "Scale…" under the line, as after a real slice (issue #8)
+            Recalculate();
+        }
+
+        /// Picture mode (issue #8 step 3): a two-colour project as our CLI sliced it with the prime tower on (plan run L:
+        /// 5,84 g, 49 m 48 s; tower 1,10 + 0,60 g, 314 s), with the note line and the "Prime tower: on" link. Call after
+        /// SetSampleJob (keeps its live price line and picture).
+        internal void SetSampleTowerJob()
+        {
+            if (!offline) return;
+            txtUrl.Text = "two_colour_project.3mf";
+            SetAuto(L.S("✓ \"two_colour_project\": 0 h 50 m, 5,84 g (0.20mm Standard · 2\u00A0colours).",
+                        "✓ \"two_colour_project\": 0 t 50 m, 5,84 g (0.20mm Standard · 2\u00A0farver)."), false);
+            var r = new SliceResult { Seconds = 2988, Grams = 5.84, Plates = 1, PurgeGrams = 2.6, ColourChangeHours = -1,
+                                      TowerGrams = 1.70, TowerSeconds = 314 };
+            r.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#FFFFFF", Type = "PLA", Profile = "Bambu PLA Basic @BBL A1", Grams = 4.85, ModelGrams = 3.0, TowerGrams = 1.10 });
+            r.Filaments.Add(new FilamentUse { Slot = 2, Colour = "#ED1C24", Type = "PLA", Profile = "Bambu PLA Basic @BBL A1", Grams = 0.99, ModelGrams = 0.2, TowerGrams = 0.60 });
+            txtHours.Text = "0";
+            txtMinutes.Text = "50";
+            txtElecPrice.Text = "3,65";
+            jobTower = true; jobTowerKnown = true;
+            SetColours(r);
+            SetSampleRowPrices("200");
+            txtGrams.Text = "5,84";
+            SetJobLoaded(true);
+            jobModel = "Two-colour project";
+            jobScale = ScaleXyz.None;
+            lastJobResult = r;
+            SetResultLinks(null, null, null);   // "Scale…" and "Prime tower: on" under the line
             Recalculate();
         }
 
@@ -1063,6 +1092,17 @@ namespace PrintPrice
         /// The shown job's scale in percent (100 = not scaled). Set by a finished job (the scale it was sliced at), by Open
         /// again / Repeat print (the record's); back to 100 by a new link / file, Clear and a new job without a scale.
         ScaleXyz jobScale = ScaleXyz.None;   // step 2: per axis (X = Y = Z = the step-1 uniform scale)
+        // ---------- issue #8 step 3: prime tower ----------
+        /// The shown job's tower switch (what it was sliced with; Open again = the record's, History.PrimeTowerFor).
+        bool jobTower = true;
+        /// false = the shown job is an old record opened again whose tower is unknown (PrimeTower -1): saving keeps -1
+        /// instead of Settings' value, until it is sliced again.
+        bool jobTowerKnown = true;
+        /// The next slice's tower switch (set by the job's tower link and Repeat print); null = Settings.
+        bool? towerForNextSlice;
+        /// The tower switch of the slice that is starting (towerForNextSlice once, else Settings; set in AnalyzeAsync).
+        bool sliceTower = true;
+        bool SettingsTower { get { return settings.PrimeTower != 0; } }
         /// "150 %" / "150 × 100 × 50 %", "" when not scaled (History's text, so names match the saved record's).
         static string ScaleLabel(ScaleXyz s) { return s == null ? "" : History.ScaleText(s.X, s.Y, s.Z); }
         /// A record's scale per axis (old records: their uniform Scale on every axis).
@@ -1090,6 +1130,9 @@ namespace PrintPrice
                                       List<HistoryPart> savedParts, bool savedTogether, ScaleXyz scalePct, JobInputs rescale)
         {
             if (offline || cts != null) return false;
+            // issue #8 step 3: the tower switch for this slice (the job's tower link / Repeat print once, else Settings)
+            sliceTower = towerForNextSlice ?? SettingsTower;
+            towerForNextSlice = null;
             // issue #8: G-code can't be scaled; say so first (not "Bambu Studio was not found" when it's missing)
             if (BambuSlicer.IsScaled(scalePct) && localFiles != null && localFiles.Any(BambuSlicer.IsGcodeFile))
             {
@@ -1201,7 +1244,10 @@ namespace PrintPrice
                 var files = localFiles;
                 var colourPlan = plan;
                 var scale = scalePct;
-                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token, scale));
+                bool tower = sliceTower;   // issue #8 step 3: this slice's tower switch
+                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token, scale, tower));
+                jobTower = tower;
+                jobTowerKnown = true;   // sliced: the switch it used is known
                 if (plan != null)
                 {
                     jobParts = plan.Parts;   // saved with the quote (History.SetParts), so Repeat print slices it the same way
@@ -1388,23 +1434,73 @@ namespace PrintPrice
         /// no G-code) on one line; when both don't fit the box's width the plates link gets its short text.
         void SetResultLinks(string platesText, Action platesClick, string platesShort)
         {
-            bool scale = CanScaleJob;
-            if (platesText == null)
-            {
-                if (scale) lblAuto.SetLink(ScaleLinkText, () => ShowScaleWindow());
-                return;
-            }
-            if (!scale) { lblAuto.SetLink(platesText, platesClick); return; }
+            // the links on one line: plates (2+), "Scale…", and for 2+ colours "Prime tower: on" (issue #8 step 3)
+            var texts = new List<string>();
+            var clicks = new List<Action>();
+            if (platesText != null) { texts.Add(platesText); clicks.Add(platesClick); }
+            if (CanScaleJob) { texts.Add(ScaleLinkText); clicks.Add(() => ShowScaleWindow()); }
+            if (CanTowerJob) { texts.Add(TowerLinkText); clicks.Add(() => { var _ = ToggleTowerAsync(); }); }
+            if (texts.Count == 0) return;
+            if (texts.Count == 1) { lblAuto.SetLink(texts[0], clicks[0]); SetTowerTip(); return; }
             Label lbl = lblAuto.Controls.Count > 0 ? lblAuto.Controls[0] as Label : null;
             int width = lbl != null ? lbl.MaximumSize.Width : 0;
-            if (lbl != null && width > 0 && platesShort != null)
+            if (platesText != null && lbl != null && width > 0 && platesShort != null)
             {
                 var flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
-                int need = TextRenderer.MeasureText(platesText, lbl.Font, new Size(int.MaxValue, int.MaxValue), flags).Width
-                         + ScalePx(16) + TextRenderer.MeasureText(ScaleLinkText, lbl.Font, new Size(int.MaxValue, int.MaxValue), flags).Width + 4;
-                if (need > width) platesText = platesShort;
+                int need = 0;
+                foreach (var t in texts) need += TextRenderer.MeasureText(t, lbl.Font, new Size(int.MaxValue, int.MaxValue), flags).Width + ScalePx(16);
+                if (need - ScalePx(16) + 4 > width) texts[0] = platesShort;
             }
-            lblAuto.SetLinks(new[] { platesText, ScaleLinkText }, new Action[] { platesClick, () => ShowScaleWindow() });
+            lblAuto.SetLinks(texts.ToArray(), clicks.ToArray());
+            SetTowerTip();
+        }
+
+        /// The tower link's dark tooltip: what a click does (qol: the switch reads like a state, the tip says the action).
+        void SetTowerTip()
+        {
+            if (printerTip == null || !CanTowerJob) return;
+            string text = TowerLinkText;
+            var stack = new Stack<Control>();
+            stack.Push(lblAuto);
+            while (stack.Count > 0)
+            {
+                var c = stack.Pop();
+                if (c is Theme.LinkText && c.Text == text)
+                {
+                    printerTip.SetToolTip(c, jobTower
+                        ? L.S("Click to slice again without the prime tower\n(saves filament, may leave colour smudges)",
+                              "Klik for at slice igen uden primetårn\n(sparer filament, kan give farvepletter)")
+                        : L.S("Click to slice again with the prime tower\n(cleaner colour changes, uses a little more filament)",
+                              "Klik for at slice igen med primetårn\n(renere farveskift, bruger lidt mere filament)"));
+                    return;
+                }
+                foreach (Control k in c.Controls) stack.Push(k);
+            }
+        }
+
+        /// "Prime tower: on" / "Primetårn: til" (the shown job's switch; a click slices it again with the other one).
+        string TowerLinkText { get { return jobTower ? L.S("Prime tower: on", "Primetårn: til") : L.S("Prime tower: off", "Primetårn: fra"); } }
+
+        /// The tower link is offered for a sliced job with 2+ colours that can be sliced again (not G-code / a sliced file
+        /// read as it is); picture mode: the sample jobs with 2+ colours.
+        bool CanTowerJob
+        {
+            get
+            {
+                if (!jobLoaded || filaments == null) return false;
+                if (offline) return true;
+                return lastJob != null && lastJob.Scalable && lastJobResult != null && !lastJobResult.FromSlicedFile;
+            }
+        }
+
+        /// The tower link: the same files, size and colours sliced again with the tower switched (a failure keeps the job).
+        async Task<bool> ToggleTowerAsync()
+        {
+            if (!CanTowerJob || cts != null || offline) return false;
+            towerForNextSlice = !jobTower;
+            bool ok = await RescaleAsync(jobScale);
+            towerForNextSlice = null;
+            return ok;
         }
 
         static string ScaleLinkText { get { return L.S("Scale…", "Skalér…"); } }
@@ -1688,7 +1784,7 @@ namespace PrintPrice
         /// plate"); null = one file, or files that keep their own colours (sliced one by one, summed).
         static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
                                   string nozzle, string process, string filament, string bed, ColourPlan plan,
-                                  IProgress<string> progress, CancellationToken ct, ScaleXyz scalePct = null)
+                                  IProgress<string> progress, CancellationToken ct, ScaleXyz scalePct = null, bool primeTower = true)
         {
             if (scalePct == null) scalePct = ScaleXyz.None;
             string work = Path.Combine(JobTempRoot(), Guid.NewGuid().ToString("N"));
@@ -1722,7 +1818,7 @@ namespace PrintPrice
                 ct.ThrowIfCancellationRequested();
                 string label = Wear.FindModel(printer).Label;   // "Bambu Lab A1 mini"
                 progress.Report(L.F("Preparing {0} profiles…", "Klargør {0}-profiler…", label));
-                BambuSlicer.PrepareProfiles(exe, printer, nozzle, process, filament, bed, work);
+                BambuSlicer.PrepareProfiles(exe, printer, nozzle, process, filament, bed, work, primeTower);   // issue #8 step 3
 
                 SliceResult total;
                 if (plan != null)
@@ -2123,6 +2219,8 @@ namespace PrintPrice
             bool multi = list.Count >= 2;
             filaments = multi ? list : null;
             jobPurge = multi ? r.PurgeGrams : -1;
+            jobTowerGrams = r != null ? r.TowerGrams : -1;       // issue #8 step 3 (one colour: 0 = sliced, no tower)
+            jobTowerSeconds = r != null ? r.TowerSeconds : -1;
             single = null;
             if (!multi)
             {
@@ -2167,7 +2265,7 @@ namespace PrintPrice
             for (int i = 0; i < MaxColourRows; i++)
                 foreach (var c in rowControls[i]) c.Visible = i < rows;
             FitColourGrid();
-            string note = multi ? PurgeNote(r) : "";
+            string note = multi ? PurgeNote(r, PurgeLineWidth()) : "";
             lblPurge.Text = note;
             lblPurge.Visible = note.Length > 0;
             txtGrams.ReadOnly = multi;
@@ -2338,15 +2436,63 @@ namespace PrintPrice
 
         /// "incl. 124 g and 8,7 h for colour changes" (ui-text: no "purge" jargon); only the parts that are known (purge only
         /// above 0,5 g). "" = no line.
+        /// Issue #8 step 3: the prime tower is counted apart ("· prime tower 1,70 g · 5 min"); the colour-change grams are then
+        /// the flush only (PurgeGrams - TowerGrams). Tower unknown (-1) or 0 = no tower part.
         static string PurgeNote(SliceResult r)
         {
-            bool g = r.PurgeGrams > 0.5, h = r.ColourChangeHours >= 0.05;
-            string grams = g ? r.PurgeGrams.ToString(r.PurgeGrams >= 10 ? "0" : "0.#", Num.Dk) : "";
+            return PurgeNote(r, int.MaxValue);
+        }
+
+        /// The room for the note line (the material table's width less the label's margins); 0 = not laid out yet.
+        int PurgeLineWidth()
+        {
+            var p = lblPurge.Parent;
+            return p == null ? 0 : Math.Max(0, p.ClientSize.Width - lblPurge.Margin.Horizontal);
+        }
+
+        /// As above; the tower part goes on a second line when both don't fit width px on one (width <= 0 = always one).
+        static string PurgeNote(SliceResult r, int width)
+        {
+            double tower = r.TowerGrams > 0.005 ? r.TowerGrams : 0;
+            double flush = r.PurgeGrams > 0 ? Math.Max(0, r.PurgeGrams - tower) : r.PurgeGrams;
+            bool g = flush > 0.5, h = r.ColourChangeHours >= 0.05;
+            string grams = g ? flush.ToString(flush >= 10 ? "0" : "0.#", Num.Dk) : "";
             string hours = h ? r.ColourChangeHours.ToString("0.#", Num.Dk) : "";
-            if (g && h) return L.F("incl. {0} g and {1} h for colour changes", "heraf {0} g og {1} t til farveskift", grams, hours);
-            if (g) return L.F("incl. {0} g for colour changes", "heraf {0} g til farveskift", grams);
-            if (h) return L.F("{0} h for colour changes", "{0} t til farveskift", hours);
-            return "";
+            string note = "";
+            if (g && h) note = L.F("incl. {0} g and {1} h for colour changes", "heraf {0} g og {1} t til farveskift", grams, hours);
+            else if (g) note = L.F("incl. {0} g for colour changes", "heraf {0} g til farveskift", grams);
+            else if (h) note = L.F("{0} h for colour changes", "{0} t til farveskift", hours);
+            string t = TowerText(tower, r.TowerSeconds, true);
+            if (t.Length == 0) return note;
+            string up = char.ToUpper(t[0]) + t.Substring(1);
+            if (note.Length == 0) return up;
+            string one = note + " · " + t;
+            if (width <= 0 || width == int.MaxValue) return one;
+            using (var f = new Font("Segoe UI", 9f))   // lblPurge's font
+                if (TextRenderer.MeasureText(one, f, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width <= width)
+                    return one;
+            return note + "\n" + up;
+        }
+
+        /// The quote's "incl. N g for colour changes": the flush only when the tower note is on the page (QuoteShowTower),
+        /// else the whole purge (tower included, as before). purge <= 0 stays as it is (no note).
+        double QuotePurge(double purge, double tower)
+        {
+            if (purge <= 0 || settings.QuoteShowTower != 1 || !(tower > 0.005)) return purge;
+            return Math.Max(0, purge - tower);
+        }
+
+        /// "prime tower 1,70 g · 5 min" (DA "primetårn …"); withTime false / seconds unknown = grams only; grams <= 0 = "".
+        internal static string TowerText(double grams, double seconds, bool withTime)
+        {
+            if (!(grams > 0.005)) return "";
+            string s = L.F("prime tower {0} g", "primetårn {0} g", grams.ToString("0.0", Num.Dk));   // one decimal (qol)
+            if (withTime && seconds >= 30)
+            {
+                int min = (int)Math.Round(seconds / 60);
+                s += " · " + (min >= 60 ? (min / 60) + L.S(" h ", " t ") + (min % 60) + " min" : min + " min");
+            }
+            return s;
         }
 
         /// Material name of a filament: the profile's short name ("Bambu PLA Matte", "@BBL A1 …" dropped), else its type
@@ -3146,8 +3292,22 @@ namespace PrintPrice
         /// The quote as plain text (Copy text): model, time and grams, both prices; "For: <name>" when a customer is given.
         string QuoteText(string customer)
         {
-            return QuoteRows.JobText(customer, LinkSource(),lastHours, lastMinutes, txtGrams.Text,
-                                     filaments != null ? filaments.Count : 0, last.FriendsPrice, last.OthersPrice);
+            string text = QuoteRows.JobText(customer, LinkSource(),lastHours, lastMinutes, txtGrams.Text,
+                                            filaments != null ? filaments.Count : 0, last.FriendsPrice, last.OthersPrice);
+            return WithTowerLine(text, filaments != null && settings.QuoteShowTower == 1 ? jobTowerGrams : -1);   // issue #8 step 3
+        }
+
+        /// Issue #8 step 3: Copy text gets "Prime tower 1,70 g" under the print-time line (as the quote's note row);
+        /// grams <= 0 = the text as it is.
+        static string WithTowerLine(string text, double grams)
+        {
+            if (!(grams > 0.005) || string.IsNullOrEmpty(text)) return text;
+            string nl = Environment.NewLine;
+            string[] lines = text.Split(new[] { nl }, StringSplitOptions.None);
+            int at = Array.FindIndex(lines, s => s.StartsWith("Print time", StringComparison.Ordinal) || s.StartsWith("Printtid", StringComparison.Ordinal));
+            var list = new List<string>(lines);
+            list.Insert(at >= 0 ? at + 1 : list.Count, QuoteRows.TowerNote(grams));
+            return string.Join(nl, list);
         }
 
         // ---------- quote export (idea 5 + 21): "Show quote… ▾" → QuoteForm, or quick exports from the ▾ menu ----------
@@ -3562,7 +3722,8 @@ namespace PrintPrice
                 Printer = PrinterText(),
                 Number = number, Date = date, ValidUntil = settings.QuoteValidUntil(date),
                 PlateName = plate,
-                PurgeGrams = filaments != null ? jobPurge : -1,
+                PurgeGrams = filaments != null ? QuotePurge(jobPurge, jobTowerGrams) : -1,
+                TowerGrams = filaments != null && settings.QuoteShowTower == 1 ? jobTowerGrams : -1,   // issue #8 step 3
                 Breakdown = Pricing.Breakdown(lastInput, settings, friends, wear)
             };
             var used = filaments ?? (single != null ? new List<FilamentUse> { single } : null);
@@ -3738,7 +3899,8 @@ namespace PrintPrice
                 Printer = PrinterText(r),
                 Number = History.QuoteNumber(r), Date = saved, ValidUntil = quote.ValidUntil,
                 PlateName = QuotePlate(r.BedType),
-                PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? r.PurgeGrams : -1,
+                PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? QuotePurge(r.PurgeGrams, r.TowerGrams) : -1,
+                TowerGrams = settings.QuoteShowTower == 1 && History.ShowsTower(r) ? r.TowerGrams : -1,   // issue #8 step 3
                 // N4: the saved price (as Copy text and the History list), with the saved wear split as sub-rows
                 Breakdown = History.RecordBreakdown(r, settings, friends)
             };
@@ -3929,7 +4091,8 @@ namespace PrintPrice
         /// A record as plain text: title, name, model, time and grams, the chosen price; invoice: number, dates, payment.
         string RecordText(QuoteRecord r, bool friends, bool invoice)
         {
-            return QuoteRows.RecordText(r, friends, invoice, settings, ShortLink(r.Source));
+            return WithTowerLine(QuoteRows.RecordText(r, friends, invoice, settings, ShortLink(r.Source)),
+                                 settings.QuoteShowTower == 1 && History.ShowsTower(r) ? r.TowerGrams : -1);   // issue #8 step 3
         }
 
         // ---------- combined bill: several History jobs on one quote / invoice (plans\combined-bill, Part A) ----------
@@ -4206,6 +4369,7 @@ namespace PrintPrice
             var gb = History.GroupBreakdown(bill, settings);
             d.Breakdown = new QuoteBreakdown { Friends = friends, Lines = gb.Lines, TotalOre = gb.TotalOre, Price = gb.Total };
             d.GroupSameRates = gb.SameRates;
+            d.TowerGrams = settings.QuoteShowTower == 1 ? History.TowerGramsSum(jobs) : -1;   // issue #8 step 3: the jobs' towers
             FillGroupMaterials(d.MaterialNames, d.MaterialColours, gb.Materials);
             int minutes = 0;
             string bed = null;
@@ -4406,6 +4570,21 @@ namespace PrintPrice
             return QuotePage.Render(BuildQuote(settings.QuoteFriends, when, History.QuoteNumber(when), customer), dark);
         }
 
+        /// Picture mode (issue #8 step 3): the job on screen as a light quote with the "Prime tower 1,70 g" note (as with
+        /// Settings' "Show prime tower grams on quotes and invoices" ticked; the in-memory settings are put back after).
+        internal Bitmap RenderSampleTowerQuote()
+        {
+            if (!offline || last == null || lastInput == null) return null;
+            double keep = settings.QuoteShowTower;
+            settings.QuoteShowTower = 1;
+            try
+            {
+                var when = new DateTime(2026, 11, 4, 17, 45, 0);
+                return QuotePage.Render(BuildQuote(false, when, History.QuoteNumber(when), "Mette Hansen"), false);
+            }
+            finally { settings.QuoteShowTower = keep; }
+        }
+
         /// Picture mode: the job on screen as a light customer quote (not friends) for Mette Hansen, fixed date: the single
         /// Benchy is below the minimum price, so its top-up shows inside Work & handling (quote_topup.png).
         internal Bitmap RenderSampleTopUpQuote()
@@ -4552,9 +4731,13 @@ namespace PrintPrice
                     r.Filaments[k].Type = used[k].Type ?? "";
                     // short preset name ("Bambu PLA Matte", not "… @BBL A1") = MaterialName's key, so prices keep matching
                     r.Filaments[k].Name = string.IsNullOrEmpty(used[k].Profile) ? "" : BambuSlicer.ShortName(used[k].Profile).Trim();
+                    r.Filaments[k].TowerGrams = used[k].TowerGrams;   // issue #8 step 3 (-1 = unknown)
                 }
                 if (filaments != null) r.PurgeGrams = jobPurge;
             }
+            // issue #8 step 3: the tower switch it was sliced with and the tower's grams / time (2+ colours only; -1 = unknown)
+            History.SetTower(r, jobTower, jobTowerGrams, jobTowerSeconds);   // one colour: the slice's 0 when known
+            if (!jobTowerKnown) r.PrimeTower = -1;   // an old record opened again (not sliced): its switch stays unknown
             if (jobParts != null) History.SetParts(r, jobParts, jobTogether);   // idea 21: the filament / colour per file
             else if (repeatOf != null && History.PartsOf(repeatOf) != null)    // a repeat print: new records don't copy them
                 History.SetParts(r, History.PartsOf(repeatOf), History.PartsTogether(repeatOf));
@@ -4686,7 +4869,7 @@ namespace PrintPrice
                         // payback is folded into Work & handling too (pricing, whole-app review)
                         long workOre = lines.Where(l => l.Key == QuoteLine.Work || l.Key == QuoteLine.Payback).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
                         var shown = QuoteRows.FoldMinimum(lines);
-                        var rows = QuoteRows.Build(qd.Breakdown, qd.MaterialNames, qd.PurgeGrams, qd.Hours, qd.Minutes, qd.PlateName);
+                        var rows = QuoteRows.AddTowerNote(QuoteRows.Build(qd.Breakdown, qd.MaterialNames, qd.PurgeGrams, qd.Hours, qd.Minutes, qd.PlateName), qd.TowerGrams);
                         var workRow = rows.FirstOrDefault(r => r.Kind == QuoteRowKind.Head && r.Label == L.S("Work & handling", "Arbejde & håndtering"));
                         bool minDrawn = rows.Any(r => (r.Label + " " + r.Detail).IndexOf("inimum", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                                       (r.Label + " " + r.Detail).IndexOf(L.S("lowest price", "laveste pris"), StringComparison.OrdinalIgnoreCase) >= 0);
@@ -4954,6 +5137,8 @@ namespace PrintPrice
                     s10.PayMobilePay = "12 34 56 78";
                     s10.PayBank = "reg. 1234";
                     s10.OthersMarkupPct = s10.OthersMarkupPct + 17;
+                    s10.PrimeTower = 0;       // issue #8 step 3: Reset brings both tower settings back (1 / 0)
+                    s10.QuoteShowTower = 1;
                     var def = new AppSettings();
                     using (var sf = new SettingsForm(s10))   // OK closes the window: one window per answer
                     {
@@ -4972,6 +5157,9 @@ namespace PrintPrice
                                   r2.PayMobilePay == "12 34 56 78" && r2.PayBank == "reg. 1234",
                                   "10i Reset, Yes: markup back to " + (r2 != null ? Num.Fmt(r2.OthersMarkupPct) : "-") + " (default " + Num.Fmt(def.OthersMarkupPct) +
                                   "), name / MobilePay / bank kept (" + (r2 != null ? r2.QuoteName + " / " + r2.PayMobilePay + " / " + r2.PayBank : "-") + ")");
+                        log.Check(r2 != null && r2.PrimeTower == 1 && r2.QuoteShowTower == 0,
+                                  "10k Reset, Yes: prime tower back to on, tower grams on quotes back to off (" +
+                                  (r2 != null ? r2.PrimeTower + " / " + r2.QuoteShowTower : "-") + ")");
                         log.Check(BackupForm.AskForm.TestAnswers.Count == 0, "10j the reset asked both times");
                     }
                     BackupForm.AskForm.TestAnswers = null;
@@ -5009,6 +5197,90 @@ namespace PrintPrice
                     log.Check(!jobScale.IsScaled && !QuoteModelName().Contains(tag),
                               "11g Clear: the job scale is back to " + jobScale.Text + ", name \"" + QuoteModelName() + "\"");
                 }
+
+                // 12. issue #8 step 3: the prime tower. A two-colour job sliced with the tower (1,10 + 0,60 g, 314 s; purge 2,6 g):
+                // the app's note line, the quote's "Prime tower 1,70 g" row only with QuoteShowTower, the flush-only purge
+                // note then, Copy text, the saved record, Open again, and a combined bill's summed tower
+                double keepShow = settings.QuoteShowTower;
+                try
+                {
+                    var two = new SliceResult { Seconds = 2988, Grams = 5.84, Plates = 1, PurgeGrams = 2.6, ColourChangeHours = -1, TowerGrams = 1.70, TowerSeconds = 314 };
+                    two.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#FFFFFF", Type = "PLA", Profile = "Bambu PLA Basic @BBL A1", Grams = 4.85, TowerGrams = 1.10 });
+                    two.Filaments.Add(new FilamentUse { Slot = 2, Colour = "#ED1C24", Type = "PLA", Profile = "Bambu PLA Basic @BBL A1", Grams = 0.99, TowerGrams = 0.60 });
+                    txtUrl.Text = SingleBenchyLink;   // before the job (its TextChanged resets the job's state)
+                    SetColours(two);
+                    jobTower = true; jobTowerKnown = true;
+                    txtHours.Text = "0";
+                    txtMinutes.Text = "50";
+                    for (int i = 0; i < colourRows; i++) rowPrice[i].Text = "200";
+                    txtGrams.Text = "5,84";
+                    txtElecPrice.Text = "3,65";
+                    jobModel = "Two-colour project";
+                    SetJobLoaded(true);
+                    Recalculate();
+                    log.Check(last != null && filaments != null && filaments.Count == 2, "12 two-colour job on screen");
+                    string towerApp = TowerText(1.70, 314, true);
+                    log.Check(lblPurge.Visible && lblPurge.Text.Replace("\n", " ").ToLowerInvariant().Contains(towerApp.ToLowerInvariant()),
+                              "12a the app's note shows \"" + towerApp + "\": \"" + lblPurge.Text.Replace("\n", " / ") + "\"");
+                    string note = QuoteRows.TowerNote(1.70);
+                    Func<QuoteData, List<QuoteRow>> rowsOf = d => QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams);
+                    Func<List<QuoteRow>, int> noteAt = rows => rows.FindIndex(x => x.Kind == QuoteRowKind.Note && x.Label == note);
+                    var when12 = new DateTime(2026, 11, 20, 12, 0, 0);
+                    settings.QuoteShowTower = 0;
+                    var q0 = BuildQuote(false, when12, "T-1", "Tårn Kunde");
+                    log.Check(noteAt(rowsOf(q0)) < 0 && Math.Abs(q0.PurgeGrams - 2.6) < 0.001,
+                              "12b box off: no tower row on the quote, purge note keeps " + q0.PurgeGrams.ToString("0.##", Num.Dk) + " g");
+                    log.Check(!QuoteText("Tårn Kunde").Contains(note), "12c box off: Copy text has no tower line");
+                    settings.QuoteShowTower = 1;
+                    var q1 = BuildQuote(false, when12, "T-1", "Tårn Kunde");
+                    var rows1 = rowsOf(q1);
+                    int at = noteAt(rows1), rule = rows1.FindIndex(x => x.Kind == QuoteRowKind.Rule);
+                    log.Check(at > 0 && (rule < 0 || at < rule) && rows1[at].Amount == "",
+                              "12d box on: \"" + note + "\" row at " + at + " (first rule " + rule + "), no amount");
+                    log.Check(Math.Abs(q1.PurgeGrams - 0.9) < 0.001, "12e box on: the purge note is the flush only (" + q1.PurgeGrams.ToString("0.##", Num.Dk) + " g)");
+                    string copy = QuoteText("Tårn Kunde");
+                    log.Check(copy.Contains(note), "12f box on: Copy text has the tower line");
+                    QuoteRecord s12;
+                    SaveToHistory(History.ForCustomer, "Tårn Kunde", out s12);
+                    log.Check(s12 != null && s12.PrimeTower == 1 && Math.Abs(s12.TowerGrams - 1.70) < 0.001 && Math.Abs(s12.TowerSeconds - 314) < 0.5 &&
+                              s12.Filaments != null && s12.Filaments.Count == 2 && Math.Abs(s12.Filaments[0].TowerGrams - 1.10) < 0.001 &&
+                              Math.Abs(s12.Filaments[1].TowerGrams - 0.60) < 0.001 && History.ShowsTower(s12),
+                              "12g saved: switch " + (s12 != null ? s12.PrimeTower.ToString() : "-") + ", tower " +
+                              (s12 != null ? s12.TowerGrams.ToString("0.##", Num.Dk) + " g, " + s12.TowerSeconds.ToString("0", Num.Dk) + " s" : "-"));
+                    if (s12 != null)
+                    {
+                        var rq = BuildRecordQuote(s12, false, "Tårn Kunde", true, null);
+                        log.Check(noteAt(rowsOf(rq)) > 0, "12h the saved job's invoice has the tower row");
+                        settings.QuoteShowTower = 0;
+                        rq = BuildRecordQuote(s12, false, "Tårn Kunde", false, null);
+                        log.Check(noteAt(rowsOf(rq)) < 0 && !RecordText(s12, false, false).Contains(note), "12i box off: the saved job's quote and Copy text have none");
+                        settings.QuoteShowTower = 1;
+                        log.Check(RecordText(s12, false, false).Contains(note), "12j box on: the saved job's Copy text has the tower line");
+                        // a combined bill: the summed tower of its jobs (one without a tower adds nothing)
+                        var other = history.FirstOrDefault(x => x != null && x.Id != s12.Id && !History.ShowsTower(x));
+                        if (other != null)
+                        {
+                            var jobs = new List<QuoteRecord> { s12, other };
+                            var gd = BuildGroupQuote(jobs, false, "Tårn Kunde", false, null, when12);
+                            var grows = QuoteRows.AddTowerNote(QuoteRows.BuildGroup(gd.Breakdown, gd.MaterialNames, gd.Hours, gd.Minutes, gd.PlateName, gd.GroupSameRates, 6), gd.TowerGrams);
+                            log.Check(Math.Abs(gd.TowerGrams - History.TowerGramsSum(jobs)) < 0.001 && noteAt(grows) > 0,
+                                      "12k combined bill: tower " + gd.TowerGrams.ToString("0.##", Num.Dk) + " g, row " + noteAt(grows));
+                        }
+                        else log.Check(false, "12k a saved job without a tower for the combined bill");
+                        // Open again: the record's switch and tower, also when Settings says off
+                        double keepTower = settings.PrimeTower;
+                        settings.PrimeTower = 0;
+                        ClearJob();
+                        Reopen(s12);
+                        log.Check(jobTower && lblPurge.Text.Replace("\n", " ").ToLowerInvariant().Contains(towerApp.ToLowerInvariant()),
+                                  "12l Open again: tower " + (jobTower ? "on" : "off") + " (Settings off), note \"" + lblPurge.Text.Replace("\n", " / ") + "\"");
+                        var old = new QuoteRecord { PrimeTower = -1 };
+                        log.Check(!History.PrimeTowerFor(old, settings) && History.PrimeTowerFor(s12, settings), "12m an old record follows Settings (off), a saved one keeps its own (on)");
+                        settings.PrimeTower = keepTower;
+                    }
+                }
+                finally { settings.QuoteShowTower = keepShow; }
+                ClearJob();
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
             finally
@@ -5076,7 +5348,7 @@ namespace PrintPrice
                           (workOre == 0 ? workShown == null || workShown.Ore == 0 : workShown != null && workShown.Ore == workOre),
                           step + " shown lines: no minimum, work & handling " + (workShown != null ? Num.Kr(workShown.Amount) : "none") +
                           " = work + top-up " + Num.Kr(workOre / 100.0) + ", sum " + Num.Kr(shown.Sum(l => l.Ore) / 100.0));
-                var rows = QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates, 6);
+                var rows = QuoteRows.AddTowerNote(QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates, 6), d.TowerGrams);
                 var workRow = rows.FirstOrDefault(r => r.Kind == QuoteRowKind.Head && r.Label == L.S("Work & handling", "Arbejde & håndtering"));
                 bool minDrawn = rows.Any(r => (r.Label + " " + r.Detail).IndexOf(L.S("inimum", "inimum"), StringComparison.OrdinalIgnoreCase) >= 0 ||
                                               (r.Label + " " + r.Detail).IndexOf(L.S("lowest price", "laveste pris"), StringComparison.OrdinalIgnoreCase) >= 0);
@@ -5861,6 +6133,8 @@ namespace PrintPrice
                 bool together = false;
                 double closeAfter = 0;   // "close-after=<s>": close the window mid-slice (A5: Bambu Studio must stop too)
                 ScaleXyz specScale = ScaleXyz.None, specRescale = null;
+                bool? specTower = null;     // issue #8 step 3: "tower=on|off" = the first slice's switch (else Settings)
+                bool toggleTower = false;   // "toggle-tower=1": then the tower link (slices again with the other switch)
                 string baseDir = Path.GetDirectoryName(specFile);
                 foreach (var raw in File.ReadAllLines(specFile))
                 {
@@ -5880,6 +6154,15 @@ namespace PrintPrice
                         if (!ScaleXyz.TryParse(line.Substring(8), out specRescale)) { check(false, "bad spec line: " + line); specRescale = null; }
                         continue;
                     }
+                    if (line.StartsWith("tower=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string v = line.Substring(6).Trim().ToLowerInvariant();
+                        if (v == "on" || v == "1") specTower = true;
+                        else if (v == "off" || v == "0") specTower = false;
+                        else check(false, "bad spec line: " + line);
+                        continue;
+                    }
+                    if (line.StartsWith("toggle-tower=", StringComparison.OrdinalIgnoreCase)) { toggleTower = line.Substring(13).Trim() == "1"; continue; }
                     if (line.StartsWith("close-after=", StringComparison.OrdinalIgnoreCase))
                     {
                         double.TryParse(line.Substring(12).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out closeAfter);
@@ -5919,9 +6202,25 @@ namespace PrintPrice
                     lastJobResult = null;
                     if (specScale.IsScaled || specRescale != null)
                         log.Add("spec: scale: " + specScale.Text + (specRescale != null ? ", rescale: " + specRescale.Text : ""));
+                    if (specTower.HasValue) { towerForNextSlice = specTower.Value; log.Add("spec: tower " + (specTower.Value ? "on" : "off")); }
                     bool done = await AnalyzeAsync(null, files, null, parts, together, specScale, null);
                     check(done && lastJobResult != null, "sliced");
+                    check(!done || jobTower == (specTower ?? SettingsTower), "sliced with tower " + ((specTower ?? SettingsTower) ? "on" : "off"));
                     TestJobLines(log, lastJobResult);
+                    if (done && toggleTower)
+                    {
+                        // the job's "Prime tower: on/off" link: the same files, size and colours again with the other switch
+                        bool before = jobTower;
+                        var firstRes = lastJobResult;   // kept: CanTowerJob reads it, as on a real click
+                        double gramsBefore = firstRes != null ? firstRes.Grams : 0;
+                        check(CanTowerJob, "tower link offered after the slice (2+ colours)");
+                        done = await ToggleTowerAsync();
+                        check(done && lastJobResult != null && !ReferenceEquals(lastJobResult, firstRes) && jobTower == !before,
+                              "sliced again with tower " + (!before ? "on" : "off"));
+                        TestJobLines(log, lastJobResult);
+                        if (lastJobResult != null)
+                            log.Add("grams " + gramsBefore.ToString("0.##", Num.Dk) + " -> " + lastJobResult.Grams.ToString("0.##", Num.Dk));
+                    }
                     if (done && specRescale != null)
                     {
                         // the Scale window's Apply: the same files again at the new size, the ✓ line says it
@@ -6005,6 +6304,9 @@ namespace PrintPrice
                     log.Add("scale: original " + RecordScale(r).Text + " / repeated " +
                             (rec != null ? RecordScale(rec).Text : "-"));
                     check(rec != null && SameScale(RecordScale(rec), RecordScale(r)), "same scale (X / Y / Z) as the original");
+                    // issue #8 step 3: the repeat slices with the original's tower switch (unknown = Settings)
+                    bool want = History.PrimeTowerFor(r, settings);
+                    check(rec != null && rec.PrimeTower == (want ? 1 : 0), "same tower switch as the original (" + (want ? "on" : "off") + ")");
                 }
                 Screenshots.Snap(this, dir, "test_repeat.png");
             }
@@ -6089,8 +6391,30 @@ namespace PrintPrice
                             string png = Path.Combine(dir, "test_history_" + cmd + "_" + arg + ".png");
                             using (var bmp = QuotePage.Render(d, false)) bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
                             HistoryTest.PageModels[cmd + " " + arg] = d.Model ?? "";
+                            bool towerRow = TestHasTowerRow(QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams), d.TowerGrams);
+                            HistoryTest.PageTowers[cmd + " " + arg] = new KeyValuePair<double, bool>(d.TowerGrams, towerRow);
                             log.Add("  " + cmd + " page " + Path.GetFileName(png) + ": model \"" + d.Model + "\"" +
-                                    (d.Invoice ? ", invoice " + d.InvoiceNo : ", quote " + d.Number));
+                                    (d.Invoice ? ", invoice " + d.InvoiceNo : ", quote " + d.Number) +
+                                    ", tower grams " + d.TowerGrams.ToString("0.###", Num.Dk) + ", tower row " + towerRow);
+                            break;
+                        }
+                        case "bill":
+                        {
+                            // bill <id> <id> […] [invoice]: the combined page of saved records (BuildGroupQuote, read-only: nothing
+                            // is made or saved), drawn to test_history_bill_<n>.png; its tower grams + row kept for "expect tower"
+                            var words = HistoryTest.Words(arg).ToList();
+                            bool inv = words.Remove("invoice");
+                            var jobs = words.Select(id => history.Find(x => x.Id == id)).ToList();
+                            log.Check(jobs.Count >= 2 && jobs.All(x => x != null), "bill: " + words.Count + " saved records found");
+                            if (jobs.Count < 2 || jobs.Any(x => x == null)) break;
+                            var d = BuildGroupQuote(jobs, jobs[0].For == History.ForFriends, jobs[0].Customer, inv, null, new DateTime(2026, 11, 20, 12, 0, 0));
+                            string png = Path.Combine(dir, "test_history_bill_" + (++testBillPages) + ".png");
+                            using (var bmp = QuotePage.Render(d, false)) bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+                            var rows = QuoteRows.AddTowerNote(QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates, 6), d.TowerGrams);
+                            bool towerRow = TestHasTowerRow(rows, d.TowerGrams);
+                            HistoryTest.PageTowers["bill " + string.Join(" ", words)] = new KeyValuePair<double, bool>(d.TowerGrams, towerRow);
+                            log.Add("  bill page " + Path.GetFileName(png) + ": " + jobs.Count + " jobs, tower grams " + d.TowerGrams.ToString("0.###", Num.Dk) +
+                                    " (sum " + History.TowerGramsSum(jobs).ToString("0.###", Num.Dk) + ", box " + settings.QuoteShowTower + "), tower row " + towerRow);
                             break;
                         }
                         case "reopen":
@@ -6109,8 +6433,13 @@ namespace PrintPrice
                             if (rec != null)
                             {
                                 bool linked = !string.IsNullOrEmpty(rec.RepeatOf) && !history.Any(x => x.Id == rec.RepeatOf);
-                                log.Add("  saved " + rec.Id + ", RepeatOf \"" + rec.RepeatOf + "\", For " + rec.For);
+                                log.Add("  saved " + rec.Id + ", RepeatOf \"" + rec.RepeatOf + "\", For " + rec.For + ", tower switch " + rec.PrimeTower +
+                                        ", tower grams " + rec.TowerGrams.ToString("0.###", Num.Dk));
                                 log.Check(!linked, "the new quote doesn't point at a deleted one");
+                                // "save tower=<1|0|-1>": the saved tower switch (issue #8 step 3: an old record opened again keeps -1)
+                                int wantTower;
+                                if (arg.StartsWith("tower=") && int.TryParse(arg.Substring(6).Trim(), out wantTower))
+                                    log.Check(rec.PrimeTower == wantTower, "saved tower switch " + rec.PrimeTower + " (expected " + wantTower + ")");
                             }
                             break;
                         }
@@ -6130,6 +6459,17 @@ namespace PrintPrice
             Program.EndTestRun(log.Ok ? 0 : 4);
         }
 
+        int testBillPages;   // test_history_bill_<n>.png
+
+        /// The breakdown has the tower note row (QuoteRows.TowerNote of these grams) before its first rule.
+        static bool TestHasTowerRow(List<QuoteRow> rows, double grams)
+        {
+            if (rows == null || !(grams > 0.005)) return false;
+            string note = QuoteRows.TowerNote(grams);
+            int at = rows.FindIndex(x => x.Kind == QuoteRowKind.Note && x.Label == note), rule = rows.FindIndex(x => x.Kind == QuoteRowKind.Rule);
+            return at > 0 && (rule < 0 || at < rule) && rows[at].Amount == "";
+        }
+
         string MainTestState()
         {
             return "main: history " + (history == null ? "(none)" : history.Count.ToString()) + ", open quote " +
@@ -6145,7 +6485,11 @@ namespace PrintPrice
                         ", plates: " + res.Plates + ", purge g: " + res.PurgeGrams.ToString("0.##", Num.Dk));
                 foreach (var f in res.Filaments)
                     log.Add("slot " + f.Slot + ": " + (f.Colour ?? "") + " " + (f.Type ?? "") + " \"" + (f.Profile ?? "") + "\" " +
-                            f.Grams.ToString("0.##", Num.Dk) + " g");
+                            f.Grams.ToString("0.##", Num.Dk) + " g, tower " + f.TowerGrams.ToString("0.###", Num.Dk) + " g");
+                // issue #8 step 3: the switch it was sliced with, the tower's grams / seconds (-1 unknown) and the breakdown note
+                log.Add("tower: switch " + (jobTower ? "on" : "off") + ", grams " + res.TowerGrams.ToString("0.###", Num.Dk) + ", seconds " +
+                        res.TowerSeconds.ToString("0", Num.Dk) + ", link offered " + CanTowerJob + " (" + TowerLinkText + ")");
+                log.Add("purge note: " + (lblPurge.Text ?? "").Replace("\n", " / "));
                 log.Add("together: " + res.Together + ", together problem: " + (res.TogetherProblem ?? "(none)"));
                 // issue #8: the job's scale and the measured size (0 = unknown)
                 log.Add("scale: " + jobScale.Text + ", size: " +
@@ -6172,6 +6516,9 @@ namespace PrintPrice
             if (r == null) { log.Add("record: (none)"); return; }
             log.Add("record " + r.Id + ": " + r.Hours + " h " + r.Minutes + " m, " + r.Grams.ToString("0.##", Num.Dk) + " g, repeat of: " +
                     (string.IsNullOrEmpty(r.RepeatOf) ? "-" : r.RepeatOf) + ", scale: " + RecordScale(r).Text);
+            // issue #8 step 3: the saved tower switch (1 / 0 / -1 unknown), grams and seconds (-1 unknown)
+            log.Add("record tower: switch " + r.PrimeTower + ", grams " + r.TowerGrams.ToString("0.###", Num.Dk) + ", seconds " +
+                    r.TowerSeconds.ToString("0", Num.Dk) + ", shown " + History.ShowsTower(r));
             var parts = History.PartsOf(r);
             if (parts == null) log.Add("record parts: (none)");
             else
@@ -6181,7 +6528,8 @@ namespace PrintPrice
             }
             if (r.Filaments != null)
                 foreach (var f in r.Filaments)
-                    log.Add("record colour: " + (f.Colour ?? "") + " " + (f.Type ?? "") + " \"" + (f.Name ?? "") + "\" " + f.Grams.ToString("0.##", Num.Dk) + " g");
+                    log.Add("record colour: " + (f.Colour ?? "") + " " + (f.Type ?? "") + " \"" + (f.Name ?? "") + "\" " + f.Grams.ToString("0.##", Num.Dk) + " g" +
+                            ", tower " + f.TowerGrams.ToString("0.###", Num.Dk) + " g");
         }
 
         // a made-up model picture for TestPictureFlow (transparent, orange shape)
@@ -6347,6 +6695,7 @@ namespace PrintPrice
                         return;
                     }
                 }
+                towerForNextSlice = History.PrimeTowerFor(r, settings);   // issue #8 step 3: the saved tower switch
                 bool done = await AnalyzeAsync(id, paths, res => KeepSavedMaterials(res, r), parts, History.PartsTogether(r),
                                                RecordScale(r), null);   // issue #8: at the saved size
                 if (done) { repeatOf = r; ShowRepeatLine(r, null); return; }
@@ -6362,6 +6711,7 @@ namespace PrintPrice
                                                   : L.S("the link or file isn't there any more", "linket eller filen findes ikke længere"));
                 return;
             }
+            towerForNextSlice = History.PrimeTowerFor(r, settings);   // issue #8 step 3: the saved tower switch
             bool ok = await AnalyzeAsync(id, local ? new List<string> { src } : null, res => KeepSavedMaterials(res, r), null, false,
                                          RecordScale(r), null);   // issue #8: at the saved size
             if (ok) { repeatOf = r; ShowRepeatLine(r, null); return; }
@@ -6408,7 +6758,7 @@ namespace PrintPrice
             ShowLinkSource(r.Source);
             SetStudioFile(null);   // no slice from this session (also when the link was the same, so TextChanged didn't fire)
             jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)
-            jobScale = RecordScale(r);   // issue #8: the saved size (also after the link: TextChanged resets it)
+            jobScale = RecordScale(r); jobTower = History.PrimeTowerFor(r, settings); jobTowerKnown = r.PrimeTower == 0 || r.PrimeTower == 1;   // issue #8: the saved size (also after the link: TextChanged resets it)
             lastJob = null;                  // nothing sliced this session: Scale… comes after a slice / Repeat print
             jobParts = History.PartsOf(r);   // a colour per file (idea 21): saving it again / a failed repeat keeps them
             jobTogether = History.PartsTogether(r);
@@ -6428,18 +6778,19 @@ namespace PrintPrice
             if (one != null)
             {
                 // Grams > 0 so SetColours keeps it; the row's grams follow "Filament used" anyway
-                slice = new SliceResult { PurgeGrams = -1, ColourChangeHours = -1 };
+                slice = new SliceResult { PurgeGrams = -1, ColourChangeHours = -1, TowerGrams = r.TowerGrams, TowerSeconds = r.TowerSeconds };
                 slice.Filaments.Add(new FilamentUse { Slot = 1, Colour = one.Colour ?? "", Type = one.Type ?? "", Profile = one.Name ?? "",
-                                                      Grams = Math.Max(one.Grams, 0.01), ModelGrams = -1 });
+                                                      Grams = Math.Max(one.Grams, 0.01), ModelGrams = -1, TowerGrams = one.TowerGrams });
             }
             else if (r.Filaments != null && r.Filaments.Count >= 2)
             {
-                slice = new SliceResult { PurgeGrams = r.PurgeGrams, ColourChangeHours = -1 };
+                // issue #8 step 3: the saved tower (-1 = unknown: no line)
+                slice = new SliceResult { PurgeGrams = r.PurgeGrams, ColourChangeHours = -1, TowerGrams = r.TowerGrams, TowerSeconds = r.TowerSeconds };
                 for (int k = 0; k < r.Filaments.Count; k++)
                 {
                     var f = r.Filaments[k];
                     slice.Filaments.Add(new FilamentUse { Slot = k + 1, Colour = f.Colour ?? "", Type = f.Type ?? "", Profile = f.Name ?? "",
-                                                          Grams = f.Grams, ModelGrams = -1 });
+                                                          Grams = f.Grams, ModelGrams = -1, TowerGrams = f.TowerGrams });
                 }
             }
             SetColours(slice);   // old record (no saved material): neutral swatch + Settings' filament profile
@@ -6516,7 +6867,7 @@ namespace PrintPrice
             // sliced again into 2+ plates: the plates link comes back under the lines, so the main line is kept to one line
             // (the box stays at 3 lines: window <= ~760 px with 4 colour rows)
             bool plates = repeatWhy == null && shownPlates != null && shownPlates.Count >= 2;
-            bool scaleLink = repeatWhy == null && CanScaleJob;   // issue #8: "Scale…" under the lines too
+            bool scaleLink = repeatWhy == null && (CanScaleJob || CanTowerJob);   // issue #8: "Scale…" (and the tower link) under the lines too
             string main = plates || scaleLink ? OneLineRepeatText(r, when)
                 : repeatWhy == null
                 ? L.F("↻ Repeat print of {0} (first quoted {1}) with today's prices.", "↻ Print igen af {0} (første tilbud {1}) med dagens priser.",
@@ -6593,7 +6944,7 @@ namespace PrintPrice
             if (lblAuto.MutedLine.Length > 0) ShowAutoIdle();   // the "Opened from history" lines go with the job
             txtUrl.Text = "";
             jobParts = null;
-            jobScale = ScaleXyz.None;   // issue #8
+            jobScale = ScaleXyz.None; jobTower = SettingsTower; jobTowerKnown = true;   // issue #8
             lastJob = null;
             SetStudioFile(null);   // back to "Get time & weight" (also if the box was already empty)
             SetUrlHint(false);

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -42,10 +42,11 @@ static class FileTests
         return null;
     }
 
-    static FileJob Read(byte[] data, string name, out BytesSource src)
+    /// tower false = the ranged read alone (the prime tower count reads every G-code line once, issue #8 step 3)
+    static FileJob Read(byte[] data, string name, out BytesSource src, bool tower = true)
     {
         src = new BytesSource(data);
-        return SlicedFile.Read(src, name, "Bambu PLA Matte").GetAwaiter().GetResult();
+        return SlicedFile.Read(src, name, "Bambu PLA Matte", tower).GetAwaiter().GetResult();
     }
 
     // the web Json gives JavaScriptSerializer's untyped shapes (ParseSlotStrings relies on them)
@@ -105,13 +106,17 @@ static class FileTests
         // a big G-code: only the first 1 MB is read when everything is there
         var big = new StringBuilder(head + string.Format(cfg, "Bambu Lab A1"));
         while (big.Length < 6 * 1048576) big.Append("G1 X10.123 Y20.456 E0.01234\n");
-        var bigJob = Read(Encoding.UTF8.GetBytes(big.ToString()), "big.gcode", out s);
+        var bigJob = Read(Encoding.UTF8.GetBytes(big.ToString()), "big.gcode", out s, false);
         True("big G-code: read " + s.BytesRead + " bytes of " + s.Length, bigJob.Result != null && s.BytesRead <= SlicedFile.GcodeHeadBytes);
+        // with the prime tower count: the head once + the whole file once (8 MB pieces), no tower in it = 0 (Bambu)
+        var bigTower = Read(Encoding.UTF8.GetBytes(big.ToString()), "big.gcode", out s);
+        True("big G-code + tower: whole file read once (" + s.BytesRead + " of " + s.Length + "), tower 0",
+             bigTower.Result != null && s.BytesRead <= s.Length + SlicedFile.GcodeHeadBytes && bigTower.Result.TowerGrams == 0);
         // numbers only at the end (other layout): head + tail
         var endOnly = new StringBuilder();
         while (endOnly.Length < 3 * 1048576) endOnly.Append("G1 X10.123 Y20.456 E0.01234\n");
         endOnly.Append(head + string.Format(cfg, "Bambu Lab A1"));
-        var endJob = Read(Encoding.UTF8.GetBytes(endOnly.ToString()), "end.gcode", out s);
+        var endJob = Read(Encoding.UTF8.GetBytes(endOnly.ToString()), "end.gcode", out s, false);
         True("G-code numbers at the end: found, read " + s.BytesRead, endJob.Result != null && endJob.Result.Seconds == 3723
              && s.BytesRead <= SlicedFile.GcodeHeadBytes + SlicedFile.GcodeTailBytes);
     }
@@ -245,7 +250,7 @@ static class FileTests
         sb.Append("G28\n");
         while (sb.Length < 3 * 1024 * 1024) sb.Append("G1 X10.000 Y10.000 E0.01234\n");
         sb.Append(prusa.Split(new[] { "G1 X10 Y10 F3000" }, StringSplitOptions.None)[1]);
-        j = Read(Encoding.UTF8.GetBytes(sb.ToString()), "big-prusa.gcode", out s2);
+        j = Read(Encoding.UTF8.GetBytes(sb.ToString()), "big-prusa.gcode", out s2, false);
         True("big Prusa file: found, read " + s2.BytesRead, j.Result != null && j.Result.Seconds == 3723 && s2.BytesRead <= SlicedFile.GcodeHeadBytes + SlicedFile.GcodeTailBytes);
 
         L.Danish = true;
@@ -329,12 +334,25 @@ static class FileTests
                 if (e.FullName != "Metadata/plate_1.gcode")
                     using (var ms = new MemoryStream()) { e.Open().CopyTo(ms); entries[e.FullName] = ms.ToArray(); }
         byte[] bigZip = MakeZip(entries, 1);
-        var bigJob = Read(bigZip, "big.gcode.3mf", out s);
+        var bigJob = Read(bigZip, "big.gcode.3mf", out s, false);
         Same("big 3mf web", desk, bigJob.Result, true);
         Console.WriteLine("Sample 3mf: {0} s, {1} g, {2}; web = desktop. Same project with a 20 MB plate G-code: read {3:N0} of {4:N0} bytes ({5} reads)",
             desk.Seconds, desk.Grams, string.Join(" + ", desk.Filaments.Select(f => f.Grams + " g " + f.Colour + " " + BambuSlicer.FilamentBaseName(f.Profile))),
             s.BytesRead, bigZip.Length, s.Reads);
         True("big 3mf: read " + s.BytesRead + " of " + bigZip.Length + " bytes in " + s.Reads + " reads", s.BytesRead < 400 * 1024);
+        // issue #8 step 3: with the tower count the compressed plate G-code is read once more (junk text = no tower, no error)
+        var bigTower = Read(bigZip, "big.gcode.3mf", out s);
+        True("big 3mf + tower: read once (" + s.BytesRead + " of " + bigZip.Length + "), tower 0, no error", bigTower.Result != null && bigTower.Error == null
+             && s.BytesRead < bigZip.Length + 400 * 1024 && bigTower.Result.TowerGrams == 0);
+        // the real sample's tower = the desktop's count (TowerSlicerTests: 3,888 / 1,799 / 1,582 g)
+        TowerSlots("sample 3mf", job.Result, 3.888, 1.799, 1.582);
+    }
+
+    static void TowerSlots(string what, SliceResult r, params double[] grams)
+    {
+        bool ok = r != null && Math.Abs(r.TowerGrams - grams.Sum()) <= 0.01 && r.Filaments.Count == grams.Length;
+        for (int i = 0; ok && i < grams.Length; i++) ok = Math.Abs(r.Filaments[i].TowerGrams - grams[i]) <= 0.01;
+        True(what + ": tower " + (r == null ? "-" : r.TowerGrams.ToString("0.###") + " g = " + string.Join(" + ", r.Filaments.Select(f => f.TowerGrams.ToString("0.###")))), ok);
     }
 
     static void SampleGcode(string gcode, string threeMf)
@@ -346,6 +364,7 @@ static class FileTests
         // the G-code lists grams per colour only (27,15 + 12,46 + 18,55 = 58,16); slice_info has the total 58,15
         Same("sample G-code vs the 3mf", desk, job.Result, true, 0.015);
         True("sample G-code (CLI): no thumbnail", job.Result != null && job.Result.Picture == null);
+        TowerSlots("sample G-code", job.Result, 3.888, 1.799, 1.582);
     }
 
     static void OneColour(string gcode)

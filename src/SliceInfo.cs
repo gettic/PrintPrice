@@ -51,6 +51,10 @@ namespace PrintPrice
         // pre-sliced file / G-code has no result.json). SizeObjects = how many objects were measured (2+ = "the biggest one").
         public double SizeX, SizeY, SizeZ;
         public int SizeObjects;
+        // issue #8 step 3: prime tower grams (already inside Grams and PurgeGrams; the flush alone = PurgeGrams - TowerGrams)
+        // and its print time (inside Seconds; only from our own slicing's result.json). -1 = unknown, 0 = no tower.
+        public double TowerGrams = -1;
+        public double TowerSeconds = -1;
     }
 
     /// Issue #8 step 2: one job's scale per axis, in percent (100 = as the file is). Uniform (X = Y = Z) slices with
@@ -206,9 +210,20 @@ namespace PrintPrice
         public string Profile = "";   // e.g. "Bambu PLA Basic @BBL A1", "" if unknown
         public double Grams;          // incl. purge/flush
         public double ModelGrams = -1;   // model only (no purge); -1 = unknown
+        public double TowerGrams = -1;   // issue #8 step 3: this slot's prime tower (inside Grams); -1 = unknown
         public double Metres;
         // the name is the user's own choice in another slicer (G-code from Orca/Prusa/Cura): ApplyDefaultFilament leaves it
         public bool KeepProfile;
+    }
+
+    /// Issue #8 step 3: prime tower use counted in one G-code (BambuSlicer.TowerFromGcode). Grams[i] = slot i+1's tower
+    /// grams (0 = that slot printed no tower); Blocks = tower sections found (0 = no tower, or a slicer whose marker we
+    /// don't know: BambuSlicer.ApplyTower decides).
+    public sealed class GcodeTower
+    {
+        public List<double> Grams = new List<double>();
+        public int Blocks;
+        public double Total { get { return Grams.Sum(); } }
     }
 
     public class SliceException : Exception
@@ -522,12 +537,14 @@ namespace PrintPrice
                 if (t == null)
                 {
                     total.Filaments.Add(new FilamentUse { Slot = slot, Colour = f.Colour ?? "", Type = f.Type ?? "", Profile = f.Profile ?? "",
-                                                          Grams = f.Grams, ModelGrams = f.ModelGrams, Metres = f.Metres, KeepProfile = f.KeepProfile });
+                                                          Grams = f.Grams, ModelGrams = f.ModelGrams, TowerGrams = f.TowerGrams,
+                                                          Metres = f.Metres, KeepProfile = f.KeepProfile });
                     continue;
                 }
                 t.Grams += f.Grams;
                 t.Metres += f.Metres;
                 t.ModelGrams = t.ModelGrams >= 0 && f.ModelGrams >= 0 ? t.ModelGrams + f.ModelGrams : -1;
+                if (f.TowerGrams >= 0) t.TowerGrams = Math.Max(0, t.TowerGrams) + f.TowerGrams;
                 if (string.IsNullOrEmpty(t.Colour)) t.Colour = f.Colour ?? "";
                 if (string.IsNullOrEmpty(t.Type)) t.Type = f.Type ?? "";
                 if (string.IsNullOrEmpty(t.Profile)) t.Profile = f.Profile ?? "";
@@ -535,6 +552,8 @@ namespace PrintPrice
             total.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
             if (r.PurgeGrams >= 0) total.PurgeGrams = Math.Max(0, total.PurgeGrams) + r.PurgeGrams;
             if (r.ColourChangeHours >= 0) total.ColourChangeHours = Math.Max(0, total.ColourChangeHours) + r.ColourChangeHours;
+            if (r.TowerGrams >= 0) total.TowerGrams = Math.Max(0, total.TowerGrams) + r.TowerGrams;
+            if (r.TowerSeconds >= 0) total.TowerSeconds = Math.Max(0, total.TowerSeconds) + r.TowerSeconds;
             if (r.PlateList == null) return;
             foreach (var p in r.PlateList)
             {
@@ -546,8 +565,8 @@ namespace PrintPrice
                     foreach (var f in p.Filaments)
                         if (f != null)
                             c.Filaments.Add(new FilamentUse { Slot = f.Slot + slotOffset, Colour = f.Colour ?? "", Type = f.Type ?? "",
-                                                              Profile = f.Profile ?? "", Grams = f.Grams, ModelGrams = f.ModelGrams, Metres = f.Metres,
-                                                              KeepProfile = f.KeepProfile });
+                                                              Profile = f.Profile ?? "", Grams = f.Grams, ModelGrams = f.ModelGrams,
+                                                              TowerGrams = f.TowerGrams, Metres = f.Metres, KeepProfile = f.KeepProfile });
                 total.PlateList.Add(c);
             }
         }
@@ -939,7 +958,8 @@ namespace PrintPrice
                 res.Filaments.Add(new FilamentUse
                 {
                     Slot = slot, Grams = g.Grams[i],
-                    Colour = NormColour(SlotAt(g.Colours, slot)), Type = SlotAt(g.Types, slot), Profile = SlotAt(g.Profiles, slot)
+                    Colour = NormColour(SlotAt(g.Colours, slot)), Type = SlotAt(g.Types, slot),
+                    Profile = StripSlotTag(SlotAt(g.Profiles, slot))   // a G-code exported from our out.3mf has our " #2" (issue #8 step 3)
                 });
             }
             res.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
@@ -1029,6 +1049,189 @@ namespace PrintPrice
                 else return new List<double>();
             }
             return l;
+        }
+
+        // ---------- prime tower (issue #8 step 3) ----------
+        // Tower grams aren't in any report (result.json / slice_info only give model and total grams), so we count the
+        // extrusion inside the G-code's tower sections: "; FEATURE: Prime tower" (Bambu Studio, OrcaSlicer) up to the next
+        // feature line; PrusaSlicer ";TYPE:Wipe tower" and Cura ";TYPE:PRIME-TOWER" best effort. Only printing moves count
+        // (G0-G3 with E > 0 and X or Y): that leaves out the filament-change flush into the chute that Bambu writes inside
+        // the tower section (no X/Y, and it happens with the tower off too) and retract / unretract pairs. Checked against
+        // real tower-on minus tower-off slices within 0,01 g per slot (plans\issue8\step3-plan.md).
+
+        /// Pure: counts the prime tower per slot in a G-code's lines (any slicer; slot = last "T<n>" + 1, n < 16, so
+        /// Bambu's T255 / T1000 are skipped). E: M83 relative, M82 absolute (default), "G92 E<v>" resets. Diameter /
+        /// density per slot from "; filament_diameter = a,b" / "; filament_density: a,b" (missing = DefaultDiameter /
+        /// DefaultDensity). Grams has an entry for every slot seen (tower or header), rounded to 0,001 g. Never null, never throws.
+        public static GcodeTower TowerFromGcode(IEnumerable<string> lines)
+        {
+            var t = new GcodeTower();
+            if (lines == null) return t;
+            var mm = new List<double>();
+            List<double> dia = null, rho = null;
+            bool relative = false, inTower = false;
+            double lastE = 0;
+            int tool = 0;
+            var spaces = new[] { ' ', '\t' };
+            foreach (var raw in lines)
+            {
+                if (raw == null) continue;
+                string line = raw.Trim();
+                if (line.Length == 0) continue;
+                if (line[0] == ';')
+                {
+                    int kind = TowerMarker(line);
+                    if (kind == 1) { if (!inTower) t.Blocks++; inTower = true; }
+                    else if (kind == 0) inTower = false;
+                    else if (dia == null || rho == null)
+                    {
+                        if (dia == null) dia = HeaderNumbers(line, "filament_diameter");
+                        if (rho == null) rho = HeaderNumbers(line, "filament_density");
+                    }
+                    continue;
+                }
+                int semi = line.IndexOf(';');
+                if (semi >= 0) line = line.Substring(0, semi);
+                var parts = line.Split(spaces, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0) continue;
+                string cmd = parts[0].ToUpperInvariant();
+                if (cmd == "M83") { relative = true; continue; }
+                if (cmd == "M82") { relative = false; continue; }
+                if (cmd.Length >= 2 && cmd[0] == 'T')
+                {
+                    int n;
+                    if (int.TryParse(cmd.Substring(1), NumberStyles.None, CultureInfo.InvariantCulture, out n) && n < 16) tool = n;
+                    continue;
+                }
+                if (cmd == "G92")
+                {
+                    double v;
+                    if (parts.Length == 1) lastE = 0;   // plain G92 = all axes 0
+                    else if (Axis(parts, 'E', out v)) lastE = v;
+                    continue;
+                }
+                if (cmd != "G0" && cmd != "G1" && cmd != "G2" && cmd != "G3" && cmd != "G00" && cmd != "G01" && cmd != "G02" && cmd != "G03") continue;
+                double e;
+                if (!Axis(parts, 'E', out e)) continue;
+                double delta = relative ? e : e - lastE;
+                if (!relative) lastE = e;
+                if (!inTower || delta <= 0) continue;
+                double dummy;
+                if (!Axis(parts, 'X', out dummy) && !Axis(parts, 'Y', out dummy)) continue;
+                while (mm.Count <= tool) mm.Add(0);
+                mm[tool] += delta;
+            }
+            int slots = Math.Max(mm.Count, Math.Max(dia == null ? 0 : dia.Count, rho == null ? 0 : rho.Count));
+            for (int i = 0; i < slots; i++)
+            {
+                double length = i < mm.Count ? mm[i] : 0;
+                double d = dia == null || dia.Count == 0 ? DefaultDiameter : dia[Math.Min(i, dia.Count - 1)];
+                double r = rho == null || rho.Count == 0 ? DefaultDensity : rho[Math.Min(i, rho.Count - 1)];
+                if (d <= 0) d = DefaultDiameter;
+                if (r <= 0) r = DefaultDensity;
+                double g = length * Math.PI * (d / 2) * (d / 2) * r / 1000.0;
+                t.Grams.Add(Math.Round(g, 3));
+            }
+            return t;
+        }
+
+        /// 1 = a prime / wipe tower section starts, 0 = another feature starts, -1 = not a feature line.
+        static int TowerMarker(string line)
+        {
+            string s = line.TrimStart(';').Trim();
+            string value;
+            if (s.StartsWith("FEATURE:", StringComparison.OrdinalIgnoreCase)) value = s.Substring(8).Trim();
+            else if (s.StartsWith("TYPE:", StringComparison.OrdinalIgnoreCase)) value = s.Substring(5).Trim();
+            else return -1;
+            return value.Equals("Prime tower", StringComparison.OrdinalIgnoreCase) || value.Equals("Wipe tower", StringComparison.OrdinalIgnoreCase)
+                || value.Equals("PRIME-TOWER", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        }
+
+        /// "; key = 1.75,1.75" / "; key: 1.75;1.75" -> the numbers; null when the line isn't that key or has no numbers.
+        static List<double> HeaderNumbers(string commentLine, string key)
+        {
+            string s = commentLine.TrimStart(';').TrimStart();
+            if (!s.StartsWith(key, StringComparison.Ordinal)) return null;
+            s = s.Substring(key.Length).TrimStart();
+            if (s.Length == 0 || (s[0] != '=' && s[0] != ':')) return null;
+            var l = NumberList(s.Substring(1));
+            return l.Count > 0 ? l : null;
+        }
+
+        /// The number after an axis letter among a G-code line's words ("E0.8171", "X.5"); false when missing / not a number.
+        static bool Axis(string[] parts, char axis, out double v)
+        {
+            v = 0;
+            for (int i = 1; i < parts.Length; i++)
+            {
+                string p = parts[i];
+                if (p.Length < 2 || char.ToUpperInvariant(p[0]) != axis) continue;
+                return double.TryParse(p.Substring(1), NumberStyles.Float, CultureInfo.InvariantCulture, out v)
+                       && !double.IsNaN(v) && !double.IsInfinity(v);
+            }
+            return false;
+        }
+
+        /// Adds one plate's tower count into a total (slot by slot). Null = nothing.
+        public static void AddTower(GcodeTower total, GcodeTower plate)
+        {
+            if (total == null || plate == null) return;
+            for (int i = 0; i < plate.Grams.Count; i++)
+            {
+                if (i < total.Grams.Count) total.Grams[i] += plate.Grams[i];
+                else total.Grams.Add(plate.Grams[i]);
+            }
+            total.Blocks += plate.Blocks;
+        }
+
+        /// Puts a tower count into a result: TowerGrams (sum) and each FilamentUse.TowerGrams (slot's grams, 0 when none).
+        /// Unknown (all stay -1) when the count is null, or found no tower in a G-code from a slicer whose marker we don't
+        /// know (Cura, other). A PrusaSlicer file whose blocks weren't found but whose header gave the wipe tower total
+        /// (PurgeGrams) gets that total, slots unknown. Bambu Studio / OrcaSlicer / PrusaSlicer without a tower = 0.
+        public static void ApplyTower(SliceResult res, GcodeTower tower)
+        {
+            if (res == null || tower == null) return;
+            string slicer = res.SlicerName ?? "";
+            bool knownMarker = slicer.Length == 0 || slicer == SlicerBambu || slicer == SlicerOrca || slicer == SlicerPrusa;
+            if (tower.Blocks == 0 && slicer == SlicerPrusa && res.PurgeGrams > 0)
+            {
+                res.TowerGrams = res.PurgeGrams;
+                return;
+            }
+            if (tower.Blocks == 0 && !knownMarker) return;
+            res.TowerGrams = Math.Round(tower.Total, 3);
+            foreach (var f in res.Filaments)
+                if (f != null) f.TowerGrams = f.Slot >= 1 && f.Slot <= tower.Grams.Count ? tower.Grams[f.Slot - 1] : 0;
+            // per plate only when there's one plate (a count over several plates' G-code can't be split back)
+            if (res.PlateList.Count == 1 && res.PlateList[0] != null)
+                foreach (var f in res.PlateList[0].Filaments)
+                    if (f != null) f.TowerGrams = f.Slot >= 1 && f.Slot <= tower.Grams.Count ? tower.Grams[f.Slot - 1] : 0;
+        }
+
+        /// Issue #8 step 3: the CLI turns the prime tower off for a Bambu .3mf when every loaded filament profile has the
+        /// same name (BambuStudio.cpp disable_wipe_tower_after_mapping), e.g. one PLA in two colours. So each slot file
+        /// we write gets its own name: the preset + " #<slot>" (after "@BBL", so ShortName / FilamentBaseName drop it).
+        public static string SlotNameTag(int slot)
+        {
+            return " #" + slot.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// The name we give a slot file: name + SlotNameTag when it has an "@" part ("Bambu PLA Basic @BBL A1 #2"), else
+        /// name + " @#<slot>" ("Acme PLA @#2"), so ShortName / FilamentBaseName drop it either way. null = "".
+        public static string TaggedName(string name, int slot)
+        {
+            name = name ?? "";
+            return name.IndexOf('@') >= 0 ? name + SlotNameTag(slot) : name + " @" + SlotNameTag(slot).TrimStart();
+        }
+
+        /// Pure: removes our tag again ("Bambu PLA Basic @BBL A1 #2" -> "Bambu PLA Basic @BBL A1", "Acme PLA @#2" ->
+        /// "Acme PLA"). Only a " #<1-2 digits>" ending after an "@" part, or a " @#<1-2 digits>" ending; anything else
+        /// unchanged (null = "").
+        public static string StripSlotTag(string profile)
+        {
+            string s = profile ?? "";
+            if (Regex.IsMatch(s, @"\s@#\d{1,2}$")) return Regex.Replace(s, @"\s@#\d{1,2}$", "");
+            return Regex.Replace(s, @"(@[^#]*?)\s#\d{1,2}$", "$1");
         }
 
         /// "; key = a;b;c", "; key = "a";"b"" or "; key: a,b" (Bambu header) -> per-slot strings (quotes removed, trimmed). Empty when missing.

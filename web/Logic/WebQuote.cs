@@ -22,6 +22,7 @@ namespace PrintPrice.Web
             public string Weight = "", Printer = "", Material = "", Number = "", PlateName = "";
             public DateTime Date, ValidUntil, Due;
             public double PurgeGrams = -1;
+            public double TowerGrams = -1;   // issue #8 step 3: the "Prime tower 1,70 g" note row (Settings' QuoteShowTower); <= 0 = none
             public List<string> MaterialNames = new List<string>();
             public List<string> MaterialColours = new List<string>();
             public QuoteBreakdown Breakdown;
@@ -45,6 +46,7 @@ namespace PrintPrice.Web
             public FilamentUse Single;              // one colour from a file / record (may be null)
             public string SingleName;               // the one material's name the page uses (null = Settings' filament)
             public double PurgeGrams = -1;
+            public double TowerGrams = -1;          // issue #8 step 3: the file's prime tower (-1 unknown, 0 none)
             public string FilamentType = "PLA";     // for the wear split (WebCalc.WearBreakdown)
         }
 
@@ -66,7 +68,8 @@ namespace PrintPrice.Web
                 Printer = PrinterText(s, null),
                 Number = number ?? "", Date = date, ValidUntil = s.QuoteValidUntil(date),
                 PlateName = PlateName(s),
-                PurgeGrams = j.Colours != null ? j.PurgeGrams : -1,
+                PurgeGrams = j.Colours != null ? QuotePurge(s, j.PurgeGrams, j.TowerGrams) : -1,
+                TowerGrams = j.Colours != null && s.QuoteShowTower == 1 ? j.TowerGrams : -1,   // issue #8 step 3
                 Breakdown = Pricing.Breakdown(j.Input, s, friends, wear)
             };
             var used = j.Colours ?? (j.Single != null ? new List<FilamentUse> { j.Single } : null);
@@ -120,7 +123,8 @@ namespace PrintPrice.Web
                 Printer = PrinterText(s, r),
                 Number = History.QuoteNumber(r), Date = saved, ValidUntil = quote.ValidUntil,
                 PlateName = PlateName(s, r.BedType),
-                PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? r.PurgeGrams : -1,
+                PurgeGrams = r.Filaments != null && r.Filaments.Count >= 2 ? QuotePurge(s, r.PurgeGrams, r.TowerGrams) : -1,
+                TowerGrams = s.QuoteShowTower == 1 && History.ShowsTower(r) ? r.TowerGrams : -1,   // issue #8 step 3
                 // the saved price, with the saved wear split as sub-rows (older records: one wear line)
                 Breakdown = History.RecordBreakdown(r, s, friends)
             };
@@ -268,7 +272,35 @@ namespace PrintPrice.Web
 
         internal static List<QuoteRow> Rows(Sheet d)
         {
-            return QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName);
+            return QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams);
+        }
+
+        // ---------- prime tower on quotes / invoices (issue #8 step 3, = MainForm.QuotePurge / WithTowerLine) ----------
+
+        /// The quote's "incl. N g for colour changes": the flush only when the tower note is on the page (QuoteShowTower),
+        /// else the whole purge (tower included, as before). purge <= 0 stays as it is (no note).
+        public static double QuotePurge(AppSettings s, double purge, double tower)
+        {
+            if (purge <= 0 || s == null || s.QuoteShowTower != 1 || !(tower > 0.005)) return purge;
+            return Math.Max(0, purge - tower);
+        }
+
+        /// The tower grams a saved record's quote / invoice / Copy text shows: -1 = none (setting off, unknown, 0).
+        public static double RecordTower(AppSettings s, QuoteRecord r)
+        {
+            return s != null && s.QuoteShowTower == 1 && History.ShowsTower(r) ? r.TowerGrams : -1;
+        }
+
+        /// Copy text gets "Prime tower 1,70 g" under the print-time line (as the quote's note row); grams <= 0 = as it is.
+        public static string WithTowerLine(string text, double grams)
+        {
+            if (!(grams > 0.005) || string.IsNullOrEmpty(text)) return text;
+            string nl = Environment.NewLine;
+            string[] lines = text.Split(new[] { nl }, StringSplitOptions.None);
+            int at = Array.FindIndex(lines, x => x.StartsWith("Print time", StringComparison.Ordinal) || x.StartsWith("Printtid", StringComparison.Ordinal));
+            var list = new List<string>(lines);
+            list.Insert(at >= 0 ? at + 1 : list.Count, QuoteRows.TowerNote(grams));
+            return string.Join(nl, list);
         }
 
         public static string Title(bool invoice) { return invoice ? L.S("Invoice", "Faktura") : L.S("3D print quote", "Tilbud på 3D-print"); }

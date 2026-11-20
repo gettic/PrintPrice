@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace PrintPrice
 {
@@ -23,7 +24,17 @@ namespace PrintPrice
             NumberHandling = JsonNumberHandling.AllowReadingFromString,
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
             WriteIndented = false,
+            TypeInfoResolver = new DefaultJsonTypeInfoResolver { Modifiers = { KnownTowerOnly } },
         };
+
+        /// HistoryFilament.TowerGrams is written only when known (>= 0), as the desktop's FilamentConverter (issue #8
+        /// step 3): lines without a tower save back exactly as older versions wrote them; reading a missing one gives -1.
+        static void KnownTowerOnly(JsonTypeInfo info)
+        {
+            if (info.Type != typeof(HistoryFilament)) return;
+            foreach (var p in info.Properties)
+                if (p.Name == "TowerGrams") p.ShouldSerialize = (obj, value) => value is double d && d >= 0;
+        }
 
         public static string Serialize(object value)
         {

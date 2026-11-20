@@ -64,7 +64,7 @@ namespace PrintPrice
             //  Y (depth):   [150] %   [ 46,5] mm
             //  Z (height):  [150] %   [ 72,0] mm
             chkSame = new CheckBox { Text = L.S("Same in every direction", "Ens i alle retninger"), AutoSize = true,
-                                     Margin = new Padding(0, 0, 0, 8), Checked = uniformOnly != null || cur.IsUniform,
+                                     Margin = new Padding(0, 0, 0, uniformOnly != null ? 2 : 8), Checked = uniformOnly != null || cur.IsUniform,
                                      AutoCheck = uniformOnly == null, UseMnemonic = false };
             var grid = new TableLayoutPanel { ColumnCount = 5, RowCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
                                               Margin = new Padding(0, 0, 0, 10), Padding = Padding.Empty };
@@ -113,6 +113,13 @@ namespace PrintPrice
             bottom.Controls.Add(right, 1, 0);
 
             root.Controls.Add(chkSame);
+            // qol: a file that can only be scaled evenly: its note on its own muted line under the (muted, locked) tick
+            if (uniformOnly != null)
+            {
+                formatNote = new Theme.PlainLabel { Text = uniformOnly, AutoSize = true, Tag = "muted", UseMnemonic = false,
+                                                    Font = new Font("Segoe UI", 9f), Margin = new Padding(NoteIndent, 0, 0, 10) };
+                root.Controls.Add(formatNote);
+            }
             root.Controls.Add(grid);
             root.Controls.Add(info);
             root.Controls.Add(bottom);
@@ -130,6 +137,15 @@ namespace PrintPrice
             btnApply.Click += delegate { Apply(); };
 
             Theme.Apply(this);
+            if (uniformOnly != null)
+            {
+                chkSame.ForeColor = Theme.Muted;   // locked: it can't be changed (after Apply, which sets Text)
+                formatNote.ForeColor = Theme.Muted;
+                tip = new ToolTip { OwnerDraw = true, InitialDelay = 300, AutoPopDelay = 15000 };
+                tip.Draw += MainForm.DrawDarkTip;
+                tip.SetToolTip(chkSame, L.S("Only STL, OBJ and 3MF can be scaled per direction", "Kun STL, OBJ og 3MF kan skaleres pr. retning"));
+                Disposed += delegate { tip.Dispose(); };
+            }
             ResumeLayout(true);
             UpdateState();
 
@@ -137,6 +153,15 @@ namespace PrintPrice
             {
                 int w = (int)Math.Round(ContentW * DeviceDpi / 96f);
                 info.SetWidth(w);
+                if (formatNote != null) formatNote.MaximumSize = new Size(Math.Max(1, w - Px(NoteIndent)), 0);
+                // qol: the box is never shorter than the help text, so an error line doesn't move the buttons
+                string shown = info.Text;
+                var kind = info.Kind;
+                info.Text = HelpText();
+                int helpH = info.GetPreferredSize(new Size(w, 0)).Height;
+                info.Text = shown;
+                info.Kind = kind;
+                info.MinimumSize = new Size(w, helpH);
                 root.MinimumSize = new Size(w + root.Padding.Horizontal, 0);
                 bottom.MinimumSize = new Size(w, 0);
                 // buttons as wide as their text (+24), at least 90
@@ -150,14 +175,31 @@ namespace PrintPrice
 
         int Px(int v) { return (int)Math.Round(v * DeviceDpi / 96f); }
 
+        /// The InfoBox help (the file-format note is on its own muted line under the tick, not in here).
+        string HelpText()
+        {
+            string help = L.S("The whole job gets this size and is sliced again; time, weight and prices follow.",
+                              "Hele jobbet får denne størrelse og slices igen; tid, vægt og priser følger med.");
+            if (!SizeKnown)
+                help += "\n" + L.S("The size in mm is shown after slicing.", "Størrelsen i mm vises efter slicing.");
+            else if (objects >= 2)
+                help += "\n" + L.S("Several objects: the size is the biggest one's.", "Flere objekter: størrelsen er for det største.");
+            return help;
+        }
+
+        const int NoteIndent = 18;   // the tick's text start (box 13 + gap), so the note lines up under "Same in every direction"
+        Label formatNote;            // the uniformOnly note (null = none)
+        ToolTip tip;                 // the locked tick's dark tooltip
+
         static Label Caption(string text)
         {
-            return new Label { Text = text, AutoSize = true, UseMnemonic = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 12, 6) };
+            return new Label { Text = text, AutoSize = true, UseMnemonic = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, Theme.LabelGap, 6) };
         }
 
         static Label Unit(string text)
         {
-            return new Label { Text = text, AutoSize = true, UseMnemonic = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 0, 6) };
+            // qol: drawn without GDI's side padding, so the unit's text starts 6 px after the box frame (the box's right margin)
+            return new SettingsForm.UnitLabel { Text = text, AutoSize = true, UseMnemonic = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 0, 6) };
         }
 
         bool SizeKnown { get { return size[0] > 0 && size[1] > 0 && size[2] > 0; } }
@@ -269,14 +311,7 @@ namespace PrintPrice
             }
             else
             {
-                string help = L.S("The whole job gets this size and is sliced again; time, weight and prices follow.",
-                                  "Hele jobbet får denne størrelse og slices igen; tid, vægt og priser følger med.");
-                if (!SizeKnown)
-                    help += "\n" + L.S("The size in mm is shown after slicing.", "Størrelsen i mm vises efter slicing.");
-                else if (objects >= 2)
-                    help += "\n" + L.S("Several objects: the size is the biggest one's.", "Flere objekter: størrelsen er for det største.");
-                if (uniformOnly != null) help += "\n" + uniformOnly;
-                info.Text = help;
+                info.Text = HelpText();
                 info.Kind = InfoKind.Info;
             }
             bool changed = false;

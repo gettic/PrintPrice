@@ -114,6 +114,10 @@
                 <input type="text" class="left" maxlength="40" @bind="work.QuoteName" @bind:event="oninput" />
                 <label>@L.S("Valid for", "Gyldigt i")</label>
                 <div class="field"><input type="text" inputmode="numeric" class="mid @BadDays(validDays, 3650)" @bind="validDays" @bind:event="oninput" /><span>@L.S("days", "dage")</span></div>
+                <label></label>
+                <label><input type="checkbox" @bind="quoteTower" /> @L.S("Show prime tower grams on quotes and invoices", "Vis primetårnets gram på tilbud og fakturaer")</label>
+                <div class="help">@L.S("On: quotes and invoices get a line \"incl. 1,7 g for the prime tower\" under Material (no price; the grams are already in the material). The calculator always shows it.",
+                                       "Til: tilbud og fakturaer får en linje \"inkl. 1,7 g til primetårnet\" under Materiale (uden pris; grammene er allerede med i materialet). Beregneren viser den altid.")</div>
                 <h3>@L.S("Invoice", "Faktura")</h3>
                 <label></label>
                 <label><input type="checkbox" @bind="mainInvoice" /> @L.S("Calculator makes invoices, not quotes", "Beregneren laver fakturaer, ikke tilbud")</label>
@@ -183,7 +187,7 @@
 
     AppSettings work;
     int tab;
-    bool auto, reset, vat, autoPower, mainInvoice, asking, resetNote;
+    bool auto, reset, vat, autoPower, mainInvoice, quoteTower, asking, resetNote;
     string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays;
 
     string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), L.S("App", "Program") }; } }
@@ -217,6 +221,7 @@
         addOn = Num.Fmt(s.PowerAddOn); vat = s.PowerIncludeVat != 0; autoPower = s.AutoPowerPrice != 0;
         validDays = Num.Fmt(s.QuoteValidDays); dueDays = Num.Fmt(s.InvoiceDueDays);
         mainInvoice = s.MainInvoice == 1;
+        quoteTower = s.QuoteShowTower == 1;   // issue #8 step 3
         problem = null;
     }
 
@@ -267,7 +272,7 @@
         work.FriendsMarkupPct = f; work.OthersMarkupPct = o; work.MinimumPrice = mi; work.RoundTo = ro; work.FailedPrintPct = fa;
         work.PrinterWatts = wa; work.MachineRatePerHour = ra; work.AutoWearRate = auto ? 1 : 0;
         work.PowerAddOn = ad; work.PowerIncludeVat = vat ? 1 : 0; work.AutoPowerPrice = autoPower ? 1 : 0;
-        work.QuoteValidDays = vd; work.InvoiceDueDays = dd; work.MainInvoice = mainInvoice ? 1 : 0;
+        work.QuoteValidDays = vd; work.InvoiceDueDays = dd; work.MainInvoice = mainInvoice ? 1 : 0; work.QuoteShowTower = quoteTower ? 1 : 0;
         work.QuoteName = (work.QuoteName ?? "").Trim(); work.PayMobilePay = (work.PayMobilePay ?? "").Trim(); work.PayBank = (work.PayBank ?? "").Trim();
         work.PrinterName = AppSettings.CleanPrinterName(name.Trim().Length == 0 ? Model.Label : name);
         await OnClose.InvokeAsync(new Result { Settings = work, FilamentType = type, Reset = reset });

@@ -32,8 +32,37 @@ namespace PrintPrice
             arg = sp < 0 ? "" : line.Substring(sp + 1).Trim();
         }
 
+        /// The words of an argument; a "quoted part" (a path with spaces) is one word, without its quotes.
+        public static string[] Words(string arg)
+        {
+            var words = new List<string>();
+            string s = arg ?? "";
+            int i = 0;
+            while (i < s.Length)
+            {
+                if (s[i] == ' ') { i++; continue; }
+                if (s[i] == '"')
+                {
+                    int end = s.IndexOf('"', i + 1);
+                    if (end < 0) end = s.Length;
+                    words.Add(s.Substring(i + 1, end - i - 1));
+                    i = end + 1;
+                    continue;
+                }
+                int sp = s.IndexOf(' ', i);
+                if (sp < 0) sp = s.Length;
+                words.Add(s.Substring(i, sp - i));
+                i = sp;
+            }
+            return words.ToArray();
+        }
+
         /// "quote <id>" / "invoice <id>" -> the drawn page's model name (MainForm.TestHistoryFlow), for "expect model".
         public static readonly Dictionary<string, string> PageModels = new Dictionary<string, string>();
+
+        /// "quote|invoice|bill <id…>" -> the drawn page's tower grams (QuoteData.TowerGrams, -1 = none) and whether its
+        /// breakdown has the tower row, for "expect tower" (issue #8 step 3).
+        public static readonly Dictionary<string, KeyValuePair<double, bool>> PageTowers = new Dictionary<string, KeyValuePair<double, bool>>();
 
         public static string Command(string line)
         {
@@ -152,6 +181,27 @@ namespace PrintPrice
                     }
                     log.Check(ok && seen.Count > 0, "model on " + id + "'s pages: " + (seen.Count > 0 ? string.Join(", ", seen) : "none drawn (quote / invoice <id> first)") +
                                                     " (expected \"" + want + "\")");
+                    break;
+                }
+                case "tower":
+                {
+                    // tower <quote|invoice|bill> <id…> <grams|none>: the page drawn by that step has the tower row with these
+                    // grams (QuoteRows.TowerNote, one decimal), or none at all (issue #8 step 3)
+                    var tw = Words(rest);
+                    if (tw.Length < 3) { log.Check(false, "expect tower needs <quote|invoice|bill> <id…> <grams|none>"); break; }
+                    string key = string.Join(" ", tw, 0, tw.Length - 1), want = tw[tw.Length - 1];
+                    KeyValuePair<double, bool> got;
+                    if (!PageTowers.TryGetValue(key, out got)) { log.Check(false, "tower: no page drawn for \"" + key + "\""); break; }
+                    bool ok;
+                    if (want == "none") ok = !got.Value;
+                    else
+                    {
+                        double g;
+                        ok = double.TryParse(want.Replace(',', '.'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out g) &&
+                             got.Value && Math.Abs(got.Key - g) < 0.05;
+                    }
+                    log.Check(ok, "tower on " + key + ": " + (got.Value ? "row \"" + QuoteRows.TowerNote(got.Key) + "\"" : "no row") +
+                                  " (grams " + got.Key.ToString("0.###", Num.Dk) + "; expected " + want + ")");
                     break;
                 }
                 case "invoice":
@@ -307,8 +357,8 @@ namespace PrintPrice
                         }
                         case "backup":
                         {
-                            // backup <clearcopy|file> merge|replace [settings] [yes|no]
-                            var w = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                            // backup <clearcopy|file> merge|replace [settings] [yes|no]; the file may be quoted (spaces)
+                            var w = HistoryTest.Words(arg);
                             string path = w.Length == 0 ? null : w[0] == "clearcopy" ? History.NewestClearCopy()
                                         : Path.IsPathRooted(w[0]) ? w[0] : Path.GetFullPath(Path.Combine(specDir, w[0]));
                             bool replace = w.Contains("replace"), withSettings = w.Contains("settings");

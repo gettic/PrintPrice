@@ -209,6 +209,7 @@ namespace PrintPrice.Web
             var gb = History.GroupBreakdown(bill, s);
             d.Breakdown = new QuoteBreakdown { Friends = friends, Lines = gb.Lines, TotalOre = gb.TotalOre, Price = gb.Total };
             d.GroupSameRates = gb.SameRates;
+            d.TowerGrams = s.QuoteShowTower == 1 ? History.TowerGramsSum(jobs) : -1;   // issue #8 step 3: the jobs' towers
             foreach (var m in gb.Materials)
             {
                 bool unnamed = string.IsNullOrEmpty(m.Name) && string.IsNullOrEmpty(m.Type);
@@ -514,8 +515,8 @@ namespace PrintPrice.Web
                 Ln(it, GL0, GR0, y, "line", 2);
                 y += 12;
                 bool shortRows = d.GroupLevel == 1 || d.GroupLevel == 3;
-                y = DrawRows(it, d, QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
-                                                         shortRows ? 4 : MaxGroupColours, shortRows), y, true);
+                y = DrawRows(it, d, QuoteRows.AddTowerNote(QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
+                                                         shortRows ? 4 : MaxGroupColours, shortRows), d.TowerGrams), y, true);
                 y += 4;
                 Ln(it, GL0, GR0, y, "line", 2);
                 y += 20;

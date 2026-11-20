@@ -165,6 +165,11 @@ namespace PrintPrice.Tests
                  "{\"Grams\":12.5,\"PricePerKg\":200,\"Colour\":\"#FF0000\",\"Type\":\"PLA\",\"Name\":\"Rød \\\"PLA\\\"\"}");
             var lineBack = Json.Deserialize<HistoryFilament>(lineJson);
             True("Json round trip HistoryFilament", lineBack.Grams == 12.5 && lineBack.PricePerKg == 200 && lineBack.Name == "Rød \"PLA\"");
+            // issue #8 step 3: TowerGrams written only when known (1,1 yes, -1 no); missing reads as -1
+            string towerJson = Json.Serialize(new HistoryFilament { Grams = 12.5, PricePerKg = 200, Colour = "", Type = "PLA", Name = "x", TowerGrams = 1.1 });
+            True("Json HistoryFilament: TowerGrams 1,1 written last, -1 left out, missing -> -1", towerJson ==
+                 "{\"Grams\":12.5,\"PricePerKg\":200,\"Colour\":\"\",\"Type\":\"PLA\",\"Name\":\"x\",\"TowerGrams\":1.1}"
+                 && Json.Deserialize<HistoryFilament>(towerJson).TowerGrams == 1.1 && !lineJson.Contains("TowerGrams") && lineBack.TowerGrams == -1);
             bool threw = false;
             try { Json.Deserialize<HistoryFile>("garbage{"); } catch { threw = true; }
             True("Json.Deserialize throws on garbage", threw);
@@ -3671,6 +3676,8 @@ namespace PrintPrice.Tests
             ScaleXyzTests();
             ScaleSlicerTests();
             ScaleFileTests();
+            TowerHistoryTests();
+            TowerSlicerTests();
             InvoiceListTests();
             CombinedBillTests();
             ReviewFixTests();
@@ -4914,6 +4921,181 @@ namespace PrintPrice.Tests
             var own = BRec("X", "2026-11-20 12:00:00"); History.SetScale(own, 80, 90, 100);
             res = History.Combine(new List<QuoteRecord> { own }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
             True("ScaleXyz merge: own 80/90/100 stays", Xyz(res.Quotes[0]) == "80/90/100");
+        }
+
+        // ---------- issue #8 step 3: prime tower setting + History fields ----------
+
+        static void TowerHistoryTests()
+        {
+            // AppSettings.PrimeTower: default 1, 0 survives, others -> 1; QuoteShowTower: default 0, 1 survives, others -> 0
+            Eq("PrimeTower default 1 (new / new install)", 2, new AppSettings().PrimeTower + AppSettings.FromIni(null).PrimeTower);
+            var pt = new AppSettings(); pt.PrimeTower = 0; pt.QuoteShowTower = 1;
+            True("PrimeTower 0 / QuoteShowTower 1 in ini + survive FromIni", Array.IndexOf(pt.ToIni(), "PrimeTower=0") >= 0 && Array.IndexOf(pt.ToIni(), "QuoteShowTower=1") >= 0
+                 && AppSettings.FromIni(pt.ToIni()).PrimeTower == 0 && AppSettings.FromIni(pt.ToIni()).QuoteShowTower == 1);
+            True("PrimeTower=7 / missing -> 1; QuoteShowTower=7 / missing -> 0", AppSettings.FromIni(new[] { "PrimeTower=7", "QuoteShowTower=7" }).PrimeTower == 1
+                 && AppSettings.FromIni(new[] { "PrimeTower=7", "QuoteShowTower=7" }).QuoteShowTower == 0
+                 && AppSettings.FromIni(new[] { "SetupDone=1" }).PrimeTower == 1 && AppSettings.FromIni(new[] { "SetupDone=1" }).QuoteShowTower == 0);
+            True("PrimeTower: Clone keeps 0, Reset to defaults -> 1 / 0", pt.Clone().PrimeTower == 0 && pt.DefaultsKeepingPersonal().PrimeTower == 1
+                 && pt.DefaultsKeepingPersonal().QuoteShowTower == 0);
+
+            // old records: everything unknown (-1), no line
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Filaments\":[{\"Grams\":5,\"PricePerKg\":200}]}]}");
+            True("Tower: old record -> PrimeTower / TowerGrams / TowerSeconds / line grams -1, no line", old[0].PrimeTower == -1 && old[0].TowerGrams == -1
+                 && old[0].TowerSeconds == -1 && old[0].Filaments[0].TowerGrams == -1 && !History.ShowsTower(old[0]));
+            // SetTower + per-colour grams, JSON round trip and CopyQuotes
+            var t = new DateTime(2026, 11, 20, 12, 0, 0);
+            var r = HistRecord(t);
+            History.SetTower(r, true, 1.70, 314);
+            r.Filaments[0].TowerGrams = 1.10;
+            var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { r }))[0];
+            True("Tower: on, 1,70 g, 314 s, line 1,10 g round trip", back.PrimeTower == 1 && back.TowerGrams == 1.70 && back.TowerSeconds == 314
+                 && back.Filaments[0].TowerGrams == 1.10 && History.ShowsTower(back));
+            var cp = History.CopyQuotes(new List<QuoteRecord> { r })[0];
+            True("Tower: CopyQuotes keeps it (own filament copy)", cp.TowerGrams == 1.70 && cp.Filaments[0].TowerGrams == 1.10 && !ReferenceEquals(cp.Filaments[0], r.Filaments[0]));
+            // bad values -> unknown; 0 = no tower (kept, no line); SetTower cleans
+            var bad = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"PrimeTower\":5,\"TowerGrams\":-3,\"TowerSeconds\":-0.5,"
+                                        + "\"Filaments\":[{\"Grams\":5,\"TowerGrams\":-2}]},{\"Id\":\"b\",\"PrimeTower\":0,\"TowerGrams\":0,\"TowerSeconds\":0}]}");
+            True("Tower: PrimeTower 5 / grams -3 / seconds -0,5 / line -2 -> -1", bad[0].PrimeTower == -1 && bad[0].TowerGrams == -1 && bad[0].TowerSeconds == -1
+                 && bad[0].Filaments[0].TowerGrams == -1);
+            True("Tower: off with 0 g kept, no line", bad[1].PrimeTower == 0 && bad[1].TowerGrams == 0 && !History.ShowsTower(bad[1]));
+            var sc = HistRecord(t); History.SetTower(sc, false, double.NaN, -5);
+            True("SetTower: off, NaN / -5 -> -1", sc.PrimeTower == 0 && sc.TowerGrams == -1 && sc.TowerSeconds == -1);
+            // the switch for reopen / repeat: own when known, else Settings'
+            var off = new AppSettings(); off.PrimeTower = 0;
+            True("PrimeTowerFor: own off beats Settings on; own on beats Settings off; unknown = Settings; null = on",
+                 !History.PrimeTowerFor(sc, new AppSettings()) && History.PrimeTowerFor(r, off) && !History.PrimeTowerFor(old[0], off)
+                 && History.PrimeTowerFor(old[0], new AppSettings()) && History.PrimeTowerFor(old[0], null) && History.PrimeTowerFor(null, null));
+            // tower on / off is another quote (same numbers, 2 min apart)
+            var a1 = HistRecord(t); var a2 = HistRecord(t.AddMinutes(2));
+            History.SetTower(a1, true, 1.7, 300); History.SetTower(a2, true, 1.7, 300);
+            bool same = History.SameQuote(a1, a2);
+            History.SetTower(a2, false, 0, 0);
+            True("Tower: same switch = same quote, on vs off = not", same && !History.SameQuote(a1, a2));
+            // merge: unknown here -> filled from the backup (with the colour line); known here stays
+            var theirs = BRec("T", "2026-11-20 12:00:00"); History.SetTower(theirs, true, 1.7, 300); theirs.Filaments[0].TowerGrams = 1.7;
+            var mine = BRec("T", "2026-11-20 12:00:00");
+            var res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Tower merge: unknown here -> on, 1,70 g, 300 s, line 1,70", res.Updated == 1 && res.Quotes[0].PrimeTower == 1 && res.Quotes[0].TowerGrams == 1.7
+                 && res.Quotes[0].TowerSeconds == 300 && res.Quotes[0].Filaments[0].TowerGrams == 1.7);
+            var mine2 = BRec("T", "2026-11-20 12:00:00"); History.SetTower(mine2, false, 0, 0);
+            res = History.Combine(new List<QuoteRecord> { mine2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Tower merge: off / 0 g here stays", res.Quotes[0].PrimeTower == 0 && res.Quotes[0].TowerGrams == 0);
+            // combined bill: 1,70 + unknown + 0,60 = 2,30; all unknown = -1
+            Eq("TowerGramsSum: 1,70 + unknown + 0,60 = 2,30", 2.30, History.TowerGramsSum(new[] { a1, old[0], new QuoteRecord { TowerGrams = 0.6 } }));
+            True("TowerGramsSum: all unknown / null -> -1", History.TowerGramsSum(new[] { old[0] }) == -1 && History.TowerGramsSum(null) == -1);
+        }
+
+        // ---------- issue #8 step 3: online's tower helpers (SliceInfo.cs / Slicer.cs); samples in tests\gcode-samples\tower ----------
+        // (trimmed copies of plans\issue8\step3\runs\*\plate_1.gcode and the website's test-cubes-3colour.gcode: header filament lines,
+        // T / M82 / M83 / G92, feature markers, and each tower block's printing moves summed into one G1 per tool run)
+
+        static GcodeTower TowerOf(string text)
+        {
+            return BambuSlicer.TowerFromGcode(text.Replace("\r", "").Split('\n'));
+        }
+
+        static GcodeTower TowerFile(string name)
+        {
+            return BambuSlicer.TowerFromGcode(System.IO.File.ReadLines(System.IO.Path.Combine(GcodeDir(), "tower", name)));
+        }
+
+        static bool G(GcodeTower t, int slot, double grams) { return t.Grams.Count >= slot && Math.Abs(t.Grams[slot - 1] - grams) <= 0.01; }
+
+        static void TowerSlicerTests()
+        {
+            // 1-2. real slices: tower on vs off (plan: counted 1,098 / 0,606 g = on - off 1,10 / 0,60)
+            var l = TowerFile("L_on_names.gcode");
+            True("TowerFromGcode: L (on) 1,098 / 0,606 g, blocks > 0", G(l, 1, 1.098) && G(l, 2, 0.606) && l.Blocks > 0);
+            var m = TowerFile("M_off_names.gcode");
+            True("TowerFromGcode: M (off) 0 / 0, no blocks", m.Grams.Count == 2 && m.Grams[0] == 0 && m.Grams[1] == 0 && m.Blocks == 0);
+            var g3 = TowerFile("G3_on.gcode");
+            True("TowerFromGcode: G3 (together, on) 1,655 / 1,029 g", G(g3, 1, 1.655) && G(g3, 2, 1.029));
+            var cubes = TowerFile("cubes_3colour.gcode");
+            True("TowerFromGcode: website 3-colour sample 3,888 / 1,799 / 1,582 g", G(cubes, 1, 3.888) && G(cubes, 2, 1.799) && G(cubes, 3, 1.582));
+
+            // 3. only printing moves count: 200 + 300 = 500 mm (flush E3000 and E0,8 without X/Y, E-0,8 / E-1 left out);
+            //    500 × π × 0,875² × 1,24 / 1000 = 1,4913 g (defaults 1,75 mm / 1,24 g/cm³)
+            const string rel = "M83\nT0\n; FEATURE: Outer wall\nG1 X10 Y10 E5\n; FEATURE: Prime tower\nG1 X20 Y20 E200\nG1 E-0.8\nG1 E0.8\n"
+                + "; FilamentChangeGCodeStart\nG1 E3000 F300\n; FilamentChangeGCodeEnd\nG1 X21 Y20 E300\nG1 X22 Y20 E-1\n; FEATURE: Inner wall\nG1 X30 Y30 E7\n";
+            var tr = TowerOf(rel);
+            True("TowerFromGcode: flush / retract left out -> 1,491 g, 1 block", tr.Grams.Count == 1 && tr.Grams[0] == 1.491 && tr.Blocks == 1);
+            // 4. the same moves in absolute E with G92 resets inside and outside the block
+            const string abs = "M82\nT0\nG92 E0\n; FEATURE: Outer wall\nG1 X10 Y10 E5\n; FEATURE: Prime tower\nG1 X20 Y20 E205\nG1 E204.2\nG1 E205\n"
+                + "G92 E0\nG1 E3000 F300\nG92 E0\nG1 X21 Y20 E300\nG1 X22 Y20 E299\n; FEATURE: Inner wall\nG1 X30 Y30 E306\n";
+            var ta = TowerOf(abs);
+            True("TowerFromGcode: M82 + G92 E0 = the M83 version (1,491 g)", ta.Grams.Count == 1 && ta.Grams[0] == tr.Grams[0]);
+            // 5. T255 / T1000 skipped, T1 = slot 2; "density: 1,2" and "diameter = 2,1.75"; diameter_map not taken
+            //    slot 1: 100 × π × 1² × 1,0 / 1000 = 0,314; slot 2: 100 × π × 0,875² × 2,0 / 1000 = 0,481
+            const string tools = "; filament_diameter_map = 9,9\n; filament_density: 1.0,2.0\n; filament_diameter = 2.0,1.75\nM83\nT255\nT1000\n"
+                + "; FEATURE: Prime tower\nG1 X1 Y1 E100\nT1\nG1 X1 Y1 E100\n";
+            var tt = TowerOf(tools);
+            True("TowerFromGcode: T255/T1000 ignored, T1 -> slot 2; header both forms -> 0,314 / 0,481", tt.Grams.Count == 2 && tt.Grams[0] == 0.314 && tt.Grams[1] == 0.481);
+            // no header: 100 × π × 0,875² × 1,24 / 1000 = 0,298
+            var td = TowerOf("M83\n; FEATURE: Prime tower\nG1 X1 Y1 E100\n");
+            True("TowerFromGcode: no header -> 1,75 mm / 1,24 -> 0,298 g", td.Grams.Count == 1 && td.Grams[0] == 0.298);
+            True("TowerFromGcode: null -> empty, no blocks", BambuSlicer.TowerFromGcode(null).Grams.Count == 0 && BambuSlicer.TowerFromGcode(null).Blocks == 0);
+
+            // 6. ApplyTower
+            var none = new GcodeTower(); none.Grams.Add(0);
+            var bambu = new SliceResult();
+            bambu.Filaments.Add(new FilamentUse { Slot = 1 }); bambu.Filaments.Add(new FilamentUse { Slot = 2 });
+            BambuSlicer.ApplyTower(bambu, none);
+            True("ApplyTower: Bambu, no blocks -> 0, slots 0 (also a slot without grams)", bambu.TowerGrams == 0 && bambu.Filaments[0].TowerGrams == 0 && bambu.Filaments[1].TowerGrams == 0);
+            var cura = new SliceResult { SlicerName = BambuSlicer.SlicerCura };
+            cura.Filaments.Add(new FilamentUse { Slot = 1 });
+            BambuSlicer.ApplyTower(cura, new GcodeTower());
+            True("ApplyTower: Cura, no blocks -> unknown -1", cura.TowerGrams == -1 && cura.Filaments[0].TowerGrams == -1);
+            var prusa = new SliceResult { SlicerName = BambuSlicer.SlicerPrusa, PurgeGrams = 1.84 };
+            prusa.Filaments.Add(new FilamentUse { Slot = 1 });
+            BambuSlicer.ApplyTower(prusa, new GcodeTower());
+            True("ApplyTower: Prusa, no blocks, wipe tower total 1,84 -> 1,84, slots unknown", prusa.TowerGrams == 1.84 && prusa.Filaments[0].TowerGrams == -1);
+            var withL = new SliceResult();
+            withL.Filaments.Add(new FilamentUse { Slot = 1 }); withL.Filaments.Add(new FilamentUse { Slot = 2 });
+            BambuSlicer.ApplyTower(withL, l);
+            True("ApplyTower: L -> 1,10 + 0,61 = 1,70 g total, per slot", Math.Abs(withL.TowerGrams - 1.704) < 0.01 && Math.Abs(withL.Filaments[0].TowerGrams - 1.098) < 0.01
+                 && Math.Abs(withL.Filaments[1].TowerGrams - 0.606) < 0.01);
+
+            // 7. slot names
+            True("StripSlotTag / SlotNameTag", BambuSlicer.StripSlotTag("Bambu PLA Basic @BBL A1 #2") == "Bambu PLA Basic @BBL A1"
+                 && BambuSlicer.StripSlotTag("PLA #2") == "PLA #2" && BambuSlicer.StripSlotTag(null) == "" && BambuSlicer.SlotNameTag(3) == " #3");
+            True("TaggedName: \"… @BBL A1 #2\", \"Acme PLA @#2\", stripped back", BambuSlicer.TaggedName("Bambu PLA Basic @BBL A1", 2) == "Bambu PLA Basic @BBL A1 #2"
+                 && BambuSlicer.TaggedName("Acme PLA", 2) == "Acme PLA @#2" && BambuSlicer.StripSlotTag("Acme PLA @#2") == "Acme PLA"
+                 && BambuSlicer.StripSlotTag(BambuSlicer.TaggedName("Bambu PLA Basic @BBL A1", 2)) == "Bambu PLA Basic @BBL A1");
+            // OwnSlotProfile: slot index 1 takes the project's per-slot density 1,32; name / from / type are not the project's
+            var template = new Dictionary<string, object> { { "name", "Bambu PLA Basic @BBL A1" }, { "from", "system" },
+                                                           { "filament_density", new[] { "1.24" } }, { "filament_type", new[] { "PLA" } } };
+            var project = new Dictionary<string, object> { { "filament_density", new System.Collections.ArrayList { "1.26", "1.32" } }, { "from", "x" } };
+            var own = BambuSlicer.OwnSlotProfile(template, project, new List<string> { "Bambu PLA Basic @BBL A1", "Bambu PLA Matte @BBL A1" }, 1);
+            var dens = own["filament_density"] as string[];
+            var typ = own["filament_type"] as string[];
+            True("OwnSlotProfile: density [1.32], from = template's, name tagged #2, type unchanged, template untouched",
+                 dens != null && dens.Length == 1 && dens[0] == "1.32" && (string)own["from"] == "system" && (string)own["name"] == "Bambu PLA Matte @BBL A1 #2"
+                 && typ != null && typ.Length == 1 && typ[0] == "PLA" && ((string[])template["filament_density"])[0] == "1.24" && (string)template["name"] == "Bambu PLA Basic @BBL A1");
+
+            // 8. AddResult: 1,70 (1,10 + 0,60, 271 s) + 0,50 at offset 2 + unknown + 0,40 on slot 1 -> 2,60 g; slots 1,50 / 0,60 / 0,50
+            var total = new SliceResult();
+            var r1 = new SliceResult { TowerGrams = 1.7, TowerSeconds = 271 };
+            r1.Filaments.Add(new FilamentUse { Slot = 1, TowerGrams = 1.1 }); r1.Filaments.Add(new FilamentUse { Slot = 2, TowerGrams = 0.6 });
+            var r2 = new SliceResult { TowerGrams = 0.5 };
+            r2.Filaments.Add(new FilamentUse { Slot = 1, TowerGrams = 0.5 });
+            var r3 = new SliceResult();
+            r3.Filaments.Add(new FilamentUse { Slot = 2 });   // unknown: never lowers slot 2
+            var r4 = new SliceResult { TowerGrams = 0.4 };
+            r4.Filaments.Add(new FilamentUse { Slot = 1, TowerGrams = 0.4 });
+            BambuSlicer.AddResult(total, r1, "a"); BambuSlicer.AddResult(total, r2, "b", 2); BambuSlicer.AddResult(total, r3, "c"); BambuSlicer.AddResult(total, r4, "d");
+            Func<int, double> slotT = k => { foreach (var f in total.Filaments) if (f != null && f.Slot == k) return f.TowerGrams; return -9; };
+            True("AddResult tower: total 2,60 g, 271 s; slots 1,50 / 0,60 / 0,50", Math.Abs(total.TowerGrams - 2.6) < 1e-9 && total.TowerSeconds == 271
+                 && Math.Abs(slotT(1) - 1.5) < 1e-9 && Math.Abs(slotT(2) - 0.6) < 1e-9 && Math.Abs(slotT(3) - 0.5) < 1e-9);
+            var tot = new GcodeTower(); tot.Grams.Add(1.0); tot.Blocks = 2;
+            var pl = new GcodeTower(); pl.Grams.Add(0.5); pl.Grams.Add(0.3); pl.Blocks = 3;
+            BambuSlicer.AddTower(tot, pl);
+            True("AddTower: [1,0] + [0,5, 0,3] = [1,5, 0,3], 5 blocks, total 1,8", tot.Grams.Count == 2 && tot.Grams[0] == 1.5 && tot.Grams[1] == 0.3 && tot.Blocks == 5
+                 && Math.Abs(tot.Total - 1.8) < 1e-9);
+
+            // 9. tower seconds from result.json feature_type_times "Prime tower" (L: 270,94 s; M: none)
+            var sl = BambuSlicer.ParseSliceResult(System.IO.File.ReadAllText(System.IO.Path.Combine(GcodeDir(), "tower", "L_on_names_result.json")));
+            var sm = BambuSlicer.ParseSliceResult(System.IO.File.ReadAllText(System.IO.Path.Combine(GcodeDir(), "tower", "M_off_names_result.json")));
+            True("ParseSliceResult: tower seconds L 271, M 0", sl != null && Math.Abs(sl.TowerSeconds - 271) < 1 && sm != null && sm.TowerSeconds == 0);
         }
 
         // ---------- issue #8 step 2, online's X/Y/Z helpers (ScaleXyz in SliceInfo.cs, file scaling in Slicer.cs) ----------

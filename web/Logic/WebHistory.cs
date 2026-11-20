@@ -384,9 +384,12 @@ namespace PrintPrice.Web
         /// profile) in the same order as input's lines (null = leave them empty); purge = the file's purge grams (2+ colours).
         /// reopened = a quote opened again keeps its For; repeatOf = a repeat print: same For, RepeatOf = its Id.
         /// wear = the job's wear split (WebCalc.WearBreakdown; saved only when Auto wear is on), null = none.
+        /// Issue #8 step 3: tower = the job's prime tower grams / seconds (-1 unknown; per colour in materials[k].TowerGrams)
+        /// and primeTower = the switch it was sliced with: the website never slices, so -1 (unknown) unless the numbers are
+        /// a saved record's (Open again / Repeat print without a new file), which keeps that record's switch.
         public static QuoteRecord MakeRecord(QuoteInput input, QuoteResult result, AppSettings s, string model, DateTime now,
                                              IList<HistoryFilament> materials, double purge, QuoteRecord reopened, QuoteRecord repeatOf,
-                                             Wear.Breakdown wear = null)
+                                             Wear.Breakdown wear = null, double towerGrams = -1, double towerSeconds = -1, int primeTower = -1)
         {
             var r = History.FromQuote(input, result, s, model ?? "", "", now, wear);
             if (r.Filaments != null && materials != null && r.Filaments.Count == materials.Count)
@@ -398,9 +401,13 @@ namespace PrintPrice.Web
                     r.Filaments[k].Colour = m.Colour ?? "";
                     r.Filaments[k].Type = m.Type ?? "";
                     r.Filaments[k].Name = BambuSlicer.FilamentBaseName(m.Name ?? ""); // no "@BBL A1" (old records kept as they are)
+                    r.Filaments[k].TowerGrams = History.CleanTower(m.TowerGrams);   // issue #8 step 3 (-1 = unknown)
                 }
                 if (materials.Count >= 2) r.PurgeGrams = purge;
             }
+            r.TowerGrams = History.CleanTower(towerGrams);   // issue #8 step 3 (as History.SetTower, without claiming a switch)
+            r.TowerSeconds = History.CleanTower(towerSeconds);
+            r.PrimeTower = primeTower == 0 || primeTower == 1 ? primeTower : -1;
             if (reopened != null) r.For = reopened.For;
             if (repeatOf != null) { r.For = repeatOf.For; r.RepeatOf = repeatOf.Id ?? ""; }
             return r;
@@ -576,6 +583,8 @@ namespace PrintPrice.Web
             public FilamentUse Single;              // one colour with a saved material (null: none / old record)
             public string MaterialName;             // one colour: its material's name (kr/kg remembered under it); null = none
             public double PurgeGrams = -1;
+            public double TowerGrams = -1, TowerSeconds = -1;   // issue #8 step 3: the saved prime tower (-1 unknown)
+            public int PrimeTower = -1;                         // and the switch it was sliced with
         }
 
         public static Fill FillFrom(QuoteRecord r, bool repeat, AppSettings s)
@@ -583,7 +592,8 @@ namespace PrintPrice.Web
             var f = new Fill
             {
                 Hours = r.Hours.ToString(Inv), Minutes = r.Minutes.ToString(Inv), Grams = Num.Fmt(r.Grams),
-                Elec = repeat ? null : r.ElectricityDkkPerKwh.ToString("0.00##", Num.Dk)
+                Elec = repeat ? null : r.ElectricityDkkPerKwh.ToString("0.00##", Num.Dk),
+                TowerGrams = History.CleanTower(r.TowerGrams), TowerSeconds = History.CleanTower(r.TowerSeconds), PrimeTower = r.PrimeTower
             };
             var one = History.SingleLine(r);
             if (r.Filaments != null && r.Filaments.Count >= 2)
@@ -592,7 +602,8 @@ namespace PrintPrice.Web
                 for (int k = 0; k < r.Filaments.Count; k++)
                 {
                     var h = r.Filaments[k];
-                    var use = new FilamentUse { Slot = k + 1, Colour = h.Colour ?? "", Type = h.Type ?? "", Profile = h.Name ?? "", Grams = h.Grams, ModelGrams = -1 };
+                    var use = new FilamentUse { Slot = k + 1, Colour = h.Colour ?? "", Type = h.Type ?? "", Profile = h.Name ?? "", Grams = h.Grams, ModelGrams = -1,
+                                                TowerGrams = History.CleanTower(h.TowerGrams) };
                     string name = MaterialName(use);
                     f.Rows.Add(new FillRow { Use = use, Name = name, PerKg = Num.Fmt(repeat ? s.PriceFor(name) : h.PricePerKg) });
                 }
@@ -601,7 +612,7 @@ namespace PrintPrice.Web
             if (one != null && ((one.Name ?? "").Length > 0 || (one.Type ?? "").Length > 0 || (one.Colour ?? "").Length > 0))
             {
                 f.Single = new FilamentUse { Slot = 1, Colour = one.Colour ?? "", Type = one.Type ?? "", Profile = one.Name ?? "",
-                                             Grams = Math.Max(one.Grams, 0.01), ModelGrams = -1 };
+                                             Grams = Math.Max(one.Grams, 0.01), ModelGrams = -1, TowerGrams = History.CleanTower(one.TowerGrams) };
                 if ((one.Name ?? "").Length > 0) f.MaterialName = MaterialName(f.Single);
             }
             double perKg = one != null ? one.PricePerKg : r.FilamentDkkPerKg;

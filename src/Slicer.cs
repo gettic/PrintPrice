@@ -19,6 +19,7 @@ namespace PrintPrice
         public double MainSeconds;     // print time without colour changes
         public double TotalSeconds;    // full print time
         public int ColourChanges;      // filament_change_times
+        public double TowerSeconds;    // issue #8 step 3: feature_type_times "Prime tower", summed over plates
         public List<double[]> ObjectSizes = new List<double[]>();   // issue #8: per object {width X, depth Y, height Z} mm, as sliced (scaled)
     }
 
@@ -417,6 +418,14 @@ namespace PrintPrice
         /// filaments and the bed-size error.
         public static void PrepareProfiles(string exe, string model, string nozzleSize, string process, string filament, string bedType, string workDir)
         {
+            PrepareProfiles(exe, model, nozzleSize, process, filament, bedType, workDir, true);
+        }
+
+        /// Issue #8 step 3: as above, with the prime tower on or off (process.json "enable_prime_tower"; the CLI has no option
+        /// for it, and our process wins over a .3mf project's own setting). Bambu prints no tower for one colour either way.
+        public static void PrepareProfiles(string exe, string model, string nozzleSize, string process, string filament, string bedType, string workDir,
+                                           bool primeTower)
+        {
             var roots = Roots(exe);
             if (roots.Count == 0) throw new SliceException(L.S("Could not find Bambu Studio's printer profiles.", "Kunne ikke finde Bambu Studios printerprofiler."));
             model = FindPrinter(model).Key;
@@ -425,6 +434,7 @@ namespace PrintPrice
             File.WriteAllText(Path.Combine(workDir, "machine.json"), json.Serialize(Flatten(roots, "machine", MachinePreset(model, nozzleSize), 0)));
             var proc = Flatten(roots, "process", Resolve(roots, "process", model, nozzleSize, process), 0);
             if (!string.IsNullOrEmpty(bedType)) proc["curr_bed_type"] = bedType;   // CLI default is Cool Plate
+            proc["enable_prime_tower"] = primeTower ? "1" : "0";                    // string, as in Bambu's profiles
             File.WriteAllText(Path.Combine(workDir, "process.json"), json.Serialize(proc));
             File.WriteAllText(Path.Combine(workDir, "filament.json"),
                 json.Serialize(Flatten(roots, "filament", Resolve(roots, "filament", model, nozzleSize, filament), 0)));
@@ -657,6 +667,14 @@ namespace PrintPrice
                 if (!info.HasValues) throw new SliceException(GcodeMissingText());
                 var res = info.ToResult();
                 res.FromSlicedFile = true;
+                // issue #8 step 3: the tower needs the whole file (one streamed pass; failure = unknown)
+                try
+                {
+                    fs.Position = 0;
+                    using (var sr = new StreamReader(fs, System.Text.Encoding.UTF8, true, 65536, true))
+                        ApplyTower(res, TowerFromGcode(Lines(sr)));
+                }
+                catch (Exception) { }
                 return res;
             }
         }
@@ -681,12 +699,14 @@ namespace PrintPrice
         {
             if (IsGcodeFile(path3mf)) return ReadGcodeFile(path3mf);
             string xml, settings, modelSettings;
+            GcodeTower tower;
             using (var zip = ZipFile.OpenRead(path3mf))
             {
                 xml = EntryText(zip, "Metadata/slice_info.config");   // null = missing, empty or over 64 MB
                 if (xml == null) return null;
                 settings = ProjectSettings(zip);
                 modelSettings = EntryText(zip, "Metadata/model_settings.config");
+                tower = PlateTower(zip);
             }
             var res = ParseSliceInfo(xml);
             if (res != null)
@@ -697,7 +717,8 @@ namespace PrintPrice
                 var parsed = ParseSettings(settings);   // once for the slots and the printer
                 var profiles = SlotStrings(parsed, "filament_settings_id");   // = ParseFilamentSlots
                 foreach (var f in res.Filaments)
-                    if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
+                    if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = StripSlotTag(profiles[f.Slot - 1]);   // our " #2" (SlotFilaments)
+                ApplyTower(res, tower);   // issue #8 step 3; null (no plate G-code) = unknown
                 var pp = ProjectPrinterFrom(parsed, xml);
                 if (pp != null)
                 {
@@ -726,6 +747,36 @@ namespace PrintPrice
                 using (var sr = new StreamReader(e.Open())) return sr.ReadToEnd();
             }
             catch { return null; }
+        }
+
+        /// Issue #8 step 3: the prime tower of every Metadata/plate_N.gcode in an open 3MF, streamed line by line (no size
+        /// cap: the G-code is never held in memory). Null = no plate G-code, or it couldn't be read.
+        static GcodeTower PlateTower(ZipArchive zip)
+        {
+            try
+            {
+                GcodeTower total = null;
+                foreach (var e in zip.Entries)
+                {
+                    if (!e.FullName.StartsWith("Metadata/plate_", StringComparison.OrdinalIgnoreCase)
+                        || !e.FullName.EndsWith(".gcode", StringComparison.OrdinalIgnoreCase)) continue;
+                    using (var sr = new StreamReader(e.Open()))
+                    {
+                        var plate = TowerFromGcode(Lines(sr));
+                        if (total == null) total = new GcodeTower();
+                        AddTower(total, plate);
+                    }
+                }
+                return total;
+            }
+            catch { return null; }
+        }
+
+        /// A reader's lines, one at a time.
+        static IEnumerable<string> Lines(TextReader r)
+        {
+            string line;
+            while ((line = r.ReadLine()) != null) yield return line;
         }
 
         // ---------- default filament per colour (idea 17) ----------
@@ -763,18 +814,40 @@ namespace PrintPrice
                 var colours = SlotStrings(parsed, "filament_colour");
                 var roots = Roots(exe);
                 var plan = SlotPlan(profiles, ShortName(defaultFilament), n => ResolveOrNull(roots, "filament", printer, nozzleSize, n));
-                if (plan.All(p => p == null)) return null;
+                // no slot has a profile for the printer: every slot keeps the project's own filament (own files, so the
+                // prime tower stays); the template for their key list = Settings' filament for this printer
+                string templateName = plan.FirstOrDefault(p => p != null)
+                                      ?? ResolveOrNull(roots, "filament", printer, nozzleSize, ShortName(defaultFilament));
+                if (templateName == null) return null;
                 var json = Serializer();
                 var flat = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
                 var parts = new List<string>();
+                Dictionary<string, object> template = null;   // a loaded profile, for the slots that keep the file's filament
                 for (int i = 0; i < plan.Count; i++)
                 {
-                    if (plan[i] == null) { parts.Add(""); continue; }
+                    if (plan[i] == null)
+                    {
+                        // issue #8 step 3: an empty entry (= the file's own filament) isn't counted by the CLI, so with only
+                        // one loaded file it would drop the prime tower. Load the file's own filament as a file of its own.
+                        if (template == null) template = Flatten(roots, "filament", templateName, 0);
+                        var own = OwnSlotProfile(template, parsed, profiles, i);
+                        string colour0 = i < colours.Count ? NormColour(colours[i]) : "";
+                        if (colour0.Length > 0) own["filament_colour"] = new[] { colour0 };
+                        string ownPath = Path.Combine(outDir, "slot" + (i + 1) + ".json");
+                        File.WriteAllText(ownPath, json.Serialize(own));
+                        parts.Add(ownPath);
+                        continue;
+                    }
                     Dictionary<string, object> f;
                     if (!flat.TryGetValue(plan[i], out f)) { f = Flatten(roots, "filament", plan[i], 0); flat[plan[i]] = f; }
                     var slot = new Dictionary<string, object>(f);
                     string colour = i < colours.Count ? NormColour(colours[i]) : "";
                     if (colour.Length > 0) slot["filament_colour"] = new[] { colour };
+                    // own name per slot, else the CLI drops the prime tower when all slots share one preset (SlotNameTag);
+                    // "from" stays (a changed "from" fails with -17), ReadSliceInfo strips the tag again
+                    object name;
+                    if (slot.TryGetValue("name", out name) && name is string && ((string)name).Length > 0)
+                        slot["name"] = TaggedName((string)name, i + 1);
                     string path = Path.Combine(outDir, "slot" + (i + 1) + ".json");
                     File.WriteAllText(path, json.Serialize(slot));
                     parts.Add(path);
@@ -782,6 +855,32 @@ namespace PrintPrice
                 return string.Join(";", parts);
             }
             catch (Exception) { return null; }
+        }
+
+        // keys of a filament profile that describe the profile itself, never copied from the project
+        static readonly HashSet<string> OwnSlotSkip = new HashSet<string>(StringComparer.Ordinal) {
+            "name", "from", "inherits", "type", "setting_id", "instantiation", "version",
+            "compatible_printers", "compatible_printers_condition", "compatible_prints", "compatible_prints_condition" };
+
+        /// Issue #8 step 3, pure: a filament profile for slot index i that keeps the project's own filament: a copy of
+        /// `template` (a flattened Bambu profile, for the key list and "from"), where every key the project stores per slot
+        /// (an array with one value per slot) takes the project's value for this slot; name = the project's name + our tag.
+        /// Checked with the CLI: same model grams / density / colour as an empty entry, and the tower stays.
+        internal static Dictionary<string, object> OwnSlotProfile(Dictionary<string, object> template, Dictionary<string, object> project,
+                                                                  List<string> fileProfiles, int i)
+        {
+            var own = new Dictionary<string, object>(template ?? new Dictionary<string, object>());
+            int slots = fileProfiles == null ? 0 : fileProfiles.Count;
+            foreach (var key in own.Keys.ToList())
+            {
+                if (OwnSlotSkip.Contains(key)) continue;
+                var vals = SlotStrings(project, key);
+                if (slots >= 2 && vals.Count == slots) own[key] = new[] { vals[i] };
+            }
+            string name = fileProfiles != null && i >= 0 && i < slots ? (fileProfiles[i] ?? "").Trim() : "";
+            if (name.Length == 0) { object t; name = own.TryGetValue("name", out t) ? (t as string ?? "") : ""; }
+            own["name"] = TaggedName(name, i + 1);
+            return own;
         }
 
         /// Reads an already-sliced .3mf like ReadSliceInfo(path); with 2+ colours, colours naming no filament get
@@ -1030,6 +1129,9 @@ namespace PrintPrice
                     st.MainSeconds += JsonNum(p, "main_predication");
                     st.TotalSeconds += JsonNum(p, "total_predication");
                     st.ColourChanges += (int)JsonNum(p, "filament_change_times");
+                    object fto;
+                    var ft = p.TryGetValue("feature_type_times", out fto) ? fto as Dictionary<string, object> : null;
+                    if (ft != null) st.TowerSeconds += Math.Max(0, JsonNum(ft, "Prime tower"));
                     object oo;
                     var objs = p.TryGetValue("objects", out oo) ? oo as System.Collections.IEnumerable : null;
                     if (objs != null)
@@ -1084,6 +1186,7 @@ namespace PrintPrice
         public static void ApplySliceStats(SliceResult res, SliceStats stats)
         {
             if (res != null && stats != null) SetSize(res, stats.ObjectSizes);
+            if (res != null && stats != null) res.TowerSeconds = stats.TowerSeconds;   // 0 = no tower
             if (res == null || stats == null || stats.TotalGrams.Count == 0) return;
             foreach (var f in res.Filaments)
             {
@@ -1204,11 +1307,11 @@ namespace PrintPrice
             return p.EndsWith(".stl") || p.EndsWith(".obj") || p.EndsWith(".3mf");
         }
 
-        /// "<name> can only be scaled the same in every direction (…)" (both languages).
+        /// "<name> can only be scaled evenly. To scale X, Y and Z separately, …" (both languages).
         public static string ScaleXyzFormatText(string name)
         {
-            return L.F("{0} can only be scaled the same in every direction. Use the same % for X, Y and Z, or use an STL, OBJ or 3MF file.",
-                       "{0} kan kun skaleres ens i alle retninger. Brug samme % for X, Y og Z, eller brug en STL-, OBJ- eller 3MF-fil.",
+            return L.F("{0} can only be scaled evenly. To scale X, Y and Z separately, use an STL, OBJ or 3MF file.",
+                       "{0} kan kun skaleres ens i alle retninger. Brug en STL-, OBJ- eller 3MF-fil for at skalere X, Y og Z hver for sig.",
                        string.IsNullOrEmpty(name) ? L.S("This file", "Denne fil") : name);
         }
 

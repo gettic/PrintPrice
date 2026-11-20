@@ -22,6 +22,8 @@ namespace PrintPrice
         public string Colour = "";   // "#RRGGBB" or ""
         public string Type = "";     // e.g. "PLA"
         public string Name = "";     // filament profile / display name
+        // issue #8 step 3: this colour's prime tower grams (already inside Grams); -1 = unknown (old records, other slicers)
+        public double TowerGrams = -1;
 
         internal object MemberwiseCopy() { return MemberwiseClone(); }   // History.CopyQuotes
     }
@@ -129,6 +131,14 @@ namespace PrintPrice
         // issue #8 step 2: per-axis scale in percent; all 0 (missing) = the uniform Scale. When set, Scale = ScaleX (older
         // versions then scale the whole job by X). History.SetScale(r, x, y, z) / ScaleXyzOf / IsUniformScale.
         public double ScaleX, ScaleY, ScaleZ;
+
+        // issue #8 step 3: prime tower. PrimeTower = the job's switch when sliced: 1 on, 0 off, -1 unknown (old records;
+        // reopen / repeat then use Settings, History.PrimeTowerFor). TowerGrams = the tower's grams (already inside Grams,
+        // a split only, no price of its own): -1 unknown (old records / other slicers: no line), 0 = no tower.
+        // TowerSeconds = its print time, -1 unknown. History.SetTower fills them after FromQuote.
+        public int PrimeTower = -1;
+        public double TowerGrams = -1;
+        public double TowerSeconds = -1;
 
         // ideas 24 + 11: the printer the quote was made for (AppSettings.ActivePrinterId when saved) and a snapshot of
         // its name and model. "" in records saved before several printers = printer "1" (History.PrinterOf).
@@ -617,6 +627,7 @@ namespace PrintPrice
             if (Math.Abs((ta - tb).TotalMinutes) > 10) return false;
             if ((a.Model ?? "") != (b.Model ?? "") || (a.Source ?? "") != (b.Source ?? "")) return false;
             if (!SameScale(a, b)) return false;   // issue #8: another size (also per axis) is another quote
+            if (a.PrimeTower != b.PrimeTower) return false;   // issue #8 step 3: tower on / off is another slice
             if (a.Hours != b.Hours || a.Minutes != b.Minutes || !Same(a.Grams, b.Grams)
                 || !Same(a.FilamentDkkPerKg, b.FilamentDkkPerKg) || !Same(a.ElectricityDkkPerKwh, b.ElectricityDkkPerKwh)
                 || !Same(a.FriendsPrice, b.FriendsPrice) || !Same(a.OthersPrice, b.OthersPrice)) return false;
@@ -1854,6 +1865,53 @@ namespace PrintPrice
             return t.Length == 0 ? (name ?? "") : (name ?? "") + " (" + t + ")";
         }
 
+        // ---------- prime tower of a job (issue #8 step 3) ----------
+
+        /// A tower number as stored: >= 0 kept; negative / NaN / infinity = -1 (unknown).
+        public static double CleanTower(double v)
+        {
+            return double.IsNaN(v) || double.IsInfinity(v) || v < 0 ? -1 : v;
+        }
+
+        /// Puts the slice's tower on r (after FromQuote): on = the switch used, grams = SliceResult.TowerGrams (-1 unknown),
+        /// seconds = SliceResult.TowerSeconds (-1 unknown); both cleaned. Per-colour grams go in r.Filaments[i].TowerGrams.
+        public static void SetTower(QuoteRecord r, bool on, double grams, double seconds)
+        {
+            if (r == null) return;
+            r.PrimeTower = on ? 1 : 0;
+            r.TowerGrams = CleanTower(grams);
+            r.TowerSeconds = CleanTower(seconds);
+        }
+
+        /// The switch to slice r with again (reopen / repeat print): its own when known, else Settings' (s null = on).
+        public static bool PrimeTowerFor(QuoteRecord r, AppSettings s)
+        {
+            if (r != null && (r.PrimeTower == 0 || r.PrimeTower == 1)) return r.PrimeTower == 1;
+            return s == null || s.PrimeTower != 0;
+        }
+
+        /// True when r has a tower line to show: known grams above 0 (unknown -1 and 0 = no line).
+        public static bool ShowsTower(QuoteRecord r)
+        {
+            return r != null && CleanTower(r.TowerGrams) > 0;
+        }
+
+        /// Combined bill: Σ the jobs' known tower grams (unknown ones count 0); -1 when none of them is known.
+        public static double TowerGramsSum(IEnumerable<QuoteRecord> jobs)
+        {
+            double sum = 0;
+            bool any = false;
+            if (jobs != null)
+                foreach (var r in jobs)
+                {
+                    if (r == null) continue;
+                    double g = CleanTower(r.TowerGrams);
+                    if (g < 0) continue;
+                    sum += g; any = true;
+                }
+            return any ? sum : -1;
+        }
+
         // ---------- the History list's name and filter (HistoryForm and the website's History page) ----------
 
         /// "Show" choices: all quotes, friends & family, customers, failed, not printed.
@@ -2312,6 +2370,9 @@ namespace PrintPrice
                 if (r.FailedAt == null) r.FailedAt = "";
                 if (r.RepeatOf == null) r.RepeatOf = "";
                 NormalizeScale(r);   // issue #8: 0 / bad / outside 1-1000 -> 100; X/Y/Z cleaned, equal axes = uniform
+                if (r.PrimeTower != 0 && r.PrimeTower != 1) r.PrimeTower = -1;   // issue #8 step 3: other values = unknown
+                r.TowerGrams = CleanTower(r.TowerGrams);
+                r.TowerSeconds = CleanTower(r.TowerSeconds);
                 if (r.PrinterId == null) r.PrinterId = "";
                 if (r.PrinterName == null) r.PrinterName = "";
                 if (r.PrinterModel == null) r.PrinterModel = "";
@@ -2341,6 +2402,7 @@ namespace PrintPrice
                         if (x.Colour == null) x.Colour = "";
                         if (x.Type == null) x.Type = "";
                         if (x.Name == null) x.Name = "";
+                        x.TowerGrams = CleanTower(x.TowerGrams);
                     }
                     if (r.Filaments.Count == 0) r.Filaments = null;   // 1 line = a one-colour quote (name/colour kept)
                 }
@@ -2977,6 +3039,17 @@ namespace PrintPrice
             if (keep.Note.Trim().Length == 0 && other.Note.Trim().Length > 0) { keep.Note = other.Note; changed = true; }
             if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
             if (keep.Parts == null && other.Parts != null) { keep.Parts = other.Parts.Copy(); changed = true; }   // idea 21
+            // issue #8 step 3: the tower switch / grams when unknown here (e.g. resaved by an older app version)
+            if (keep.PrimeTower == -1 && (other.PrimeTower == 0 || other.PrimeTower == 1)) { keep.PrimeTower = other.PrimeTower; changed = true; }
+            if (keep.TowerGrams < 0 && other.TowerGrams >= 0)
+            {
+                keep.TowerGrams = other.TowerGrams; keep.TowerSeconds = other.TowerSeconds;
+                if (keep.Filaments != null && other.Filaments != null && keep.Filaments.Count == other.Filaments.Count)
+                    for (int i = 0; i < keep.Filaments.Count; i++)
+                        if (keep.Filaments[i] != null && other.Filaments[i] != null && keep.Filaments[i].TowerGrams < 0)
+                            keep.Filaments[i].TowerGrams = other.Filaments[i].TowerGrams;
+                changed = true;
+            }
             // issue #8: a scale lost here (e.g. resaved by an older app version) comes back from the other copy
             // (none here, or only the X value an older version kept while the other copy has the axes)
             if ((Unscaled(keep) && !Unscaled(other))
@@ -3515,7 +3588,43 @@ namespace PrintPrice
     {
         static JavaScriptSerializer Make()
         {
-            return new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+            var s = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+            s.RegisterConverters(new JavaScriptConverter[] { new FilamentConverter() });
+            return s;
+        }
+
+        /// HistoryFilament as before (Grams, PricePerKg, Colour, Type, Name in that order) + "TowerGrams" only when known
+        /// (>= 0; issue #8 step 3), so lines without a tower save back exactly as older versions wrote them. Reading a
+        /// missing TowerGrams gives -1. Unknown keys are ignored, like the plain serializer.
+        sealed class FilamentConverter : JavaScriptConverter
+        {
+            public override IEnumerable<Type> SupportedTypes { get { return new[] { typeof(HistoryFilament) }; } }
+
+            public override IDictionary<string, object> Serialize(object obj, JavaScriptSerializer serializer)
+            {
+                var f = (HistoryFilament)obj;
+                var d = new Dictionary<string, object>();
+                d["Grams"] = f.Grams;
+                d["PricePerKg"] = f.PricePerKg;
+                d["Colour"] = f.Colour;
+                d["Type"] = f.Type;
+                d["Name"] = f.Name;
+                if (f.TowerGrams >= 0) d["TowerGrams"] = f.TowerGrams;
+                return d;
+            }
+
+            public override object Deserialize(IDictionary<string, object> dictionary, Type type, JavaScriptSerializer serializer)
+            {
+                var f = new HistoryFilament();
+                object v;
+                if (dictionary.TryGetValue("Grams", out v)) f.Grams = serializer.ConvertToType<double>(v);
+                if (dictionary.TryGetValue("PricePerKg", out v)) f.PricePerKg = serializer.ConvertToType<double>(v);
+                if (dictionary.TryGetValue("Colour", out v)) f.Colour = serializer.ConvertToType<string>(v);
+                if (dictionary.TryGetValue("Type", out v)) f.Type = serializer.ConvertToType<string>(v);
+                if (dictionary.TryGetValue("Name", out v)) f.Name = serializer.ConvertToType<string>(v);
+                if (dictionary.TryGetValue("TowerGrams", out v)) f.TowerGrams = serializer.ConvertToType<double>(v);
+                return f;
+            }
         }
 
         public static string Serialize(object value) { return Make().Serialize(value); }

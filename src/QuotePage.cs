@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -34,6 +34,7 @@ namespace PrintPrice
         public DateTime Date, ValidUntil;
         public string PlateName = "";     // build plate for the wear line ("Smooth PEI")
         public double PurgeGrams = -1;    // multi-colour purge grams (<= 0 = no note)
+        public double TowerGrams = -1;    // issue #8 step 3: "Prime tower 1,70 g" note (<= 0 = no note; only with QuoteShowTower)
         public List<string> MaterialNames = new List<string>();   // by QuoteLine.Index
         public List<Color> MaterialColours = new List<Color>();   // by QuoteLine.Index (Color.Empty = no dot)
         public QuoteBreakdown Breakdown;
@@ -558,7 +559,7 @@ namespace PrintPrice
                 y += 44;
                 HLine(L0, R0, y, p.Line, 2);
                 y += 14;
-                y = DrawRows(g, p, d, QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName),
+                y = DrawRows(g, p, d, QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams),
                              y, draw, F, T, compact);
                 y += 4;
                 HLine(L0, R0, y, p.Line, 2);
@@ -728,8 +729,8 @@ namespace PrintPrice
                     y += 12;
                     // GroupLevel 1 / 3: shorter breakdown (wear parts on one note line, at most 4 colour rows) so it fits one page
                     bool shortRows = d.GroupLevel == 1 || d.GroupLevel == 3;
-                    y = DrawRows(g, p, d, QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
-                                                               shortRows ? 4 : MaxGroupColours, shortRows), y, draw, F, T, true);
+                    y = DrawRows(g, p, d, QuoteRows.AddTowerNote(QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
+                                                               shortRows ? 4 : MaxGroupColours, shortRows), d.TowerGrams), y, draw, F, T, true);
                     y += 4;
                     HLine(L0, R0, y, p.Line, 2);
                     y += 20;
@@ -927,6 +928,7 @@ namespace PrintPrice
                         y += compact ? 27 : 32;
                         break;
                     default:
+                        if (prev == QuoteRowKind.Note) y -= 10;   // a second note (prime tower) sits as close as text lines
                         T(r.Label, F(15, false), p.Faint, 70, y, R0 - 70, near);
                         y += 34;
                         break;

@@ -101,6 +101,17 @@ namespace PrintPrice
                     using (var set = new SettingsForm(invSettings, 0, SettingsForm.TabQuote))
                         SnapForm(set, folder, "settings_quote_invoice.png");
                     main.SampleMainInvoice(false);   // back to the default for the other pictures
+                    // issue #8 step 3: a two-colour job with its prime tower (note line + "Prime tower: on" link), its quote
+                    // with the "Prime tower 1,70 g" note, and the Quote & invoice tab with that box ticked (never saved)
+                    main.SetSampleTowerJob();
+                    Snap(main, folder, "main_tower.png");
+                    using (var q = main.RenderSampleTowerQuote())
+                        if (q != null) q.Save(Path.Combine(folder, "quote_tower.png"), ImageFormat.Png);
+                    var towerSettings = s.Clone();
+                    towerSettings.QuoteShowTower = 1;
+                    using (var set = new SettingsForm(towerSettings, 0, SettingsForm.TabQuote))
+                        SnapForm(set, folder, "settings_quote_tower.png");
+                    main.SetSampleMultiJob();   // back to the 4-colour job for the pictures below
                     // sliced G-code files put in the folder (idea 14): main_gcode_<name>.png each, read as a dropped file would be
                     foreach (string g in Directory.GetFiles(folder, "*.gcode"))
                     {

@@ -51,6 +51,42 @@ namespace PrintPrice.Web
             return grams == FieldState.Empty || (hours == FieldState.Empty && minutes == FieldState.Empty);
         }
 
+        // ---------- the note under the colour rows (MainForm.PurgeNote / TowerText, issue #8 step 3) ----------
+
+        /// The parts of "incl. 6 g for colour changes · prime tower 1,7 g · 5 min" (2+ colours): the colour-change part
+        /// (flush only = purge − tower; grams above 0,5 g, hours from 0,05 h) and the tower part (grams > 0; the time only
+        /// when known, which the website normally isn't). Tower unknown (-1) or 0 = no tower part; a part alone starts with
+        /// a capital. The page joins them with " · " (each part kept on one line). Empty list = no note.
+        public static List<string> PurgeNoteParts(double purge, double changeHours, double tower, double towerSeconds)
+        {
+            var parts = new List<string>();
+            double t = tower > 0.005 ? tower : 0;
+            double flush = purge > 0 ? Math.Max(0, purge - t) : purge;
+            bool g = flush > 0.5, h = changeHours >= 0.05;
+            string grams = g ? flush.ToString(flush >= 10 ? "0" : "0.#", Num.Dk) : "";
+            string hours = h ? changeHours.ToString("0.#", Num.Dk) : "";
+            if (g && h) parts.Add(L.F("incl. {0} g and {1} h for colour changes", "heraf {0} g og {1} t til farveskift", grams, hours));
+            else if (g) parts.Add(L.F("incl. {0} g for colour changes", "heraf {0} g til farveskift", grams));
+            else if (h) parts.Add(L.F("{0} h for colour changes", "{0} t til farveskift", hours));
+            string tt = TowerText(t, towerSeconds, true);
+            if (tt.Length > 0) parts.Add(parts.Count == 0 ? char.ToUpper(tt[0]) + tt.Substring(1) : tt);
+            return parts;
+        }
+
+        /// "prime tower 1,7 g · 5 min" (DA "primetårn …"); withTime false / seconds unknown = grams only; grams <= 0 = ""
+        /// (= MainForm.TowerText).
+        public static string TowerText(double grams, double seconds, bool withTime)
+        {
+            if (!(grams > 0.005)) return "";
+            string s = L.F("prime tower {0} g", "primetårn {0} g", grams.ToString("0.0", Num.Dk));   // one decimal (as the desktop)
+            if (withTime && seconds >= 30)
+            {
+                int min = (int)Math.Round(seconds / 60);
+                s += " · " + (min >= 60 ? (min / 60) + L.S(" h ", " t ") + (min % 60) + " min" : min + " min");
+            }
+            return s;
+        }
+
         /// A whole-number box (hours 0-999, minutes 0-59); empty = 0.
         public static FieldState ReadInt(string text, int max, out int value)
         {

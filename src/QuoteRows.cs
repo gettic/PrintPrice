@@ -95,6 +95,24 @@ namespace PrintPrice
             return rows;
         }
 
+        /// Issue #8 step 3: the "incl. 1,7 g for the prime tower" note (no amount) at the end of the material part (before the first
+        /// rule), on quotes / invoices when AppSettings.QuoteShowTower is on. grams <= 0 = no row. Returns rows.
+        public static List<QuoteRow> AddTowerNote(List<QuoteRow> rows, double grams)
+        {
+            if (rows == null || !(grams > 0.005)) return rows;
+            int at = rows.FindIndex(r => r.Kind == QuoteRowKind.Rule);
+            if (at < 0) at = rows.Count;
+            if (at == 1 && rows[0].Kind == QuoteRowKind.Head) rows[0].Alone = false;   // a single-material head gets its note right under it
+            rows.Insert(at, new QuoteRow { Kind = QuoteRowKind.Note, Label = TowerNote(grams) });
+            return rows;
+        }
+
+        /// "incl. 1,7 g for the prime tower" / "inkl. 1,7 g til primetårnet" (one decimal; worded like the colour-change note).
+        public static string TowerNote(double grams)
+        {
+            return L.F("incl. {0} g for the prime tower", "inkl. {0} g til primetårnet", grams.ToString("0.0", Num.Dk));
+        }
+
         /// The rows of a combined bill's breakdown (History.GroupBreakdown as b.Lines; names by its Materials index, hours /
         /// minutes = the jobs' summed time). As Build, but the details "g × kr/kg", "kWh × kr/kWh", "time × kr/h" only when
         /// sameRates and the rate is known (else the summed grams / kWh / time); the top-up folded into Work & handling

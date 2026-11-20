@@ -114,6 +114,9 @@ body.dragging .zone { border: 2px solid var(--others); background: var(--hot-bac
 .colours .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .colours .x { color: var(--muted); text-align: center; }
 .colours input { width: 64px; height: 26px; }
+/* the note under the colour rows (MainForm lblPurge): colour changes · prime tower (issue #8 step 3); breaks only at " · " */
+.purge-note { color: var(--muted); font-size: 13px; margin: -2px 0 8px; }
+.purge-note span { white-space: nowrap; }
 input[readonly] { color: var(--muted); }
 
 /* live electricity price line (under the electricity price, spans the inputs) */

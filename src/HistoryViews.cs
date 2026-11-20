@@ -599,19 +599,13 @@ namespace PrintPrice
             {
                 string full = ModelText(r), scale = History.ScaleText(r);
                 if (scale.Length == 0 || TextW(g, full, NameFont) <= rc.Width) { DrawText(g, r, full, NameFont, rc, c, false); return; }
-                // the scale whole (compact "150×100×50 %" when the full one leaves under 40 px of the name)
-                string name = History.ModelText(r), tail = null;
-                int tw = 0;
-                foreach (var t in new[] { " (" + scale + ")", " (" + scale.Replace(" × ", "×") + ")" })
-                {
-                    tw = TextW(g, t, NameFont);
-                    if (tw <= rc.Width - P(40)) { tail = t; break; }
-                }
-                if (tail == null) { DrawText(g, r, full, NameFont, rc, c, false); return; }
-                var nameRc = new Rectangle(rc.X, rc.Y, rc.Width - tw, rc.Height);
-                DrawText(g, null, name, NameFont, nameRc, c, false);
-                int nw = Math.Min(TextW(g, name, NameFont), nameRc.Width);
-                DrawText(g, null, tail, NameFont, new Rectangle(rc.X + nw, rc.Y, tw + 1, rc.Height), c, false);
+                // the scale whole and compact ("150×100×50 %"), the name cut as late as possible with "…", one space between
+                string name = History.ModelText(r), tail = " (" + scale.Replace(" × ", "×") + ")";
+                Func<string, int> width = s => TextW(g, s, NameFont);
+                int tw = width(tail);
+                if (tw > rc.Width - P(40)) { DrawText(g, r, full, NameFont, rc, c, false); return; }
+                string shown = width(name + tail) <= rc.Width ? name : HistoryForm.CutToWidth(name, width, rc.Width - tw);
+                DrawText(g, null, shown + tail, NameFont, new Rectangle(rc.X, rc.Y, rc.Width + 1, rc.Height), c, false);
                 List<KeyValuePair<Rectangle, string>> cuts;
                 if (!cutTexts.TryGetValue(r, out cuts)) cutTexts[r] = cuts = new List<KeyValuePair<Rectangle, string>>();
                 cuts.Add(new KeyValuePair<Rectangle, string>(new Rectangle(rc.X, rc.Y + scroll, rc.Width, rc.Height), full));

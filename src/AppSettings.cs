@@ -54,6 +54,14 @@ namespace PrintPrice
         // Any other value reads as 1.
         public double InvoiceCopies = 1;
 
+        // Issue #8 step 3: Bambu Studio's prime tower when slicing 2+ colours (INI "PrimeTower"): 1 = on (default, like
+        // Bambu Studio), 0 = off. Any other value reads as 1. A job can override it (QuoteRecord.PrimeTower).
+        public double PrimeTower = 1;
+
+        // Issue #8 step 3: show the "Prime tower 1,70 g" note on quotes / invoices (INI "QuoteShowTower"): 0 = off
+        // (default; the app's own breakdown always shows it), 1 = on. Any other value reads as 0.
+        public double QuoteShowTower = 0;
+
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
         public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
@@ -511,6 +519,8 @@ namespace PrintPrice
             d["SetupDone"] = SetupDone;
             d["MainInvoice"] = MainInvoice;
             d["InvoiceCopies"] = InvoiceCopies;
+            d["PrimeTower"] = PrimeTower;
+            d["QuoteShowTower"] = QuoteShowTower;
             return d;
         }
 
@@ -567,6 +577,8 @@ namespace PrintPrice
                 case "SetupDone": SetupDone = v != 0 ? 1 : 0; break;
                 case "MainInvoice": MainInvoice = v == 1 ? 1 : 0; break;
                 case "InvoiceCopies": InvoiceCopies = v == 0 ? 0 : 1; break;
+                case "PrimeTower": PrimeTower = v == 0 ? 0 : 1; break;
+                case "QuoteShowTower": QuoteShowTower = v == 1 ? 1 : 0; break;
             }
         }
 

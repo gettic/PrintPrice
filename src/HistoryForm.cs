@@ -1233,22 +1233,32 @@ namespace PrintPrice
             if (TextRenderer.MeasureText(full, font, Size.Empty, flags).Width <= area.Width) return;   // fits: the normal drawing
             // the scale whole ("(150 × 100 × 50 %)", or "(150×100×50 %)" when that leaves too little of the name); at least
             // 30 px of the name stays, else the normal "…" on the whole name
-            string name = History.ModelText(rec), tail = null;
-            int tw = 0, minName = (int)Math.Round(30 * CurrentAutoScaleDimensions.Width / 96f);
-            foreach (var t in new[] { " (" + scale + ")", " (" + scale.Replace(" × ", "×") + ")" })
-            {
-                tw = TextRenderer.MeasureText(t, font, Size.Empty, flags).Width;
-                if (tw <= area.Width - minName) { tail = t; break; }
-            }
-            if (tail == null) return;
+            // qol: the compact scale ("(150×100×50 %)") so the name is cut as late as possible; the cut name ends in "…"
+            // and the scale follows after one space (the name part is measured as drawn, no gap)
+            string name = History.ModelText(rec);
+            Func<string, int> width = s => TextRenderer.MeasureText(s, font, Size.Empty, flags).Width;
+            string tail = " (" + scale.Replace(" × ", "×") + ")";
+            int tw = width(tail), minName = (int)Math.Round(30 * CurrentAutoScaleDimensions.Width / 96f);
+            if (tw > area.Width - minName) return;   // too narrow: the normal "…" on the whole name
+            string shown = width(name + tail) <= area.Width ? name : CutToWidth(name, width, area.Width - tw);
             bool selected = (e.State & DataGridViewElementStates.Selected) != 0;
             e.PaintBackground(e.CellBounds, selected);
             Color fore = selected ? style.SelectionForeColor : style.ForeColor;
-            var nameRc = new Rectangle(area.X, area.Y, area.Width - tw, area.Height);
-            TextRenderer.DrawText(e.Graphics, name, font, nameRc, fore, flags | TextFormatFlags.EndEllipsis);
-            int nw = Math.Min(TextRenderer.MeasureText(name, font, Size.Empty, flags).Width, nameRc.Width);
-            TextRenderer.DrawText(e.Graphics, tail, font, new Rectangle(area.X + nw, area.Y, tw + 2, area.Height), fore, flags);
+            TextRenderer.DrawText(e.Graphics, shown + tail, font, area, fore, flags);
             e.Handled = true;
+        }
+
+        /// The longest start of s that fits max px with "…" after it (whole s when it fits; "…" alone when nothing does).
+        internal static string CutToWidth(string s, Func<string, int> width, int max)
+        {
+            if (string.IsNullOrEmpty(s) || width(s) <= max) return s ?? "";
+            int lo = 0, hi = s.Length;
+            while (lo < hi)
+            {
+                int mid = (lo + hi + 1) / 2;
+                if (width(s.Substring(0, mid).TrimEnd() + "…") <= max) lo = mid; else hi = mid - 1;
+            }
+            return s.Substring(0, lo).TrimEnd() + "…";
         }
 
         /// The Status mark + short name in a cell (History's Status column and the Invoices window): not printed = Muted

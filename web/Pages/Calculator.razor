@@ -191,6 +191,12 @@ else
                         <span class="num">@(last != null && last.FilamentCosts != null && n < last.FilamentCosts.Length ? Num.Kr(last.FilamentCosts[n]) : "–")</span>
                     }
                 </div>
+                var noteParts = WebCalc.PurgeNoteParts(jobPurge, jobChangeHours, jobTower, jobTowerSeconds);
+                @if (noteParts.Count > 0)
+                {
+                    @* = the desktop's note under the colour rows (issue #8 step 3: the prime tower apart, colour changes = flush only) *@
+                    <div class="purge-note">@for (int k = 0; k < noteParts.Count; k++) { @(k > 0 ? " · " : "")<span>@noteParts[k]</span> }</div>
+                }
             }
             <div class="rows">
                 @if (!Multi)
@@ -341,6 +347,9 @@ else
     string jobModel;                   // the record's model name: the dropped file's name, or the reopened record's
     FilamentUse single;                // one colour from a file / a reopened record: its material (saved with the quote)
     double jobPurge = -1;              // 2+ colours: purge grams of the file
+    double jobChangeHours = -1;        // 2+ colours: the file's colour-change hours (-1 unknown)
+    double jobTower = -1, jobTowerSeconds = -1;   // issue #8 step 3: the prime tower (file / saved record; -1 unknown, 0 none)
+    int jobTowerSwitch = -1;           // the saved record's tower switch (Open again / Repeat); a file = -1 (the website never slices)
     QuoteRecord reopened, repeatOf;    // Open again / Repeat print (their lines in the file box)
     bool repeatHint;                   // "drop the sliced file again" until a file is dropped
     string savedId;                    // the record Save made (left out of the payback debt)
@@ -543,6 +552,8 @@ else
         fileError = false;
         single = null;
         jobPurge = -1;
+        jobChangeHours = jobTower = jobTowerSeconds = -1;
+        jobTowerSwitch = -1;
         jobModel = null;
         jobSource = null;
         reopened = repeatOf = null;   // the "Opened from history" lines go with the job
@@ -703,6 +714,9 @@ else
         jobModel = job.FileName;
         jobSource = job.FileName;
         jobPurge = multi ? res.PurgeGrams : -1;
+        jobChangeHours = multi ? res.ColourChangeHours : -1;
+        jobTower = History.CleanTower(res.TowerGrams);   // issue #8 step 3 (one colour: 0 when known, as the desktop saves it)
+        jobTowerSeconds = History.CleanTower(res.TowerSeconds);
         prefs.Hours = hours; prefs.Minutes = minutes; prefs.Grams = grams;
         if (res.Picture != null && job.PictureType != null)
             pictureUrl = "data:" + job.PictureType + ";base64," + Convert.ToBase64String(res.Picture);
@@ -1056,12 +1070,17 @@ else
         if (Multi)
         {
             materials = new List<HistoryFilament>();
-            foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "" });
+            foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "", TowerGrams = r.Use.TowerGrams });
         }
-        else materials = new List<HistoryFilament> { WebHistory.JobMaterial(single, materialName, settings, prefs.FilamentType) };
+        else
+        {
+            materials = new List<HistoryFilament> { WebHistory.JobMaterial(single, materialName, settings, prefs.FilamentType) };
+            if (single != null) materials[0].TowerGrams = single.TowerGrams;   // issue #8 step 3
+        }
         // the wear split goes with the record (only with Auto wear on, as the desktop), so its bill keeps the detail
         var wear = settings.AutoWearRate != 0 ? WebCalc.WearBreakdown(settings, prefs.FilamentType) : null;
-        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf, wear);
+        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf, wear,
+                                        jobTower, jobTowerSeconds, jobTowerSwitch);
         if (jobSource != null && jobSource.StartsWith("http", StringComparison.OrdinalIgnoreCase)) rec.Source = jobSource;
         return rec;
     }
@@ -1214,7 +1233,7 @@ else
     WebQuote.Job CurrentJob()
     {
         var j = new WebQuote.Job { Input = input, Model = jobModel, Source = jobSource, Picture = pictureUrl, Single = single,
-                                   SingleName = materialName, PurgeGrams = jobPurge, FilamentType = prefs.FilamentType };
+                                   SingleName = materialName, PurgeGrams = jobPurge, TowerGrams = jobTower, FilamentType = prefs.FilamentType };
         if (Multi) { j.Colours = new List<FilamentUse>(); foreach (var r in rows) j.Colours.Add(r.Use); }
         return j;
     }
@@ -1341,7 +1360,7 @@ else
             }
             friends = WebQuote.ExportFriends(r, quoteInvoice, friends);   // a made invoice: the price it was billed at
             // what goes out is made now, from the record as it is about to be saved
-            if (kind == "text") d.Text = QuoteRows.RecordText(r, friends, quoteInvoice, settings, WebQuote.ShortLink(r.Source));
+            if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.RecordText(r, friends, quoteInvoice, settings, WebQuote.ShortLink(r.Source)), WebQuote.RecordTower(settings, r));
             else if (kind == "print") d.FileName = WebQuote.FileName(BuildQuoteSheet(friends, customer));
             err = await Histories.Save(history);
             if (err == null && newNumber) await SaveSettings();
@@ -1366,9 +1385,10 @@ else
                 newNumber = true;   // a job invoice is always a new one (an invoiced record is never replaced by a save)
                 invoiceNo = saved.InvoiceNo;
                 friends = WebQuote.ExportFriends(saved, true, friends);
-                if (kind == "text") d.Text = QuoteRows.RecordText(saved, friends, true, settings, WebQuote.ShortLink(saved.Source));
+                if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.RecordText(saved, friends, true, settings, WebQuote.ShortLink(saved.Source)), WebQuote.RecordTower(settings, saved));
             }
-            else if (kind == "text") d.Text = QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, grams, Multi ? rows.Count : 0, last.FriendsPrice, last.OthersPrice);
+            else if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, grams, Multi ? rows.Count : 0, last.FriendsPrice, last.OthersPrice),
+                                                                Multi && settings.QuoteShowTower == 1 ? jobTower : -1);   // issue #8 step 3
             err = await Histories.Save(history);
             if (err == null)
             {
@@ -1454,6 +1474,7 @@ else
         single = f.Single;
         materialName = f.MaterialName;
         jobPurge = f.PurgeGrams;
+        jobTower = f.TowerGrams; jobTowerSeconds = f.TowerSeconds; jobTowerSwitch = f.PrimeTower;   // issue #8 step 3: the saved tower
         jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;
         jobSource = string.IsNullOrEmpty(r.Source) ? null : r.Source;
         if (!repeat)

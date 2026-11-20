@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -30,7 +30,8 @@ namespace PrintPrice.Web
 
         static readonly string[] ModelExtensions = { ".stl", ".3mf", ".obj", ".step", ".stp", ".amf" };
 
-        public static async Task<FileJob> Read(IRangeSource src, string fileName, string defaultFilament)
+        /// tower = also count the prime tower (issue #8 step 3; reads the whole G-code / the plate G-codes once, see CountTower).
+        public static async Task<FileJob> Read(IRangeSource src, string fileName, string defaultFilament, bool tower = true)
         {
             var job = new FileJob { FileName = fileName ?? "" };
             string lower = job.FileName.ToLowerInvariant();
@@ -40,8 +41,9 @@ namespace PrintPrice.Web
                 {
                     job.IsGcode = true;
                     await ReadGcode(src, job);
+                    if (tower && job.Result != null) await CountGcodeTower(src, job.Result);
                 }
-                else if (lower.EndsWith(".3mf")) await Read3mf(src, job);
+                else if (lower.EndsWith(".3mf")) await Read3mf(src, job, tower);
                 else if (ModelExtensions.Any(lower.EndsWith)) job.Unsliced = true;
                 else job.Error = L.S("That isn't a sliced file. Use a .gcode.3mf or a G-code file (Bambu Studio, OrcaSlicer, PrusaSlicer or Cura).",
                                      "Det er ikke en slicet fil. Brug en .gcode.3mf eller en G-code-fil (Bambu Studio, OrcaSlicer, PrusaSlicer eller Cura).");
@@ -63,7 +65,7 @@ namespace PrintPrice.Web
 
         // ---------- .gcode.3mf (same steps as BambuSlicer.ReadSliceInfo) ----------
 
-        static async Task Read3mf(IRangeSource src, FileJob job)
+        static async Task Read3mf(IRangeSource src, FileJob job, bool tower)
         {
             var zip = await ZipRanges.Open(src);
             if (zip == null) throw new FormatException("not a zip");
@@ -80,7 +82,8 @@ namespace PrintPrice.Web
             var parsed = BambuSlicer.ParseSettings(settings);   // once for the slots and the printer (as ReadSliceInfo)
             var profiles = BambuSlicer.SlotStrings(parsed, "filament_settings_id");   // = ParseFilamentSlots
             foreach (var f in res.Filaments)
-                if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = profiles[f.Slot - 1];
+                if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = BambuSlicer.StripSlotTag(profiles[f.Slot - 1]);   // the desktop's " #2" (issue #8 step 3)
+            if (tower) BambuSlicer.ApplyTower(res, await PlateTower(zip));   // issue #8 step 3; null (no plate G-code read) = unknown
             SetPrinter(res, BambuSlicer.ProjectPrinterFrom(parsed, xml));
             // plate names (idea 21): missing / unreadable file = no names, never an error
             BambuSlicer.ApplyPlateNames(res, await zip.ReadText("Metadata/model_settings.config", MaxSettingsBytes));
@@ -121,6 +124,57 @@ namespace PrintPrice.Web
             if (!info.HasValues) { job.Error = BambuSlicer.GcodeMissingText(); return; }
             job.Result = info.ToResult();
             if (info.Picture != null) { job.PictureType = BambuSlicer.ImageType(info.Picture); if (job.PictureType == null) job.Result.Picture = null; }
+        }
+
+        // ---------- prime tower (issue #8 step 3; = Slicer.ReadGcodeFile's / PlateTower's pass) ----------
+        // The counting is the desktop's BambuSlicer.TowerFromGcode + ApplyTower (SliceInfo.cs). It needs every line, so a
+        // G-code is read whole once (in 8 MB pieces) and a .gcode.3mf's plate G-codes are inflated line by line from
+        // their compressed bytes. Anything that fails = unknown (no tower part shown), never an error for the file.
+
+        /// Biggest G-code (or compressed plate G-code) read for the count; bigger = unknown.
+        public const long MaxTowerBytes = 512L * 1048576;
+
+        static async Task CountGcodeTower(IRangeSource src, SliceResult res)
+        {
+            try
+            {
+                if (src.Length > MaxTowerBytes) return;
+                var all = await ChunkStream.Read(src, 0, src.Length);
+                if (all == null) return;
+                BambuSlicer.ApplyTower(res, BambuSlicer.TowerFromGcode(Lines(all)));
+            }
+            catch (Exception) { }
+        }
+
+        /// Every Metadata/plate_N.gcode's tower, summed; null = no plate G-code, or one couldn't be read.
+        static async Task<GcodeTower> PlateTower(ZipRanges zip)
+        {
+            try
+            {
+                GcodeTower total = null;
+                foreach (var e in zip.Entries)
+                {
+                    if (!e.Name.StartsWith("Metadata/plate_", StringComparison.OrdinalIgnoreCase)
+                        || !e.Name.EndsWith(".gcode", StringComparison.OrdinalIgnoreCase)) continue;
+                    var s = await zip.OpenStream(e.Name, MaxTowerBytes);
+                    if (s == null) return null;
+                    var plate = BambuSlicer.TowerFromGcode(Lines(s));   // Lines disposes s
+                    if (total == null) total = new GcodeTower();
+                    BambuSlicer.AddTower(total, plate);
+                }
+                return total;
+            }
+            catch (Exception) { return null; }
+        }
+
+        /// A stream's lines, one at a time (UTF-8, BOM skipped); disposes the stream at the end.
+        static IEnumerable<string> Lines(System.IO.Stream s)
+        {
+            using (var sr = new System.IO.StreamReader(s, Encoding.UTF8, true, 65536))
+            {
+                string line;
+                while ((line = sr.ReadLine()) != null) yield return line;
+            }
         }
     }
 }

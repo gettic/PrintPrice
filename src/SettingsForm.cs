@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -17,6 +17,8 @@ namespace PrintPrice
         TextBox txtDueDays, txtMobilePay, txtBank, txtPrinterName;   // invoice: pay within N days, ways to pay; printer name
         CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate, chkPayback;
         CheckBox chkMainInvoice;   // Quote & invoice tab: the main window's button makes invoices (AppSettings.MainInvoice)
+        CheckBox chkQuoteTower;    // Quote & invoice tab: "incl. 1,7 g for the prime tower" note on quotes / invoices (AppSettings.QuoteShowTower, issue #8 step 3)
+        ComboBox cmbTower;         // Quote & invoice tab: prime tower On / Off for 2+ colours (AppSettings.PrimeTower, all printers; issue #8 step 3)
         CheckBox chkInvoiceCopies; // Quote & invoice tab: copy of every invoice PDF (AppSettings.InvoiceCopies, issue #6)
         Button btnInvoiceFolder;   // … and "Open folder" beside it (MainForm.InvoicesFolder)
         ToolTip tip;               // dark tooltips (MainForm.DrawDarkTip)
@@ -205,6 +207,13 @@ namespace PrintPrice
             Section(t, L.S("Quote", "Tilbud"));
             txtQuoteName = TextRow(t, L.S("Name on the quote", "Navn på tilbuddet"), null, 40);
             txtQuoteDays = Row(t, L.S("Valid for", "Gyldigt i"), L.S("days", "dage"));   // valid until = quote date + days
+            // issue #8 step 3: Bambu Studio's prime tower when slicing 2+ colours (one setting for every printer; a job can
+            // switch it) here, next to its grams tick, so the Printer tab (the tallest) keeps Settings at 565 px; own heading (qol)
+            Section(t, "Slicing");   // the same word in Danish
+            cmbTower = Combo(t, L.S("Prime tower", "Primetårn"));
+            cmbTower.Items.Add(L.S("On (2+ colours)", "Til (2+ farver)"));
+            cmbTower.Items.Add(L.S("Off", "Fra"));
+            chkQuoteTower = Check(t, L.S("Show prime tower grams on quotes and invoices", "Vis primetårnets gram på tilbud og fakturaer"));
             Section(t, L.S("Invoice", "Faktura"));
             chkMainInvoice = Check(t, L.S("Main window makes invoices, not quotes",
                                           "Hovedvinduet laver fakturaer, ikke tilbud"));
@@ -213,6 +222,11 @@ namespace PrintPrice
             Disposed += delegate { tip.Dispose(); };
             tip.SetToolTip(chkMainInvoice, L.S("On: the main window's button makes an invoice with a number.\nQuotes are still made from History.",
                                                "Til: knappen i hovedvinduet laver en faktura med nummer.\nTilbud kan stadig laves fra Historik."));
+            // issue #8 step 3 (tip exists from here on)
+            tip.SetToolTip(cmbTower, L.S("Bambu Studio prints a small tower to clean the nozzle when the colour changes.\nOff saves filament and time but can leave colour smudges.\nFor every printer; a job with 2+ colours can switch it under its result.",
+                                         "Bambu Studio printer et lille tårn, der renser dysen, når farven skifter.\nFra sparer filament og tid, men kan give farvepletter.\nGælder alle printere; et job med 2+ farver kan skifte under resultatet."));
+            tip.SetToolTip(chkQuoteTower, L.S("On: quotes and invoices get the line \"incl. 1,7 g for the prime tower\" under Material\n(no price; the grams are already in the material). The main window always shows it.",
+                                              "Til: tilbud og fakturaer får linjen \"inkl. 1,7 g til primetårnet\" under Materiale\n(uden pris; grammene er allerede med i materialet). Hovedvinduet viser den altid."));
             // issue #6: a copy of every saved invoice PDF in <settings folder>\Invoices + a button that opens that folder
             int ic = t.RowCount++;
             var copyFlow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
@@ -359,7 +373,7 @@ namespace PrintPrice
             int cw = ClientSize.Width - 2 * Px(Edge);
             // one caption column for every tab: the longest caption (or the payback checkbox) + its right margin (LabelGap)
             // qol #13: tick boxes start where the captions' text starts (the box frame was 5 px left of it)
-            foreach (var cb in new[] { chkPayback, chkAutoWear, chkVat, chkAutoPower, chkMainInvoice, chkInvoiceCopies, chkAutoUpdate })
+            foreach (var cb in new[] { chkPayback, chkAutoWear, chkVat, chkAutoPower, chkMainInvoice, chkQuoteTower, chkInvoiceCopies, chkAutoUpdate })
                 cb.Margin = new Padding(Px(CheckIndent), cb.Margin.Top, cb.Margin.Right, cb.Margin.Bottom);
             // qol #12: measured to the end of the caption's TEXT (its preferred width ends with GDI's trailing text padding),
             // then a 30 px clear gap to the boxes, as in the main window (PreferredSize + LabelGap gave 27 / 26 px)
@@ -399,7 +413,7 @@ namespace PrintPrice
             foreach (var b in new[] { btnAddPrinter, btnRemovePrinter, btnBackupTo, btnRestoreFrom, btnSetupAgain, btnInvoiceFolder })
                 b.Size = new Size(TextRenderer.MeasureText(b.Text, b.Font).Width + Px(24), txtWatts.Height);
             // the copy check box centred on its Open folder button (measured)
-            chkInvoiceCopies.Margin = new Padding(0, Math.Max(0, btnInvoiceFolder.Margin.Top + (btnInvoiceFolder.Height - chkInvoiceCopies.Height) / 2), 0, 0);
+            chkInvoiceCopies.Margin = new Padding(Px(CheckIndent), Math.Max(0, btnInvoiceFolder.Margin.Top + (btnInvoiceFolder.Height - chkInvoiceCopies.Height) / 2), 0, 0);   // qol: the same indent as the other ticks
             btnInvoiceFolder.Margin = new Padding(btnInvoiceFolder.Margin.Left, btnInvoiceFolder.Margin.Top, 0, 4);
             FitHeight();
             FitPrinterList();
@@ -984,6 +998,8 @@ namespace PrintPrice
             txtBank.Text = s.PayBank ?? "";
             chkMainInvoice.Checked = s.MainInvoice == 1;
             chkInvoiceCopies.Checked = s.InvoiceCopies != 0;
+            cmbTower.SelectedIndex = s.PrimeTower == 0 ? 1 : 0;            // issue #8 step 3
+            chkQuoteTower.Checked = s.QuoteShowTower == 1;
             filling = false;
         }
 
@@ -1270,6 +1286,8 @@ namespace PrintPrice
             Result.PayBank = txtBank.Text.Trim();
             Result.MainInvoice = chkMainInvoice.Checked ? 1 : 0;
             Result.InvoiceCopies = chkInvoiceCopies.Checked ? 1 : 0;
+            Result.PrimeTower = cmbTower.SelectedIndex == 1 ? 0 : 1;      // issue #8 step 3
+            Result.QuoteShowTower = chkQuoteTower.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
         }
