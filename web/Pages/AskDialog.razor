@@ -1,0 +1,45 @@
+@* A short dark yes / no question (desktop BackupForm.AskForm): title, bold question, text, the action button and Cancel.
+   Focus starts on Cancel (No); Esc or a click outside = No. Used by Settings' "Reset to defaults" and the print status
+   question before several prints are set to Failed (issue #7). *@
+
+<div class="overlay ask-overlay" @onclick="No" @onkeydown="Key">
+    <div class="dialog confirm ask" role="alertdialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-text" @onclick:stopPropagation="true">
+        <div class="title">
+            <span id="ask-title">@Title</span>
+            <button @onclick="No" aria-label="@L.S("Close", "Luk")">✕</button>
+        </div>
+        <div class="cbody">
+            <p><b>@Question</b></p>
+            <p id="ask-text">@Text</p>
+        </div>
+        <div class="buttons">
+            <button @ref="noButton" data-cancel="1" @onclick="No">@NoText</button>
+            <button class="accent" @onclick="Yes">@YesText</button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; }
+    [Parameter] public string Question { get; set; }
+    [Parameter] public string Text { get; set; }
+    [Parameter] public string YesText { get; set; }
+    [Parameter] public string NoText { get; set; }
+    /// true = the action button, false = Cancel / Esc / outside.
+    [Parameter] public EventCallback<bool> OnAnswer { get; set; }
+
+    ElementReference noButton;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) { try { await noButton.FocusAsync(); } catch (Exception) { } }
+    }
+
+    Task Yes() { return OnAnswer.InvokeAsync(true); }
+    Task No() { return OnAnswer.InvokeAsync(false); }
+
+    async Task Key(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") await No();
+    }
+}

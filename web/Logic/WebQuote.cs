@@ -577,12 +577,12 @@ namespace PrintPrice.Web
         {
             get
             {
-                return new[] { L.S("Not printed yet", "Ikke printet endnu"), L.S("Printing now", "Printer nu"),
-                               L.S("Printed", "Printet"), L.S("Failed", "Fejlet") };
+                return new[] { QuoteRows.StateName(PrintState.NotPrinted), QuoteRows.StateName(PrintState.Printing),
+                               QuoteRows.StateName(PrintState.Printed), QuoteRows.StateName(PrintState.Failed) };   // the shared names (issue #7)
             }
         }
 
-        public static string StatusHeading { get { return L.S("Print status", "Printstatus"); } }
+        public static string StatusHeading { get { return WebStatus.Heading; } }
 
         /// After saving a quote marked Failed: what that means for new quotes ("" otherwise; = MainForm.FailedSavedNote,
         /// without its leading line break).
@@ -605,11 +605,13 @@ namespace PrintPrice.Web
         /// "Show invoice…"'s first Print / PDF or Copy text (MainForm.ExportJobInvoice): the job is saved (SaveExport, print
         /// state Printed as SaveToHistory(..., PrintState.Printed)) and its invoice made (number, date, snapshot, BilledTo).
         /// Returns the record now in the list. The caller saves the history, then the settings (UsedInvoiceNos).
-        public static QuoteRecord SaveJobInvoice(List<QuoteRecord> list, QuoteRecord r, bool friends, string customer, DateTime now, AppSettings s)
+        public static QuoteRecord SaveJobInvoice(List<QuoteRecord> list, QuoteRecord r, bool friends, string customer, DateTime now, AppSettings s, PrintState? state = null)
         {
             var saved = SaveExport(list, r, friends, customer);
             History.SetPrintState(saved, PrintState.Printed, now);
             ApplyRecordExport(list, saved, friends, customer, true, now, s);
+            // issue #7: the status picked in the window before it was made (it starts at Printed)
+            if (state.HasValue) History.SetPrintState(saved, state.Value, now);
             return saved;
         }
 
@@ -700,6 +702,10 @@ namespace PrintPrice.Web
         public sealed class Done
         {
             public string Problem, Status, Text, FileName;
+            /// The status box afterwards (a saved record / combined bill: its stored status; null with Mixed = they differ;
+            /// HasStatus false = leave the box as it is).
+            public bool HasStatus, Mixed;
+            public PrintState Status_;
         }
     }
 }

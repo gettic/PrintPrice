@@ -63,6 +63,7 @@ namespace PrintPrice
 
         // ---------- idea 22: several selected, Clear all, undo, pictures, views ----------
         readonly Button btnClear;
+        readonly Button btnInvoices;   // issue #7: the Invoices window (HistoryInvoices.cs)
         readonly DataGridViewTextBoxColumn colPic;   // the picture (drawn in GridCellPainting)
         readonly ViewSwitch viewSwitch;
         readonly TileView tiles;
@@ -585,9 +586,14 @@ namespace PrintPrice
             btnClear = MakeButton(L.S("Clear all…", "Ryd alt…"), 0);
             btnClear.Margin = new Padding(6, 0, 0, 0);
             btnClear.Click += delegate { ClearAllClicked(); };
+            // issue #7: Invoices… (Ctrl+I) opens the invoice list (one row per invoice)
+            btnInvoices = MakeButton(L.S("Invoices…", "Fakturaer…"), 0);
+            btnInvoices.Margin = new Padding(6, 0, 0, 0);
+            btnInvoices.Click += delegate { InvoicesClicked(); };
             left.Controls.Add(btnDelete);
             left.Controls.Add(btnClear);
             left.Controls.Add(btnBackup);
+            left.Controls.Add(btnInvoices);
             bottom.Controls.Add(left, 0, 0);
             bottom.Controls.Add(right, 1, 0);
             root.Controls.Add(bottom);
@@ -822,7 +828,7 @@ namespace PrintPrice
         }
 
         // ---------- list ----------
-        static string ModelText(QuoteRecord r) { return History.ModelText(r); }
+        static string ModelText(QuoteRecord r) { return History.WithScale(History.ModelText(r), r); }   // issue #8: "… (150 %)"
 
         static string DateText(QuoteRecord r)
         {
@@ -1172,6 +1178,7 @@ namespace PrintPrice
             if (keyData == (Keys.Control | Keys.D1) || keyData == (Keys.Control | Keys.NumPad1)) { SetView(ViewList); return true; }
             if (keyData == (Keys.Control | Keys.D2) || keyData == (Keys.Control | Keys.NumPad2)) { SetView(ViewMedium); return true; }
             if (keyData == (Keys.Control | Keys.D3) || keyData == (Keys.Control | Keys.NumPad3)) { SetView(ViewLarge); return true; }
+            if (keyData == (Keys.Control | Keys.I)) { InvoicesClicked(); return true; }   // issue #7: the Invoices window
             // Esc in the search box with text: clears the search first (the next Esc closes the window)
             if (keyData == Keys.Escape && txtSearch.Focused && txtSearch.TextLength > 0) { txtSearch.Clear(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
@@ -1199,11 +1206,25 @@ namespace PrintPrice
             e.PaintBackground(e.CellBounds, selected);
             var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
             if (rec == null) { e.Handled = true; return; }
-            var state = History.PrintStateOf(rec, DateTime.Now);
-            float sc = CurrentAutoScaleDimensions.Height / 96f;
+            PaintStatusCell(e.Graphics, e.CellBounds, History.PrintStateOf(rec, DateTime.Now), selected, CurrentAutoScaleDimensions.Height / 96f, grid.Font);
+            e.Handled = true;
+        }
+
+        /// The Status mark + short name in a cell (History's Status column and the Invoices window): not printed = Muted
+        /// hollow circle, printing = amber clock, printed = green ✓, failed = red ✗; null = several prints that differ:
+        /// no mark, Muted "Mixed" / "Blandet". sc = dpi / 96.
+        internal static void PaintStatusCell(Graphics g, Rectangle cell, PrintState? shared, bool selected, float sc, Font font)
+        {
+            if (!shared.HasValue)
+            {
+                var r0 = new Rectangle(cell.X + (int)Math.Round(7 * sc), cell.Y, cell.Width - (int)Math.Round(9 * sc), cell.Height);
+                TextRenderer.DrawText(g, L.S("Mixed", "Blandet"), font, r0, selected ? Color.White : Theme.Muted,
+                                      TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                return;
+            }
+            var state = shared.Value;
             int size = (int)Math.Round(14 * sc), padL = (int)Math.Round(7 * sc);
-            var box = new Rectangle(e.CellBounds.X + padL, e.CellBounds.Y + (e.CellBounds.Height - size) / 2, size - 1, size - 1);
-            var g = e.Graphics;
+            var box = new Rectangle(cell.X + padL, cell.Y + (cell.Height - size) / 2, size - 1, size - 1);
             var old = g.SmoothingMode;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             float w = Math.Max(1.5f, 1.5f * sc);
@@ -1252,11 +1273,10 @@ namespace PrintPrice
                 }
             }
             g.SmoothingMode = old;
-            var textRect = new Rectangle(box.Right + 1 + (int)Math.Round(6 * sc), e.CellBounds.Y, e.CellBounds.Right - box.Right - (int)Math.Round(8 * sc), e.CellBounds.Height);
+            var textRect = new Rectangle(box.Right + 1 + (int)Math.Round(6 * sc), cell.Y, cell.Right - box.Right - (int)Math.Round(8 * sc), cell.Height);
             Color fore = state == PrintState.NotPrinted ? Theme.Muted : selected ? Color.White : Theme.Text;
-            TextRenderer.DrawText(g, ShortStateName(state), grid.Font, textRect, fore,
+            TextRenderer.DrawText(g, ShortStateName(state), font, textRect, fore,
                                   TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
-            e.Handled = true;
         }
 
         /// The Status column's short names (the menus use QuoteRows.StateName).

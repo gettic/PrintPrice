@@ -159,7 +159,11 @@ else
             <div class="power">
                 <button @onclick="FetchPower" disabled="@fetchingPower"
                         title="@L.S("Fetch the current electricity price", "Hent den aktuelle elpris")">@L.S("Update", "Opdatér")</button>
-                <div class="@(powerError ? "power-line error" : "power-line")" role="status">@powerLine</div>
+                <div class="@(powerError ? "power-line error" : "power-line")" role="status">@powerLine@if (powerCredit != null && powerLine != null && powerLine == creditFor)
+                    {
+                        @* the price source's credit (elprisenligenu.dk asks for it when their prices are shown) *@
+                        <span class="power-credit">@powerCredit<a href="@LivePower.CreditUrl" target="_blank" rel="noopener noreferrer">@LivePower.CreditSource</a></span>
+                    }</div>
             </div>
         </div>
 
@@ -277,12 +281,17 @@ else
                    PriceLocked="@(quoteJobs != null ? groupMade : quoteInvoice && WebQuote.InvoiceMade(quoteRecord))"
                    LockedFriends="@(quoteJobs != null ? WebQuote.AllFriends(quoteJobs) : WebQuote.BilledFriends(quoteRecord))"
                    MadeNo="@(quoteRecord != null ? quoteRecord.InvoiceNo : null)"
-                   StartStatus="@(quoteRecord != null ? History.PrintStateOf(quoteRecord, DateTime.Now) : PrintState.NotPrinted)"
-                   NoStatus="quoteJobs != null"
+                   StartStatus="@QuoteStartStatus" StartMixed="@(quoteJobs != null && WebStatus.Shared(quoteJobs, DateTime.Now) == null)"
+                   StatusHeading="@(quoteJobs != null ? WebStatus.GroupHeading(quoteJobs.Count) : null)"
+                   StatusNow="@(quoteRecord != null || quoteJobs != null ? SaveStatusNow : null)"
                    Warning="@(quoteJobs != null ? (quoteNoteWarn ? quoteNote : null) : quoteInvoice ? Joined(WebQuote.FailedInvoiceNote(quoteRecord), quoteNoteWarn ? quoteNote : null) : quoteNoteWarn ? quoteNote : null)"
                    Note="@(quoteNoteWarn ? null : quoteNote)"
                    Help="@(quoteJobs != null ? WebQuote.GroupHelpText(quoteJobs.Count, quoteInvoice, groupMade, groupMade ? quoteJobs[0].InvoiceNo.Trim() : "") : null)"
                    Build="BuildQuoteSheet" Export="ExportQuote" Remember="RememberQuoteLook" OnClose="CloseQuote" />
+    }
+    @if (askDone != null)
+    {
+        <AskDialog Title="@askTitle" Question="@askQuestion" Text="@askText" YesText="@WebStatus.Yes" NoText="@WebStatus.No" OnAnswer="Answered" />
     }
 }
 
@@ -321,7 +330,7 @@ else
 
     // ---------- live electricity price ----------
     bool fetchingPower, powerError, powerStarted;
-    string powerLine;
+    string powerLine, powerCredit, creditFor;   // creditFor: the line the credit belongs to (another line hides it)
 
     // ---------- stage 3: price history ----------
     List<QuoteRecord> history = new List<QuoteRecord>();   // newest first; the History page edits this same list
@@ -611,6 +620,8 @@ else
             }
             powerError = !r.Ok;
             powerLine = LivePower.Line(r, addOn, vat, applied, t => t.ToLocalTime(), DateTime.Now);
+            powerCredit = LivePower.Credit(r);
+            creditFor = powerLine;
         }
         finally
         {
@@ -1070,6 +1081,80 @@ else
     string quoteNote;                            // notes under the price choice (whole invoice shown, failed left out, names)
     bool quoteNoteWarn;
 
+    /// The status box at the start: a saved record / combined bill = its stored status; a new job invoice = Printed
+    /// (making it ticks Printed; the pick is stored when it is made); a new job quote = Not printed yet.
+    PrintState QuoteStartStatus
+    {
+        get
+        {
+            DateTime now = DateTime.Now;
+            if (quoteJobs != null) { var s = WebStatus.Shared(quoteJobs, now); return s ?? PrintState.NotPrinted; }
+            if (quoteRecord != null) return History.PrintStateOf(quoteRecord, now);
+            return quoteInvoice ? PrintState.Printed : PrintState.NotPrinted;
+        }
+    }
+
+    // a yes / no question over the page (AskDialog): Ask waits for the answer
+    TaskCompletionSource<bool> askDone;
+    string askTitle, askQuestion, askText;
+
+    Task<bool> Ask(string title, string question, string text)
+    {
+        askTitle = title; askQuestion = question; askText = text;
+        askDone = new TaskCompletionSource<bool>();
+        StateHasChanged();
+        return askDone.Task;
+    }
+
+    void Answered(bool yes)
+    {
+        var t = askDone;
+        askDone = null;
+        if (t != null) t.TrySetResult(yes);
+    }
+
+    /// Issue #7 (MainForm.SaveStatusNow): a status picked in a saved record's window (quote, invoice or a combined bill)
+    /// is saved at once on every record, one save; 2+ to Failed asks first (No = nothing changes). The box shows the
+    /// stored status afterwards.
+    async Task<WebQuote.Done> SaveStatusNow(PrintState state)
+    {
+        var d = new WebQuote.Done();
+        var recs = quoteJobs ?? (quoteRecord != null ? new List<QuoteRecord> { quoteRecord } : new List<QuoteRecord>());
+        int ask = WebStatus.FailedToAsk(recs, state);
+        bool go = recs.Count > 0 && (ask == 0 || await Ask(WebStatus.Heading, WebStatus.FailedQuestion(ask), WebStatus.FailedText));
+        if (go)
+        {
+            WebStatus.Apply(recs, state, DateTime.Now);
+            string err = await Histories.Save(history);
+            if (err == null)
+            {
+                SaveWorked();
+                d.Status = WebStatus.SavedText(state);
+                if (state == PrintState.Failed)
+                {
+                    string note = WebQuote.FailedSavedNote(recs[0], settings);
+                    if (note.Length > 0) d.Status += "\n" + note;
+                }
+                Recalculate();   // the failed-prints payback
+            }
+            else { await RollBack(err); d.Problem = err; }
+        }
+        FillStatus(d);
+        StateHasChanged();
+        return d;
+    }
+
+    /// The Done's status box: the window's records as they are stored now.
+    void FillStatus(WebQuote.Done d)
+    {
+        var recs = quoteJobs ?? (quoteRecord != null ? new List<QuoteRecord> { quoteRecord } : null);
+        if (recs == null || recs.Count == 0) return;
+        var s = WebStatus.Shared(recs, DateTime.Now);
+        d.HasStatus = true;
+        d.Mixed = s == null;
+        d.Status_ = s ?? PrintState.NotPrinted;
+    }
+
     double GroupTotal(bool friends) { return History.GroupBill(quoteJobs, settings, friends).Total; }
 
     static string Joined(string a, string b)
@@ -1269,10 +1354,10 @@ else
             bool makeInvoice = quoteInvoice && kind != "history";
             if (makeInvoice && customer.Length == 0) { d.Problem = WebQuote.NeedName; return d; }
             string oldSavedId = savedId;
-            var saved = makeInvoice ? WebQuote.SaveJobInvoice(history, NewRecord(), friends, customer, DateTime.Now, settings)
+            var saved = makeInvoice ? WebQuote.SaveJobInvoice(history, NewRecord(), friends, customer, DateTime.Now, settings, state)
                                     : state.HasValue && !quoteInvoice ? WebQuote.SaveExport(history, NewRecord(), friends, customer, state.Value, DateTime.Now)
                                     : WebQuote.SaveExport(history, NewRecord(), friends, customer);
-            if (!quoteInvoice) noteOn = saved;
+            if (!quoteInvoice || (makeInvoice && state.HasValue)) noteOn = saved;
             savedId = saved.Id;   // left out of the payback debt from now on
             DateTime when;
             var savedWhen = History.TryTime(saved.SavedAt, out when) ? when : DateTime.Now;
@@ -1333,6 +1418,7 @@ else
             if (note.Length > 0) d.Status += "\n" + note;
         }
         if (ok) Recalculate();   // a status change can change the failed-prints payback
+        FillStatus(d);   // the box: the stored status (a made invoice: Printed or the pick)
         StateHasChanged();   // the History page and the tab count behind the window
         return d;
     }

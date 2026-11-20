@@ -48,15 +48,42 @@ static class PowerTests
         string edited = LivePower.Line(r, 0.55, true, false, utc, at);
         True("edited field: " + edited, edited == "Live price DK1 12:00 is 3,69 kr/kWh (not applied because you edited the field).");
 
-        // STALE copy from 13:20 UTC, asked 5 hours later: the slot current at 13:20, with the copy's time
-        var stale = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json, Stale = "2026-11-10T13:20:00.000Z" },
-                                        "DK1", at.AddHours(5), 0.55, true);
-        True("stale: ok, saved 13:20", stale.Ok && stale.SavedUtc == new DateTime(2026, 11, 10, 13, 20, 0, DateTimeKind.Utc));
-        True("stale: slot 13:15", stale.Quote.SlotStartUtc == new DateTime(2026, 11, 10, 13, 15, 0));
+        // STALE copy (old Worker: only X-Price-Stale) fetched 11:20 UTC, asked at 12:14: still the slot of NOW, with the copy's time
+        var stale = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json, Stale = "2026-11-10T11:20:00.000Z" },
+                                        "DK1", at, 0.55, true);
+        True("stale: ok, from 11:20", stale.Ok && stale.Stale && stale.SavedUtc == new DateTime(2026, 11, 10, 11, 20, 0, DateTimeKind.Utc));
+        True("stale: slot of now (12:00)", stale.Quote.SlotStartUtc == new DateTime(2026, 11, 10, 12, 0, 0));
         string sl = LivePower.Line(stale, 0.55, true, true, utc, at);
-        True("stale line: " + sl, sl.StartsWith("Live DK1 13:15 (price from 13:20, the live service is busy): spot 2,90"));
+        True("stale line: " + sl, sl.StartsWith("Live DK1 12:00 (price from 11:20, the live service is busy): spot 2,40"));
         string sl2 = LivePower.Line(stale, 0.55, true, true, utc, at.AddDays(1));
-        True("stale from yesterday shows the date: " + sl2, sl2.Contains("(price from 10/11 13:20,"));
+        True("stale from yesterday shows the date: " + sl2, sl2.Contains("(price from 10/11 11:20,"));
+        // a STALE copy too old for a current slot (the Worker's 10-day-old copy): not used, the user's price stays, its date said
+        var tooOld = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json, Stale = "2026-11-10T11:20:00.000Z" },
+                                         "DK1", at.AddDays(10), 0.55, true);
+        string tl = LivePower.Line(tooOld, 0.55, true, true, utc, at.AddDays(10));
+        True("too old: not used, says from when: " + tl, !tooOld.Ok && tooOld.NoCurrent
+             && tl == "Couldn't get the live price (the newest prices are from 10/11 11:20). Using your last price.");
+        // the new Worker's headers: source, fetch time, cache state
+        var eli = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json, Source = "elprisenligenu.dk", Fetched = "2026-11-10T12:05:00Z", Cache = "MISS" },
+                                      "DK1", at, 0.55, true);
+        True("new Worker fresh: ok, no 'price from', credit", eli.Ok && !eli.Stale && eli.SavedUtc == null && eli.Source == "elprisenligenu.dk"
+             && LivePower.Credit(eli) == "Prices: " && LivePower.Line(eli, 0.55, true, true, utc, at).StartsWith("Live DK1 12:00: spot"));
+        var eds = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json, Source = "Energi Data Service", Fetched = "2026-11-10T12:05:00Z", Cache = "HIT" },
+                                      "DK1", at, 0.55, true);
+        True("Energi Data Service: no credit line", eds.Ok && LivePower.Credit(eds) == null);
+        var kept = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json, Source = "elprisenligenu.dk", Fetched = "2026-11-10T11:30:00Z",
+                                                              Cache = "STALE", Stale = "2026-11-10T11:30:00Z" }, "DK1", at, 0.55, true);
+        True("new Worker STALE: price from its fetch time: " + LivePower.Line(kept, 0.55, true, true, utc, at),
+             kept.Ok && kept.Stale && LivePower.Line(kept, 0.55, true, true, utc, at).StartsWith("Live DK1 12:00 (price from 11:30, the live service is busy)"));
+        // fetched over a day ago (no STALE said): "price from" with the date, no "busy"
+        string day = PowerTests.Records(at.AddHours(-26), 160);
+        var aged = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = day, Fetched = "2026-11-09T10:00:00Z", Cache = "KEPT" }, "DK1", at, 0.55, true);
+        string al = LivePower.Line(aged, 0.55, true, true, utc, at);
+        True("fetched yesterday: price from with the date: " + al, aged.Ok && al.Contains("(price from 9/11 10:00):") && !al.Contains("busy"));
+        var noHead = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json }, "DK1", at, 0.55, true);
+        True("old Worker, no headers: as before, no credit", noHead.Ok && noHead.Source == "" && LivePower.Credit(noHead) == null && noHead.SavedUtc == null);
+        var noCurNoDate = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json }, "DK1", at.AddHours(5), 0.55, true);
+        True("no current slot, no fetch time: the old reason", !noCurNoDate.Ok && !noCurNoDate.NoCurrent && noCurNoDate.Why.Contains("no current price"));
 
         // failures -> the fallback line (the typed / last price stays)
         var busy = LivePower.Interpret(new LivePower.Answer { Status = 429, Text = "price service busy" }, "DK1", at, 0.55, true);
@@ -84,6 +111,10 @@ static class PowerTests
         busy = LivePower.Interpret(new LivePower.Answer { Status = 429 }, "DK1", at, 0.55, true);
         True("Danish fallback text", LivePower.Line(busy, 0.55, true, true, utc, at) ==
              "Kunne ikke hente live-prisen (pristjenesten har travlt lige nu). Bruger din sidste pris.");
+        tooOld = LivePower.Interpret(new LivePower.Answer { Status = 200, Text = json, Stale = "2026-11-10T11:20:00.000Z" }, "DK1", at.AddDays(10), 0.55, true);
+        True("Danish too old", LivePower.Line(tooOld, 0.55, true, true, utc, at.AddDays(10)) ==
+             "Kunne ikke hente live-prisen (de nyeste priser er fra 10/11 11:20). Bruger din sidste pris.");
+        True("Danish credit + price from", LivePower.Credit(eli) == "Priser: " && LivePower.Line(aged, 0.55, true, true, utc, at).Contains("(pris fra 9/11 10:00):"));
         L.Danish = danish;
     }
 }

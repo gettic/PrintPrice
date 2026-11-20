@@ -19,6 +19,7 @@ namespace PrintPrice
         public double MainSeconds;     // print time without colour changes
         public double TotalSeconds;    // full print time
         public int ColourChanges;      // filament_change_times
+        public List<double[]> ObjectSizes = new List<double[]>();   // issue #8: per object {width X, depth Y, height Z} mm, as sliced (scaled)
     }
 
     /// Drives the Bambu Studio command line to slice models with Bambu Lab A1 / A1 mini / P1S profiles.
@@ -506,8 +507,12 @@ namespace PrintPrice
         /// `defaultFilament` (Settings' filament), named ones keep theirs; nozzleSize / defaultFilament null = one filament
         /// (slot 1). printer = "A1", "A1M", "P1S"; null = the one PrepareProfiles used for workDir.
         /// A model too big for the printer (CLI -50) throws BedErrorText.
-        public static SliceResult SliceFile(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament, CancellationToken ct)
+        /// scalePct (issue #8): 100 / 0 = as the file is; else "--scale --ensure-on-bed" (ScaleArgs; a G-code throws ScaleGcodeText).
+        public static SliceResult SliceFile(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament, CancellationToken ct,
+                                            double scalePct = 100)
         {
+            if (IsScaled(scalePct) && IsGcodeFile(model)) throw new SliceException(ScaleGcodeText());
+            var scaleArgs = ScaleArgs(scalePct);
             printer = string.IsNullOrEmpty(printer) ? WorkDirPrinter(workDir) : FindPrinter(printer).Key;
             string outDir = Path.Combine(workDir, "out_" + Guid.NewGuid().ToString("N").Substring(0, 8));
             Directory.CreateDirectory(outDir);
@@ -515,7 +520,7 @@ namespace PrintPrice
             if (!string.IsNullOrEmpty(nozzleSize) && !string.IsNullOrEmpty(defaultFilament))
                 filaments = SlotFilaments(exe, model, printer, nozzleSize, defaultFilament, outDir);
             return RunSlice(exe, new[] { model }, workDir, printer, filaments, filaments ?? Path.Combine(workDir, "filament.json"),
-                            null, outDir, Path.GetFileName(model), ct);
+                            scaleArgs.Count > 0 ? scaleArgs : null, outDir, Path.GetFileName(model), ct);
         }
 
         /// Runs the slicer CLI on `models` (one call) with the given --load-filaments value and extra options, in outDir
@@ -836,9 +841,13 @@ namespace PrintPrice
         /// workDir: copy it out with KeepForStudio).
         public static SliceResult SliceColours(string exe, IList<KeyValuePair<string, string>> models, IList<int> slots,
                                                IList<ColourChoice> colours, bool together, string workDir, string printer,
-                                               string nozzleSize, string defaultFilament, IProgress<string> progress, CancellationToken ct)
+                                               string nozzleSize, string defaultFilament, IProgress<string> progress, CancellationToken ct,
+                                               double scalePct = 100)
         {
             if (models == null || models.Count == 0) throw new SliceException(L.S("No model file to slice.", "Ingen modelfil at slice."));
+            // issue #8: one scale for every file of the job (refused for a G-code, checked before anything runs)
+            if (IsScaled(scalePct) && models.Any(m => IsGcodeFile(m.Value))) throw new SliceException(ScaleGcodeText());
+            var scaleArgs = ScaleArgs(scalePct);
             colours = colours ?? new List<ColourChoice>();
             printer = string.IsNullOrEmpty(printer) ? WorkDirPrinter(workDir) : FindPrinter(printer).Key;
             var colourFiles = PrepareColours(exe, printer, nozzleSize, colours, defaultFilament, workDir);
@@ -870,7 +879,7 @@ namespace PrintPrice
                         string outDir = NewOutDir(workDir);
                         string load = string.Join(";", colourFiles);
                         var r = RunSlice(exe, plain.Select(i => models[i].Value).ToList(), workDir, printer, load, load,
-                                         TogetherArgs(plain.Select(slotOf).ToList(), types), outDir,
+                                         TogetherArgs(plain.Select(slotOf).ToList(), types).Concat(scaleArgs).ToList(), outDir,
                                          string.Join(", ", plain.Select(i => models[i].Key)), ct);
                         // too big for one plate: the CLI makes 2+ plates and puts plate 2 on filament 1 (wrong colours),
                         // so that counts as a failure
@@ -912,13 +921,13 @@ namespace PrintPrice
                     int slot = slotOf(i);
                     Report(progress, name, i, models.Count);
                     string cf = colourFiles[slot - 1];
-                    r = RunSlice(exe, new[] { path }, workDir, printer, cf, cf, null, NewOutDir(workDir), Path.GetFileName(path), ct);
+                    r = RunSlice(exe, new[] { path }, workDir, printer, cf, cf, scaleArgs.Count > 0 ? scaleArgs : null, NewOutDir(workDir), Path.GetFileName(path), ct);
                     offset = slot - 1;   // the run's slot 1 = this colour
                 }
                 else
                 {
-                    if (IsSlicedProject(path)) { r = ReadSliceInfo(path, defaultFilament); r.FromSlicedFile = true; }
-                    else { Report(progress, name, i, models.Count); r = SliceFile(exe, path, workDir, printer, nozzleSize, defaultFilament, ct); }
+                    if (ReadAsSliced(path, scalePct)) { r = ReadSliceInfo(path, defaultFilament); r.FromSlicedFile = true; }
+                    else { Report(progress, name, i, models.Count); r = SliceFile(exe, path, workDir, printer, nozzleSize, defaultFilament, ct, scalePct); }
                     offset = colourFiles.Count;
                 }
                 AddResult(total, r, name, offset);
@@ -988,6 +997,18 @@ namespace PrintPrice
                     st.MainSeconds += JsonNum(p, "main_predication");
                     st.TotalSeconds += JsonNum(p, "total_predication");
                     st.ColourChanges += (int)JsonNum(p, "filament_change_times");
+                    object oo;
+                    var objs = p.TryGetValue("objects", out oo) ? oo as System.Collections.IEnumerable : null;
+                    if (objs != null)
+                        foreach (var o in objs)
+                        {
+                            var ob = o as Dictionary<string, object>;
+                            object bo;
+                            var bb = ob != null && ob.TryGetValue("bbox", out bo) ? bo as Dictionary<string, object> : null;
+                            if (bb == null) continue;
+                            double w = JsonNum(bb, "width"), dp = JsonNum(bb, "depth"), h = JsonNum(bb, "height");
+                            if (w > 0 && dp > 0 && h > 0) st.ObjectSizes.Add(new[] { w, dp, h });
+                        }
                     object fo;
                     var fils = p.TryGetValue("filaments", out fo) ? fo as System.Collections.IEnumerable : null;
                     if (fils == null) continue;
@@ -1029,6 +1050,7 @@ namespace PrintPrice
         /// Does nothing when stats is null (e.g. a user's .gcode.3mf): those stay -1. Seconds/Grams are not changed.
         public static void ApplySliceStats(SliceResult res, SliceStats stats)
         {
+            if (res != null && stats != null) SetSize(res, stats.ObjectSizes);
             if (res == null || stats == null || stats.TotalGrams.Count == 0) return;
             foreach (var f in res.Filaments)
             {
@@ -1045,6 +1067,123 @@ namespace PrintPrice
             res.PurgeGrams = Math.Max(0, purge);
             if (stats.TotalSeconds > 0 && stats.MainSeconds > 0)
                 res.ColourChangeHours = Math.Max(0, stats.TotalSeconds - stats.MainSeconds) / 3600.0;
+        }
+
+        // ---------- same-size scaling (issue #8 step 1) ----------
+        // One scale per job, in percent (100 = as the file is). Bambu Studio's CLI scales with "--scale <factor>"; without
+        // "--ensure-on-bed" it scales around the model's centre and a bigger model loses its bottom (the slice "works" with
+        // wrong numbers) and a smaller one floats (slice fails), so the two always go together (plans\issue8\report.md).
+
+        /// The scale window's limits (percent).
+        public const double MinScalePct = 10, MaxScalePct = 500;
+
+        /// True when pct asks for a real scale: > 0 and not 100 (0 / negative / NaN = not scaled, like an old record).
+        public static bool IsScaled(double pct)
+        {
+            return !double.IsNaN(pct) && !double.IsInfinity(pct) && pct > 0 && Math.Abs(pct - 100) >= 0.005;
+        }
+
+        /// Pure: the extra CLI arguments for a scale: none when !IsScaled, else "--scale", the factor with an invariant
+        /// dot (150 -> "1.5", 33,3 -> "0.333", never "1,5" on Danish Windows), "--ensure-on-bed". Outside
+        /// MinScalePct..MaxScalePct throws SliceException (ScaleRangeText).
+        public static List<string> ScaleArgs(double pct)
+        {
+            var list = new List<string>();
+            if (!IsScaled(pct)) return list;
+            if (pct < MinScalePct - 0.005 || pct > MaxScalePct + 0.005) throw new SliceException(ScaleRangeText());
+            list.Add("--scale");
+            list.Add((Math.Round(pct, 2) / 100.0).ToString("0.####", CultureInfo.InvariantCulture));
+            list.Add("--ensure-on-bed");
+            return list;
+        }
+
+        /// "The size must be between 10 % and 500 %." (both languages).
+        public static string ScaleRangeText()
+        {
+            return L.F("The size must be between {0} % and {1} %.", "Størrelsen skal være mellem {0} % og {1} %.",
+                       MinScalePct.ToString("0", Num.Dk), MaxScalePct.ToString("0", Num.Dk));
+        }
+
+        /// Pure: the scale box's text -> percent. Accepts "150", "150 %", "150%", "87,5", "87.5" (Num.TryParse rules);
+        /// false when empty, not a number, or outside MinScalePct..MaxScalePct. Rounded to 1 decimal.
+        public static bool TryParseScale(string text, out double pct)
+        {
+            pct = 0;
+            string s = (text ?? "").Trim().TrimEnd('%').Trim();
+            double v;
+            if (!Num.TryParse(s, out v)) return false;
+            v = Math.Round(v, 1);
+            if (v < MinScalePct || v > MaxScalePct) return false;
+            pct = v;
+            return true;
+        }
+
+        /// A G-code can't be scaled (it is already toolpaths); models and .3mf files (also sliced ones) can.
+        public static bool CanScale(string path)
+        {
+            return !string.IsNullOrEmpty(path) && !IsGcodeFile(path);
+        }
+
+        /// Read the file's own numbers instead of slicing: an already-sliced file and no scale. A scaled sliced .3mf is
+        /// sliced again (it holds the model); a scaled G-code is not read either, so it goes on to SliceFile, which throws
+        /// ScaleGcodeText (never its 100 % numbers under a scaled name). Use this where IsSlicedProject decided "read, don't slice".
+        public static bool ReadAsSliced(string path, double scalePct)
+        {
+            return IsSlicedProject(path) && !IsScaled(scalePct);
+        }
+
+        /// "A G-code file can't be scaled …" (both languages).
+        public static string ScaleGcodeText()
+        {
+            return L.S("A G-code file can't be scaled; it is already sliced. Scale the model file instead.",
+                       "En G-code-fil kan ikke skaleres, den er allerede slicet. Skalér modelfilen i stedet.");
+        }
+
+        /// Pure: the object sizes from result.json -> res.SizeX/Y/Z (the biggest by box volume) and SizeObjects.
+        /// None = left as they are.
+        internal static void SetSize(SliceResult res, IList<double[]> sizes)
+        {
+            if (res == null || sizes == null || sizes.Count == 0) return;
+            double best = -1;
+            foreach (var s in sizes)
+            {
+                if (s == null || s.Length < 3) continue;
+                double v = s[0] * s[1] * s[2];
+                if (v > best) { best = v; res.SizeX = s[0]; res.SizeY = s[1]; res.SizeZ = s[2]; }
+            }
+            res.SizeObjects = sizes.Count(s => s != null && s.Length >= 3);
+        }
+
+        /// Pure: a size measured at fromPct, at toPct (both > 0; else the size as it is). 48 mm at 100 % -> 72 at 150 %.
+        public static double SizeAt(double mm, double fromPct, double toPct)
+        {
+            if (!(fromPct > 0) || !(toPct > 0)) return mm;
+            return mm * toPct / fromPct;
+        }
+
+        /// Pure: "60,0 × 31,0 × 48,0 mm" (W × D × H, 1 decimal, Danish comma in both languages like the rest of the app).
+        public static string SizeText(double x, double y, double z)
+        {
+            return x.ToString("0.0", Num.Dk) + " × " + y.ToString("0.0", Num.Dk) + " × " + z.ToString("0.0", Num.Dk) + " mm";
+        }
+
+        /// Pure: does an object of x × y × z mm fit the printer's build volume (X and Y may swap)? printer = "A1", "A1M",
+        /// "P1S" (unknown = A1). Unknown size (any <= 0) = true.
+        public static bool FitsBed(string printer, double x, double y, double z)
+        {
+            if (x <= 0 || y <= 0 || z <= 0) return true;
+            var p = FindPrinter(printer);
+            const double eps = 0.01;
+            bool xy = (x <= p.BedX + eps && y <= p.BedY + eps) || (y <= p.BedX + eps && x <= p.BedY + eps);
+            return xy && z <= p.BedZ + eps;
+        }
+
+        /// "Too big for the Bambu Lab A1 (max 256 × 256 × 256 mm)." (both languages).
+        public static string TooBigText(string printer)
+        {
+            var p = FindPrinter(printer);
+            return L.F("Too big for the {0} (max {1} × {2} × {3} mm).", "For stor til {0} (maks. {1} × {2} × {3} mm).",
+                       p.MachineName, p.BedX, p.BedY, p.BedZ);
         }
 
         const long MaxPictureBytes = 4 * 1048576;

@@ -46,6 +46,15 @@ namespace PrintPrice
                     main.SetSamplePayback(33.70);
                     Snap(main, folder, "main_payback.png");
                     main.SetSamplePayback(0);   // back to the defaults (no debt) for the other pictures
+                    // issue #8: the Scale window on the Benchy (as it opens at 100 %, then 150 % typed), the scaled job, and
+                    // 500 % (too big for the A1: warning, Apply off)
+                    using (var sw = main.SampleScaleWindow(null)) if (sw != null) SnapForm(sw, folder, "scale_100.png");
+                    using (var sw = main.SampleScaleWindow("150")) if (sw != null) SnapForm(sw, folder, "scale.png");
+                    using (var sw = main.SampleScaleWindow("500")) if (sw != null) SnapForm(sw, folder, "scale_toobig.png");
+                    using (var sw = main.SampleScaleWindow("5")) if (sw != null) SnapForm(sw, folder, "scale_bad.png");
+                    main.SetSampleScaledJob();
+                    Snap(main, folder, "main_scaled.png");
+                    main.SetSampleJob();   // back to 100 %
                     // 4-colour Benchy: one row per colour in the Cost breakdown; picture = <folder>\model2.png if there
                     main.SetSampleMultiJob();
                     main.SetSamplePicture(Path.Combine(folder, "model2.png"), "sample1");
@@ -150,6 +159,32 @@ namespace PrintPrice
                         Snap(hist, folder, "history_status_menu.png", (g, o) => hist.SampleStatusMenu(1, g, o));
                         using (var ask = HistoryForm.NewFailedAsk(3))
                             SnapForm(ask, folder, "history_failed_ask.png");
+                        hist.Hide();
+                    }
+                    // issue #7: the Invoices window (made-up invoices: a combined Mixed one, one past its due date), a search,
+                    // the Status cell's menu of the combined invoice
+                    var invQuotes = HistoryForm.SampleInvoiceQuotes();
+                    using (var hist = new HistoryForm(invQuotes, null, true))
+                    {
+                        hist.QuoteRequested = (owner, recs, isInvoice) => null;
+                        hist.Settings = s;
+                        Place(hist);
+                        hist.Show();
+                        using (var inv = hist.NewInvoicesForm())
+                        {
+                            Place(inv);
+                            inv.Show(hist);
+                            Snap(inv, folder, "invoices.png");
+                            inv.TestSelect("2026-51907");
+                            int row = inv.TestRows.FindIndex(r => r.No == "2026-51907");
+                            Snap(inv, folder, "invoices_status_menu.png", (g, o) => inv.SampleStatusMenu(row, g, o));
+                            inv.TestSearch("mads");
+                            Snap(inv, folder, "invoices_search.png");
+                            inv.TestSearch("");
+                            inv.TestStatusFilter(2);   // Printing now: only the 4-colour Benchy's invoice
+                            Snap(inv, folder, "invoices_filter.png");
+                            inv.Hide();
+                        }
                         hist.Hide();
                     }
                     // combined bill (Part A): three small prints for Lene Hansen on one invoice (made: one code, below the

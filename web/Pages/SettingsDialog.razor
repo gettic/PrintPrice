@@ -148,14 +148,21 @@
         }
 
         @if (problem != null) { <div class="problem" style="margin:0 14px" role="alert">@problem</div> }
+        else if (resetNote) { <div class="muted small resetnote" style="margin:0 14px" role="status">@WebStatus.ResetDone</div> }
 
         <div class="buttons">
-            <button class="left" @onclick="Defaults">@L.S("Defaults", "Standard")</button>
+            <button class="left" @onclick="() => asking = true">@WebStatus.ResetButton</button>
             <button class="accent" @onclick="Save">@L.S("Save", "Gem")</button>
             <button @onclick="Cancel">@L.S("Cancel", "Annullér")</button>
         </div>
     </div>
 </div>
+
+@if (asking)
+{
+    <AskDialog Title="@WebStatus.ResetButton" Question="@WebStatus.ResetQuestion" Text="@WebStatus.ResetText"
+               YesText="@WebStatus.ResetYes" NoText="@WebStatus.Cancel" OnAnswer="ResetAnswered" />
+}
 
 @code {
     public const int TabPrices = 0, TabPrinter = 1, TabElectricity = 2, TabQuote = 3, TabApp = 4;
@@ -176,7 +183,7 @@
 
     AppSettings work;
     int tab;
-    bool auto, reset, vat, autoPower, mainInvoice;
+    bool auto, reset, vat, autoPower, mainInvoice, asking, resetNote;
     string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays;
 
     string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), L.S("App", "Program") }; } }
@@ -236,12 +243,15 @@
         return WebCalc.Read(text, out v) == FieldState.Invalid ? "invalid" : "";
     }
 
-    void Defaults()
+    /// "Reset to defaults" (issue #7): asked first; Reset fills every tab with its default, your own details kept
+    /// (WebStatus.Defaults: name, payment details, language; other printers, invoice numbers etc. stay). Save stores it.
+    void ResetAnswered(bool yes)
     {
-        var d = new AppSettings();
-        d.Language = work.Language;   // keep the language
-        Fill(d, "PLA");
+        asking = false;
+        if (!yes) return;
+        Fill(WebStatus.Defaults(work), "PLA");
         reset = true;
+        resetNote = true;
     }
 
     async Task Save()

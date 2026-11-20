@@ -67,9 +67,11 @@
                 try {
                     var r = await fetch(url, { signal: ctl.signal, credentials: 'omit', cache: 'no-store' });
                     var text = await r.text();
-                    return { status: r.status, text: text, stale: r.headers.get('X-Price-Stale'), timedOut: false };
+                    var hd = function (n) { return r.headers.get(n); };   // missing (old Worker) = null
+                    return { status: r.status, text: text, stale: hd('X-Price-Stale'), source: hd('X-Price-Source'), fetched: hd('X-Price-Fetched'),
+                             cache: hd('X-Cache'), timedOut: false };
                 } catch (e) {
-                    return { status: 0, text: '', stale: null, timedOut: timedOut };
+                    return { status: 0, text: '', stale: null, source: null, fetched: null, cache: null, timedOut: timedOut };
                 } finally { clearTimeout(timer); }
             },
             pick: function () { if (window.printPrice.input) window.printPrice.input.click(); },

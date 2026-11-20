@@ -47,8 +47,14 @@
         <option value="0" selected="@(filter.Show == 0)">@L.S("All quotes", "Alle tilbud")</option>
         <option value="1" selected="@(filter.Show == 1)">@L.S("Friends & family", "Venner og familie")</option>
         <option value="2" selected="@(filter.Show == 2)">@L.S("Customers", "Kunder")</option>
-        <option value="3" selected="@(filter.Show == 3)">@L.S("Failed", "Fejlede")</option>
-        <option value="4" selected="@(filter.Show == 4)">@L.S("Not printed", "Ikke printet")</option>
+        @* issue #7: the four print statuses under a muted heading (each quote is under exactly one) *@
+        <optgroup label="@WebStatus.Heading">
+            @foreach (var st in WebStatus.States)
+            {
+                int v = History.ShowFor(st);
+                <option value="@v" selected="@(filter.Show == v)">@QuoteRows.StateName(st)</option>
+            }
+        </optgroup>
     </select>
     @if (printerMode)
     {
@@ -98,6 +104,19 @@
     </div>
 }
 
+@if (statusLine != null)
+{
+    <div class="hinfo done ok stline" role="status">
+        <span>@statusLine</span>
+        <button class="small x" aria-label="@L.S("Close", "Luk")" title="@L.S("Close", "Luk")" @onclick="() => statusLine = null">✕</button>
+    </div>
+}
+@if (askDone != null)
+{
+    <AskDialog Title="@WebStatus.Heading" Question="@WebStatus.FailedQuestion(askCount)" Text="@WebStatus.FailedText"
+               YesText="@WebStatus.Yes" NoText="@WebStatus.No" OnAnswer="Answered" />
+}
+
 @if (Quotes.Count == 0)
 {
     <div class="empty">@L.S("No saved quotes yet. On the Calculator page, Save to history keeps the quote on screen here; Backup… below restores a backup.",
@@ -120,6 +139,10 @@ else
                 <span class="muted">· @Num.Kr(WebHistory.Total(ticked))</span>
                 <span class="grow"></span>
                 <button class="small" @onclick="ClearTicks">@L.S("Clear selection", "Fjern markering")</button>
+                <span class="stbar">
+                    <button class="small stbarbtn" aria-haspopup="menu" aria-expanded="@(menuAt == "bar")" @onclick="OpenBarMenu">@WebStatus.Heading ▾</button>
+                    @if (menuRecs != null && menuAt == "bar") { @StatusMenu() }
+                </span>
                 @if (ticked.Count >= 2)
                 {
                     <button class="small billbtn" @onclick="() => BillClicked(false)">@L.S("Quote…", "Tilbud…")</button>
@@ -146,7 +169,7 @@ else
                 <th class="n">@L.S("Grams", "Gram")</th><th class="n">@L.S("Price", "Pris")</th><th>@L.S("For", "Til")</th>
                 @if (printerMode) { <th>@L.S("Printer", "Printer")</th> }
                 <th class="customer">@L.S("Customer", "Kunde")</th>
-                <th>@L.S("Note", "Note")</th><th class="c">@L.S("Printed", "Printet")</th><th class="c">@L.S("Failed", "Fejlet")</th>
+                <th>@L.S("Note", "Note")</th><th class="stcol">@L.S("Status", "Status")</th>
                 <th>@L.S("Invoice", "Faktura")</th>
             </tr>
         </thead>
@@ -176,12 +199,7 @@ else
                     <td class="customer" title="@WebHistory.CustomerTip(rec)">@WebHistory.CustomerText(rec)</td>
                     <td class="notecell"><input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" aria-label="@L.S("Note", "Note")"
                                                 title="@rec.Note" @onchange="e => NoteChanged(rec, e)" @onkeydown:stopPropagation="true" /></td>
-                    @{ string printingTip = WebHistory.PrintingText(rec, now, false); }
-                    <td class="c"><button class="@(printingTip != null ? "tick on printing" : rec.Printed ? "tick on" : "tick")" aria-pressed="@rec.Printed"
-                                          aria-label="@(printingTip ?? L.S("Printed", "Printet"))" title="@printingTip"
-                                          @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@if (printingTip != null) { @Clock } else { @(rec.Printed ? "✓" : "") }</button></td>
-                    <td class="c"><button class="@(rec.Failed ? "tick x" : "tick")" aria-pressed="@rec.Failed" aria-label="@L.S("Failed", "Fejlet")"
-                                          @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true">@(rec.Failed ? "✗" : "")</button></td>
+                    <td class="stcol" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@StatusButton(rec, "stbtn", "row")@if (menuRecs != null && menuAt == "row" && menuRecs[0] == rec) { @StatusMenu() }</td>
                     <td class="muted">@rec.InvoiceNo</td>
                 </tr>
             }
@@ -214,17 +232,10 @@ else
                 <div class="d">@WebHistory.ShortDate(rec) · @WebHistory.TimeText(rec) · @WebHistory.GramsText(rec) g</div>
                 <div class="d r @(friends ? "green" : "red")">@WebHistory.ForText(rec.For)</div>
                 @if (extra.Length > 0) { <div class="d wide">@extra</div> }
-                <div class="chips">
-                    @if (printingChip != null)
-                    {
-                        <button class="chip printing" aria-pressed="true" title="@WebHistory.PrintingText(rec, now, false)" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@Clock @printingChip</button>
-                    }
-                    else
-                    {
-                        <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
-                    }
-                    <button class="@(rec.Failed ? "chip bad" : "chip")" aria-pressed="@rec.Failed" @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true">@(rec.Failed ? "✗ " : "")@L.S("Failed", "Fejlet")</button>
+                <div class="chips" @onclick:stopPropagation="true">
+                    @StatusButton(rec, "chip stchip", "card")
                     @if (rec.InvoiceNo.Length > 0) { <span class="chip">@rec.InvoiceNo</span> }
+                    @if (menuRecs != null && menuAt == "card" && menuRecs[0] == rec) { @StatusMenu() }
                 </div>
                 @if (open) { @Sheet(rec, rows) }
             </div>
@@ -277,16 +288,9 @@ else
                             <span class="@(friends ? "green" : "red")">@WebHistory.ForText(rec.For)</span></div>
                         <div class="d">@WebHistory.DateText(rec) · @WebHistory.TimeText(rec) · @WebHistory.GramsText(rec) g</div>
                         <div class="d" title="@extra">@(extra.Length > 0 ? extra : " ")</div>
-                        <div class="chips">
-                            @if (largePrinting != null)
-                            {
-                                <button class="chip printing" aria-pressed="true" title="@WebHistory.PrintingText(rec, now, false)" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@Clock @largePrinting</button>
-                            }
-                            else
-                            {
-                                <button class="@(rec.Printed ? "chip on" : "chip")" aria-pressed="@rec.Printed" @onclick="() => TogglePrinted(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@(rec.Printed ? "✓ " : "")@L.S("Printed", "Printet")</button>
-                            }
-                            <button class="@(rec.Failed ? "chip bad" : "chip")" aria-pressed="@rec.Failed" @onclick="() => ToggleFailed(rec)" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">@(rec.Failed ? "✗ " : "")@L.S("Failed", "Fejlet")</button>
+                        <div class="chips" @onclick:stopPropagation="true" @ondblclick:stopPropagation="true">
+                            @StatusButton(rec, "chip stchip", "tile")
+                            @if (menuRecs != null && menuAt == "tile" && menuRecs[0] == rec) { @StatusMenu() }
                         </div>
                     }
                     else
@@ -396,13 +400,13 @@ else
 @if (Quotes.Count > 0 && narrow == true)
 {
     @* phone: tap wording, no click / double-click *@
-    <div class="hinfo">@L.S("Tap a quote for its actions: Open again loads it as saved, Repeat print with today's prices (time and grams as saved), Quote… makes a quote page and Invoice… a bill (and marks it as printed). Printed and Failed change with a tap; changes are saved at once. Select ticks quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
-                           "Tryk på et tilbud for at se dets handlinger: Åbn igen henter det som gemt, Print igen med dagens priser (tid og gram som gemt), Tilbud… laver et tilbud og Faktura… en regning (og markerer det som printet). Printet og Fejlet ændres med et tryk; ændringer gemmes med det samme. Vælg markerer tilbud, så du kan slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
+    <div class="hinfo">@L.S("Tap a quote for its actions: Open again loads it as saved, Repeat print with today's prices (time and grams as saved), Quote… makes a quote page and Invoice… a bill (and marks it as printed). The print status changes with a tap on it; changes are saved at once. Select ticks quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
+                           "Tryk på et tilbud for at se dets handlinger: Åbn igen henter det som gemt, Print igen med dagens priser (tid og gram som gemt), Tilbud… laver et tilbud og Faktura… en regning (og markerer det som printet). Printstatus ændres med et tryk på den; ændringer gemmes med det samme. Vælg markerer tilbud, så du kan slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
 }
 else if (Quotes.Count > 0)
 {
-<div class="hinfo">@L.S("Quote… makes a quote page for the selected print, Invoice… a bill (and marks it as printed). Click For, Note, Printed or Failed to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them). Tick quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
-                       "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (og markerer det som printet). Klik på Til, Note, Printet eller Fejlet for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem). Markér tilbud for at slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
+<div class="hinfo">@L.S("Quote… makes a quote page for the selected print, Invoice… a bill (and marks it as printed). Click For, Note or Status to change them; changes are saved at once. Open again (or double-click) loads a quote as saved; Repeat print loads it with today's prices (time and grams as saved: drop the sliced file again to update them). Tick quotes to delete several at once; Clear all… deletes every quote after a safety copy. Both can be undone until the page is reloaded.",
+                       "Tilbud… laver et tilbud på det valgte print, Faktura… en regning (og markerer det som printet). Klik på Til, Note eller Status for at ændre dem; ændringer gemmes med det samme. Åbn igen (eller dobbeltklik) henter et tilbud som gemt; Print igen henter det med dagens priser (tid og gram som gemt: slip den slicede fil igen for at opdatere dem). Markér tilbud for at slette flere på én gang; Ryd alt… sletter alle tilbud efter en sikkerhedskopi. Begge kan fortrydes, indtil siden genindlæses.")</div>
 }
 <div class="note">@L.S("Your history is kept in this browser only (about 1 KB per quote). Clearing the browser's site data deletes it.",
                        "Din historik gemmes kun i denne browser (ca. 1 KB pr. tilbud). Sletter du browserens webstedsdata, slettes den.")</div>
@@ -555,6 +559,7 @@ else if (Quotes.Count > 0)
     }
 
     Seen[] seen;
+    long seenMinute;
     List<QuoteRecord> seenList;
     AppSettings seenSettings;
     string seenPrinters;
@@ -598,7 +603,11 @@ else if (Quotes.Count > 0)
         }
         bool printerMode = cAllPrinters.Count >= 2;
         if (!printerMode) filter.PrinterId = null;
-        if (data || cRows == null || filter.Month != seenMonth || filter.Show != seenShow || filter.PrinterId != seenPrinterId || filter.Query != seenQuery)
+        // a status filter: a "Printing now" whose time ran out moves to Printed (worked out again each minute)
+        long minute = DateTime.Now.Ticks / TimeSpan.TicksPerMinute;
+        bool clock = WebStatus.IsStateShow(filter.Show) && minute != seenMinute;
+        seenMinute = minute;
+        if (data || clock || cRows == null || filter.Month != seenMonth || filter.Show != seenShow || filter.PrinterId != seenPrinterId || filter.Query != seenQuery)
         {
             cRows = WebHistory.Apply(Quotes, filter, printerMode ? cNames : null);
             ticked = WebHistory.KeepTicks(ticked, cRows);   // only shown rows stay ticked; a reloaded list keeps them by Id
@@ -628,6 +637,14 @@ else if (Quotes.Count > 0)
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (focusMenu && menuRecs != null)
+        {
+            // the status menu just opened: focus on the current status (the first when they differ)
+            focusMenu = false;
+            var cur = WebStatus.Shared(menuRecs, now);
+            menuFocus = cur.HasValue ? Array.IndexOf(WebStatus.States, cur.Value) : 0;
+            try { await menuItems[menuFocus].FocusAsync(); } catch (Exception) { }
+        }
         if (firstRender)
         {
             try
@@ -699,6 +716,15 @@ else if (Quotes.Count > 0)
                 </select></label>
             <label>@L.S("Note", "Note")
                 <input type="text" class="left" maxlength="@WebHistory.MaxNote" value="@rec.Note" @onchange="e => NoteChanged(rec, e)" /></label>
+            <div class="stchoices" role="group" aria-label="@WebStatus.Heading">
+                <span class="muted">@WebStatus.Heading</span>
+                @foreach (var st in WebStatus.States)
+                {
+                    var s = st;
+                    bool cur = History.PrintStateOf(rec, now) == s;
+                    <button class="@("small " + WebStatus.Css(s) + (cur ? " on" : ""))" aria-pressed="@cur" @onclick="() => SetStatus(new List<QuoteRecord> { rec }, s)">@Mark(s) @QuoteRows.StateName(s)</button>
+                }
+            </div>
             <button class="accent" @onclick="() => OpenAgain.InvokeAsync(rec)">@L.S("Open again", "Åbn igen")</button>
             <button @onclick="() => Repeat.InvokeAsync(rec)">@L.S("Repeat print", "Print igen")</button>
             <button @onclick="() => Quote.InvokeAsync(rec)">@L.S("Quote…", "Tilbud…")</button>
@@ -912,18 +938,113 @@ else if (Quotes.Count > 0)
         await Changed.InvokeAsync();
     }
 
-    async Task TogglePrinted(QuoteRecord r)
+    // ---------- print status (issue #7: HistoryForm.SetStatus / ShowStatusMenu) ----------
+
+    List<QuoteRecord> menuRecs;   // the open status menu's quotes; null = closed
+    string menuAt;                // "row" (in the Status cell / phone chip) or "bar" (the selection bar)
+    string statusLine;            // "✓ Print status: Printed."
+    TaskCompletionSource<bool> askDone;
+    int askCount;
+    readonly ElementReference[] menuItems = new ElementReference[4];
+    bool focusMenu;
+
+    /// The mark of a status: hollow circle / the clock / ✓ / ✗, in its colour.
+    RenderFragment Mark(PrintState s) => s == PrintState.Printing
+        ? @<span class="stmark st-printing">@Clock</span>
+        : @<span class="@("stmark " + WebStatus.Css(s))">@WebStatus.Mark(s)</span>;
+
+    /// The Status cell / chip: the mark and the name (a printing one: "done about …" as its tip); a click opens the menu.
+    RenderFragment StatusButton(QuoteRecord rec, string css, string at)
     {
-        selected = r;
-        History.SetPrinted(r, !r.Printed);   // unticking also ends "Printing now"
-        await Changed.InvokeAsync();
+        var st = History.PrintStateOf(rec, now);
+        string name = QuoteRows.StateName(st);
+        string tip = WebHistory.PrintingText(rec, now, false) ?? name;
+        string chip = st == PrintState.Printing ? (WebHistory.PrintingText(rec, now, true) ?? name) : name;
+        return @<button class="@(css + " " + WebStatus.Css(st))" aria-haspopup="menu" aria-expanded="@(menuRecs != null && menuAt == at && menuRecs[0] == rec)"
+                        aria-label="@(WebStatus.Heading + ": " + name)" title="@tip" @onclick="() => OpenRowMenu(rec, at)">@Mark(st)<span class="stname">@(css.Contains("chip") ? chip : name)</span></button>;
     }
 
-    async Task ToggleFailed(QuoteRecord r)
+    /// The four choices (a dot on the current one; several with different statuses: no dot). Arrow keys move, Esc closes.
+    RenderFragment StatusMenu()
     {
-        selected = r;
-        History.MarkFailed(r, !r.Failed, DateTime.Now);
+        var recs = menuRecs;
+        PrintState? cur = WebStatus.Shared(recs, now);
+        return @<div class="stlayer">
+            <div class="stback" @onclick="CloseMenu" @onclick:stopPropagation="true"></div>
+            <div class="stmenu" role="menu" aria-label="@WebStatus.Heading" @onkeydown="MenuKey" @onclick:stopPropagation="true">
+                <div class="sthead muted">@(recs.Count > 1 ? WebStatus.Heading + " (" + QuoteRows.PrintsText(recs.Count) + ")" : WebStatus.Heading)</div>
+                @for (int i = 0; i < 4; i++)
+                {
+                    var s = WebStatus.States[i];
+                    int k = i;
+                    <button role="menuitemradio" aria-checked="@(cur == s)" class="@(cur == s ? "stitem on" : "stitem")" @ref="menuItems[k]"
+                            @onclick="() => SetStatus(recs, s)"><span class="stdot">@(cur == s ? "●" : "")</span>@Mark(s)<span>@QuoteRows.StateName(s)</span></button>
+                }
+            </div>
+        </div>;
+    }
+
+    void OpenRowMenu(QuoteRecord rec, string at)
+    {
+        selected = rec;
+        bool same = menuRecs != null && menuAt == at && menuRecs[0] == rec;
+        CloseMenu();
+        if (same) return;
+        menuRecs = new List<QuoteRecord> { rec };
+        menuAt = at;
+        focusMenu = true;
+    }
+
+    void OpenBarMenu()
+    {
+        bool same = menuAt == "bar";
+        CloseMenu();
+        if (same || ticked.Count == 0) return;
+        menuRecs = Quotes.FindAll(q => ticked.Contains(q));
+        menuAt = "bar";
+        focusMenu = true;
+    }
+
+    void CloseMenu() { menuRecs = null; menuAt = null; }
+
+    async Task MenuKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") { CloseMenu(); return; }
+        if (e.Key != "ArrowDown" && e.Key != "ArrowUp") return;
+        int at = Math.Max(0, Math.Min(3, menuFocus + (e.Key == "ArrowDown" ? 1 : -1)));
+        menuFocus = at;
+        try { await menuItems[at].FocusAsync(); } catch (Exception) { }
+    }
+    int menuFocus;
+
+    /// Sets the status of these quotes and saves at once (the Calculator's Changed); 2+ to Failed asks first (the
+    /// user's choice). The line says what changed, and that they moved when a status filter no longer shows them.
+    async Task SetStatus(List<QuoteRecord> recs, PrintState state)
+    {
+        CloseMenu();
+        if (recs == null || recs.Count == 0) return;
+        int ask = WebStatus.FailedToAsk(recs, state);
+        if (ask > 0)
+        {
+            askCount = ask;
+            askDone = new TaskCompletionSource<bool>();
+            StateHasChanged();
+            if (!await askDone.Task) return;
+        }
+        DateTime when = DateTime.Now;
+        WebStatus.Apply(recs, state, when);
         await Changed.InvokeAsync();
+        // saved (a failed save puts the list back: no line then)
+        if (!recs.TrueForAll(r => Quotes.Contains(r) && History.PrintStateOf(r, when) == state)) { statusLine = null; return; }
+        bool moved = WebStatus.IsStateShow(filter.Show) && !recs.TrueForAll(r => WebHistory.Matches(r, filter, null));
+        statusLine = WebStatus.ListText(recs.Count, state, moved);
+    }
+
+    void Answered(bool yes)
+    {
+        var t = askDone;
+        askDone = null;
+        if (t != null) t.TrySetResult(yes);
     }
 
     /// Two clicks, as on the desktop: the first turns the button into a red "Really delete?" for 4 seconds.

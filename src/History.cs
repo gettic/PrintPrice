@@ -123,6 +123,10 @@ namespace PrintPrice
         // idea 23: repeat print of an earlier record (its Id); "" = not a repeat. Never merged with the original (SameQuote).
         public string RepeatOf = "";
 
+        // issue #8: same-size scale of the whole job in percent (Slicer --scale = Scale / 100). 100 = not scaled; a
+        // missing key, 0 or a value outside 1-1000 reads as 100 (CleanQuotes). Older app versions ignore the key.
+        public double Scale = History.DefaultScale;
+
         // ideas 24 + 11: the printer the quote was made for (AppSettings.ActivePrinterId when saved) and a snapshot of
         // its name and model. "" in records saved before several printers = printer "1" (History.PrinterOf).
         public string PrinterId = "";
@@ -177,6 +181,21 @@ namespace PrintPrice
         public string FromName = "";
         public string BilledTo = "";               // QuoteRecord.BilledTo, else its Customer (trimmed; "" = no name)
         public bool FromSnapshot;                  // true = saved with the invoice; false = today's settings
+    }
+
+    /// One row of the Invoices window (History.Invoices): one invoice number, a combined invoice = one row.
+    public class InvoiceRow
+    {
+        public string No = "";                     // the number as saved on its oldest job (trimmed)
+        public List<QuoteRecord> Jobs = new List<QuoteRecord>();   // oldest first (History.OldestFirst)
+        public DateTime BilledAt = DateTime.MinValue;   // the invoice date+time; MinValue = unreadable
+        public DateTime Due;                       // date only (History.InvoiceInfo: snapshot, else the given settings)
+        public string BilledTo = "";               // the first job's name with one (InvoiceInfo.BilledTo); "" = none
+        public bool Friends;                       // the oldest job is For friends & family
+        public double Total;                       // kr.: Σ shown saved prices (History.PriceFor), whole øre
+        public PrintState? State;                  // the one status of all its jobs; null = mixed
+        /// Due date passed (a hint only: the app doesn't track paid).
+        public bool Overdue(DateTime today) { return Due != DateTime.MinValue && Due.Date < today.Date; }
     }
 
     /// The print status chosen in the quote window (History.SetPrintState / PrintStateOf). Values are the box's order.
@@ -594,6 +613,7 @@ namespace PrintPrice
             if (!TryTime(a.SavedAt, out ta) || !TryTime(b.SavedAt, out tb)) return false;
             if (Math.Abs((ta - tb).TotalMinutes) > 10) return false;
             if ((a.Model ?? "") != (b.Model ?? "") || (a.Source ?? "") != (b.Source ?? "")) return false;
+            if (!Same(ScaleOf(a), ScaleOf(b))) return false;   // issue #8: another size is another quote
             if (a.Hours != b.Hours || a.Minutes != b.Minutes || !Same(a.Grams, b.Grams)
                 || !Same(a.FilamentDkkPerKg, b.FilamentDkkPerKg) || !Same(a.ElectricityDkkPerKwh, b.ElectricityDkkPerKwh)
                 || !Same(a.FriendsPrice, b.FriendsPrice) || !Same(a.OthersPrice, b.OthersPrice)) return false;
@@ -1051,6 +1071,135 @@ namespace PrintPrice
             d.Bank = s.PayBank ?? "";
             d.FromName = s.QuoteName ?? "";
             return d;
+        }
+
+        // ---------- Invoices window (issue #7): one row per invoice number, filter, age text ----------
+
+        /// Status filter values for InvoiceMatches: all, the 4 PrintState values (0-3, as (int)state), mixed.
+        public const int InvoiceStatusAll = -1, InvoiceStatusMixed = 4;
+        /// Period filter values for InvoicePeriod: all, this month, last 30 days, this year.
+        public const int PeriodAll = 0, PeriodMonth = 1, PeriodLast30 = 2, PeriodYear = 3;
+
+        /// Invoices(list, now, null): due dates of old invoices without a snapshot from default settings.
+        public static List<InvoiceRow> Invoices(List<QuoteRecord> list, DateTime now)
+        {
+            return Invoices(list, now, null);
+        }
+
+        /// One row per invoice number (trimmed, case-insensitive; old letter codes too), records without one skipped;
+        /// newest first by BilledAt (unreadable last, then number descending). s = today's settings for invoices
+        /// without a due snapshot (null = defaults). State by PrintStateOf(job, now).
+        public static List<InvoiceRow> Invoices(List<QuoteRecord> list, DateTime now, AppSettings s)
+        {
+            var rows = new List<InvoiceRow>();
+            if (list == null) return rows;
+            var groups = new Dictionary<string, List<QuoteRecord>>(StringComparer.OrdinalIgnoreCase);
+            var order = new List<string>();
+            foreach (var r in list)
+            {
+                if (r == null) continue;
+                string no = (r.InvoiceNo ?? "").Trim();
+                if (no.Length == 0) continue;
+                List<QuoteRecord> g;
+                if (!groups.TryGetValue(no, out g)) { g = new List<QuoteRecord>(); groups[no] = g; order.Add(no); }
+                g.Add(r);
+            }
+            foreach (var key in order)
+            {
+                var jobs = OldestFirst(groups[key]);
+                if (jobs.Count == 0) continue;
+                var row = new InvoiceRow { Jobs = jobs, No = (jobs[0].InvoiceNo ?? "").Trim(), Friends = jobs[0].For == ForFriends };
+                long ore = 0;
+                bool first = true;
+                foreach (var j in jobs)
+                {
+                    DateTime b;
+                    if (row.BilledAt == DateTime.MinValue && TryTime(j.BilledAt, out b)) row.BilledAt = b;
+                    if (row.BilledTo.Length == 0) row.BilledTo = InvoiceInfo(j, s, now).BilledTo;
+                    ore += Pricing.ShownOre(PriceFor(j));
+                    var st = PrintStateOf(j, now);
+                    if (first) { row.State = st; first = false; }
+                    else if (row.State != st) row.State = null;
+                }
+                // due: the first job with a snapshot (all jobs of a combined invoice share it), else the oldest's
+                InvoiceDetails due = null;
+                foreach (var j in jobs)
+                {
+                    var d = InvoiceInfo(j, s, now);
+                    if (d.FromSnapshot) { due = d; break; }
+                }
+                row.Due = (due ?? InvoiceInfo(jobs[0], s, now)).Due.Date;
+                row.Total = ore / 100.0;
+                rows.Add(row);
+            }
+            rows.Sort(delegate(InvoiceRow a, InvoiceRow b)
+            {
+                bool ga = a.BilledAt != DateTime.MinValue, gb = b.BilledAt != DateTime.MinValue;
+                if (ga != gb) return ga ? -1 : 1;
+                int k = b.BilledAt.CompareTo(a.BilledAt);
+                return k != 0 ? k : string.CompareOrdinal(b.No, a.No);
+            });
+            return rows;
+        }
+
+        /// The Period box as a range on BilledAt: from inclusive, to exclusive. All = MinValue..MaxValue; this month =
+        /// 1st of now's month to the 1st of the next; last 30 days = now.Date - 30 days onwards; this year = 1 Jan to 1 Jan.
+        public static void InvoicePeriod(int period, DateTime now, out DateTime from, out DateTime to)
+        {
+            from = DateTime.MinValue; to = DateTime.MaxValue;
+            switch (period)
+            {
+                case PeriodMonth: from = new DateTime(now.Year, now.Month, 1); to = from.AddMonths(1); break;
+                case PeriodLast30: from = now.Date.AddDays(-30); break;
+                case PeriodYear: from = new DateTime(now.Year, 1, 1); to = from.AddYears(1); break;
+            }
+        }
+
+        /// True when row passes the Invoices window's filters: status (InvoiceStatusAll, (int)PrintState, InvoiceStatusMixed),
+        /// BilledAt in [from, to) (from MinValue and to MaxValue = no limit; an unreadable date passes only with no limit) and
+        /// the search text in the number, the name it was made out to, a job's customer or model name (case-insensitive).
+        public static bool InvoiceMatches(InvoiceRow row, string query, int status, DateTime from, DateTime to)
+        {
+            if (row == null) return false;
+            if (status == InvoiceStatusMixed) { if (row.State != null) return false; }
+            else if (status != InvoiceStatusAll && (row.State == null || (int)row.State.Value != status)) return false;
+            bool limited = from != DateTime.MinValue || to != DateTime.MaxValue;
+            if (limited)
+            {
+                if (row.BilledAt == DateTime.MinValue) return false;
+                if (row.BilledAt < from || row.BilledAt >= to) return false;
+            }
+            string q = (query ?? "").Trim();
+            if (q.Length == 0) return true;
+            if (Has(row.No, q) || Has(row.BilledTo, q)) return true;
+            foreach (var j in row.Jobs)
+                if (j != null && (Has(j.Customer, q) || Has(ModelText(j), q))) return true;
+            return false;
+        }
+
+        static bool Has(string s, string q)
+        {
+            return !string.IsNullOrEmpty(s) && s.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0;
+        }
+
+        /// How long ago billedAt was, by calendar days: "today" (also a later date), "yesterday", "3 days ago" (up to
+        /// 30 days), "1 month ago" / "2 months ago" (whole calendar months), "1 year ago" / "2 years ago"; Danish
+        /// "i dag", "i går", "for 3 dage siden", "for 1 måned siden", "for 2 måneder siden", "for 1 år siden". MinValue = "".
+        public static string AgeText(DateTime billedAt, DateTime now)
+        {
+            if (billedAt == DateTime.MinValue) return "";
+            DateTime b = billedAt.Date, n = now.Date;
+            int days = (n - b).Days;
+            if (days <= 0) return L.S("today", "i dag");
+            if (days == 1) return L.S("yesterday", "i går");
+            if (days <= 30) return L.F("{0} days ago", "for {0} dage siden", days);
+            int months = (n.Year - b.Year) * 12 + n.Month - b.Month;
+            if (n.Day < b.Day) months--;
+            if (months < 1) months = 1;
+            if (months < 12)
+                return months == 1 ? L.S("1 month ago", "for 1 måned siden") : L.F("{0} months ago", "for {0} måneder siden", months);
+            int years = months / 12;
+            return years == 1 ? L.S("1 year ago", "for 1 år siden") : L.F("{0} years ago", "for {0} år siden", years);
         }
 
         // ---------- combined bill (several jobs on one invoice / quote; minimum price once on the whole bill) ----------
@@ -1588,6 +1737,48 @@ namespace PrintPrice
             return t;
         }
 
+        // ---------- same-size scale of a job (issue #8 step 1) ----------
+
+        /// Not scaled (percent). A record's Scale reads as this when missing, 0 or outside MinScale-MaxScale.
+        public const double DefaultScale = 100;
+        /// The range a saved scale is read in (percent); the Scale window itself allows 10-500 %.
+        public const double MinScale = 1, MaxScale = 1000;
+
+        /// pct when it is a number in MinScale-MaxScale (1-1000 %), else DefaultScale (100). Not rounded.
+        public static double CleanScale(double pct)
+        {
+            if (double.IsNaN(pct) || double.IsInfinity(pct) || pct < MinScale || pct > MaxScale) return DefaultScale;
+            return pct;
+        }
+
+        /// r's scale in percent (100 = not scaled; null r = 100).
+        public static double ScaleOf(QuoteRecord r) { return r == null ? DefaultScale : CleanScale(r.Scale); }
+
+        /// The factor for Slicer's --scale (1.5 for 150 %; 1.0 = not scaled).
+        public static double ScaleFactor(QuoteRecord r) { return ScaleOf(r) / 100; }
+
+        /// Puts the job's scale on r (cleaned: bad / out of range = 100). ui calls it after FromQuote (also for a repeat print,
+        /// with the original's scale).
+        public static void SetScale(QuoteRecord r, double pct) { if (r != null) r.Scale = CleanScale(pct); }
+
+        /// "150 %" / "12,5 %" (da-DK, one decimal at most), "" when not scaled (100 % after rounding to one decimal,
+        /// or a bad value). For names: "3D Benchy (150 %)" on quote, invoice and History.
+        public static string ScaleText(double pct)
+        {
+            double v = Math.Round(CleanScale(pct), 1, MidpointRounding.AwayFromZero);
+            if (v == DefaultScale) return "";
+            return v.ToString("0.#", Num.Dk) + " %";
+        }
+
+        public static string ScaleText(QuoteRecord r) { return ScaleText(ScaleOf(r)); }
+
+        /// name + " (150 %)" when r is scaled, else name unchanged (null name = "").
+        public static string WithScale(string name, QuoteRecord r)
+        {
+            string t = ScaleText(r);
+            return t.Length == 0 ? (name ?? "") : (name ?? "") + " (" + t + ")";
+        }
+
         // ---------- the History list's name and filter (HistoryForm and the website's History page) ----------
 
         /// "Show" choices: all quotes, friends & family, customers, failed, not printed.
@@ -2045,6 +2236,7 @@ namespace PrintPrice
                 if (r.Customer == null) r.Customer = "";
                 if (r.FailedAt == null) r.FailedAt = "";
                 if (r.RepeatOf == null) r.RepeatOf = "";
+                r.Scale = CleanScale(r.Scale);   // issue #8: 0 / bad / outside 1-1000 -> 100
                 if (r.PrinterId == null) r.PrinterId = "";
                 if (r.PrinterName == null) r.PrinterName = "";
                 if (r.PrinterModel == null) r.PrinterModel = "";
@@ -2710,6 +2902,8 @@ namespace PrintPrice
             if (keep.Note.Trim().Length == 0 && other.Note.Trim().Length > 0) { keep.Note = other.Note; changed = true; }
             if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
             if (keep.Parts == null && other.Parts != null) { keep.Parts = other.Parts.Copy(); changed = true; }   // idea 21
+            // issue #8: a scale lost here (e.g. resaved by an older app version) comes back from the other copy
+            if (ScaleOf(keep) == DefaultScale && ScaleOf(other) != DefaultScale) { keep.Scale = ScaleOf(other); changed = true; }
             // the bill's look then: filled when this PC's copy has none (e.g. resaved by an older app version)
             if (SavedWear(keep) == null && SavedWear(other) != null)
             {

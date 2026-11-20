@@ -165,7 +165,11 @@ namespace PrintPrice
             {
                 if (linkFile != null && !LinkShowsFile()) { linkFile = null; if (printerTip != null) printerTip.SetToolTip(txtUrl, null); }
             };
-            txtUrl.TextChanged += delegate { SetUrlHint(false); jobModel = null; jobParts = null; fromExample = false; SetStudioFile(null); repeatOf = null; };
+            txtUrl.TextChanged += delegate
+            {
+                SetUrlHint(false); jobModel = null; jobParts = null; fromExample = false; SetStudioFile(null); repeatOf = null;
+                jobScale = History.DefaultScale; lastJob = null;   // issue #8: a new link / file starts at 100 %
+            };
             AddRow(inputs, L.S("Model link", "Link til model"), txtUrl, null);
             inputs.SetColumnSpan(txtUrl, 2);
 
@@ -552,7 +556,35 @@ namespace PrintPrice
             SetPowerInfo(L.S("Live DK1 17:45: spot 2,37 + fees 0,55 + 25 % VAT = 3,65 kr.",
                              "Live-pris DK1 17:45: spot 2,37 + afg. 0,55 + moms = 3,65 kr."), false);
             jobModel = "3D Benchy";   // after the link (its TextChanged clears it); the quote picture's model name
+            jobScale = History.DefaultScale;   // issue #8: not scaled (the same link doesn't fire TextChanged)
+            lastJobResult = new SliceResult { Seconds = 38 * 60, Grams = 11.8, Plates = 1, SizeX = 60, SizeY = 31, SizeZ = 48, SizeObjects = 1 };
+            SetResultLinks(null, null, null);   // "Scale…" under the line, as after a real slice
             Recalculate();
+        }
+
+        /// Picture mode (issue #8): the sample Benchy scaled to 150 % (numbers from the CLI test: about 30,6 g and 1 h 18 m;
+        /// 60 × 31 × 48 mm at 100 %), with the ✓ line naming the scale and the "Scale…" link. Call after SetSampleJob.
+        internal void SetSampleScaledJob()
+        {
+            if (!offline) return;
+            jobScale = 150;
+            lastJobResult = new SliceResult { Seconds = 78 * 60, Grams = 30.57, Plates = 1, SizeX = 90, SizeY = 46.5, SizeZ = 72, SizeObjects = 1 };
+            txtHours.Text = "1";
+            txtMinutes.Text = "18";
+            txtGrams.Text = "30,6";
+            SetAuto(L.S("✓ \"3D BENCHY\" (150 %): 1 h 18 m, 30,6 g (0.16mm Optimal · Bambu PLA Matte).",
+                        "✓ \"3D BENCHY\" (150 %): 1 t 18 m, 30,6 g (0.16mm Optimal · Bambu PLA Matte)."), false);
+            SetResultLinks(null, null, null);
+            Recalculate();
+        }
+
+        /// Picture mode: the Scale window of the shown sample job, with typed (null = as it opens).
+        internal ScaleForm SampleScaleWindow(string typed)
+        {
+            if (!offline) return null;
+            var f = NewScaleForm();
+            if (typed != null) f.SampleType(typed);
+            return f;
         }
 
         /// Picture mode: the 4-colour Benchy (Printables 1648230) as our CLI slices it (real numbers from the
@@ -581,6 +613,7 @@ namespace PrintPrice
             // shows the "Open in Studio" button (with Studio's icon if it's installed); never clicked in picture mode
             SetStudioFile(Path.Combine(BambuSlicer.StudioRoot, "sample", "Multicolor_Benchy.3mf"));
             jobModel = "Four-Color Multicolor Test Benchy";   // the quote picture's model name
+            SetResultLinks(null, null, null);   // "Scale…" under the line, as after a real slice (issue #8)
             Recalculate();
         }
 
@@ -1009,11 +1042,42 @@ namespace PrintPrice
         async Task<bool> AnalyzeAsync(string printablesId, List<string> localFiles, Action<SliceResult> beforeFill,
                                       List<HistoryPart> savedParts, bool savedTogether)
         {
+            return await AnalyzeAsync(printablesId, localFiles, beforeFill, savedParts, savedTogether, History.DefaultScale, null);
+        }
+
+        // ---------- issue #8: same-size scale of the whole job ----------
+        /// The shown job's scale in percent (100 = not scaled). Set by a finished job (the scale it was sliced at), by Open
+        /// again / Repeat print (the record's); back to 100 by a new link / file, Clear and a new job without a scale.
+        double jobScale = History.DefaultScale;
+        /// What the last finished job was sliced from, so Scale… can slice the same files again without the file picker.
+        sealed class JobInputs
+        {
+            public string PrintablesId;
+            public List<string> LocalFiles;
+            public List<RemoteFile> Chosen;
+            public ColourPlan Plan;
+            public string ModelName;
+            public bool Scalable;   // no G-code among them (BambuSlicer.CanScale)
+        }
+        JobInputs lastJob;
+
+        /// scalePct = the size to slice at (100 = as the file is); rescale = the shown job again at another size (Scale…):
+        /// the same files and colour plan (no picker), the picture stays, and a failed slice keeps the shown numbers.
+        async Task<bool> AnalyzeAsync(string printablesId, List<string> localFiles, Action<SliceResult> beforeFill,
+                                      List<HistoryPart> savedParts, bool savedTogether, double scalePct, JobInputs rescale)
+        {
             if (offline || cts != null) return false;
+            // issue #8: G-code can't be scaled; say so first (not "Bambu Studio was not found" when it's missing)
+            if (BambuSlicer.IsScaled(scalePct) && localFiles != null && localFiles.Any(BambuSlicer.IsGcodeFile))
+            {
+                SetAuto(BambuSlicer.ScaleGcodeText(), true);
+                return false;
+            }
             bool ok = false;
+            string studioBefore = studioFile;
             SetStudioFile(null);   // a new job: back to "Get time & weight" until it has sliced
             string exe = BambuSlicer.FindExe(settings.SlicerPath);
-            bool presliced = localFiles != null && localFiles.Count == 1 && BambuSlicer.IsSlicedProject(localFiles[0]);
+            bool presliced = localFiles != null && localFiles.Count == 1 && BambuSlicer.ReadAsSliced(localFiles[0], scalePct);
             if (exe == null && !presliced)
             {
                 SetAuto(L.S("Bambu Studio was not found. Install it from bambulab.com, or set its location in Settings.",
@@ -1035,8 +1099,8 @@ namespace PrintPrice
             // model picture: a picked .3mf shows its own picture at once; Printables photo / slice render follow below
             SetJobLoaded(false);
             savedId = null;   // a new job: what the last one saved counts as paid back now
-            ResetModelPicture();
-            if (localFiles != null && localFiles.Count == 1 && localFiles[0].EndsWith(".3mf", StringComparison.OrdinalIgnoreCase))
+            if (rescale == null) ResetModelPicture();   // Scale…: the picture stays until the new render
+            if (rescale == null && localFiles != null && localFiles.Count == 1 && localFiles[0].EndsWith(".3mf", StringComparison.OrdinalIgnoreCase))
             {
                 string project = localFiles[0];
                 var projectPicture = LoadModelPicture(() => BambuSlicer.FromProject(project), true);   // not awaited: shows when ready
@@ -1060,7 +1124,13 @@ namespace PrintPrice
                     var sliceable = model.Files.Where(f => BambuSlicer.IsModelFile(f.Name)).ToList();
                     if (sliceable.Count == 0) throw new SliceException(L.F("\"{0}\" has no STL, 3MF or STEP files to slice.",
                                                                            "\"{0}\" har ingen STL-, 3MF- eller STEP-filer at slice.", model.Name));
-                    if (savedParts != null)
+                    if (rescale != null && rescale.Chosen != null)
+                    {
+                        // Scale…: the files sliced last time (no picker), their colour plan
+                        chosen = rescale.Chosen;
+                        plan = rescale.Plan;
+                    }
+                    else if (savedParts != null)
                     {
                         // Repeat print: the same files by name, with their saved filament and colour (no picker)
                         chosen = new List<RemoteFile>();
@@ -1084,6 +1154,7 @@ namespace PrintPrice
                         plan = picked.Plan;
                     }
                 }
+                else if (rescale != null) plan = rescale.Plan;   // Scale…: the same files (localFiles) and colour plan
                 else if (localFiles.Count >= 2 || savedParts != null)
                 {
                     if (savedParts != null) plan = ColourPlan.Build(savedParts, savedTogether);   // localFiles = the saved paths
@@ -1106,12 +1177,19 @@ namespace PrintPrice
 
                 var files = localFiles;
                 var colourPlan = plan;
-                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token));
+                double scale = scalePct;
+                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token, scale));
                 if (plan != null)
                 {
                     jobParts = plan.Parts;   // saved with the quote (History.SetParts), so Repeat print slices it the same way
                     jobTogether = plan.Together;
                 }
+                jobScale = BambuSlicer.IsScaled(scalePct) ? scalePct : History.DefaultScale;
+                lastJob = new JobInputs
+                {
+                    PrintablesId = printablesId, LocalFiles = localFiles, Chosen = chosen, Plan = plan, ModelName = modelName,
+                    Scalable = localFiles == null || localFiles.All(BambuSlicer.CanScale)   // Printables: model files only
+                };
                 if (result.Picture != null)
                 {
                     byte[] render = result.Picture;
@@ -1127,15 +1205,23 @@ namespace PrintPrice
                 ok = true;
             }
             catch (OperationCanceledException) { SetAuto(L.S("Cancelled.", "Annulleret."), false); }
-            // a failed job clears the last one's numbers (Repeat print keeps them: it shows the saved quote instead)
-            catch (SliceException ex) { if (beforeFill == null) ClearJobNumbers(); SetAutoError(ex.Message); }
+            // a failed job clears the last one's numbers (Repeat print keeps them: it shows the saved quote instead; Scale…
+            // keeps the shown job at its old size)
+            catch (SliceException ex) { if (beforeFill == null && rescale == null) ClearJobNumbers(); SetAutoError(ex.Message); }
             catch (Exception ex)
             {
-                if (beforeFill == null) ClearJobNumbers();
+                if (beforeFill == null && rescale == null) ClearJobNumbers();
                 SetAuto(L.S("Something went wrong: ", "Noget gik galt: ") + ex.Message, true);
             }
             finally
             {
+                if (!ok && rescale != null)
+                {
+                    // Scale… failed or was cancelled: the job stays as it was (numbers, size, Open in Studio, Save)
+                    SetJobLoaded(true);
+                    SetStudioFile(studioBefore);
+                    lastJob = rescale;
+                }
                 cts.Dispose();
                 cts = null;
                 lblAuto.MinimumSize = new Size(lblAuto.MinimumSize.Width, autoMinHeight);   // one size change, with the result
@@ -1165,6 +1251,7 @@ namespace PrintPrice
 
             string what = modelName != null ? "\"" + modelName + "\"" :
                           localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : L.F("{0} files", "{0} filer", localFiles.Count);
+            if (BambuSlicer.IsScaled(jobScale)) what += " (" + History.ScaleText(jobScale) + ")";   // issue #8: "3D Benchy" (150 %)
             // grams worked out from the filament length (e.g. Cura): shown as an estimate; a missing value is left out
             var said = new List<string>();
             if (!noTime) said.Add((totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m");
@@ -1268,11 +1355,72 @@ namespace PrintPrice
         void ShowPlatesLink(List<PlateInfo> plates)
         {
             shownPlates = null;
-            if (plates == null || plates.Count < 2) return;
+            if (plates == null || plates.Count < 2) { SetResultLinks(null, null, null); return; }   // only "Scale…" (if any)
             var list = plates.Where(p => p != null).ToList();
             shownPlates = list;
-            lblAuto.SetLink(PlatesLinkText(list.Count, false), () => ShowPlatesMenu(list));
+            SetResultLinks(PlatesLinkText(list.Count, false), () => ShowPlatesMenu(list), L.F("{0} plates – show them", "{0} plader – vis dem", list.Count));
         }
+
+        /// The links under a finished job's line (issue #8): the plates link (when any) and "Scale…" (a job that can be scaled:
+        /// no G-code) on one line; when both don't fit the box's width the plates link gets its short text.
+        void SetResultLinks(string platesText, Action platesClick, string platesShort)
+        {
+            bool scale = CanScaleJob;
+            if (platesText == null)
+            {
+                if (scale) lblAuto.SetLink(ScaleLinkText, () => ShowScaleWindow());
+                return;
+            }
+            if (!scale) { lblAuto.SetLink(platesText, platesClick); return; }
+            Label lbl = lblAuto.Controls.Count > 0 ? lblAuto.Controls[0] as Label : null;
+            int width = lbl != null ? lbl.MaximumSize.Width : 0;
+            if (lbl != null && width > 0 && platesShort != null)
+            {
+                var flags = TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+                int need = TextRenderer.MeasureText(platesText, lbl.Font, new Size(int.MaxValue, int.MaxValue), flags).Width
+                         + ScalePx(16) + TextRenderer.MeasureText(ScaleLinkText, lbl.Font, new Size(int.MaxValue, int.MaxValue), flags).Width + 4;
+                if (need > width) platesText = platesShort;
+            }
+            lblAuto.SetLinks(new[] { platesText, ScaleLinkText }, new Action[] { platesClick, () => ShowScaleWindow() });
+        }
+
+        static string ScaleLinkText { get { return L.S("Scale…", "Skalér…"); } }
+
+        /// The Scale window for the shown job (issue #8); Apply slices the same files again at the new size.
+        void ShowScaleWindow()
+        {
+            if (!CanScaleJob || cts != null) return;
+            ScaleForm f = NewScaleForm();
+            double pct;
+            using (f)
+            {
+                if (f.ShowDialog(this) != DialogResult.OK) return;
+                pct = f.Pct;
+            }
+            var _ = RescaleAsync(pct);
+        }
+
+        ScaleForm NewScaleForm()
+        {
+            var r = lastJobResult;
+            return new ScaleForm(jobScale, r != null ? r.SizeX : 0, r != null ? r.SizeY : 0, r != null ? r.SizeZ : 0,
+                                 r != null ? r.SizeObjects : 0, settings.PrinterModel);
+        }
+
+        /// Slices the shown job again at pct (same files, colour plan and model name; a failed slice keeps the job as it was).
+        async Task<bool> RescaleAsync(double pct)
+        {
+            var job = lastJob;
+            if (job == null || !job.Scalable) return false;
+            var keepRepeat = repeatOf;   // a repeat stays a repeat (its record is saved as one)
+            bool ok = await AnalyzeAsync(job.PrintablesId, job.LocalFiles, null, null, false, pct, job);
+            if (ok) repeatOf = keepRepeat;
+            return ok;
+        }
+
+        /// A job is shown that Scale… can slice again: it sliced or was read from files that aren't G-code (picture mode:
+        /// the sample job).
+        bool CanScaleJob { get { return jobLoaded && (offline || (lastJob != null && lastJob.Scalable)); } }
 
         /// "The price is for both plates – show them" (2) / "… all N plates …" (3+); fellBack = "together" didn't work
         /// (Repeat print folds the "Sliced one by one" note into the link to keep the box at 3 lines).
@@ -1503,7 +1651,7 @@ namespace PrintPrice
         /// plate"); null = one file, or files that keep their own colours (sliced one by one, summed).
         static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
                                   string nozzle, string process, string filament, string bed, ColourPlan plan,
-                                  IProgress<string> progress, CancellationToken ct)
+                                  IProgress<string> progress, CancellationToken ct, double scalePct = 100)
         {
             string work = Path.Combine(JobTempRoot(), Guid.NewGuid().ToString("N"));
             try
@@ -1526,7 +1674,7 @@ namespace PrintPrice
                     foreach (var f in local) models.Add(new KeyValuePair<string, string>(Path.GetFileName(f), f));
                 }
 
-                if (models.Count == 1 && BambuSlicer.IsSlicedProject(models[0].Value))
+                if (models.Count == 1 && BambuSlicer.ReadAsSliced(models[0].Value, scalePct))   // issue #8: a scaled sliced .3mf slices again
                 {
                     var r = BambuSlicer.ReadSliceInfo(models[0].Value, filament);
                     r.FromSlicedFile = true;
@@ -1542,7 +1690,7 @@ namespace PrintPrice
                 if (plan != null)
                 {
                     total = BambuSlicer.SliceColours(exe, models, plan.Slots, plan.Colours, plan.Together, work, printer, nozzle,
-                                                     BambuSlicer.ShortName(filament), progress, ct);
+                                                     BambuSlicer.ShortName(filament), progress, ct, scalePct);
                     // the user's colours: the material and colour they picked (a file with its own colours keeps them)
                     foreach (var f in total.Filaments)
                     {
@@ -1560,7 +1708,7 @@ namespace PrintPrice
                         ct.ThrowIfCancellationRequested();
                         progress.Report(L.S("Slicing ", "Slicer ") + models[i].Key + (models.Count > 1 ? " (" + (i + 1) + "/" + models.Count + ")" : "") +
                                         L.S(" in Bambu Studio…", " i Bambu Studio…"));
-                        var r = BambuSlicer.SliceFile(exe, models[i].Value, work, printer, nozzle, filament, ct);
+                        var r = BambuSlicer.SliceFile(exe, models[i].Value, work, printer, nozzle, filament, ct, scalePct);
                         // time, grams, plates (with the file's name), filaments per slot, the first picture and Studio file
                         BambuSlicer.AddResult(total, r, models.Count > 1 ? models[i].Key : "");
                     }
@@ -3346,7 +3494,10 @@ namespace PrintPrice
         /// The model's name for the quote: the job's model name, else "3D print".
         string QuoteModelName()
         {
-            return QuoteRows.ModelName(jobModel);
+            // issue #8: "3D Benchy (150 %)" when the job is scaled (quote / invoice name, title, file name)
+            string name = QuoteRows.ModelName(jobModel);
+            string scale = History.ScaleText(jobScale);
+            return scale.Length == 0 ? name : name + " (" + scale + ")";
         }
 
         /// Short link for the quote (QuoteRows.ShortLink with Printables' link parser).
@@ -3524,7 +3675,7 @@ namespace PrintPrice
 
         static string RecordModelName(QuoteRecord r)
         {
-            return QuoteRows.ModelName(r.Model);
+            return History.WithScale(QuoteRows.ModelName(r.Model), r);   // issue #8: "3D Benchy (150 %)"
         }
 
         /// The page of a saved record, as it was made: its saved inputs, prices and wear split (History.RecordBreakdown),
@@ -4351,6 +4502,8 @@ namespace PrintPrice
             // with the wear split shown on the quote (Auto wear), so History's Quote… / Invoice… show the same rows later
             var r = History.FromQuote(lastInput, last, settings, jobModel ?? "", LinkSource(), DateTime.Now,
                                       settings.AutoWearRate != 0 ? WearBreakdown(settings) : null);
+            // issue #8: the size it was sliced at (a repeat print / Open again: the record's, set when it was filled)
+            History.SetScale(r, jobScale);
             // colour, type and material of each row, so "Open again" can rebuild the material rows without slicing
             var used = filaments ?? (single != null ? new List<FilamentUse> { single } : null);
             if (r.Filaments != null && used != null && r.Filaments.Count == used.Count)
@@ -4785,6 +4938,38 @@ namespace PrintPrice
                     }
                     BackupForm.AskForm.TestAnswers = null;
                     BackupForm.AskForm.TestLog = null;
+                }
+
+                // 11. issue #8: a scaled job keeps "(150 %)" in its quote / invoice name, saved and re-opened; Clear = 100 %
+                {
+                    string tag = "(" + History.ScaleText(150) + ")";
+                    log.Check(setJob(38), "11 job on screen again");
+                    jobScale = 150;   // as a finished Scale… at 150 % leaves it
+                    log.Check(QuoteModelName().EndsWith(tag), "11a the job's quote name \"" + QuoteModelName() + "\" ends with " + tag);
+                    if (f != null) { f.Dispose(); f = null; }
+                    f = NewJobInvoiceForm("Skala Kunde");
+                    string m1 = f.TestData() != null ? f.TestData().Model : "";
+                    log.Check(m1.EndsWith(tag), "11b the job's invoice window names it \"" + m1 + "\"");
+                    f.Dispose(); f = null;
+                    QuoteRecord s11;
+                    SaveToHistory(History.ForCustomer, "Skala Kunde", out s11);
+                    string saved = HistoryTest.FileRecords() != null ? HistoryTest.FileRecords().Where(x => s11 != null && x.Id == s11.Id).Select(x => History.ScaleText(x)).FirstOrDefault() : null;
+                    log.Check(s11 != null && History.ScaleOf(s11) == 150 && saved == History.ScaleText(150),
+                              "11c saved with scale " + (s11 != null ? History.ScaleText(s11) : "-") + " (history.json: " + (saved ?? "-") + ")");
+                    if (s11 != null)
+                    {
+                        log.Check(RecordModelName(s11).EndsWith(tag), "11d the saved record's name \"" + RecordModelName(s11) + "\"");
+                        foreach (bool inv in new[] { false, true })
+                        {
+                            f = NewRecordQuoteForm(s11, inv);
+                            string m = f.TestData() != null ? f.TestData().Model : "";
+                            log.Check(m.EndsWith(tag), "11" + (inv ? "f" : "e") + " the saved " + (inv ? "invoice" : "quote") + " window names it \"" + m + "\"");
+                            f.Dispose(); f = null;
+                        }
+                    }
+                    ClearJob();   // what the Clear button runs
+                    log.Check(jobScale == History.DefaultScale && !QuoteModelName().Contains(tag),
+                              "11g Clear: the job scale is back to " + Num.Fmt(jobScale) + " %, name \"" + QuoteModelName() + "\"");
                 }
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
@@ -5334,6 +5519,114 @@ namespace PrintPrice
                     BackupForm.AskForm.TestAnswers = null;
                     BackupForm.AskForm.TestLog = null;
                 }
+
+                // 11. issue #7: the Invoices window (History's Invoices… / Ctrl+I)
+                {
+                    log.Add("11 the Invoices window");
+                    BackupForm.AskForm.TestAnswers = new Queue<DialogResult>();
+                    BackupForm.AskForm.TestLog = log;
+                    DateTime now11 = DateTime.Now;
+                    // a. the made-up invoices (picture-mode list; offline History, so nothing is saved)
+                    var sample = HistoryForm.SampleInvoiceQuotes();
+                    using (var sh = new HistoryForm(sample, null, true))
+                    {
+                        sh.Settings = settings;
+                        sh.Show();
+                        Application.DoEvents();
+                        var f = sh.NewInvoicesForm();
+                        f.Show(sh);
+                        Application.DoEvents();
+                        var want = History.Invoices(sample, now11, settings);
+                        log.Check(f.TestRowCount == 6 && want.Count == 6 && f.TestCount.StartsWith(L.S("6 invoices", "6 fakturaer")),
+                                  "11a 6 invoices (7 billed prints), one row each (" + f.TestCount + ")");
+                        var comb = f.TestRows.FirstOrDefault(r => r.No == "2026-51907");
+                        log.Check(comb != null && comb.Jobs.Count == 2 && comb.State == null && comb.Friends,
+                                  "11b the combined friends invoice is one row of 2 prints, Mixed");
+                        int ci = f.TestRows.IndexOf(comb);
+                        log.Check(ci >= 0 && f.TestCell(ci, 2).StartsWith(L.S("2 prints: ", "2 print: ")) &&
+                                  f.TestCell(ci, HistoryForm.InvoicesForm.ColAge) == History.AgeText(comb.BilledAt, now11),
+                                  "11c its Prints / Created cells: \"" + (ci >= 0 ? f.TestCell(ci, 2) + "\", \"" + f.TestCell(ci, HistoryForm.InvoicesForm.ColAge) : "") + "\"");
+                        var jonas = f.TestRows.FirstOrDefault(r => r.No == "2026-39774");
+                        log.Check(jonas != null && jonas.Overdue(now11), "11d Jonas Berg's invoice (due 14 days after 06-10-2026) is past its due date");
+                        f.TestSearch("mads");
+                        log.Check(f.TestRowCount == 1 && f.TestRows[0].No == "2026-51907", "11e search \"mads\": 1 row (" + f.TestCount + ")");
+                        f.TestSearch("2026-4");
+                        log.Check(f.TestRowCount == 1 && f.TestRows[0].No == "2026-48213", "11f search by number: 1 row");
+                        f.TestSearch("");
+                        f.TestStatusFilter(5);
+                        log.Check(f.TestRowCount == 1 && f.TestRows[0].No == "2026-51907", "11g Status Mixed: 1 row (" + f.TestCount + ")");
+                        f.TestStatusFilter(4);
+                        log.Check(f.TestRowCount == 0, "11h Status Failed: 0 rows (" + f.TestCount + ")");
+                        f.TestStatusFilter(0);
+                        DateTime from, to;
+                        History.InvoicePeriod(History.PeriodLast30, now11, out from, out to);
+                        int want30 = want.Count(r => History.InvoiceMatches(r, "", History.InvoiceStatusAll, from, to));
+                        f.TestPeriod(2);
+                        log.Check(f.TestRowCount == want30, "11i Period last 30 days: " + f.TestRowCount + " rows (expected " + want30 + ")");
+                        f.TestPeriod(0);
+                        int dot;
+                        int items = f.TestStatusMenu(f.TestRows.IndexOf(f.TestRows.First(r => r.No == "2026-51907")), out dot);
+                        log.Check(items == 4 && dot == -1, "11j Status menu of the Mixed invoice: 4 choices, none marked");
+                        comb = f.TestRows.First(r => r.No == "2026-51907");
+                        f.SetStatus(comb, PrintState.Printed);
+                        var combJobs = sample.Where(r => r.InvoiceNo == "2026-51907").ToList();
+                        log.Check(combJobs.All(r => History.PrintStateOf(r, DateTime.Now) == PrintState.Printed) &&
+                                  f.TestRows.First(r => r.No == "2026-51907").State == PrintState.Printed && f.TestInfoKind == InfoKind.Success,
+                                  "11k Printed: both prints printed (" + f.TestInfoText + ")");
+                        BackupForm.AskForm.TestAnswers.Enqueue(DialogResult.No);
+                        f.SetStatus(f.TestRows.First(r => r.No == "2026-51907"), PrintState.Failed);
+                        log.Check(combJobs.All(r => History.PrintStateOf(r, DateTime.Now) == PrintState.Printed) && BackupForm.AskForm.TestAnswers.Count == 0,
+                                  "11l Failed for 2 asked, No: unchanged");
+                        BackupForm.AskForm.TestAnswers.Enqueue(DialogResult.Yes);
+                        f.SetStatus(f.TestRows.First(r => r.No == "2026-51907"), PrintState.Failed);
+                        log.Check(combJobs.All(r => r.Failed) && BackupForm.AskForm.TestAnswers.Count == 0, "11m Failed for 2 asked, Yes: both failed");
+                        f.TestStatusFilter(4);
+                        f.TestSelect("2026-51907");
+                        f.SetStatus(f.TestSelected, PrintState.NotPrinted);
+                        log.Check(f.TestRowCount == 0 && combJobs.All(r => !r.Failed && !r.Printed) &&
+                                  f.TestInfoText.Contains(L.S("no longer shows", "vises ikke længere")),
+                                  "11n under Status Failed, set Not printed: it leaves the list (" + f.TestInfoText + ")");
+                        f.TestStatusFilter(0);
+                        string clip11 = null;
+                        HistoryForm.InvoicesForm.testClipboard = t => clip11 = t;
+                        f.TestSelect("2026-73096");
+                        f.TestCopy();
+                        HistoryForm.InvoicesForm.testClipboard = null;
+                        log.Check(clip11 == "2026-73096", "11o Copy invoice number: " + clip11);
+                        f.TestSelect("2026-51907");
+                        f.TestShowInHistory();
+                        Application.DoEvents();
+                        sh.AfterInvoices();
+                        var sel = sh.SampleSelected();
+                        log.Check(f.IsDisposed || !f.Visible, "11p Show in History closes the window");
+                        log.Check(sel.Count == 2 && sel.All(r => r.InvoiceNo == "2026-51907") && sh.TestInfo.Contains("2026-51907"),
+                                  "11q History selects its 2 prints (" + sh.TestInfo + ")");
+                        if (!f.IsDisposed) f.Dispose();
+                    }
+                    // r. the real (test) list: Open invoice opens the invoice window of that number
+                    {
+                        var f = h.NewInvoicesForm();
+                        f.Show(h);
+                        Application.DoEvents();
+                        int want = History.Invoices(history, DateTime.Now, settings).Count;
+                        log.Check(f.TestRowCount == want && want > 0, "11r the test list: " + f.TestRowCount + " invoice rows (expected " + want + ")");
+                        if (f.TestRowCount > 0)
+                        {
+                            var first = f.TestRows[0];
+                            string gotNo = null;
+                            onWindow = w => { gotNo = w.TestData().InvoiceNo; };
+                            f.TestSelect(first.No);
+                            f.TestOpen();
+                            onWindow = null;
+                            log.Check(gotNo != null && string.Equals(gotNo.Trim(), first.No, StringComparison.OrdinalIgnoreCase),
+                                      "11s Open invoice " + first.No + ": the invoice window opened with " + (gotNo ?? "none"));
+                        }
+                        f.Close();
+                        f.Dispose();
+                    }
+                    BackupForm.AskForm.TestAnswers = null;
+                    BackupForm.AskForm.TestLog = null;
+                }
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
             finally
@@ -5529,12 +5822,25 @@ namespace PrintPrice
                 var parts = new List<HistoryPart>();
                 bool together = false;
                 double closeAfter = 0;   // "close-after=<s>": close the window mid-slice (A5: Bambu Studio must stop too)
+                double specScale = History.DefaultScale, specRescale = 0;
                 string baseDir = Path.GetDirectoryName(specFile);
                 foreach (var raw in File.ReadAllLines(specFile))
                 {
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("//")) continue;
                     if (line.StartsWith("together=", StringComparison.OrdinalIgnoreCase)) { together = line.Substring(9).Trim() == "1"; continue; }
+                    // issue #8: "scale=<pct>" slices at that size; "rescale=<pct>" slices at 100 % and then again through
+                    // the Scale window's path (RescaleAsync)
+                    if (line.StartsWith("scale=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        double.TryParse(line.Substring(6).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out specScale);
+                        continue;
+                    }
+                    if (line.StartsWith("rescale=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        double.TryParse(line.Substring(8).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out specRescale);
+                        continue;
+                    }
                     if (line.StartsWith("close-after=", StringComparison.OrdinalIgnoreCase))
                     {
                         double.TryParse(line.Substring(12).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out closeAfter);
@@ -5572,9 +5878,31 @@ namespace PrintPrice
                     var files = parts.Select(p => p.File).ToList();
                     txtUrl.Text = files.Count == 1 ? files[0] : L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
                     lastJobResult = null;
-                    bool done = await AnalyzeAsync(null, files, null, parts, together);
+                    if (specScale != History.DefaultScale || specRescale > 0)
+                        log.Add("spec: scale=" + specScale.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                                (specRescale > 0 ? ", rescale=" + specRescale.ToString(System.Globalization.CultureInfo.InvariantCulture) : ""));
+                    bool done = await AnalyzeAsync(null, files, null, parts, together, specScale, null);
                     check(done && lastJobResult != null, "sliced");
                     TestJobLines(log, lastJobResult);
+                    if (done && specRescale > 0)
+                    {
+                        // the Scale window's Apply: the same files again at the new size, the ✓ line says it
+                        var first = lastJobResult;
+                        check(CanScaleJob, "Scale… offered after the slice");
+                        using (var sf = NewScaleForm())
+                        {
+                            sf.SampleType(specRescale.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                            log.Add("scale window: size " + sf.TestSizeText + " | " + sf.TestInfoText.Replace("\n", " / ") + " | Apply " + (sf.TestApplyOn ? "on" : "off"));
+                        }
+                        lastJobResult = null;
+                        done = await RescaleAsync(specRescale);
+                        check(done && lastJobResult != null && Math.Abs(jobScale - specRescale) < 0.05, "sliced again at " + History.ScaleText(specRescale));
+                        check((lblAuto.Text ?? "").Contains("(" + History.ScaleText(specRescale) + ")"), "result line names the scale: " + lblAuto.Text);
+                        TestJobLines(log, lastJobResult);
+                        if (first != null && lastJobResult != null && first.SizeZ > 0 && lastJobResult.SizeZ > 0)
+                            log.Add("height " + Num.Fmt(Math.Round(first.SizeZ, 1)) + " -> " + Num.Fmt(Math.Round(lastJobResult.SizeZ, 1)) + " mm (expected " +
+                                    Num.Fmt(Math.Round(BambuSlicer.SizeAt(first.SizeZ, specScale, specRescale), 1)) + ")");
+                    }
                     QuoteRecord rec = null;
                     string err = done ? SaveToHistory(0, null, out rec) : "not sliced";
                     if (err != null) rec = null;
@@ -5633,6 +5961,10 @@ namespace PrintPrice
                     var a = History.PartsOf(r);
                     var b = rec != null ? History.PartsOf(rec) : null;
                     check((a == null) == (b == null) && (a == null || a.Count == b.Count), "same parts as the original");
+                    // issue #8: the repeat slices and saves at the original's size
+                    log.Add("scale: original " + History.ScaleText(History.ScaleOf(r)) + " / repeated " +
+                            (rec != null ? History.ScaleText(History.ScaleOf(rec)) : "-") + " (\"\" = 100 %)");
+                    check(rec != null && Math.Abs(History.ScaleOf(rec) - History.ScaleOf(r)) < 0.05, "same scale as the original");
                 }
                 Screenshots.Snap(this, dir, "test_repeat.png");
             }
@@ -5695,7 +6027,8 @@ namespace PrintPrice
                         case "seed":
                         {
                             if (history.Count > 0) { log.Check(false, "seed needs an empty history"); break; }
-                            history.AddRange(HistoryForm.SampleQuotes());
+                            // "seed invoices": the same quotes with 6 invoices (one combined, Mixed; one past due), issue #7
+                            history.AddRange(arg == "invoices" ? HistoryForm.SampleInvoiceQuotes() : HistoryForm.SampleQuotes());
                             string err = History.Save(history);
                             int saved = 0;
                             foreach (var kv in HistoryForm.SamplePictures()) if (History.SavePicture(kv.Key, kv.Value)) saved++;
@@ -5757,6 +6090,9 @@ namespace PrintPrice
                     log.Add("slot " + f.Slot + ": " + (f.Colour ?? "") + " " + (f.Type ?? "") + " \"" + (f.Profile ?? "") + "\" " +
                             f.Grams.ToString("0.##", Num.Dk) + " g");
                 log.Add("together: " + res.Together + ", together problem: " + (res.TogetherProblem ?? "(none)"));
+                // issue #8: the job's scale and the measured size (0 = unknown)
+                log.Add("scale: " + jobScale.ToString("0.#", Num.Dk) + " %, size: " +
+                        (res.SizeX > 0 ? BambuSlicer.SizeText(res.SizeX, res.SizeY, res.SizeZ) : "(unknown)") + ", objects: " + res.SizeObjects);
                 var plates = res.PlateList ?? new List<PlateInfo>();
                 bool showFile = plates.Select(p => p.File ?? "").Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
                 foreach (var p in plates)
@@ -5778,7 +6114,7 @@ namespace PrintPrice
         {
             if (r == null) { log.Add("record: (none)"); return; }
             log.Add("record " + r.Id + ": " + r.Hours + " h " + r.Minutes + " m, " + r.Grams.ToString("0.##", Num.Dk) + " g, repeat of: " +
-                    (string.IsNullOrEmpty(r.RepeatOf) ? "-" : r.RepeatOf));
+                    (string.IsNullOrEmpty(r.RepeatOf) ? "-" : r.RepeatOf) + ", scale: " + History.ScaleOf(r).ToString("0.#", Num.Dk) + " %");
             var parts = History.PartsOf(r);
             if (parts == null) log.Add("record parts: (none)");
             else
@@ -5954,7 +6290,8 @@ namespace PrintPrice
                         return;
                     }
                 }
-                bool done = await AnalyzeAsync(id, paths, res => KeepSavedMaterials(res, r), parts, History.PartsTogether(r));
+                bool done = await AnalyzeAsync(id, paths, res => KeepSavedMaterials(res, r), parts, History.PartsTogether(r),
+                                               History.ScaleOf(r), null);   // issue #8: at the saved size
                 if (done) { repeatOf = r; ShowRepeatLine(r, null); return; }
                 string failed = (lblAuto.Text ?? "").Trim().TrimEnd('.');
                 FillFromRecord(r, true);
@@ -5968,7 +6305,8 @@ namespace PrintPrice
                                                   : L.S("the link or file isn't there any more", "linket eller filen findes ikke længere"));
                 return;
             }
-            bool ok = await AnalyzeAsync(id, local ? new List<string> { src } : null, res => KeepSavedMaterials(res, r));
+            bool ok = await AnalyzeAsync(id, local ? new List<string> { src } : null, res => KeepSavedMaterials(res, r), null, false,
+                                         History.ScaleOf(r), null);   // issue #8: at the saved size
             if (ok) { repeatOf = r; ShowRepeatLine(r, null); return; }
             string why = (lblAuto.Text ?? "").Trim().TrimEnd('.');
             FillFromRecord(r, true);   // back to the saved time, grams and colours (Analyze reset the job)
@@ -6013,6 +6351,8 @@ namespace PrintPrice
             ShowLinkSource(r.Source);
             SetStudioFile(null);   // no slice from this session (also when the link was the same, so TextChanged didn't fire)
             jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;   // after the link (its TextChanged clears it)
+            jobScale = History.ScaleOf(r);   // issue #8: the saved size (also after the link: TextChanged resets it)
+            lastJob = null;                  // nothing sliced this session: Scale… comes after a slice / Repeat print
             jobParts = History.PartsOf(r);   // a colour per file (idea 21): saving it again / a failed repeat keeps them
             jobTogether = History.PartsTogether(r);
             ResetModelPicture();
@@ -6119,7 +6459,8 @@ namespace PrintPrice
             // sliced again into 2+ plates: the plates link comes back under the lines, so the main line is kept to one line
             // (the box stays at 3 lines: window <= ~760 px with 4 colour rows)
             bool plates = repeatWhy == null && shownPlates != null && shownPlates.Count >= 2;
-            string main = plates ? OneLineRepeatText(r, when)
+            bool scaleLink = repeatWhy == null && CanScaleJob;   // issue #8: "Scale…" under the lines too
+            string main = plates || scaleLink ? OneLineRepeatText(r, when)
                 : repeatWhy == null
                 ? L.F("↻ Repeat print of {0} (first quoted {1}) with today's prices.", "↻ Print igen af {0} (første tilbud {1}) med dagens priser.",
                       RecordName(r), when)
@@ -6141,6 +6482,7 @@ namespace PrintPrice
             {
                 lblAuto.SetText(main, muted);   // removes the link line: put it back
                 if (plates) ShowRepeatPlatesLink();
+                else if (scaleLink) SetResultLinks(null, null, null);
                 SetAutoColor();
             }
         }
@@ -6174,7 +6516,7 @@ namespace PrintPrice
             var list = shownPlates;
             if (list == null || list.Count < 2) return;
             bool fellBack = !string.IsNullOrEmpty(platesProblem);
-            lblAuto.SetLink(PlatesLinkText(list.Count, fellBack), () => ShowPlatesMenu(list));
+            SetResultLinks(PlatesLinkText(list.Count, fellBack), () => ShowPlatesMenu(list), L.F("{0} plates – show them", "{0} plader – vis dem", list.Count));
             if (lblAuto.LinkControl == null || printerTip == null) return;
             var tip = new List<string>();
             if (fellBack) tip.Add(WrapTip(platesProblem, 45));
@@ -6194,6 +6536,8 @@ namespace PrintPrice
             if (lblAuto.MutedLine.Length > 0) ShowAutoIdle();   // the "Opened from history" lines go with the job
             txtUrl.Text = "";
             jobParts = null;
+            jobScale = History.DefaultScale;   // issue #8
+            lastJob = null;
             SetStudioFile(null);   // back to "Get time & weight" (also if the box was already empty)
             SetUrlHint(false);
             SetColours(null);   // back to the single-filament layout

@@ -40,14 +40,13 @@
             </div>
             <div class="muted small">@L.S("The PDF is always light (for printing).", "PDF'en er altid lys (til print).")</div>
 
-            @if (!Invoice && !NoStatus)
-            {
-                @* print status (quotes only, QuoteForm): saved with the quote on every export *@
-                <label class="qv-head" for="qv-status">@WebQuote.StatusHeading</label>
-                <select id="qv-status" class="qv-status" @bind="status_">
-                    @for (int i = 0; i < 4; i++) { int k = i; <option value="@k">@WebQuote.StatusNames[k]</option> }
-                </select>
-            }
+            @* print status (QuoteForm, issue #7): every window; a saved quote / invoice / combined bill saves a pick at
+               once (StatusNow), the calculator's job stores it with its export. "Mixed" only while the prints differ. *@
+            <label class="qv-head" for="qv-status">@(StatusHeading ?? WebQuote.StatusHeading)</label>
+            <select id="qv-status" class="qv-status" value="@(mixed ? "4" : status_.ToString())" disabled="@statusBusy" @onchange="StatusChanged">
+                @for (int i = 0; i < 4; i++) { int k = i; <option value="@k">@WebQuote.StatusNames[k]</option> }
+                @if (mixed) { <option value="4">@WebStatus.Mixed</option> }
+            </select>
 
             <div class="qv-actions">
                 <button class="accent" disabled="@(busy || NeedsName)" @onclick='() => Run("print")'>@L.S("Print / PDF…", "Print / PDF…")</button>
@@ -97,8 +96,13 @@
     [Parameter] public string Note { get; set; }
     /// The help text (null = WebQuote.HelpText; combined bill: GroupHelpText).
     [Parameter] public string Help { get; set; }
-    /// No print status box (a combined quote: one status would overwrite each quote's own).
-    [Parameter] public bool NoStatus { get; set; }
+    /// The status box's heading (null = "Print status"; combined: "Print status (all 3 prints)").
+    [Parameter] public string StatusHeading { get; set; }
+    /// A combined bill whose prints differ: the box starts at "Mixed".
+    [Parameter] public bool StartMixed { get; set; }
+    /// A saved record / combined bill: a pick is saved at once (the Done says the status afterwards); null = the pick
+    /// goes with the next export (the calculator's job).
+    [Parameter] public Func<PrintState, Task<WebQuote.Done>> StatusNow { get; set; }
     /// The page for (friends, customer).
     [Parameter] public Func<bool, string, WebQuote.Sheet> Build { get; set; }
     /// One export ("print", "text", "history") with (friends, customer, print status; null for an invoice): saves what it
@@ -110,7 +114,7 @@
 
     WebQuote.Sheet sheet;
     string customer = "", status, printTitle;
-    bool friends, dark, busy, statusError, zoomed;
+    bool friends, dark, busy, statusError, zoomed, mixed, statusBusy;
     int status_;   // the Print status box (PrintState as int; "status" is the message line)
 
     bool NeedsName { get { return Invoice && customer.Trim().Length == 0; } }
@@ -121,6 +125,7 @@
         dark = StartDark;
         customer = StartCustomer ?? "";
         status_ = (int)StartStatus;
+        mixed = StartMixed;
         Rebuild();
     }
 
@@ -161,8 +166,9 @@
         if (kind == "text") Store.CopyStart();
         try
         {
-            var done = await Export(kind, friends, customer, Invoice || NoStatus ? (PrintState?)null : (PrintState)status_);
+            var done = await Export(kind, friends, customer, mixed ? (PrintState?)null : (PrintState)status_);
             Rebuild();   // a saved quote's number and date, an invoice's number
+            TakeStatus(done);
             statusError = done.Problem != null;
             status = done.Problem ?? done.Status;
             if (done.Problem != null && kind == "text") await Store.CopyCancel();
@@ -189,6 +195,33 @@
             printTitle = null;
             await Store.PrintSheet(t);
         }
+    }
+
+    /// The box after a save (the stored status; "Mixed" when the prints differ).
+    void TakeStatus(WebQuote.Done done)
+    {
+        if (done == null || !done.HasStatus) return;
+        mixed = done.Mixed;
+        if (!mixed) status_ = (int)done.Status_;
+    }
+
+    async Task StatusChanged(ChangeEventArgs e)
+    {
+        int v;
+        if (!int.TryParse((string)e.Value, out v) || v < 0 || v > 3) return;
+        status_ = v;
+        mixed = false;
+        if (StatusNow == null) return;
+        StateHasChanged();   // the pick on screen first, so a "No" or a failed save can put the old one back   // the job: stored with the next export
+        statusBusy = true;
+        try
+        {
+            var done = await StatusNow((PrintState)v);
+            TakeStatus(done);
+            if (done.Problem != null) { status = done.Problem; statusError = true; }
+            else if (done.Status != null) { status = done.Status; statusError = false; }
+        }
+        finally { statusBusy = false; }
     }
 
     Task Close() { return OnClose.InvokeAsync(); }

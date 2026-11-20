@@ -384,6 +384,7 @@ table.hist tr.picked.ticked td { background: var(--accent); }
 .dialog.confirm .cbody p { margin: 0 0 8px; }
 .dialog.confirm .warntext { color: var(--warning); }
 .dialog.confirm .check { margin: 4px 0 10px; }
+.ask-overlay { z-index: 40; }   /* AskDialog: over Settings and the quote window */
 /* phone: an opened card stays in its place; its actions come full width after its row */
 .tile-sheet { grid-column: 1 / -1; background: var(--info); border: 1px solid var(--accent); border-radius: 6px; padding: 0 8px 8px; }
 .tile-sheet .tsname { font-weight: 600; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -510,3 +511,48 @@ table.hist td.notecell { min-width: 90px; }
 @media (pointer: coarse) {
     input[type], input:not([type]), select, textarea, table.hist select.for { font-size: 16px; }
 }
+/* issue #7: print status - one Status column (mark + name; mark only under 1200 px), a dark menu, the phone chip */
+.stmark { display: inline-block; width: 14px; text-align: center; font-weight: 700; line-height: 1; flex: none; }
+.st-none .stmark, .stmark.st-none { color: var(--muted); font-weight: 400; }
+.st-printing .stmark, .stmark.st-printing { color: var(--warning); }
+.st-printed .stmark, .stmark.st-printed { color: var(--friends); }
+.st-failed .stmark, .stmark.st-failed { color: var(--error); }
+table.hist td.stcol { position: relative; white-space: nowrap; }
+.stbtn { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; padding: 3px 6px; color: var(--text); font: inherit; }
+.stbtn.st-none { color: var(--muted); }
+.stbtn:hover, .stbtn[aria-expanded="true"] { background: var(--input); }
+@media (max-width: 1199px) { table.hist .stbtn .stname { display: none; } }
+.chip.stchip { display: inline-flex; align-items: center; gap: 5px; color: var(--text); }
+.chip.stchip.st-none { color: var(--muted); }
+.chip.stchip.st-printing { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 45%, var(--back)); }
+.chip.stchip.st-printed { border-color: color-mix(in srgb, var(--friends) 45%, var(--back)); }
+.chip.stchip.st-failed { border-color: color-mix(in srgb, var(--error) 40%, var(--back)); }
+.chip.stchip .stmark { width: auto; }
+.stlayer { position: absolute; z-index: 20; left: 0; top: 100%; }
+.stbar, .chips { position: relative; }
+.stbar { display: inline-block; }
+.stbar .stlayer { left: auto; right: 0; }
+.stback { position: fixed; inset: 0; z-index: 0; background: transparent; }
+.stmenu { position: relative; z-index: 1; min-width: 190px; background: var(--input); border: 1px solid var(--border); box-shadow: 0 6px 20px rgba(0, 0, 0, .55); padding: 4px 0; text-align: left; }
+.stmenu .sthead { font-size: 12px; padding: 4px 12px 4px 30px; }
+.stitem { display: flex; align-items: center; gap: 6px; width: 100%; border: 0; background: transparent; color: var(--text); padding: 6px 12px 6px 10px; font: inherit; text-align: left; white-space: nowrap; }
+.stitem:hover, .stitem:focus-visible { background: var(--accent); color: #fff; outline: none; }
+.stitem:hover .stmark, .stitem:focus-visible .stmark { color: #fff; }
+.stdot { display: inline-block; width: 14px; font-size: 10px; text-align: center; }
+.stchoices { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.stchoices > .muted { flex-basis: 100%; font-size: 12px; }
+.stchoices button { display: inline-flex; align-items: center; gap: 4px; }
+.stchoices button.on { border-color: var(--accent); box-shadow: inset 0 -3px 0 var(--accent); }
+.hinfo.stline { display: flex; align-items: center; gap: 8px; }
+.hinfo.stline > span { flex: 1; }
+/* phones: the status menu is a sheet at the bottom of the screen */
+@media (max-width: 720px) {
+    .stlayer { position: fixed; inset: 0; z-index: 30; }
+    .stback { background: rgba(0, 0, 0, .5); }
+    .stmenu { position: absolute; left: 0; right: 0; bottom: 0; min-width: 0; border-width: 1px 0 0; padding: 8px 0 14px; }
+    .stmenu .sthead { padding: 6px 16px; font-size: 13px; }
+    .stitem { padding: 12px 16px; font-size: 16px; }
+}
+/* the live price's source credit (elprisenligenu.dk) */
+.power-credit { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.power-credit a { color: var(--muted); }

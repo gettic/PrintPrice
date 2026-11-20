@@ -296,7 +296,7 @@ namespace PrintPrice.Web
         public sealed class Filter
         {
             public DateTime Month = DateTime.MinValue;   // 1st of the month; MinValue = all months
-            public int Show;                             // ShowAll ... ShowNotPrinted
+            public int Show;                             // ShowAll / ShowFriends / ShowCustomers or a status (History.ShowState*, issue #7)
             public string PrinterId;                     // null = all printers
             public string Query = "";
         }
@@ -305,7 +305,7 @@ namespace PrintPrice.Web
         public static bool Matches(QuoteRecord r, Filter f, Dictionary<string, string> printerNames)
         {
             return History.Matches(r, f.Month, f.PrinterId, f.Show, f.Query,
-                                   printerNames != null ? (Func<QuoteRecord, string>)(x => PrinterText(x, printerNames)) : null);
+                                   printerNames != null ? (Func<QuoteRecord, string>)(x => PrinterText(x, printerNames)) : null, DateTime.Now);
         }
 
         public static List<QuoteRecord> Apply(List<QuoteRecord> list, Filter f, Dictionary<string, string> printerNames)

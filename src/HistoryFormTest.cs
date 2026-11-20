@@ -133,6 +133,20 @@ namespace PrintPrice
                     log.Check(w.Length == 2 && m == w[1] && fs == w[1], "status " + (w.Length > 0 ? w[0] : "?") + ": memory " + m + ", file " + fs + " (expected " + rest + ")");
                     break;
                 }
+                case "invoice":
+                {
+                    // invoice <no> <notprinted|printing|printed|failed>: every print with that invoice number has that status,
+                    // in memory and in history.json (issue #7, the Invoices window)
+                    string[] names = { "notprinted", "printing", "printed", "failed" };
+                    var now = DateTime.Now;
+                    Func<IEnumerable<QuoteRecord>, string> states = recs => recs == null ? "-" : string.Join(",",
+                        recs.Where(x => w.Length > 0 && string.Equals((x.InvoiceNo ?? "").Trim(), w[0], StringComparison.OrdinalIgnoreCase))
+                            .Select(x => names[(int)History.PrintStateOf(x, now)]));
+                    string m = states(list), fs = states(FileRecords());
+                    bool ok = w.Length == 2 && m.Length > 0 && m == fs && m.Split(',').All(s => s == w[1]);
+                    log.Check(ok, "invoice " + (w.Length > 0 ? w[0] : "?") + ": memory [" + m + "], file [" + fs + "] (expected all " + (w.Length > 1 ? w[1] : "?") + ")");
+                    break;
+                }
                 case "shown":
                     // rows / cards the list shows now (month and printer filter applied)
                     if (form == null) { log.Check(false, "expect shown works only inside open..close"); break; }
@@ -342,10 +356,43 @@ namespace PrintPrice
                         case "snap":
                             Screenshots.Snap(this, dir, "test_history_" + (arg.Length > 0 ? arg : "snap") + ".png");
                             break;
+                        case "invoices":
+                            // the Invoices window over this window's (real, loaded) list, as Invoices… / Ctrl+I opens it
+                            // (shown modeless here so the next steps can drive it; "inv close" / "inv showinhistory" end it)
+                            if (testInv != null) { log.Check(false, "the Invoices window is already open"); break; }
+                            log.Check(btnInvoices.Visible && btnInvoices.Enabled, "Invoices… button can be clicked");
+                            invoicesShowInHistory = null;
+                            testInv = NewInvoicesForm();
+                            testInv.Show(this);
+                            Application.DoEvents();
+                            log.Add("  " + testInv.TestStateLine());
+                            break;
+                        case "inv":
+                            TestInvoices(arg, log, answers, dir);
+                            break;
                         case "expect":
+                            if (HistoryTest.Command(arg) == "inv") { TestExpectInvoices(arg.Substring(3).Trim(), log); break; }
+                            if (HistoryTest.Command(arg) == "invselected")
+                            {
+                                // the prints of the last "inv showinhistory" are exactly the selection in History, and shown
+                                var want = testInvShownJobs ?? new List<QuoteRecord>();
+                                var have = SelectedRecords();
+                                bool same = want.Count > 0 && have.Count == want.Count && want.All(r => have.Contains(r)) && want.All(r => shown.Contains(r));
+                                log.Check(same, "History selects the invoice's " + want.Count + " print(s): selected " + have.Count +
+                                                " [" + string.Join(" ", have.Select(r => r.Id)) + "]");
+                                break;
+                            }
+                            if (HistoryTest.Command(arg) == "selected")
+                            {
+                                int n;
+                                string rest = arg.Substring(8).Trim();
+                                log.Check(int.TryParse(rest, out n) && SelectedCount() == n, "History selected " + SelectedCount() + " (expected " + rest + ")");
+                                break;
+                            }
                             HistoryTest.Expect(arg, log, list, this, null);
                             break;
                         case "close":
+                            if (testInv != null) { testInv.Close(); testInv.Dispose(); testInv = null; }
                             log.Add("  " + TestState());
                             Close();
                             return;
@@ -360,6 +407,187 @@ namespace PrintPrice
                 await Task.Delay(50);   // let queued work run (picture loading, BeginInvokes)
             }
             Close();   // no "close" line: the window closes after the last step
+        }
+
+        InvoicesForm testInv;   // the Invoices window opened by the "invoices" step
+        List<QuoteRecord> testInvShownJobs;   // the prints of the last "inv showinhistory" (expect invselected)
+        static readonly string[] InvStateNames = { "notprinted", "printing", "printed", "failed" };
+        static readonly string[] InvFilterNames = { "all", "notprinted", "printing", "printed", "failed", "mixed" };
+        static readonly string[] InvPeriodNames = { "all", "month", "30days", "year" };
+
+        /// inv search <text> | filter <all|notprinted|printing|printed|failed|mixed> | period <all|month|30days|year> |
+        /// select <invoice no.|#row> | set <notprinted|printing|printed|failed> [yes|no] | showinhistory | close | snap [name]
+        void TestInvoices(string arg, TestLog log, Queue<DialogResult> answers, string dir)
+        {
+            if (testInv == null) { log.Check(false, "inv " + arg + ": the Invoices window is not open (step \"invoices\" first)"); return; }
+            string cmd, rest;
+            HistoryTest.Split(arg, out cmd, out rest);
+            switch (cmd)
+            {
+                case "search":
+                    testInv.TestSearch(rest.Trim('"'));
+                    break;
+                case "filter":
+                {
+                    int i = Array.IndexOf(InvFilterNames, rest);
+                    if (i < 0) { log.Check(false, "unknown inv filter: " + rest); return; }
+                    testInv.TestStatusFilter(i);
+                    break;
+                }
+                case "period":
+                {
+                    int i = Array.IndexOf(InvPeriodNames, rest);
+                    if (i < 0) { log.Check(false, "unknown inv period: " + rest); return; }
+                    testInv.TestPeriod(i);
+                    break;
+                }
+                case "select":
+                {
+                    string no = rest;
+                    int k;
+                    if (rest.StartsWith("#") && int.TryParse(rest.Substring(1), out k))
+                        no = k >= 1 && k <= testInv.TestRowCount ? testInv.TestRows[k - 1].No : null;
+                    if (no != null) testInv.TestSelect(no);
+                    var sel = testInv.TestSelected;
+                    log.Check(no != null && sel != null && string.Equals(sel.No, no, StringComparison.OrdinalIgnoreCase),
+                              "invoice " + rest + " selected (" + (sel != null ? sel.No + ", " + sel.Jobs.Count + " print(s)" : "none") + ")");
+                    break;
+                }
+                case "set":
+                {
+                    var w = rest.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    int k = w.Length > 0 ? Array.IndexOf(InvStateNames, w[0]) : -1;
+                    if (k < 0) { log.Check(false, "unknown inv set: " + rest); return; }
+                    if (testInv.TestSelected == null) { log.Check(false, "inv set: no invoice selected"); return; }
+                    if (w.Contains("yes")) answers.Enqueue(DialogResult.Yes);
+                    else if (w.Contains("no")) answers.Enqueue(DialogResult.No);
+                    testInv.SetStatus(testInv.TestSelected, (PrintState)k);
+                    break;
+                }
+                case "showinhistory":
+                {
+                    var sel = testInv.TestSelected;
+                    log.Check(sel != null, "Show in History with an invoice selected");
+                    testInvShownJobs = sel != null ? new List<QuoteRecord>(sel.Jobs) : null;
+                    testInv.TestShowInHistory();
+                    Application.DoEvents();
+                    log.Check(testInv.IsDisposed || !testInv.Visible, "the Invoices window closed");
+                    if (!testInv.IsDisposed) testInv.Dispose();
+                    testInv = null;
+                    AfterInvoices();
+                    return;
+                }
+                case "close":
+                    testInv.Close();
+                    testInv.Dispose();
+                    testInv = null;
+                    AfterInvoices();
+                    return;
+                case "snap":
+                    Screenshots.Snap(testInv, dir, "test_invoices_" + (rest.Length > 0 ? rest : "snap") + ".png");
+                    break;
+                default:
+                    log.Check(false, "unknown inv step: " + arg);
+                    return;
+            }
+            log.Add("  " + testInv.TestStateLine());
+        }
+
+        /// expect inv rows <n> | sorted | first <no> | state <no> <notprinted|printing|printed|failed|mixed> |
+        /// prints <no> <n> | count "<text>" | info "<text>" | has <no> | hasnot <no>
+        void TestExpectInvoices(string arg, TestLog log)
+        {
+            if (testInv == null) { log.Check(false, "expect inv " + arg + ": the Invoices window is not open"); return; }
+            string what, rest;
+            HistoryTest.Split(arg, out what, out rest);
+            var rows = testInv.TestRows;
+            var w = rest.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            int n;
+            // an invoice by its number, or "#row" (1 = the top row shown)
+            Func<string, InvoiceRow> find = no =>
+                no.StartsWith("#") && int.TryParse(no.Substring(1), out n) ? (n >= 1 && n <= rows.Count ? rows[n - 1] : null)
+                : rows.FirstOrDefault(r => string.Equals(r.No, no, StringComparison.OrdinalIgnoreCase));
+            string[] names = { "notprinted", "printing", "printed", "failed" };
+            switch (what)
+            {
+                case "selstate":
+                case "selsaved":
+                {
+                    // selstate <state|mixed>: the selected row's status; selsaved <state>: all its prints, memory + history.json
+                    var sel = testInv.TestSelected;
+                    if (sel == null) { log.Check(false, "expect inv " + what + ": no invoice selected"); break; }
+                    if (what == "selstate")
+                    {
+                        string has = sel.State == null ? "mixed" : names[(int)sel.State.Value];
+                        log.Check(has == rest, "selected invoice " + sel.No + " row status " + has + " (expected " + rest + ")");
+                        break;
+                    }
+                    var now = DateTime.Now;
+                    var ids = new HashSet<string>(sel.Jobs.Select(j => j.Id));
+                    var file = HistoryTest.FileRecords();
+                    string m = string.Join(",", list.Where(x => ids.Contains(x.Id)).Select(x => names[(int)History.PrintStateOf(x, now)]));
+                    string fs = file == null ? "-" : string.Join(",", file.Where(x => ids.Contains(x.Id)).Select(x => names[(int)History.PrintStateOf(x, now)]));
+                    log.Check(m.Length > 0 && m == fs && m.Split(',').All(s => s == rest),
+                              "selected invoice " + sel.No + " (" + sel.Jobs.Count + " prints): memory [" + m + "], file [" + fs + "] (expected all " + rest + ")");
+                    break;
+                }
+                case "rows":
+                    log.Check(int.TryParse(rest, out n) && rows.Count == n, "Invoices rows " + rows.Count + " (expected " + rest + ")");
+                    break;
+                case "sorted":
+                {
+                    // newest invoice date first, unreadable dates last, then number descending (History.Invoices)
+                    int bad = -1;
+                    for (int i = 1; i < rows.Count && bad < 0; i++)
+                    {
+                        var a = rows[i - 1]; var b = rows[i];
+                        bool ga = a.BilledAt != DateTime.MinValue, gb = b.BilledAt != DateTime.MinValue;
+                        bool ok = ga != gb ? ga : a.BilledAt != b.BilledAt ? a.BilledAt > b.BilledAt : string.CompareOrdinal(a.No, b.No) >= 0;
+                        if (!ok) bad = i;
+                    }
+                    log.Check(bad < 0, "Invoices sorted newest first (" + rows.Count + " rows" +
+                                       (bad >= 0 ? "; row " + (bad + 1) + " " + rows[bad].No + " " + rows[bad].BilledAt.ToString("yyyy-MM-dd HH:mm") +
+                                                   " after " + rows[bad - 1].No + " " + rows[bad - 1].BilledAt.ToString("yyyy-MM-dd HH:mm") : "") + ")");
+                    break;
+                }
+                case "first":
+                    log.Check(rows.Count > 0 && string.Equals(rows[0].No, rest, StringComparison.OrdinalIgnoreCase),
+                              "first invoice " + (rows.Count > 0 ? rows[0].No : "none") + " (expected " + rest + ")");
+                    break;
+                case "has":
+                case "hasnot":
+                    log.Check((find(rest) != null) == (what == "has"), "invoice " + rest + (find(rest) != null ? " is listed" : " is not listed") + " (expected " + what + ")");
+                    break;
+                case "state":
+                {
+                    var r = w.Length == 2 ? find(w[0]) : null;
+                    string has = r == null ? "not listed" : r.State == null ? "mixed" : InvStateNames[(int)r.State.Value];
+                    log.Check(r != null && has == w[1], "invoice " + (w.Length > 0 ? w[0] : "?") + " row status " + has + " (expected " + rest + ")");
+                    break;
+                }
+                case "prints":
+                {
+                    var r = w.Length == 2 ? find(w[0]) : null;
+                    log.Check(r != null && int.TryParse(w[1], out n) && r.Jobs.Count == n,
+                              "invoice " + (w.Length > 0 ? w[0] : "?") + " has " + (r != null ? r.Jobs.Count.ToString() : "-") + " print(s) (expected " + rest + ")");
+                    break;
+                }
+                case "count":
+                {
+                    string want = rest.Trim('"');
+                    log.Check(testInv.TestCount.Contains(want), "Invoices count \"" + testInv.TestCount + "\" contains \"" + want + "\"");
+                    break;
+                }
+                case "info":
+                {
+                    string want = rest.Trim('"');
+                    log.Check(testInv.TestInfoText.Contains(want), "Invoices info \"" + testInv.TestInfoText + "\" contains \"" + want + "\"");
+                    break;
+                }
+                default:
+                    log.Check(false, "unknown expect inv: " + arg);
+                    break;
+            }
         }
 
         static void TestClick(Button b, string name, TestLog log)

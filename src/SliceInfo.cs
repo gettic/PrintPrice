@@ -47,6 +47,10 @@ namespace PrintPrice
         public bool Together;
         // idea 21: null = fine / not asked; else a short text why "together" fell back to separate plates
         public string TogetherProblem;
+        // issue #8: size in mm of the biggest object (by its box volume) as sliced, i.e. already scaled; 0 = unknown (a
+        // pre-sliced file / G-code has no result.json). SizeObjects = how many objects were measured (2+ = "the biggest one").
+        public double SizeX, SizeY, SizeZ;
+        public int SizeObjects;
     }
 
     /// One plate of a sliced print (idea 21): from slice_info.config (+ names from model_settings.config); G-code = one plate.
@@ -436,6 +440,12 @@ namespace PrintPrice
             total.Plates += r.Plates;
             if (total.Picture == null) total.Picture = r.Picture;
             if (total.StudioFile == null) total.StudioFile = r.StudioFile;
+            if (r.SizeObjects > 0)
+            {
+                if (r.SizeX * r.SizeY * r.SizeZ > total.SizeX * total.SizeY * total.SizeZ)
+                { total.SizeX = r.SizeX; total.SizeY = r.SizeY; total.SizeZ = r.SizeZ; }
+                total.SizeObjects += r.SizeObjects;
+            }
             foreach (var f in r.Filaments)
             {
                 if (f == null) continue;

@@ -18,6 +18,10 @@ namespace PrintPrice.Web
             public int Status { get; set; }
             public string Text { get; set; }
             public string Stale { get; set; }     // X-Price-Stale (ISO UTC) or null
+            // the newer Worker (plans\worker-power\web-notes.md); null from the old one
+            public string Source { get; set; }    // X-Price-Source: "Energi Data Service" or "elprisenligenu.dk"
+            public string Fetched { get; set; }   // X-Price-Fetched: when the prices were fetched (ISO UTC)
+            public string Cache { get; set; }     // X-Cache: MISS / HIT / KEPT / STALE
             public bool TimedOut { get; set; }
         }
 
@@ -26,7 +30,11 @@ namespace PrintPrice.Web
             public bool Ok;
             public PowerQuote Quote;
             public double Total;          // kr/kWh incl. fees (and VAT), rounded to 2 decimals as on the desktop
-            public DateTime? SavedUtc;    // a saved copy (Worker's STALE): when it was fetched
+            public DateTime? SavedUtc;    // shown as "price from …": a saved copy (Worker's STALE) or prices fetched over a day ago
+            public DateTime? FetchedUtc;  // when the prices were fetched (X-Price-Fetched, else X-Price-Stale); null = not said
+            public bool Stale;            // the Worker could reach no source and sent its saved copy
+            public bool NoCurrent;        // the prices have no slot for now (too old): "the newest prices are from …"
+            public string Source = "";    // X-Price-Source ("" from the old Worker)
             public string Why;            // not Ok: the reason, for "Couldn't get the live price ({0})…"
         }
 
@@ -49,37 +57,75 @@ namespace PrintPrice.Web
             }
             if (a.Status == 429) { r.Why = L.S("the price service is busy right now", "pristjenesten har travlt lige nu"); return r; }
             if (a.Status != 200) { r.Why = L.S("the price service is unavailable", "pristjenesten er ikke tilgængelig"); return r; }
-            DateTime saved = default(DateTime);
-            bool stale = !string.IsNullOrEmpty(a.Stale) && DateTime.TryParse(a.Stale, CultureInfo.InvariantCulture,
-                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out saved);
-            if (stale) r.SavedUtc = DateTime.SpecifyKind(saved, DateTimeKind.Utc);
+            r.Source = (a.Source ?? "").Trim();
+            r.Stale = string.Equals((a.Cache ?? "").Trim(), "STALE", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrEmpty(a.Stale);
+            r.FetchedUtc = Utc(a.Fetched) ?? Utc(a.Stale);
             try
             {
-                // a saved copy: the slot that was current when it was fetched
-                r.Quote = PowerPrice.PickCurrent(a.Text ?? "", area == "DK2" ? "DK2" : "DK1", stale ? r.SavedUtc.Value : nowUtc);
+                // always the slot of NOW: a saved copy covers 36 h; one without a current slot is too old to use (the
+                // Worker's copy was 10 days old once: the page then keeps the user's own price)
+                r.Quote = PowerPrice.PickCurrent(a.Text ?? "", area == "DK2" ? "DK2" : "DK1", nowUtc);
             }
-            catch (SliceException ex) { r.Why = ex.Message; return r; }
+            catch (SliceException ex)
+            {
+                r.Why = ex.Message;
+                // PowerPrice.PickCurrent's "no current price" (not a broken answer): say how old the prices are
+                string a2 = area == "DK2" ? "DK2" : "DK1";
+                r.NoCurrent = r.FetchedUtc.HasValue && ex.Message == L.F("no current price published for {0}", "ingen aktuel pris offentliggjort for {0}", a2);
+                return r;
+            }
             catch (Exception) { r.Why = L.S("unexpected answer from Energi Data Service", "uventet svar fra Energi Data Service"); return r; }
             r.Total = Math.Round(PowerPrice.TotalPrice(r.Quote.SpotDkkPerKwh, addOn, vat), 2);
             r.Ok = true;
+            // "price from …": a saved copy, or prices fetched about a day ago or more
+            if (r.FetchedUtc.HasValue && (r.Stale || nowUtc - r.FetchedUtc.Value > OldAfter)) r.SavedUtc = r.FetchedUtc;
             return r;
+        }
+
+        /// Prices fetched longer ago than this get "price from <date>" even when the Worker didn't say STALE.
+        public static readonly TimeSpan OldAfter = TimeSpan.FromHours(20);
+
+        static DateTime? Utc(string iso)
+        {
+            DateTime t;
+            if (string.IsNullOrEmpty(iso) || !DateTime.TryParse(iso, CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out t)) return null;
+            return DateTime.SpecifyKind(t, DateTimeKind.Utc);
+        }
+
+        /// The source credit under the price line: elprisenligenu.dk asks for it when their prices are shown; null = none.
+        public static string Credit(Result r)
+        {
+            if (r == null || !r.Ok || !string.Equals(r.Source, CreditSource, StringComparison.OrdinalIgnoreCase)) return null;
+            return L.S("Prices: ", "Priser: ");
+        }
+
+        public const string CreditSource = "elprisenligenu.dk", CreditUrl = "https://www.elprisenligenu.dk";
+
+        /// A local time for the line: "14:20" today, else "10/11 14:20" (times always with ":").
+        static string At(DateTime local, DateTime localToday)
+        {
+            return local.Date == localToday.Date ? local.ToString("HH:mm", CultureInfo.InvariantCulture) : local.ToString("d/M HH:mm", CultureInfo.InvariantCulture);
         }
 
         /// The line under the electricity price (MainForm.FetchPowerPrice's texts). applied = the box got the price.
         /// toLocal turns a UTC time into the browser's local time.
         public static string Line(Result r, double addOn, bool vat, bool applied, Func<DateTime, DateTime> toLocal, DateTime localToday)
         {
+            if (!r.Ok && r.NoCurrent)
+                return L.F("Couldn't get the live price (the newest prices are from {0}). Using your last price.",
+                           "Kunne ikke hente live-prisen (de nyeste priser er fra {0}). Bruger din sidste pris.", At(toLocal(r.FetchedUtc.Value), localToday));
             if (!r.Ok)
                 return L.F("Couldn't get the live price ({0}). Using your last price.",
                            "Kunne ikke hente live-prisen ({0}). Bruger din sidste pris.", r.Why);
             string total = r.Total.ToString("0.00", Num.Dk);
             string when = r.Quote.Area + " " + toLocal(r.Quote.SlotStartUtc).ToString("HH:mm", CultureInfo.InvariantCulture);
             // times always with ":" (da-DK's own time separator here is ".", the desktop shows 17:45)
-        if (r.SavedUtc.HasValue)
+            if (r.SavedUtc.HasValue)
             {
-                var t = toLocal(r.SavedUtc.Value);
-                string at = t.Date == localToday.Date ? t.ToString("HH:mm", CultureInfo.InvariantCulture) : t.ToString("d/M HH:mm", CultureInfo.InvariantCulture);
-                when += L.F(" (price from {0}, the live service is busy)", " (pris fra {0}, live-tjenesten har travlt)", at);
+                string at = At(toLocal(r.SavedUtc.Value), localToday);
+                when += r.Stale ? L.F(" (price from {0}, the live service is busy)", " (pris fra {0}, live-tjenesten har travlt)", at)
+                                : L.F(" (price from {0})", " (pris fra {0})", at);
             }
             if (!applied)
                 return L.F("Live price {0} is {1} kr/kWh (not applied because you edited the field).",

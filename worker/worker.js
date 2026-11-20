@@ -1,4 +1,5 @@
-// PrintPrice Worker: (1) encrypted History backups in KV, (2) cached Energi Data Service proxy for the website.
+// PrintPrice Worker: (1) encrypted History backups in KV, (2) cached day-ahead power prices for the website
+// (Energi Data Service, else elprisenligenu.dk, else the last good copy).
 // Plain ES module Worker, no dependencies. Bindings (see wrangler.toml or the dashboard):
 //   BACKUPS      KV namespace
 //   PUT_LIMIT    rate limit binding (optional; skipped if missing)
@@ -130,75 +131,187 @@ function looksLikeBlob(b) {
   return (b.length - 4 - 16 - 32) % 16 === 0;                                            // whole AES blocks
 }
 
-// Same query as src\PowerPrice.cs, so the website can reuse PickCurrent.
-function powerUrl(area) {
+// /power answers {"records":[{"TimeUTC":"2026-11-20T13:00:00","DayAheadPriceDKK":1881.0}, ...]} (DKK per MWh, UTC
+// without "Z", oldest first), the shape of Energi Data Service's DayAheadPrices, so the website's PickCurrent (the
+// latest slot that has started, at most 2 h old) works on it unchanged. It covers a whole day: from the start of the
+// UTC hour 3 h ago to 36 h later, so a kept copy still has the current slot for hours (and tomorrow once published).
+// Sources in order: Energi Data Service (15-min slots), then elprisenligenu.dk (free open API, hourly, DKK/kWh,
+// converted), then the last good copy in KV. Energi Data Service often answers 429 to Cloudflare's shared addresses.
+const WINDOW_BACK_H = 3, WINDOW_AHEAD_H = 36;
+const UPSTREAM_MS = 8000;                              // each upstream request: 8 s at most
+const KEPT_FRESH_MS = 60 * 60 * 1000;                  // a KV copy younger than this that still covers the next hour is served without asking upstream
+const SOURCE_EDS = "Energi Data Service", SOURCE_ELPRIS = "elprisenligenu.dk";
+
+// The window [start, end) for "now": start = the start of the UTC hour WINDOW_BACK_H hours ago, so the query (and the
+// answer) only changes once an hour, which keeps KV writes low.
+function priceWindow(now) {
+  const start = Math.floor((now - WINDOW_BACK_H * 3600000) / 3600000) * 3600000;
+  return { start: start, end: start + (WINDOW_BACK_H + WINDOW_AHEAD_H) * 3600000 };
+}
+
+// "2026-11-20T13:00" (UTC, minutes) for Energi Data Service's start/end.
+function edsTime(ms) { return new Date(ms).toISOString().slice(0, 16); }
+// "2026-11-20T13:00:00" (UTC, no zone) as in Energi Data Service's TimeUTC.
+function recTime(ms) { return new Date(ms).toISOString().slice(0, 19); }
+
+function edsUrl(area, win) {
   return "https://api.energidataservice.dk/dataset/DayAheadPrices" +
-    "?start=now-PT3H&end=now%2BPT1H" +
+    "?start=" + edsTime(win.start) + "&end=" + edsTime(win.end) +
     "&filter=" + encodeURIComponent('{"PriceArea":["' + area + '"]}') +
     "&columns=TimeUTC,DayAheadPriceDKK&sort=TimeUTC%20asc&limit=1000";
+}
+
+// fetch with a timeout; null on a network error / timeout. Logs the answer (status or error) for `wrangler tail`.
+async function upstream(label, url) {
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": "PrintPrice-Worker", "Accept": "application/json" },
+                                 signal: AbortSignal.timeout(UPSTREAM_MS) });
+    console.log("power upstream " + label + ": " + r.status);
+    if (label.indexOf("EDS") === 0) lastEdsStatus = r.status;
+    return r;
+  } catch (e) {
+    console.log("power upstream " + label + ": error " + (e && e.name ? e.name : "") + " " + (e && e.message ? e.message : ""));
+    return null;
+  }
+}
+
+// The records of a JSON body (array of {TimeUTC, DayAheadPriceDKK} with a numeric price), or null.
+function recordsOf(body) {
+  try {
+    const d = JSON.parse(body);
+    if (!d || !Array.isArray(d.records)) return null;
+    return d.records.filter(x => x && typeof x.TimeUTC === "string" && typeof x.DayAheadPriceDKK === "number" && isFinite(x.DayAheadPriceDKK));
+  } catch (e) { return null; }
+}
+
+// Energi Data Service: the window's records, or null (busy / down / bad answer / none).
+async function fromEds(area, win) {
+  const r = await upstream("EDS " + area, edsUrl(area, win));
+  if (!r || !r.ok) return null;
+  let body;
+  try { body = await r.text(); } catch (e) { console.log("power upstream EDS " + area + ": body cut off"); return null; }
+  const recs = recordsOf(body);
+  if (!recs || recs.length === 0) { console.log("power upstream EDS " + area + ": no records"); return null; }
+  return recs.map(x => ({ TimeUTC: x.TimeUTC, DayAheadPriceDKK: x.DayAheadPriceDKK }));
+}
+
+// The Copenhagen calendar date of a time: "2026/11-20" as in elprisenligenu.dk's path.
+function cphDay(ms) {
+  const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Copenhagen", year: "numeric", month: "2-digit", day: "2-digit" })
+    .formatToParts(new Date(ms));
+  const get = t => (p.find(x => x.type === t) || {}).value;
+  return get("year") + "/" + get("month") + "-" + get("day");
+}
+
+// elprisenligenu.dk: one file per Danish day (/api/v1/prices/2026/11-20_DK1.json, entries {DKK_per_kWh, time_start
+// with offset}), excl. VAT like Energi Data Service. Fetches the Danish days the window touches (tomorrow's file
+// is 404 until about 13:00, which is fine), converts to records in the window, or null when none.
+async function fromElpris(area, win) {
+  const days = [];
+  for (let t = win.start; t < win.end + 3600000; t += 6 * 3600000) {
+    const d = cphDay(Math.min(t, win.end));
+    if (days.indexOf(d) < 0) days.push(d);
+  }
+  const recs = [];
+  for (const d of days) {
+    const r = await upstream("elpris " + d + "_" + area, "https://www.elprisenligenu.dk/api/v1/prices/" + d + "_" + area + ".json");
+    if (!r || !r.ok) continue;
+    let list;
+    try { list = JSON.parse(await r.text()); } catch (e) { continue; }
+    if (!Array.isArray(list)) continue;
+    for (const x of list) {
+      if (!x || typeof x.DKK_per_kWh !== "number" || !isFinite(x.DKK_per_kWh) || typeof x.time_start !== "string") continue;
+      const t = Date.parse(x.time_start);
+      if (isNaN(t) || t < win.start || t >= win.end) continue;
+      recs.push({ TimeUTC: recTime(t), DayAheadPriceDKK: Math.round(x.DKK_per_kWh * 1000 * 1000) / 1000 });   // DKK/kWh -> DKK/MWh
+    }
+  }
+  if (recs.length === 0) return null;
+  recs.sort((a, b) => a.TimeUTC < b.TimeUTC ? -1 : a.TimeUTC > b.TimeUTC ? 1 : 0);
+  return recs;
+}
+
+// true when the records hold a slot that has started at most 2 h before `now` (what PickCurrent accepts).
+function hasCurrent(recs, now) {
+  return !!recs && recs.some(x => { const t = Date.parse(x.TimeUTC + "Z"); return t <= now && now - t <= 2 * 3600000; });
+}
+// true when the records already reach at least `ms` (a slot starting at or after it).
+function reaches(recs, ms) {
+  return !!recs && recs.some(x => Date.parse(x.TimeUTC + "Z") >= ms);
 }
 
 async function power(url, env, ctx, cors) {
   const area = url.searchParams.get("area") === "DK2" ? "DK2" : "DK1";   // nothing else is passed upstream
   const now = Date.now();
   const memo = powerMemo[area];
-  if (memo && now - memo.t < POWER_TTL_MS) return json(200, memo.body, cors, "HIT");
+  // memory: asked upstream (or KV) less than 5 min ago and it still has the current slot
+  if (memo && now - memo.checked < POWER_TTL_MS && hasCurrent(memo.recs, now)) return priceAnswer(memo, cors, "HIT", now);
 
-  const upstream = powerUrl(area);
-
-  // Edge cache too (works on custom domains; may be a no-op on workers.dev, then the memory cache carries it).
-  const cacheKey = new Request("https://cache.printprice/power/" + area);
-  const cache = caches.default;
-  const hit = await cache.match(cacheKey);
-  if (hit) {
-    const body = await hit.text();
-    powerMemo[area] = { t: now, body: body };
-    return json(200, body, cors, "HIT");
+  // KV: a copy fetched within the hour that still covers the next hour is served without asking upstream
+  const kept = await keptPrice(env, area);
+  if (kept && now - kept.t < KEPT_FRESH_MS && hasCurrent(kept.recs, now) && reaches(kept.recs, now + 3600000)) {
+    const entry = { checked: now, fetched: kept.t, source: kept.source, body: kept.body, recs: kept.recs };
+    powerMemo[area] = entry;
+    return priceAnswer(entry, cors, "KEPT", now);
   }
 
-  let r = null;
-  // 8 s at most: a hanging Energi Data Service falls through to the last good copy below
-  try { r = await fetch(upstream, { headers: { "User-Agent": "PrintPrice-Worker", "Accept": "application/json" },
-                                    signal: AbortSignal.timeout(8000) }); }
-  catch (e) { r = null; }
-  let body = null;
-  if (r && r.ok) {
-    try { body = await r.text(); }        // the 8 s also covers the body; cut off = treated as down
-    catch (e) { body = null; }
+  // upstream: Energi Data Service, then elprisenligenu.dk (each 8 s at most)
+  const win = priceWindow(now);
+  lastEdsStatus = 0;
+  let recs = await fromEds(area, win), source = SOURCE_EDS;
+  if (!hasCurrent(recs, now)) {
+    const alt = await fromElpris(area, win);
+    if (hasCurrent(alt, now)) { recs = alt; source = SOURCE_ELPRIS; }
+    else recs = null;
   }
-  if (body === null) {
-    // Energi Data Service busy (429, it often limits Cloudflare's shared addresses) or down: serve the last good copy,
-    // from this isolate's memory, else from KV, with X-Price-Stale = when that copy was fetched.
-    if (memo) return json(200, memo.body, cors, "STALE", { "X-Price-Stale": iso(memo.t) });
-    const kept = await keptPrice(env, area);
-    if (kept) {
-      powerMemo[area] = { t: kept.t, body: kept.body };
-      return json(200, kept.body, cors, "STALE", { "X-Price-Stale": iso(kept.t) });
-    }
-    return r && r.status === 429 ? text(429, "price service busy", cors, { "Retry-After": "60" })
-                                 : text(502, "price service unavailable", cors);
+  if (recs) {
+    const body = JSON.stringify({ records: recs });
+    const entry = { checked: now, fetched: now, source: source, body: body, recs: recs };
+    powerMemo[area] = entry;
+    ctx.waitUntil(keepPrice(env, area, body, now, source, kept));
+    return priceAnswer(entry, cors, "MISS", now);
   }
-  powerMemo[area] = { t: now, body: body };
-  ctx.waitUntil(cache.put(cacheKey, new Response(body, {
-    headers: { "Content-Type": "application/json", "Cache-Control": "max-age=300" } })));
-  ctx.waitUntil(keepPrice(env, area, body, now));
-  return json(200, body, cors, "MISS");
+
+  // both failed: the last good copy (memory or KV, the newer one), marked stale; not asked upstream again for 5 min
+  console.log("power " + area + ": no source answered, serving the kept copy if any");
+  let old = kept && kept.recs && kept.recs.length ? { fetched: kept.t, source: kept.source, body: kept.body, recs: kept.recs } : null;
+  if (memo && memo.recs && memo.recs.length && (!old || memo.fetched > old.fetched)) old = memo;
+  if (old) {
+    const entry = { checked: now, fetched: old.fetched, source: old.source, body: old.body, recs: old.recs };
+    powerMemo[area] = entry;
+    return priceAnswer(entry, cors, "STALE", now);
+  }
+  return lastEdsStatus === 429 ? text(429, "price service busy", cors, { "Retry-After": "60" })
+                               : text(502, "price service unavailable", cors);
 }
 
-// The last good /power answer per area in KV ("power:DK1"; metadata t = fetch time, ms). Written only when the answer
-// changed and the kept copy is at least 10 minutes old: about one write per 15-minute price slot per area.
+// The /power answer: the records body plus X-Cache, X-Price-Source (which service the prices came from),
+// X-Price-Fetched (ISO UTC time they were fetched) and, when the copy is old or no source answered, X-Price-Stale (same
+// time; kept for the website version that reads it).
+let lastEdsStatus = 0;
+function priceAnswer(entry, cors, cacheState, now) {
+  const extra = { "X-Price-Source": entry.source || SOURCE_EDS, "X-Price-Fetched": iso(entry.fetched) };
+  if (cacheState === "STALE") extra["X-Price-Stale"] = iso(entry.fetched);
+  return json(200, entry.body, cors, cacheState, extra);
+}
+
+// The last good /power answer per area in KV ("power:DK1"; metadata t = fetch time in ms, s = source). Old copies
+// (raw Energi Data Service bodies, no s) still read. Written only when the answer changed and the kept copy is at
+// least 10 minutes old; the window only moves once an hour, so about 1-2 writes per hour per area.
 const PRICE_KEEP_MS = 10 * 60 * 1000;
 async function keptPrice(env, area) {
   try {
     const v = await env.BACKUPS.getWithMetadata("power:" + area);
-    if (v && v.value !== null && v.metadata && v.metadata.t) return { body: v.value, t: v.metadata.t };
+    if (v && v.value !== null && v.metadata && v.metadata.t) {
+      const recs = recordsOf(v.value);
+      return { body: v.value, t: v.metadata.t, source: v.metadata.s || SOURCE_EDS, recs: recs || [] };
+    }
   } catch (e) { }
   return null;
 }
-async function keepPrice(env, area, body, now) {
-  const kept = await keptPrice(env, area);
+async function keepPrice(env, area, body, now, source, kept) {
   if (kept && (kept.body === body || now - kept.t < PRICE_KEEP_MS)) return;
-  try { await env.BACKUPS.put("power:" + area, body, { metadata: { t: now } }); } catch (e) { }
+  try { await env.BACKUPS.put("power:" + area, body, { metadata: { t: now, s: source } }); } catch (e) { }
 }
 function iso(ms) { return new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z"); }
 
@@ -214,7 +327,7 @@ function corsHeaders(origin) {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Expose-Headers": "X-Uploads-Left, X-Uploads-Reset, Retry-After, X-Price-Stale, X-Cache",
+    "Access-Control-Expose-Headers": "X-Uploads-Left, X-Uploads-Reset, Retry-After, X-Price-Stale, X-Price-Fetched, X-Price-Source, X-Cache",
     "Access-Control-Max-Age": "86400",
     "Vary": "Origin"
   };

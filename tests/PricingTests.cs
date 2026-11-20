@@ -3667,6 +3667,9 @@ namespace PrintPrice.Tests
             RecordBillTests();
             PrintStateTests();
             StatusFilterTests();
+            ScaleTests();
+            ScaleSlicerTests();
+            InvoiceListTests();
             CombinedBillTests();
             ReviewFixTests();
             SettingsSafeTests();
@@ -4797,6 +4800,214 @@ namespace PrintPrice.Tests
             var blank = new AppSettings(); blank.QuoteName = null; blank.PayMobilePay = null; blank.PayBank = null; blank.SlicerPath = null; blank.Language = null;
             var db = blank.DefaultsKeepingPersonal();
             True("Reset: null details -> \"\"", db.QuoteName == "" && db.PayMobilePay == "" && db.PayBank == "" && db.SlicerPath == "" && db.Language == "");
+        }
+
+        // ---------- issue #8 step 1: same-size scale saved per job (QuoteRecord.Scale, percent) ----------
+
+        static void ScaleTests()
+        {
+            var t = new DateTime(2026, 11, 20, 12, 0, 0);
+            // new record and old file without the key = 100 %
+            var r = HistRecord(t);
+            True("Scale: new record 100 %, factor 1", r.Scale == 100 && History.ScaleOf(r) == 100 && History.ScaleFactor(r) == 1);
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Hours\":1}]}");
+            True("Scale: old file without the key -> 100", old != null && old[0].Scale == 100 && History.ScaleText(old[0]) == "");
+            // bad values read as 100: 0, negative, 0,5 (< 1), 1001 (> 1000); 1 and 1000 kept
+            var bad = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Scale\":0},{\"Id\":\"b\",\"Scale\":-50},{\"Id\":\"c\",\"Scale\":0.5},"
+                                        + "{\"Id\":\"d\",\"Scale\":1001},{\"Id\":\"e\",\"Scale\":1},{\"Id\":\"f\",\"Scale\":1000}]}");
+            True("Scale: 0 / -50 / 0,5 / 1001 -> 100", bad != null && bad[0].Scale == 100 && bad[1].Scale == 100 && bad[2].Scale == 100 && bad[3].Scale == 100);
+            True("Scale: 1 and 1000 kept", bad[4].Scale == 1 && bad[5].Scale == 1000);
+            True("Scale: CleanScale NaN / infinity -> 100", History.CleanScale(double.NaN) == 100 && History.CleanScale(double.PositiveInfinity) == 100
+                 && History.CleanScale(double.NegativeInfinity) == 100 && History.CleanScale(150) == 150);
+            // SetScale + JSON round trip; factor 150 / 100 = 1,5
+            History.SetScale(r, 150);
+            var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { r }));
+            True("Scale: 150 % round trip, factor 1,5", back[0].Scale == 150 && History.ScaleFactor(back[0]) == 1.5);
+            History.SetScale(back[0], 5000);
+            True("Scale: SetScale 5000 -> 100; null record no error", back[0].Scale == 100);
+            History.SetScale(null, 150);
+            // CopyQuotes (backup copies) keeps it
+            True("Scale: CopyQuotes keeps 150", History.CopyQuotes(new List<QuoteRecord> { r })[0].Scale == 150);
+            // texts: 150 -> "150 %", 12,5 -> "12,5 %", 33,333 -> "33,3 %", 100 / 100,04 / bad -> ""
+            True("ScaleText: 150 %, 12,5 %, 33,3 %", History.ScaleText(150) == "150 %" && History.ScaleText(12.5) == "12,5 %" && History.ScaleText(33.333) == "33,3 %");
+            True("ScaleText: 100 / 100,04 / 0 -> \"\"", History.ScaleText(100) == "" && History.ScaleText(100.04) == "" && History.ScaleText(0) == "");
+            True("WithScale: \"3D Benchy (150 %)\", unscaled unchanged", History.WithScale("3D Benchy", r) == "3D Benchy (150 %)"
+                 && History.WithScale("3D Benchy", HistRecord(t)) == "3D Benchy" && History.WithScale(null, null) == "");
+            // the same job at another size is never "the same quote" (both numbers equal, 2 min apart)
+            var a = HistRecord(t); var b = HistRecord(t.AddMinutes(2));
+            True("Scale: same numbers same scale = same quote", History.SameQuote(a, b));
+            History.SetScale(b, 150);
+            True("Scale: other scale = not the same quote", !History.SameQuote(a, b));
+            var list = new List<QuoteRecord>();
+            History.Add(list, a); History.Add(list, b);
+            True("Scale: Add keeps both sizes", list.Count == 2 && list[0].Scale == 150 && list[1].Scale == 100);
+            // backup merge: this PC's copy lost the scale (100), the backup's has 150 -> filled; a scaled one here stays
+            var mine = BRec("S", "2026-11-20 12:00:00");
+            var theirs = BRec("S", "2026-11-20 12:00:00"); History.SetScale(theirs, 150);
+            var res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Scale merge: 100 here, 150 in the backup -> 150", res.Updated == 1 && res.Quotes[0].Scale == 150);
+            var mine2 = BRec("S", "2026-11-20 12:00:00"); History.SetScale(mine2, 80);
+            res = History.Combine(new List<QuoteRecord> { mine2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Scale merge: 80 here stays 80", res.Quotes[0].Scale == 80);
+            // replace restore takes the backup's record as it is
+            res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, true, false);
+            True("Scale restore (replace): 150", res.Quotes.Count == 1 && res.Quotes[0].Scale == 150);
+        }
+
+        // ---------- issue #8 step 1, online's pure helpers in Slicer.cs / SliceInfo.cs ----------
+
+        static void ScaleSlicerTests()
+        {
+            Func<List<string>, string> join = l => l == null ? "NULL" : string.Join(" ", l);
+            True("ScaleArgs: 100 and 0 -> none", BambuSlicer.ScaleArgs(100).Count == 0 && BambuSlicer.ScaleArgs(0).Count == 0);
+            True("ScaleArgs: 150 -> --scale 1.5 --ensure-on-bed", join(BambuSlicer.ScaleArgs(150)) == "--scale 1.5 --ensure-on-bed");
+            var oldCulture = System.Threading.Thread.CurrentThread.CurrentCulture;
+            try
+            {
+                System.Threading.Thread.CurrentThread.CurrentCulture = new System.Globalization.CultureInfo("da-DK");
+                True("ScaleArgs: Danish Windows still \"1.5\"", join(BambuSlicer.ScaleArgs(150)) == "--scale 1.5 --ensure-on-bed");
+            }
+            finally { System.Threading.Thread.CurrentThread.CurrentCulture = oldCulture; }
+            True("ScaleArgs: 33,3 -> 0.333", join(BambuSlicer.ScaleArgs(33.3)) == "--scale 0.333 --ensure-on-bed");
+            foreach (double bad in new[] { 501.0, 5.0 })
+            {
+                bool threw = false;
+                try { BambuSlicer.ScaleArgs(bad); } catch (SliceException) { threw = true; }
+                True("ScaleArgs: " + bad + " throws SliceException", threw);
+            }
+
+            double p;
+            True("TryParseScale: \"150 %\" -> 150", BambuSlicer.TryParseScale("150 %", out p) && p == 150);
+            True("TryParseScale: \"87,5\" -> 87,5", BambuSlicer.TryParseScale("87,5", out p) && p == 87.5);
+            True("TryParseScale: \"87.5\" -> 87,5", BambuSlicer.TryParseScale("87.5", out p) && p == 87.5);
+            True("TryParseScale: abc / 9,9 / 500,1 / empty rejected", !BambuSlicer.TryParseScale("abc", out p) && !BambuSlicer.TryParseScale("9,9", out p)
+                 && !BambuSlicer.TryParseScale("500,1", out p) && !BambuSlicer.TryParseScale("", out p));
+
+            // result.json bbox (trimmed from plans\issue8\runs\b_scale150_eob: Benchy at 150 %)
+            const string sample = "{\"sliced_plates\":[{\"main_predication\":4645.6,\"total_predication\":4664.7,\"filament_change_times\":0,"
+                + "\"filaments\":[{\"id\":1,\"main_used_g\":30.57,\"total_used_g\":30.57}],"
+                + "\"objects\":[{\"bbox\":{\"depth\":46.50599670410156,\"height\":72.0,\"width\":90.00150299072266,\"x\":83,\"y\":104.7,\"z\":0},\"id\":5,\"name\":\"3dbenchy.stl\"}]}]}";
+            var st = BambuSlicer.ParseSliceResult(sample);
+            True("ParseSliceResult: one object box", st != null && st.ObjectSizes.Count == 1);
+            var res = new SliceResult();
+            BambuSlicer.ApplySliceStats(res, st);
+            True("ParseSliceResult: Benchy 150 % = 90,0 × 46,5 × 72,0 mm", BambuSlicer.SizeText(res.SizeX, res.SizeY, res.SizeZ) == "90,0 × 46,5 × 72,0 mm"
+                 && res.SizeObjects == 1);
+            // biggest by volume: 10×10×50 (5000) vs 20×20×20 (8000) vs 30×30×5 (4500) -> 20×20×20, 3 objects
+            var two = new SliceResult();
+            BambuSlicer.SetSize(two, new List<double[]> { new[] { 10.0, 10, 50 }, new[] { 20.0, 20, 20 }, new[] { 30.0, 30, 5 } });
+            True("SetSize: biggest box 20×20×20 of 3", two.SizeX == 20 && two.SizeY == 20 && two.SizeZ == 20 && two.SizeObjects == 3);
+            // AddResult: total keeps the bigger box (Benchy 90 × 46,5 × 72 ≈ 301 000 mm³ > 20 × 20 × 20 = 8000) and sums objects
+            var total = new SliceResult();
+            BambuSlicer.AddResult(total, two, "a.stl");
+            BambuSlicer.AddResult(total, res, "b.stl");
+            True("AddResult: Benchy's box kept (bigger), 3 + 1 = 4 objects", total.SizeZ == 72 && Math.Abs(total.SizeX - 90.0015) < 0.001 && total.SizeObjects == 4);
+            var total2 = new SliceResult();
+            BambuSlicer.AddResult(total2, res, "b.stl");
+            BambuSlicer.AddResult(total2, two, "a.stl");
+            True("AddResult: other order, same biggest box", total2.SizeZ == 72 && total2.SizeObjects == 4);
+            True("SizeAt: 48 mm at 100 % -> 72 at 150 %; bad % unchanged", BambuSlicer.SizeAt(48, 100, 150) == 72 && BambuSlicer.SizeAt(48, 0, 150) == 48);
+            True("FitsBed: A1 257 mm high no, 256 yes", !BambuSlicer.FitsBed("A1", 100, 100, 257) && BambuSlicer.FitsBed("A1", 256, 256, 256));
+            True("FitsBed: A1 mini 180×100×50 yes, 181 no; X/Y swap", BambuSlicer.FitsBed("A1M", 180, 100, 50) && BambuSlicer.FitsBed("A1M", 100, 180, 50)
+                 && !BambuSlicer.FitsBed("A1M", 181, 100, 50));
+            True("FitsBed: unknown size = fits", BambuSlicer.FitsBed("A1M", 0, 500, 500));
+            True("CanScale: .gcode no, .stl / .3mf yes, empty no", !BambuSlicer.CanScale(@"C:\x\a.gcode") && BambuSlicer.CanScale(@"C:\x\a.stl")
+                 && BambuSlicer.CanScale(@"C:\x\a.3mf") && !BambuSlicer.CanScale(""));
+            True("ReadAsSliced: .gcode read at 100 %, not at 150 % (SliceFile refuses the scale); missing .stl not", BambuSlicer.ReadAsSliced(@"C:\x\a.gcode", 100)
+                 && !BambuSlicer.ReadAsSliced(@"C:\x\a.gcode", 150) && !BambuSlicer.ReadAsSliced(@"C:\x\no-such-file.stl", 150));
+        }
+
+        // ---------- issue #7 part 2: Invoices window helpers (History.Invoices / InvoiceMatches / InvoicePeriod / AgeText) ----------
+
+        static QuoteRecord Inv(DateTime saved, string no, string billedAt, string due, double price)
+        {
+            var r = HistRecord(saved);
+            r.InvoiceNo = no; r.BilledAt = billedAt; r.InvoiceDue = due; r.OthersPrice = price;
+            return r;
+        }
+
+        static void InvoiceListTests()
+        {
+            var now = new DateTime(2026, 11, 20, 12, 0, 0);
+            var a = Inv(now.AddDays(-5), "2026-11111", "2026-11-18 10:00:00", "2026-12-02", 72.72);
+            a.Customer = "Lene Hansen"; History.SetPrintState(a, PrintState.Printed, now);
+            var b1 = Inv(now.AddDays(-4), "2026-22222", "2026-11-19 09:00:00", "2026-11-19", 10.10);
+            var b2 = Inv(now.AddDays(-3), "2026-22222", "2026-11-19 09:00:00", "2026-11-19", 20.20); b2.BilledTo = "Firma ApS";
+            var b3 = Inv(now.AddDays(-2), " 2026-22222 ", "2026-11-19 09:00:00", "2026-11-19", 30.30); b3.Model = "Vase";
+            History.SetPrintState(b1, PrintState.Printed, now);   // b2, b3 not printed -> mixed
+            var c = Inv(new DateTime(2025, 6, 1, 7, 0, 0), "2025-K7Q4", "2025-06-01 08:00:00", "", 0);   // old letter code, no due snapshot
+            c.For = History.ForFriends; c.FriendsPrice = 5.5; History.SetPrintState(c, PrintState.Failed, now);
+            var d = HistRecord(now);                                                       // no invoice: skipped
+            var e = Inv(now.AddDays(-1), "2026-33333", "bad", "", 1);                      // unreadable date: last
+            var list = new List<QuoteRecord> { b3, d, a, e, b1, c, b2 };
+            var rows = History.Invoices(list, now);
+            True("Invoices: 4 rows, newest first B, A, C, E", rows.Count == 4 && rows[0].No == "2026-22222" && rows[1].No == "2026-11111"
+                 && rows[2].No == "2025-K7Q4" && rows[3].No == "2026-33333");
+            var B = rows[0];
+            True("Invoices: combined = 3 jobs oldest first", B.Jobs.Count == 3 && B.Jobs[0] == b1 && B.Jobs[1] == b2 && B.Jobs[2] == b3);
+            Eq("Invoices: combined total 10,10 + 20,20 + 30,30 = 60,60", 60.60, B.Total);
+            True("Invoices: combined state mixed, billed to Firma ApS, due 19-11, overdue on 20-11", B.State == null && B.BilledTo == "Firma ApS"
+                 && B.Due == new DateTime(2026, 11, 19) && B.Overdue(now) && !B.Overdue(new DateTime(2026, 11, 19, 23, 0, 0))
+                 && B.BilledAt == new DateTime(2026, 11, 19, 9, 0, 0));
+            var A = rows[1];
+            True("Invoices: single 72,72, Printed, Lene Hansen, due 02-12, not overdue", Math.Abs(A.Total - 72.72) < 1e-9 && A.State == PrintState.Printed
+                 && A.BilledTo == "Lene Hansen" && A.Due == new DateTime(2026, 12, 2) && !A.Overdue(now) && !A.Friends);
+            var C = rows[2];
+            True("Invoices: old code, friends 5,50, Failed, due 01-06 + 14 days = 15-06-2025", C.Friends && Math.Abs(C.Total - 5.5) < 1e-9
+                 && C.State == PrintState.Failed && C.Due == new DateTime(2025, 6, 15));
+            True("Invoices: unreadable date -> MinValue, age \"\"", rows[3].BilledAt == DateTime.MinValue && History.AgeText(rows[3].BilledAt, now) == "");
+            True("Invoices: null / empty list -> no rows", History.Invoices(null, now).Count == 0 && History.Invoices(new List<QuoteRecord> { d }, now).Count == 0);
+
+            Func<string, int, int, string> pick = delegate(string q, int status, int period)
+            {
+                DateTime f, t;
+                History.InvoicePeriod(period, now, out f, out t);
+                var hits = new List<string>();
+                foreach (var r in rows) if (History.InvoiceMatches(r, q, status, f, t)) hits.Add(r.No);
+                return string.Join(",", hits);
+            };
+            const int all = History.InvoiceStatusAll;
+            True("InvoiceMatches: all", pick("", all, History.PeriodAll) == "2026-22222,2026-11111,2025-K7Q4,2026-33333");
+            True("InvoiceMatches: search number part / BilledTo / customer / model / letter code", pick("22222", all, 0) == "2026-22222"
+                 && pick("firma", all, 0) == "2026-22222" && pick("lene", all, 0) == "2026-11111" && pick("VASE", all, 0) == "2026-22222"
+                 && pick("k7q4", all, 0) == "2025-K7Q4" && pick("nothing", all, 0) == "");
+            True("InvoiceMatches: status Printed / Failed / Not printed / Mixed", pick("", (int)PrintState.Printed, 0) == "2026-11111"
+                 && pick("", (int)PrintState.Failed, 0) == "2025-K7Q4" && pick("", (int)PrintState.NotPrinted, 0) == "2026-33333"
+                 && pick("", History.InvoiceStatusMixed, 0) == "2026-22222" && pick("", (int)PrintState.Printing, 0) == "");
+            True("InvoiceMatches: this month / last 30 days / this year = B, A (no old, no unreadable)", pick("", all, History.PeriodMonth) == "2026-22222,2026-11111"
+                 && pick("", all, History.PeriodLast30) == "2026-22222,2026-11111" && pick("", all, History.PeriodYear) == "2026-22222,2026-11111");
+            DateTime pf, pt;
+            History.InvoicePeriod(History.PeriodMonth, now, out pf, out pt);
+            bool month = pf == new DateTime(2026, 11, 1) && pt == new DateTime(2026, 12, 1);
+            History.InvoicePeriod(History.PeriodLast30, now, out pf, out pt);
+            bool last30 = pf == new DateTime(2026, 10, 21) && pt == DateTime.MaxValue;
+            History.InvoicePeriod(History.PeriodYear, now, out pf, out pt);
+            True("InvoicePeriod: month 01-11..01-12, 30 days from 21-10, year 2026", month && last30 && pf == new DateTime(2026, 1, 1) && pt == new DateTime(2027, 1, 1));
+            True("InvoiceMatches: null row false", !History.InvoiceMatches(null, "", all, DateTime.MinValue, DateTime.MaxValue));
+
+            // age by calendar days
+            bool wasDanish = L.Danish;
+            try
+            {
+                L.Danish = false;
+                True("AgeText: same day / later date = today", History.AgeText(now.AddHours(-11), now) == "today" && History.AgeText(now.AddDays(2), now) == "today");
+                True("AgeText: 23:59 yesterday at 00:01 = yesterday", History.AgeText(new DateTime(2026, 11, 19, 23, 59, 0), new DateTime(2026, 11, 20, 0, 1, 0)) == "yesterday");
+                True("AgeText: 3 / 30 days ago", History.AgeText(now.AddDays(-3), now) == "3 days ago" && History.AgeText(now.AddDays(-30), now) == "30 days ago");
+                True("AgeText: 20-10 -> 20-11 = 31 days = 1 month ago", History.AgeText(new DateTime(2026, 10, 20), now) == "1 month ago");
+                // month ends: 31-01 -> 02-03 = 28 + 2 = 30 days; -> 03-03 = 31 days, 1 month (3rd < 31st); -> 01-04 = 2 months
+                True("AgeText: 31-01 -> 02-03 = 30 days ago", History.AgeText(new DateTime(2026, 1, 31), new DateTime(2026, 3, 2)) == "30 days ago");
+                True("AgeText: 31-01 -> 03-03 = 1 month ago", History.AgeText(new DateTime(2026, 1, 31), new DateTime(2026, 3, 3)) == "1 month ago");
+                True("AgeText: 31-01 -> 01-04 = 2 months ago", History.AgeText(new DateTime(2026, 1, 31), new DateTime(2026, 4, 1)) == "2 months ago");
+                True("AgeText: 1 year (12 months; 23 months) / 2 years", History.AgeText(new DateTime(2025, 11, 20), now) == "1 year ago"
+                     && History.AgeText(new DateTime(2024, 11, 21), now) == "1 year ago" && History.AgeText(new DateTime(2024, 11, 20), now) == "2 years ago");
+                L.Danish = true;
+                True("AgeText DA: i dag / i går / for 3 dage siden", History.AgeText(now, now) == "i dag" && History.AgeText(now.AddDays(-1), now) == "i går"
+                     && History.AgeText(now.AddDays(-3), now) == "for 3 dage siden");
+                True("AgeText DA: for 1 måned siden / for 2 måneder siden / for 1 år siden / for 2 år siden",
+                     History.AgeText(new DateTime(2026, 10, 20), now) == "for 1 måned siden" && History.AgeText(new DateTime(2026, 9, 20), now) == "for 2 måneder siden"
+                     && History.AgeText(new DateTime(2025, 11, 20), now) == "for 1 år siden" && History.AgeText(new DateTime(2024, 11, 20), now) == "for 2 år siden");
+            }
+            finally { L.Danish = wasDanish; }
         }
 
         // ---------- first-time setup answers (idea 19): SetupAnswers + AppSettings.ApplySetup, shared by desktop and web ----------
