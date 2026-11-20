@@ -44,6 +44,31 @@ namespace PrintPrice
         public DateTime Due;              // AppSettings.InvoiceDue(Date)
         public string PayMobilePay = "";  // AppSettings.PayMobilePay ("" = no line)
         public string PayBank = "";       // AppSettings.PayBank ("" = no line)
+        // combined bill (History: 2+ jobs on one quote / invoice; MainForm.BuildGroupQuote): Jobs with 2+ entries replaces the
+        // picture, details and breakdown by summary rows ("Bill to", "Prints", "Printer" / "Plate" when shared) and one
+        // card per job, side by side (up to 3 per row); Breakdown = the whole bill's breakdown (History.GroupBreakdown;
+        // MaterialNames / MaterialColours by its Materials, Hours / Minutes summed), drawn under the cards by
+        // QuoteRows.BuildGroup; GroupFriends / GroupTotal for colour and total
+        public List<QuoteJob> Jobs;
+        public string Summary = "";       // "3 prints · 7 h 40 m · 182 g" (QuoteRows.GroupSummary)
+        public bool GroupSameRates;       // GroupBreakdownInfo.SameRates: "g × kr/kg" etc. in the details
+        public string TopUpLabel = "";    // "Minimum price (50,00 kr.)" ("" = none; data for the checks only, never drawn)
+        public string TopUpAmount = "";   // its amount ("18,00 kr.")
+        public bool GroupFriends;
+        public double GroupTotal;
+    }
+
+    /// One job's card on a combined bill (picture, name, quote no. / date, print time, weight, print price; MainForm.BuildGroupQuote).
+    class QuoteJob
+    {
+        public string Name = "";          // model name (2 lines, cut with … on the card)
+        public string Detail = "";        // "3 h 10 m · 86 g · PLA Matte" (QuoteRows.JobDetail; data, not drawn)
+        public string Sub = "";           // "Quote no. 261103-1412 · 3 November 2026" (QuoteRows.JobSub; one line per part on the card)
+        public string Amount = "";        // "178,00 kr." = its print price with its share of any top-up (QuoteRows.JobOre)
+        public long Ore;                  // the same in øre
+        public Image Picture;             // not owned; null = a drawn cube
+        public int Hours, Minutes;
+        public string Weight = "";        // "30 g"
     }
 
     /// The customer quote page (idea 5): one A4 page with logo, model, details and the full price breakdown.
@@ -80,9 +105,14 @@ namespace PrintPrice
             };
         }
 
+        /// A combined bill (2+ job lines).
+        public static bool IsGroup(QuoteData d) { return d != null && d.Jobs != null && d.Jobs.Count >= 2; }
+
+        static bool FriendsOf(QuoteData d) { return IsGroup(d) ? d.GroupFriends : d.Breakdown.Friends; }
+
         public static Bitmap Render(QuoteData d, bool dark)
         {
-            var p = Palette(dark, d.Breakdown.Friends);
+            var p = Palette(dark, FriendsOf(d));
             float need;
             using (var tmp = new Bitmap(1, 1))
             using (var g = Graphics.FromImage(tmp))
@@ -102,6 +132,128 @@ namespace PrintPrice
                 Draw(g, p, d, pageH, true);
             }
             return bmp;
+        }
+
+        // combined bill on paper: job cards side by side, at most CardCols per row (2 jobs: 2 wider cards), CardGap
+        // between them and RowGap under each row; a page's content ends by PageLimit (the "Made with" rule is at
+        // A4Height - 62); later pages start at ContinueTop. The whole bill's breakdown shows at most MaxGroupColours
+        // filament sub-rows (the rest summed in one "N more colours" row).
+        // NoteH: the "Price breakdown and total on the next page →" line under the cards of a page without them
+        const float ContinueTop = 60, PageLimit = A4Height - 80, CardGap = 24, RowGap = 24, NoteH = 46;
+        const int CardCols = 3, MaxGroupColours = 6;
+
+        static int Cols(QuoteData d) { return Math.Max(1, Math.Min(CardCols, d.Jobs.Count)); }
+
+        /// The A4 pages of a PDF: a single job = the one Render page (exactly as before; a taller one is scaled onto A4
+        /// by Pdf); a combined bill = A4 pages broken between job lines, the header only on page 1, the total and payment
+        /// after the last job, "Page 2 of 2" in the footer when there are 2+. The caller disposes the bitmaps.
+        public static List<Bitmap> RenderPages(QuoteData d, bool dark)
+        {
+            var res = new List<Bitmap>();
+            if (!IsGroup(d)) { res.Add(Render(d, dark)); return res; }
+            var p = Palette(dark, FriendsOf(d));
+            var plan = PagePlan(d, p);
+            float k = PageWidth / W;
+            for (int i = 0; i < plan.Count; i++)
+            {
+                var bmp = new Bitmap(PageWidth, (int)Math.Ceiling(A4Height * k), PixelFormat.Format32bppArgb);
+                bmp.SetResolution(150, 150);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(p.Page);
+                    g.ScaleTransform(k, k);
+                    Prep(g);
+                    Draw(g, p, d, A4Height, true, plan[i][0], plan[i][1], i == 0, plan[i][2] == 1,
+                         plan.Count > 1 ? L.F("Page {0} of {1}", "Side {0} af {1}", i + 1, plan.Count) : null, NoteText(plan, i));
+                }
+                res.Add(bmp);
+            }
+            return res;
+        }
+
+        /// The note under the cards of plan page i when the breakdown / total part is on a later page (the user's wish:
+        /// easy to read): "Price breakdown and total on the next page →" (or "on page N →"); null = none.
+        static string NoteText(List<int[]> plan, int i)
+        {
+            if (plan[i][2] == 1 || plan[i][1] <= plan[i][0]) return null;
+            int tailPage = plan.Count;   // the breakdown part is always on the last page
+            return tailPage == i + 2
+                ? L.S("Price breakdown and total on the next page →", "Prisoversigt og total på næste side →")
+                : L.F("Price breakdown and total on page {0} →", "Prisoversigt og total på side {0} →", tailPage);
+        }
+
+        /// --test-bill: the PDF's pages as "from-to" job ranges, "+note" on a page with the "next page" note, "+total" on
+        /// the page with the breakdown / total / payment ("0-9+note | 9-12+total"); fits = that part is on exactly one page, the last, after the last job, and is no taller
+        /// than a page.
+        internal static string PageLayout(QuoteData d, out bool fits)
+        {
+            fits = true;
+            if (!IsGroup(d)) return "single";
+            var p = Palette(false, FriendsOf(d));
+            var plan = PagePlan(d, p);
+            var parts = new List<string>();
+            int tails = 0;
+            for (int i = 0; i < plan.Count; i++)
+            {
+                parts.Add(plan[i][0] + "-" + plan[i][1] + (NoteText(plan, i) != null ? "+note" : "") + (plan[i][2] == 1 ? "+total" : ""));
+                if (plan[i][2] == 1) { tails++; if (i != plan.Count - 1 || plan[i][1] != d.Jobs.Count) fits = false; }
+            }
+            if (tails != 1) fits = false;
+            using (var tmp = new Bitmap(1, 1))
+            using (var g = Graphics.FromImage(tmp))
+            {
+                Prep(g);
+                float tailH = Draw(g, p, d, A4Height, false, 0, 0, false, true, null) - 90 - ContinueTop;
+                if (ContinueTop + tailH > PageLimit) fits = false;
+            }
+            return string.Join(" | ", parts);
+        }
+
+        /// How many A4 pages the PDF of d has (1 for a single job).
+        internal static int PageCount(QuoteData d)
+        {
+            if (!IsGroup(d)) return 1;
+            return PagePlan(d, Palette(false, FriendsOf(d))).Count;
+        }
+
+        /// Pages of a combined bill: {from job, to job (exclusive), 1 = the breakdown / total / payment part is on it}.
+        /// Whole rows of cards, as many per page as fit (at least one; room kept under them for the note); the breakdown
+        /// part comes after the last row when it fits there, else on the next page of its own (every page before it then
+        /// says where it is: RenderPages' note). Always the last page.
+        static List<int[]> PagePlan(QuoteData d, Pal p)
+        {
+            int n = d.Jobs.Count, cols = Cols(d);
+            float headEnd, tailH;
+            var rowH = new List<float>();
+            using (var tmp = new Bitmap(1, 1))
+            using (var g = Graphics.FromImage(tmp))
+            {
+                Prep(g);
+                headEnd = Draw(g, p, d, A4Height, false, 0, 0, true, false, null) - 90;
+                tailH = Draw(g, p, d, A4Height, false, 0, 0, false, true, null) - 90 - ContinueTop;
+                for (int a = 0; a < n; a += cols)
+                    rowH.Add(Draw(g, p, d, A4Height, false, a, Math.Min(n, a + cols), false, false, null) - 90 - ContinueTop);
+            }
+            var plan = new List<int[]>();
+            int pageFrom = 0, rowsOnPage = 0;
+            float top = headEnd;
+            for (int k = 0; k < rowH.Count; k++)
+            {
+                if (rowsOnPage > 0 && top + rowH[k] - RowGap + NoteH > PageLimit)   // room kept for the "next page" note
+                {
+                    plan.Add(new[] { pageFrom, k * cols, 0 });
+                    pageFrom = k * cols; rowsOnPage = 0; top = ContinueTop;
+                }
+                top += rowH[k];
+                rowsOnPage++;
+            }
+            if (top + tailH <= PageLimit) plan.Add(new[] { pageFrom, n, 1 });
+            else
+            {
+                plan.Add(new[] { pageFrom, n, 0 });
+                plan.Add(new[] { n, n, 1 });
+            }
+            return plan;
         }
 
         static void Prep(Graphics g)
@@ -133,6 +285,15 @@ namespace PrintPrice
         // ---------- drawing ----------
         /// Draws the page (draw = false only measures) and returns the height it needs.
         static float Draw(Graphics g, Pal p, QuoteData d, float pageH, bool draw)
+        {
+            return Draw(g, p, d, pageH, draw, 0, d.Jobs != null ? d.Jobs.Count : 0, true, true, null);
+        }
+
+        /// As above for one page of a combined bill (RenderPages): job lines from..to (exclusive), head = the header and
+        /// summary (page 1), tail = the total and payment part, pageText = "Page 1 of 2" in the footer (null = none).
+        /// A single job always draws everything (from / to / tail unused).
+        static float Draw(Graphics g, Pal p, QuoteData d, float pageH, bool draw, int from, int to, bool head, bool tail, string pageText,
+                          string noteText = null)
         {
             var fonts = new Dictionary<string, Font>();
             Func<float, bool, Font> F = (size, bold) =>
@@ -173,7 +334,7 @@ namespace PrintPrice
                 var far = StringAlignment.Far;
 
                 // header band: logo, title, name; quote number and date on the right
-                if (draw)
+                if (draw && head)
                 {
                     using (var br = new SolidBrush(p.Header)) g.FillRectangle(br, 0, 0, W, 170);
                     using (var br = new SolidBrush(p.Stripe)) g.FillRectangle(br, 0, 170, W, 8);
@@ -186,34 +347,39 @@ namespace PrintPrice
                     }
                 }
                 float tx = d.Logo != null ? 182 : L0;
-                T(d.Invoice ? L.S("Invoice", "Faktura") : L.S("3D print quote", "Tilbud på 3D-print"), F(40, true), p.HeaderText, tx, 42, 0, near);
-                if (!string.IsNullOrEmpty(d.Name))
-                    T(d.Name + L.S(" · 3D printing", " · 3D-print"), F(18, false), p.HeaderMuted, tx + 3, 98, 0, near);
-                if (d.Invoice)
+                if (head)
                 {
-                    // right block: invoice no., invoice date, due date (the customer is in the "Bill to" row)
-                    T(L.F("Invoice no. {0}", "Faktura nr. {0}", d.InvoiceNo), F(17, false), p.HeaderText, 560, 46, 400, far);
-                    T(L.F("Invoice date {0}", "Fakturadato {0}", LongDate(d.Date)), F(17, false), p.HeaderMuted, 560, 74, 400, far);
-                    T(L.F("Due {0}", "Forfald {0}", LongDate(d.Due)), F(17, false), p.HeaderMuted, 560, 102, 400, far);
-                }
-                else
-                {
-                    // right block: "For: <customer>" (bold, only with a name), quote no., date
-                    bool forLine = !string.IsNullOrEmpty(d.Customer);
-                    if (forLine)
+                    T(d.Invoice ? L.S("Invoice", "Faktura") : L.S("3D print quote", "Tilbud på 3D-print"), F(40, true), p.HeaderText, tx, 42, 0, near);
+                    if (!string.IsNullOrEmpty(d.Name))
+                        T(d.Name + L.S(" · 3D printing", " · 3D-print"), F(18, false), p.HeaderMuted, tx + 3, 98, 0, near);
+                    if (d.Invoice)
                     {
-                        // from 30 px after the title to the right edge (C2: long company names); 20 px bold, down to 15 px
-                        // before it is cut with …
-                        float forX = tx + g.MeasureString(d.Invoice ? "" : L.S("3D print quote", "Tilbud på 3D-print"), F(40, true)).Width + 30;
-                        string forText = L.S("For: ", "Til: ") + d.Customer;
-                        float size = 20;
-                        while (size > 15 && g.MeasureString(forText, F(size, true)).Width > 960 - forX) size -= 1;
-                        T(forText, F(size, true), p.HeaderText, forX, 38 + (20 - size) / 2, 960 - forX, far);
+                        // right block: invoice no., invoice date, due date (the customer is in the "Bill to" row)
+                        T(L.F("Invoice no. {0}", "Faktura nr. {0}", d.InvoiceNo), F(17, false), p.HeaderText, 560, 46, 400, far);
+                        T(L.F("Invoice date {0}", "Fakturadato {0}", LongDate(d.Date)), F(17, false), p.HeaderMuted, 560, 74, 400, far);
+                        T(L.F("Due {0}", "Forfald {0}", LongDate(d.Due)), F(17, false), p.HeaderMuted, 560, 102, 400, far);
                     }
-                    if (d.Number.Length > 0)
-                        T(L.F("Quote no. {0}", "Tilbud nr. {0}", d.Number), F(17, false), p.HeaderText, 560, forLine ? 74 : 52, 400, far);
-                    T(LongDate(d.Date), F(17, false), p.HeaderMuted, 560, forLine ? 100 : 80, 400, far);
+                    else
+                    {
+                        // right block: "For: <customer>" (bold, only with a name), quote no., date
+                        bool forLine = !string.IsNullOrEmpty(d.Customer);
+                        if (forLine)
+                        {
+                            // from 30 px after the title to the right edge (C2: long company names); 20 px bold, down to 15 px
+                            // before it is cut with …
+                            float forX = tx + g.MeasureString(d.Invoice ? "" : L.S("3D print quote", "Tilbud på 3D-print"), F(40, true)).Width + 30;
+                            string forText = L.S("For: ", "Til: ") + d.Customer;
+                            float size = 20;
+                            while (size > 15 && g.MeasureString(forText, F(size, true)).Width > 960 - forX) size -= 1;
+                            T(forText, F(size, true), p.HeaderText, forX, 38 + (20 - size) / 2, 960 - forX, far);
+                        }
+                        if (d.Number.Length > 0)
+                            T(L.F("Quote no. {0}", "Tilbud nr. {0}", d.Number), F(17, false), p.HeaderText, 560, forLine ? 74 : 52, 400, far);
+                        T(LongDate(d.Date), F(17, false), p.HeaderMuted, 560, forLine ? 100 : 80, 400, far);
+                    }
                 }
+
+                if (IsGroup(d)) return DrawGroup(g, p, d, pageH, draw, from, to, head, tail, pageText, noteText, F, T, HLine);
 
                 // model: picture box (if any) + name, link and details
                 float y0 = 214, pic = 300;
@@ -268,47 +434,8 @@ namespace PrintPrice
                 y += 44;
                 HLine(L0, R0, y, p.Line, 2);
                 y += 14;
-                QuoteRowKind prev = QuoteRowKind.Rule;
-                foreach (var r in QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName))
-                {
-                    switch (r.Kind)
-                    {
-                        case QuoteRowKind.Rule:
-                            if (prev == QuoteRowKind.Sub) y += 10;
-                            HLine(L0, R0, y, p.Line, 1);
-                            y += 14;
-                            break;
-                        case QuoteRowKind.Head:
-                            T(r.Label, F(19, true), p.Ink, L0 + 3, y, 420, near);
-                            T(r.Detail, F(16, false), p.Muted, 470, y + 2, 240, near);
-                            T(r.Amount, F(19, true), p.Ink, 700, y, R0 - 700, far);
-                            y += r.Alone ? 44 : 36;
-                            break;
-                        case QuoteRowKind.Sub:
-                            float lx = 70;
-                            Color dot = r.ColourIndex >= 0 && r.ColourIndex < d.MaterialColours.Count ? d.MaterialColours[r.ColourIndex] : Color.Empty;
-                            if (dot != Color.Empty)
-                            {
-                                if (draw)
-                                {
-                                    using (var br = new SolidBrush(dot)) g.FillEllipse(br, 70, y + 5, 15, 15);
-                                    using (var pen = new Pen(p.DotRing, 1.5f)) g.DrawEllipse(pen, 70, y + 5, 15, 15);
-                                }
-                                lx = 94;
-                            }
-                            T(r.Label, F(17, false), p.Ink, lx, y, 465 - lx, near);
-                            T(r.Detail, F(16, false), p.Muted, 470, y + 1, 240, near);
-                            T(r.Amount, F(17, false), p.Ink, 700, y, R0 - 30 - 700, far);
-                            y += 32;
-                            break;
-                        default:
-                            T(r.Label, F(15, false), p.Faint, 70, y, R0 - 70, near);
-                            y += 34;
-                            break;
-                    }
-                    prev = r.Kind;
-                }
-                if (prev == QuoteRowKind.Sub) y += 10;
+                y = DrawRows(g, p, d, QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName),
+                             y, draw, F, T);
                 y += 4;
                 HLine(L0, R0, y, p.Line, 2);
                 y += 22;
@@ -369,6 +496,304 @@ namespace PrintPrice
             }
         }
 
+        /// The body of a combined bill (2+ jobs) under the header: summary rows two to a line ("Bill to" / "Prints" /
+        /// "Printer" / "Plate"), then the job cards side by side (up to CardCols per row, DrawCard; the cards of a row are as
+        /// tall as the tallest), the whole bill's "Price breakdown" (as a single page's), the total box ("Total · 3 prints",
+        /// the job prices "a + b + c" on its small line when they fit) and the payment block / valid-until.
+        /// head / tail / from / to: see Draw (from / to are whole rows).
+        static float DrawGroup(Graphics g, Pal p, QuoteData d, float pageH, bool draw, int from, int to, bool head, bool tail,
+                               string pageText, string noteText, Func<float, bool, Font> F,
+                               Action<string, Font, Color, float, float, float, StringAlignment> T, Action<float, float, float, Color, float> HLine)
+        {
+            const float L0 = 40, R0 = 960;
+            var near = StringAlignment.Near;
+            var far = StringAlignment.Far;
+            float y;
+            if (head)
+            {
+                // summary rows, two to a line (label at 43 / 503, value at 170 / 630; DA 180 / 640): Bill to (invoice),
+                // Prints, Printer and Plate when every job shares them
+                var rows = new List<string[]>();
+                if (d.Invoice) rows.Add(new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" });
+                rows.Add(new[] { L.S("Prints", "Print"), d.Summary ?? "" });
+                if (!string.IsNullOrEmpty(d.Printer)) rows.Add(new[] { L.S("Printer", "Printer"), d.Printer });
+                if (!string.IsNullOrEmpty(d.PlateName)) rows.Add(new[] { L.S("Plate", "Plade"), d.PlateName });
+                float vx = L.Danish ? 140 : 130, mid = 500;
+                y = 214;
+                for (int k = 0; k < rows.Count; k += 2)
+                {
+                    HLine(L0, R0, y, p.Line, 1);
+                    bool pair = k + 1 < rows.Count;
+                    T(rows[k][0], F(18, false), p.Muted, L0 + 3, y + 10, 0, near);
+                    T(rows[k][1], F(18, true), p.Ink, L0 + vx, y + 10, (pair ? mid - 10 : R0) - L0 - vx, near);
+                    if (pair)
+                    {
+                        T(rows[k + 1][0], F(18, false), p.Muted, mid + 3, y + 10, 0, near);
+                        T(rows[k + 1][1], F(18, true), p.Ink, mid + vx, y + 10, R0 - mid - vx, near);
+                    }
+                    y += 46;
+                }
+                HLine(L0, R0, y, p.Line, 1);
+                y += 26;
+            }
+            else y = ContinueTop;
+
+            // the cards, row by row
+            int cols = Cols(d);
+            float cardW = (R0 - L0 - CardGap * (cols - 1)) / cols;
+            bool anyPicture = false;
+            foreach (var j in d.Jobs) if (j.Picture != null) anyPicture = true;
+            for (int a = from; a < to && a < d.Jobs.Count; a += cols)
+            {
+                int b = Math.Min(Math.Min(to, d.Jobs.Count), a + cols);
+                float rowH = 0;
+                for (int i = a; i < b; i++)
+                    rowH = Math.Max(rowH, DrawCard(g, p, d.Jobs[i], L0 + (i - a) * (cardW + CardGap), y, cardW, 0, false, F, T, HLine));
+                if (draw)
+                    for (int i = a; i < b; i++)
+                        DrawCard(g, p, d.Jobs[i], L0 + (i - a) * (cardW + CardGap), y, cardW, rowH, true, F, T, HLine);
+                y += rowH + RowGap;
+            }
+            // the breakdown is on a later page: say so under the cards (bold 20 Ink, larger than the body text)
+            if (!string.IsNullOrEmpty(noteText))
+            {
+                T(noteText, F(20, true), p.Ink, L0 + 3, y, R0 - L0 - 3, near);
+                y += NoteH;
+            }
+
+            if (tail)
+            {
+                // the whole bill's price breakdown (History.GroupBreakdown; its minimum line is folded into Work & handling
+                // by QuoteRows.BuildGroup: the minimum is never shown), kept on one page with the total and payment
+                if (d.Breakdown != null && d.Breakdown.Lines != null && d.Breakdown.Lines.Count > 0)
+                {
+                    T(L.S("Price breakdown", "Prisoversigt"), F(24, true), p.Ink, L0, y, 0, near);
+                    y += 40;
+                    HLine(L0, R0, y, p.Line, 2);
+                    y += 12;
+                    y = DrawRows(g, p, d, QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
+                                                               MaxGroupColours), y, draw, F, T, true);
+                    y += 4;
+                    HLine(L0, R0, y, p.Line, 2);
+                    y += 20;
+                }
+                // total box (as a single page, the label with the number of prints)
+                if (draw)
+                {
+                    using (var path = RoundRect(L0, y, R0 - L0, 110, 14))
+                    {
+                        using (var br = new SolidBrush(p.TotalBack)) g.FillPath(br, path);
+                        if (p.TotalLine != Color.Empty) using (var pen = new Pen(p.TotalLine, 1)) g.DrawPath(pen, path);
+                    }
+                    using (var br = new SolidBrush(p.Stripe)) g.FillRectangle(br, L0, y + 12, 8, 86);
+                }
+                T(L.S("Total", "I alt") + " · " + QuoteRows.PrintsText(d.Jobs.Count), F(26, true), p.Ink, 80, y + 22, 340, near);
+                // small line: the job prices "34,08 + 8,89 + 7,03 · please pay by …" when that fits left of the total
+                string small = d.Invoice ? L.F("Please pay by {0}", "Betales senest {0}", LongDate(d.Due)) : L.S("Shipping not included", "Fragt er ikke inkluderet");
+                string total = Num.Kr(d.GroupTotal);
+                float smallW = 900 - 80 - 30 - g.MeasureString(total, F(56, true)).Width;
+                var sums = new List<string>();
+                foreach (var j in d.Jobs) sums.Add(Num.N2(j.Ore / 100.0));
+                string withSums = string.Join(" + ", sums) + " · " + (small.Length > 0 ? char.ToLower(small[0]) + small.Substring(1) : small);
+                if (g.MeasureString(withSums, F(16, false)).Width <= smallW) small = withSums;
+                T(small, F(16, false), p.Muted, 80, y + 62, 0, near);
+                T(total, F(56, true), p.Total, 420, y + 14, 510, far);
+                y += 140;
+
+                if (d.Invoice)
+                {
+                    var pay = new List<string>();
+                    if (!string.IsNullOrEmpty(d.PayMobilePay)) pay.Add("MobilePay: " + d.PayMobilePay);
+                    if (!string.IsNullOrEmpty(d.PayBank)) pay.Add(L.S("Bank: ", "Bank: ") + d.PayBank);
+                    if (pay.Count > 0)
+                    {
+                        T(L.S("Payment", "Betaling"), F(19, true), p.Ink, L0 + 3, y, 0, near);
+                        y += 32;
+                        foreach (var line in pay) { T(line, F(18, false), p.Ink, L0 + 3, y, R0 - L0 - 3, near); y += 28; }
+                        T(L.F("Please write invoice no. {0} with the payment.", "Skriv fakturanr. {0} ved betalingen.", d.InvoiceNo),
+                          F(16, false), p.Muted, L0 + 3, y + 2, 0, near);
+                        y += 32;
+                    }
+                }
+                else
+                {
+                    T(L.F("Valid until {0}", "Gyldigt til {0}", LongDate(d.ValidUntil)), F(18, false), p.Ink, L0 + 3, y, 0, near);
+                    if (anyPicture)
+                    {
+                        T(L.S("Colours and finish may differ slightly from the pictures.", "Farver og overflade kan afvige lidt fra billederne."),
+                          F(16, false), p.Muted, L0 + 3, y + 30, 0, near);
+                        y += 60;
+                    }
+                    else y += 30;
+                }
+            }
+            // "made with" line at the bottom of the page (+ "Page 1 of 2" on a PDF page of several)
+            HLine(L0, R0, pageH - 62, p.Line, 1);
+            T(L.S("Made with Gettic's 3D Print Price Calculator", "Lavet med Gettic's 3D Print Price Calculator"),
+              F(14, false), p.Muted, L0, pageH - 44, R0 - L0, StringAlignment.Center);
+            if (!string.IsNullOrEmpty(pageText)) T(pageText, F(14, false), p.Muted, R0 - 200, pageH - 44, 200, far);
+            return y + 90;
+        }
+
+        /// One job's card at (x, y), w wide (h = the row's height: the print price box sits at its bottom; 0 = measure):
+        /// rounded 1.5 px Line border; 76 px picture well (or a cube); right of it the name bold 18 (2 lines, …) and Faint 12
+        /// lines "Quote no. …" and the date; Print time and Weight rows (Muted 14 label, bold 14 value, 1 px Line rules);
+        /// the "Print price" box (TotalBack, stripe, bold 22 in the total colour). Returns the height it needs.
+        static float DrawCard(Graphics g, Pal p, QuoteJob job, float x, float y, float w, float h, bool draw,
+                              Func<float, bool, Font> F, Action<string, Font, Color, float, float, float, StringAlignment> T,
+                              Action<float, float, float, Color, float> HLine)
+        {
+            const float Pad = 12, Pic = 76, BoxH = 50;
+            var near = StringAlignment.Near;
+            var far = StringAlignment.Far;
+            Action<string, Font, Color, float, float, float, StringAlignment> t = (s, f, c, px, py, pw, al) => { if (draw) T(s, f, c, px, py, pw, al); };
+            Action<float, float, float, Color, float> hl = (ax, bx, ly, c, lw) => { if (draw) HLine(ax, bx, ly, c, lw); };
+            float top = y, R = x + w;
+            if (draw && h > 0)
+                using (var path = RoundRect(x, top, w, h, 10))
+                    using (var pen = new Pen(p.Line, 1.5f)) g.DrawPath(pen, path);
+
+            // picture, name (up to 2 lines, cut with … at a word), quote no. / date
+            if (draw)
+            {
+                using (var path = RoundRect(x + Pad, top + Pad, Pic, Pic, 10))
+                {
+                    using (var br = new SolidBrush(p.PicBack)) g.FillPath(br, path);
+                    using (var pen = new Pen(p.Line, 2)) g.DrawPath(pen, path);
+                }
+                if (job.Picture != null) DrawPicture(g, job.Picture, x + Pad, top + Pad, Pic, Pic);
+                else DrawCube(g, p.Faint, x + Pad + Pic / 2, top + Pad + Pic / 2, Pic * 0.26f);
+            }
+            float tx = x + Pad + Pic + 12, tw = R - Pad - tx;
+            float ny = top + Pad - 3;
+            var nf = F(18, true);
+            // the details start at the same height on every card: room for a 2-line name and the two faint lines
+            float factsTop = Math.Max(top + Pad + Pic, ny + nf.GetHeight(g) * 2 + 4 + 2 * 17) + 10;
+            if (!string.IsNullOrEmpty(job.Name))
+            {
+                using (var sf = new StringFormat { Trimming = StringTrimming.EllipsisWord })
+                {
+                    float nh = Math.Min(g.MeasureString(job.Name, nf, (int)tw, sf).Height, nf.GetHeight(g) * 2);
+                    if (draw) using (var br = new SolidBrush(p.Ink)) g.DrawString(job.Name, nf, br, new RectangleF(tx, ny, tw, nh + 2), sf);
+                    ny += nh + 4;
+                }
+            }
+            foreach (var part in (job.Sub ?? "").Split(new[] { " · " }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                t(part, F(12, false), p.Faint, tx, ny, tw, near);
+                ny += 17;
+            }
+            y = Math.Max(factsTop, ny + 10);
+
+            // print time and weight, as before
+            var facts = new[]
+            {
+                new[] { L.S("Print time", "Printtid"), QuoteRows.Time(job.Hours, job.Minutes) },
+                new[] { L.S("Weight", "Vægt"), job.Weight },
+            };
+            float valueX = x + Pad + (L.Danish ? 82 : 78);
+            foreach (var r in facts)
+            {
+                hl(x + 10, R - 10, y, p.Line, 1);
+                t(r[0], F(14, false), p.Muted, x + Pad + 2, y + 6, 0, near);
+                t(r[1], F(14, true), p.Ink, valueX, y + 6, R - Pad - valueX, near);
+                y += 28;
+            }
+            hl(x + 10, R - 10, y, p.Line, 1);
+            y += 10;
+
+            // the print price box: at the bottom of the row's height
+            float boxY = h > 0 ? Math.Max(y, top + h - Pad - BoxH) : y;
+            if (draw)
+            {
+                using (var path = RoundRect(x + 10, boxY, w - 20, BoxH, 8))
+                {
+                    using (var br = new SolidBrush(p.TotalBack)) g.FillPath(br, path);
+                    if (p.TotalLine != Color.Empty) using (var pen = new Pen(p.TotalLine, 1)) g.DrawPath(pen, path);
+                }
+                using (var br = new SolidBrush(p.Stripe)) g.FillRectangle(br, x + 10, boxY + 8, 5, BoxH - 16);
+            }
+            float priceW = g.MeasureString(job.Amount ?? "", F(22, true)).Width;
+            t(L.S("Print price", "Printpris"), F(16, true), p.Ink, x + 26, boxY + 13, R - 24 - priceW - 8 - (x + 26), near);
+            t(job.Amount, F(22, true), p.Total, R - 24 - priceW - 10, boxY + 8, priceW + 10, far);
+            return boxY + BoxH + Pad - top;
+        }
+
+        /// The breakdown rows (QuoteRows.Build / BuildGroup) from y: heads bold 19, sub-lines 17 with a colour dot by
+        /// d.MaterialColours, notes faint 15, rules 1 px. Returns y under the last row (a sub-line block: + 10). compact (the combined
+        /// bill, so 3 prints fit one A4 page): the same sizes with tighter steps (heads 38 / 32, sub-lines 27, rules 12, + 6).
+        static float DrawRows(Graphics g, Pal p, QuoteData d, List<QuoteRow> rows, float y, bool draw,
+                              Func<float, bool, Font> F, Action<string, Font, Color, float, float, float, StringAlignment> T,
+                              bool compact = false)
+        {
+            const float L0 = 40, R0 = 960;
+            float subEnd = compact ? 6 : 10;
+            var near = StringAlignment.Near;
+            var far = StringAlignment.Far;
+            QuoteRowKind prev = QuoteRowKind.Rule;
+            foreach (var r in rows)
+            {
+                switch (r.Kind)
+                {
+                    case QuoteRowKind.Rule:
+                        if (prev == QuoteRowKind.Sub) y += subEnd;
+                        if (draw) using (var lp = new Pen(p.Line, 1)) g.DrawLine(lp, L0, y, R0, y);
+                        y += compact ? 12 : 14;
+                        break;
+                    case QuoteRowKind.Head:
+                        T(r.Label, F(19, true), p.Ink, L0 + 3, y, 420, near);
+                        T(r.Detail, F(16, false), p.Muted, 470, y + 2, 240, near);
+                        T(r.Amount, F(19, true), p.Ink, 700, y, R0 - 700, far);
+                        y += compact ? (r.Alone ? 38 : 32) : (r.Alone ? 44 : 36);
+                        break;
+                    case QuoteRowKind.Sub:
+                        float lx = 70;
+                        Color dot = r.ColourIndex >= 0 && r.ColourIndex < d.MaterialColours.Count ? d.MaterialColours[r.ColourIndex] : Color.Empty;
+                        if (dot != Color.Empty)
+                        {
+                            if (draw)
+                            {
+                                using (var br = new SolidBrush(dot)) g.FillEllipse(br, 70, y + 5, 15, 15);
+                                using (var pen = new Pen(p.DotRing, 1.5f)) g.DrawEllipse(pen, 70, y + 5, 15, 15);
+                            }
+                            lx = 94;
+                        }
+                        T(r.Label, F(17, false), p.Ink, lx, y, 465 - lx, near);
+                        T(r.Detail, F(16, false), p.Muted, 470, y + 1, 240, near);
+                        T(r.Amount, F(17, false), p.Ink, 700, y, R0 - 30 - 700, far);
+                        y += compact ? 27 : 32;
+                        break;
+                    default:
+                        T(r.Label, F(15, false), p.Faint, 70, y, R0 - 70, near);
+                        y += 34;
+                        break;
+                }
+                prev = r.Kind;
+            }
+            if (prev == QuoteRowKind.Sub) y += subEnd;
+            return y;
+        }
+
+        /// A cube outline (no picture for a job): hexagon + the three inner edges, 2 px.
+        static void DrawCube(Graphics g, Color col, float cx, float cy, float s)
+        {
+            float w = s * 0.87f;
+            var st = g.Save();
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var pen = new Pen(col, 2) { LineJoin = LineJoin.Round })
+            {
+                g.DrawPolygon(pen, new[]
+                {
+                    new PointF(cx, cy - s), new PointF(cx + w, cy - s / 2), new PointF(cx + w, cy + s / 2),
+                    new PointF(cx, cy + s), new PointF(cx - w, cy + s / 2), new PointF(cx - w, cy - s / 2)
+                });
+                g.DrawLine(pen, cx, cy, cx - w, cy - s / 2);
+                g.DrawLine(pen, cx, cy, cx + w, cy - s / 2);
+                g.DrawLine(pen, cx, cy, cx, cy + s);
+            }
+            g.Restore(st);
+        }
+
         static string LongDate(DateTime t) { return QuoteRows.LongDate(t); }
 
         static GraphicsPath RoundRect(float x, float y, float w, float h, float r)
@@ -416,7 +841,62 @@ namespace PrintPrice
             File.WriteAllBytes(path, Pdf(bmp));
         }
 
+        /// A PDF with one A4 page per picture (RenderPages: a combined bill of many jobs).
+        public static void SavePdf(IList<Bitmap> pages, string path)
+        {
+            File.WriteAllBytes(path, Pdf(pages));
+        }
+
         internal static byte[] Pdf(Bitmap bmp)
+        {
+            return Pdf(new List<Bitmap> { bmp });
+        }
+
+        /// The PDF bytes: objects 1 catalog, 2 pages, then per page k (from 0) 3+3k page, 4+3k image, 5+3k content
+        /// (one page = exactly the old one-page file).
+        internal static byte[] Pdf(IList<Bitmap> pages)
+        {
+            var inv = CultureInfo.InvariantCulture;
+            const double pw = 595.28, ph = 841.89;   // A4 in points
+            var outp = new MemoryStream();
+            var offsets = new List<long>();
+            Action<string> Put = str => { var b = Encoding.ASCII.GetBytes(str); outp.Write(b, 0, b.Length); };
+            Put("%PDF-1.4\n");
+            outp.Write(new byte[] { 0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A }, 0, 6);   // binary marker comment
+            offsets.Add(outp.Position); Put("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+            var kids = new StringBuilder();
+            for (int k = 0; k < pages.Count; k++) kids.Append(k == 0 ? "" : " ").Append(3 + 3 * k).Append(" 0 R");
+            offsets.Add(outp.Position); Put("2 0 obj\n<< /Type /Pages /Kids [" + kids + "] /Count " + pages.Count.ToString(inv) + " >>\nendobj\n");
+            for (int k = 0; k < pages.Count; k++)
+            {
+                var bmp = pages[k];
+                byte[] jpg = Jpeg(bmp);
+                int pageObj = 3 + 3 * k, imgObj = pageObj + 1, contentObj = pageObj + 2;
+                double s = Math.Min(pw / bmp.Width, ph / bmp.Height);
+                double dw = bmp.Width * s, dh = bmp.Height * s;
+                double dx = (pw - dw) / 2, dy = ph - dh;   // top of the page; a taller-than-A4 picture is scaled to fit
+                string content = string.Format(inv, "q {0:0.###} 0 0 {1:0.###} {2:0.###} {3:0.###} cm /Im0 Do Q", dw, dh, dx, dy);
+                offsets.Add(outp.Position);
+                Put(string.Format(inv, "{2} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {0:0.##} {1:0.##}] " +
+                    "/Resources << /XObject << /Im0 {3} 0 R >> >> /Contents {4} 0 R >>\nendobj\n", pw, ph, pageObj, imgObj, contentObj));
+                offsets.Add(outp.Position);
+                Put(string.Format(inv, "{3} 0 obj\n<< /Type /XObject /Subtype /Image /Width {0} /Height {1} /ColorSpace /DeviceRGB " +
+                    "/BitsPerComponent 8 /Filter /DCTDecode /Length {2} >>\nstream\n", bmp.Width, bmp.Height, jpg.Length, imgObj));
+                outp.Write(jpg, 0, jpg.Length);
+                Put("\nendstream\nendobj\n");
+                offsets.Add(outp.Position);
+                Put(string.Format(inv, "{2} 0 obj\n<< /Length {0} >>\nstream\n{1}\nendstream\nendobj\n", Encoding.ASCII.GetByteCount(content), content, contentObj));
+            }
+            long xref = outp.Position;
+            int size = offsets.Count + 1;
+            Put(string.Format(inv, "xref\n0 {0}\n0000000000 65535 f \n", size));
+            foreach (long o in offsets) Put(o.ToString("0000000000", inv) + " 00000 n \n");
+            Put(string.Format(inv, "trailer\n<< /Size {0} /Root 1 0 R >>\nstartxref\n{1}\n%%EOF\n", size, xref));
+            return outp.ToArray();
+        }
+
+        /// The page as JPEG 92 % (flattened onto white: JPEG has no alpha).
+        static byte[] Jpeg(Bitmap bmp)
         {
             byte[] jpg;
             using (var ms = new MemoryStream())
@@ -438,35 +918,7 @@ namespace PrintPrice
                 }
                 jpg = ms.ToArray();
             }
-            var inv = CultureInfo.InvariantCulture;
-            const double pw = 595.28, ph = 841.89;   // A4 in points
-            double s = Math.Min(pw / bmp.Width, ph / bmp.Height);
-            double dw = bmp.Width * s, dh = bmp.Height * s;
-            double dx = (pw - dw) / 2, dy = ph - dh;   // top of the page; a taller-than-A4 picture is scaled to fit
-            string content = string.Format(inv, "q {0:0.###} 0 0 {1:0.###} {2:0.###} {3:0.###} cm /Im0 Do Q", dw, dh, dx, dy);
-
-            var outp = new MemoryStream();
-            var offsets = new List<long>();
-            Action<string> Put = str => { var b = Encoding.ASCII.GetBytes(str); outp.Write(b, 0, b.Length); };
-            Put("%PDF-1.4\n");
-            outp.Write(new byte[] { 0x25, 0xE2, 0xE3, 0xCF, 0xD3, 0x0A }, 0, 6);   // binary marker comment
-            offsets.Add(outp.Position); Put("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-            offsets.Add(outp.Position); Put("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
-            offsets.Add(outp.Position);
-            Put(string.Format(inv, "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {0:0.##} {1:0.##}] " +
-                "/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>\nendobj\n", pw, ph));
-            offsets.Add(outp.Position);
-            Put(string.Format(inv, "4 0 obj\n<< /Type /XObject /Subtype /Image /Width {0} /Height {1} /ColorSpace /DeviceRGB " +
-                "/BitsPerComponent 8 /Filter /DCTDecode /Length {2} >>\nstream\n", bmp.Width, bmp.Height, jpg.Length));
-            outp.Write(jpg, 0, jpg.Length);
-            Put("\nendstream\nendobj\n");
-            offsets.Add(outp.Position);
-            Put(string.Format(inv, "5 0 obj\n<< /Length {0} >>\nstream\n{1}\nendstream\nendobj\n", Encoding.ASCII.GetByteCount(content), content));
-            long xref = outp.Position;
-            Put("xref\n0 6\n0000000000 65535 f \n");
-            foreach (long o in offsets) Put(o.ToString("0000000000", inv) + " 00000 n \n");
-            Put(string.Format(inv, "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{0}\n%%EOF\n", xref));
-            return outp.ToArray();
+            return jpg;
         }
     }
 

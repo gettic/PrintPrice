@@ -130,17 +130,18 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Failed prints:** optional. Set a % in Settings and material and power are raised by it for failed prints and reprints, before the markup. The default is 0 % (off). When it is above 0, the Cost breakdown shows a "Failed prints" line.
 - **Failed prints payback:** on by default. In the price history, tick **Failed** on a saved quote. With **Earn back failed prints** on in Settings, new quotes get a payback of 10 % (**% per quote**) of material + power until the failed print's material, power and wear are made back. It never adds more than what is left. It is shown as **Failed prints payback** in the Cost breakdown, is not marked up, and is added after the minimum price and before rounding. **Paid by** is **Customers only** (default; only quotes saved For = Customer count) or **Both prices**. Settings shows **Not made back yet**. A saved quote counts as sold, so delete quotes you didn't sell.
-- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank, Show invoice… instead of Show quote…) and **App** (language, update check, Bambu Studio path, backup, and **Run setup again…**).
+- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, invoice due days, MobilePay, bank, Show invoice… instead of Show quote…, keep a copy of every invoice PDF) and **App** (language, update check, Bambu Studio path, backup, and **Run setup again…**).
   - On the **Printer** tab, the **Printer** drop-down picks which printer you edit; the one in use is marked "(in use)". **Add…** adds an A1, A1 mini or P1S with that model's defaults. **Remove** removes the printer shown (only when you have 2 or more).
   - Each printer's **Name** is shown on the printer card and the quote. Left empty, the model name is used. The filament profile is the same for all printers.
 - **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
-- **Quote page:** **Show quote…** opens a window with a live preview of an A4 quote page: logo, model picture, print time, weight, printer, material, a full price breakdown (material per colour, electricity, machine wear split into printer / spare parts / nozzle / build plate, "Work & handling", and failed prints payback, minimum price or rounding when used), the total, a quote number, a valid-until date and small print.
+- **Quote page:** **Show quote…** opens a window with a live preview of an A4 quote page: logo, model picture, print time, weight, printer, material, a full price breakdown (material per colour, electricity, machine wear split into printer / spare parts / nozzle / build plate, "Work & handling", and failed prints payback or rounding when used), the total, a quote number, a valid-until date and small print.
   - **For:** an optional customer name (recent names from the history are offered).
   - **Price:** Customers or Friends & family.
   - **Look of the picture:** Dark (default) or Light. The PDF is always light.
   - **Print status:** Not printed yet, Printing now, Printed or Failed. It is saved with the quote on every export and on **Save to history**. A new job starts at Not printed yet. **Failed** works like ticking **Failed** in History. The invoice window has no status box: making an invoice ticks **Printed**.
   - **Export:** **Copy picture**, **Save picture…**, **Save as PDF…** or **Copy text**. The **▾** on the button gives the same four as quick exports without a name.
   - **Save to history** saves the quote with the chosen price and name without making a file. Every export is also saved to the price history. Just opening the window saves nothing.
+  - A bill never shows the minimum price as its own line. When the minimum price raises the customer price, the extra is part of "Work & handling".
   - The window is large and can be resized. Click the page to zoom to 100 %, and drag to move around.
   - The name on the quote, the number of days it is valid (default 14) and the printer name are set in Settings.
   - **Show invoice… instead:** with **Main window: Show invoice… instead of Show quote…** on (Settings → Quote & invoice, off by default), the button makes an invoice for the job on screen. A name is required. The first copy or save gives it a number, saves it in History and ticks **Printed**. More copies from the same window keep that number. The **▾** quick exports still make quotes without a name. Only in the Windows app for now.
@@ -163,16 +164,27 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Quote…** opens the quote page of a saved quote with its saved prices. It shows the same rows as when it was made: the machine wear split, nozzle, build plate, name on the quote and valid days. Quotes saved by older versions show one wear line and today's settings.
   - **Invoice…** makes a bill: the title is Invoice, with a random invoice code (the year and 5 digits, for example 2026-48213), the invoice date and a due date. Older invoices keep their codes. A customer name is required ("Bill to"). A **Payment** block with MobilePay and/or bank details shows only if you set them in Settings. Making an invoice ticks **Printed**. The code shows in the **Invoice** column. The due date and payment details are kept with the invoice.
   - A made invoice keeps the name it was made out to: **Invoice…** on it shows that name, read-only, even if **Customer** was changed later.
+  - **Several prints on one bill:** see [One bill for several prints](#one-bill-for-several-prints) below.
   - **Repeat print** prices the same print again with today's filament and electricity prices and slices the saved link or file again. If that isn't possible, the saved time and weight are used, with a note. The info box shows "Was … → now …". A repeat is never merged with its original. A job with several files slices each file again with its saved filament and colour, and together on one plate if it was before. The plates link comes back too.
   - **Open again** (or double-click, or Enter) puts the inputs back, including the filament name and colour, and recalculates with today's settings. The model box shows the saved price next to today's. Open again and **Repeat print** switch back to the quote's printer, if you still have it.
   - **Picture:** each saved job keeps a small picture (256 px) of the model in `%APPDATA%\PrintPrice\pictures`. The list shows it (point at it for a bigger one), and so do **Open again**, **Repeat print** and a saved job's **Quote…** / **Invoice…**. A job without a picture shows a cube. A deleted job's picture goes once the delete can't be undone any more.
   - All actions are also in the right-click menu.
   - The same quote saved again within 10 minutes replaces the last one. The newest 5000 quotes are kept.
-  - Saved quote and invoice files are named `<date> <model> - <name>`.
+  - Saved quote files are named `<date> <model> - <name>` (several prints: `<date> 3 prints - <name>`). Saved invoices (PDF and picture) are named after the invoice number and the name, for example `2026-48213 - Mette Hansen.pdf`.
+  - **Invoice copies:** every invoice PDF you save is also copied into `%APPDATA%\PrintPrice\Invoices`. A copy is never overwritten: a different file with the same name gets " (2)". If the copy fails, the save still works and the message says so. Switch it off with **Keep a copy of every invoice PDF** in **Settings → Quote & invoice**. **Open folder** next to it opens the folder.
   - **Backup…** opens the Backup window (also in Settings > App as **Back up…** and **Restore…**). See Backup and restore below.
 
 <p align="center"><img src="assets/screenshot-history.png" width="480" alt="Screenshot of the History window"></p>
 <p align="center"><sub>Model pictures: Printables models by their authors, under their own licences (not the app's). See <a href="assets/history-samples/credits.txt">credits</a>.</sub></p>
+
+<a id="one-bill-for-several-prints"></a>
+**One bill for several prints:** in History, select several quotes (Ctrl+click or Shift+click) and click **Quote…** or **Invoice…** (or use the right-click menu). They go on one quote or invoice. Only in the Windows app for now.
+- The prints are shown side by side, up to 3 per row, each with its picture, print time, weight and price. Then comes one price breakdown for the whole bill, and the total.
+- The printer and plate show at the top when all the prints share them.
+- The minimum price counts once for the whole bill. If the prints together cost less, the difference is shared over the prints' prices and is part of "Work & handling". The saved prices of the prints then add up to the bill's total.
+- An invoice gets one invoice number for all the prints, and ticks **Printed** on all of them. **Invoice…** on one print of it opens the whole invoice.
+- Failed prints are left off, with a line that says so. Prints already on another invoice are refused, with a line that says which invoice.
+- A long bill goes onto several A4 pages ("Page 1 of 2"). The breakdown, total and payment stay together on the last page. When they don't fit under the prints, a line says "Price breakdown and total on the next page →".
 
 - **Backup and restore:** the Backup window has two tabs.
   - **Back up** saves the price history and your settings to a `.printprice-backup` file. The file is not locked with a code, and it holds customer names and payment details, so keep it somewhere private.
@@ -226,7 +238,7 @@ The default setup is a 0.4 stainless nozzle, PLA and the smooth PEI plate. All o
 | Minimum price | 50 kr. (customers only) |
 | Failed prints payback | On; 10 % per quote; paid by customers only |
 | Quote | No name on a new install (set it in the setup or Settings), valid 14 days, customer price, dark picture |
-| Invoice | Due after 14 days; MobilePay and bank empty |
+| Invoice | Due after 14 days; MobilePay and bank empty; keep a copy of every invoice PDF on |
 | History | List view |
 | Language | Automatic (Danish if Windows is Danish, otherwise English) |
 | Slicing | 0.4 mm nozzle, 0.16mm Optimal, Bambu PLA Matte, Smooth PEI plate |
@@ -259,11 +271,11 @@ A backup file holds your price history (customer names), the jobs' pictures and 
 
 **Open in Studio** starts the Bambu Studio program on your PC with a copy of the sliced file. The copy is kept in `%TEMP%\PrintPrice\studio\` (older copies are deleted) and is never sent anywhere. Bambu Studio may add it to its own list of recent projects.
 
-The **Open folder** link in the Backup window opens Windows Explorer at the saved backup file or safety copy, only when you click it. Nothing is sent.
+The **Open folder** link in the Backup window and the **Open folder** button in Settings → Quote & invoice open Windows Explorer at the saved backup file or safety copy, or at the `%APPDATA%\PrintPrice\Invoices` folder, only when you click them. Nothing is sent.
 
-Quotes and invoices are made on your PC. A quote picture or PDF is written only where you choose to save it, and **Copy picture** and **Copy text** put it on the clipboard. Nothing is uploaded. The invoice codes already used are kept in `settings.ini`.
+Quotes and invoices are made on your PC. A quote picture or PDF is written only where you choose to save it, and **Copy picture** and **Copy text** put it on the clipboard. A saved invoice PDF is also copied into `%APPDATA%\PrintPrice\Invoices` (unless you switch that off). Nothing is uploaded. The invoice codes already used are kept in `settings.ini`.
 
-Nothing is installed. The app writes only its settings file, the price history, the files you save and temporary slicing files. To uninstall, delete PrintPrice.exe and the folder %APPDATA%\PrintPrice.
+Nothing is installed. The app writes only its settings file, the price history, the files you save, the invoice copies and temporary slicing files. To uninstall, delete PrintPrice.exe and the folder %APPDATA%\PrintPrice.
 
 ## Build from source
 ```powershell

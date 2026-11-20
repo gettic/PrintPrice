@@ -142,6 +142,10 @@ namespace PrintPrice
         // the name the invoice was made out to (Customer when MakeInvoice gave the number; filled once on the first
         // re-issue of an older invoice). "" = not stored (History.InvoiceInfo then uses Customer). Customer can change later.
         public string BilledTo = "";
+        // combined customer invoice (History.MakeInvoice with several records): this job's share of the bill's
+        // "Minimum price" top-up in kr., already inside OthersPrice (its line on the bill = OthersPrice - InvoiceTopUp).
+        // 0 / missing = none (single-job invoices, friends bills, older records). Older app versions ignore the key.
+        public double InvoiceTopUp;
 
         // idea 21: several model files with a filament / colour each (History.SetParts / PartsOf); null = none (old records,
         // one file, links, typed jobs). Older app versions ignore the key.
@@ -278,7 +282,7 @@ namespace PrintPrice
         public int Updated;               // same record here, filled in from the backup (invoice, Printed, Failed, Note, Customer)
         public int Same;                  // same record here, nothing new
         public int PrintersMoved;         // printer ids moved to a new id (same id, different model)
-        public List<string> InvoiceClashes = new List<string>();   // invoice codes now on 2+ different records (kept as they are)
+        public List<string> InvoiceClashes = new List<string>();   // invoice codes on 2+ records with different BilledAt (kept as they are; same BilledAt = a combined invoice)
         /// Pictures to write (record Id -> bytes): replace = the backup's; merge = added records' and records that have none here.
         public Dictionary<string, byte[]> Pictures = new Dictionary<string, byte[]>(StringComparer.Ordinal);
     }
@@ -311,6 +315,63 @@ namespace PrintPrice
         public int PayingBack;         // quotes whose payback counted against failed prints (deleting them = owed again)
         public double DebtBefore;      // History.FailedDebt now
         public double DebtAfter;       // History.FailedDebt after the delete
+        public int OnCombined;         // of them on a combined invoice (its code on 2+ records)
+        public List<CombinedInvoiceCut> Combined = new List<CombinedInvoiceCut>();   // per combined invoice hit, in list order
+    }
+
+    /// A combined invoice that loses jobs in a delete (DeleteSummary.Combined): the others keep their prices and shares.
+    public class CombinedInvoiceCut
+    {
+        public string Code = "";       // the invoice code (trimmed)
+        public int Gone;               // its jobs being deleted
+        public int Left;               // its jobs that stay (the invoice then shows these)
+    }
+
+    /// Whether some History jobs can go on one bill (History.BillProblem).
+    public class BillCheck
+    {
+        public List<QuoteRecord> Jobs = new List<QuoteRecord>();   // the jobs for the bill: not failed, in the given order
+        public int FailedLeftOut;      // failed jobs left off the bill
+        public string Code = "";       // all Jobs are already on this one invoice (re-open it); "" = none is billed yet
+        public QuoteRecord Clash;      // a job that blocks the bill: already on an invoice while the others aren't / another code
+        public string ClashCode = "";  // Clash's invoice code
+        public bool Ok { get { return Clash == null && Jobs.Count > 0; } }
+    }
+
+    /// The lines and total of a bill for several History jobs (History.GroupBill). kr., whole øre.
+    public class GroupBillInfo
+    {
+        public List<QuoteRecord> Jobs = new List<QuoteRecord>();
+        public double[] Prices = new double[0];   // each job's line (History.BillPrice), same order as Jobs
+        public double Sum;             // Σ Prices
+        public double TopUp;           // the "Minimum price" line; 0 = no line
+        public double Minimum;         // the minimum price the top-up reaches (for the line's label)
+        public double Total;           // Sum + TopUp
+        public bool Friends;
+    }
+
+    /// One price breakdown for a whole combined bill (History.GroupBreakdown): rows summed by kind, whole øre.
+    public class GroupBreakdownInfo
+    {
+        /// Rows in the single bill's order: material (one per merged filament, Index = position in Materials), power, wear
+        /// (Parts = the summed 4-part wear split, always; estimated for prints saved without one, see EstimatedSplit), failed, payback, work, other, minimum (the bill's
+        /// top-up), rounding. Optional rows that come to 0,00 are left out (material / power / work stay). Ore sum = TotalOre.
+        /// Quantity: material grams, power kWh, wear hours (summed); failed / payback / work % and rounding step only when
+        /// every job had the same (else 0); minimum = GroupBillInfo.Minimum. UnitPrice (kr./kg, kr./kWh, kr./h) = the rate
+        /// every job on that row used, 0 when they differ.
+        public List<QuoteLine> Lines = new List<QuoteLine>();
+        public long TotalOre;          // = the bill's total in øre (GroupBillInfo.Total)
+        public double Total { get { return TotalOre / 100.0; } }
+        /// Merged filaments (same name + colour): Name, Colour, Type, Grams (summed), PricePerKg (same for all, else 0).
+        public List<HistoryFilament> Materials = new List<HistoryFilament>();
+        /// Every job used the same kr./kg per filament, kr./kWh and kr./h: the ui may show "g × kr./kg" etc.
+        public bool SameRates = true;
+        /// The wear row's Parts always has the 4 parts (when there is wear). True = at least one print had no saved split,
+        /// so its part of the split was estimated (Wear.Calculate ratios for its saved printer / nozzle / plate, else today's).
+        public bool EstimatedSplit;
+        /// Build plate key (Wear.Plates) for the plate part's name: the plate every print with wear used; "" = they differ
+        /// (show a general "Build plate").
+        public string PlateKey = "";
     }
 
     /// Price history: saved quotes in history.json next to settings.ini. Local only, never sent anywhere.
@@ -891,15 +952,49 @@ namespace PrintPrice
         /// gets it from Customer this once (kept from then on). Returns the number. Does not save.
         public static string MakeInvoice(List<QuoteRecord> list, QuoteRecord r, DateTime now, AppSettings s)
         {
-            return MakeInvoice(list, r, now, s, null);
+            return MakeInvoice(list, r, now, s, null, null);
         }
 
         public static string MakeInvoice(List<QuoteRecord> list, QuoteRecord r, DateTime now, AppSettings s, Func<int, int> pick)
         {
+            return MakeInvoice(list, r, now, s, null, pick);
+        }
+
+        /// Issue #6: as MakeInvoice, but a NEW number is wantedNo (e.g. picked with NextInvoiceNo for the file name before
+        /// the save dialog) when it is still free (InvoiceFree); else a fresh NextInvoiceNo. null / "" = a fresh one.
+        /// An invoice that already has a number keeps it (wantedNo ignored).
+        public static string MakeInvoice(List<QuoteRecord> list, QuoteRecord r, DateTime now, AppSettings s, string wantedNo)
+        {
+            return MakeInvoice(list, r, now, s, wantedNo, null);
+        }
+
+        /// True when code can be given as a new invoice number: not blank, no comma, not on a record in list and not in
+        /// usedCsv (AppSettings.UsedInvoiceNos); trimmed, case-insensitive.
+        public static bool InvoiceFree(List<QuoteRecord> list, string usedCsv, string code)
+        {
+            string c = (code ?? "").Trim();
+            if (c.Length == 0 || c.IndexOf(',') >= 0) return false;
+            if (list != null)
+                foreach (var r in list)
+                    if (r != null && string.Equals((r.InvoiceNo ?? "").Trim(), c, StringComparison.OrdinalIgnoreCase)) return false;
+            foreach (var u in (usedCsv ?? "").Split(','))
+                if (string.Equals(u.Trim(), c, StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
+        }
+
+        // wantedNo when free, else NextInvoiceNo
+        static string NewInvoiceNo(List<QuoteRecord> list, int year, string usedCsv, string wantedNo, Func<int, int> pick)
+        {
+            if (InvoiceFree(list, usedCsv, wantedNo)) return wantedNo.Trim();
+            return NextInvoiceNo(list, year, usedCsv, pick);
+        }
+
+        static string MakeInvoice(List<QuoteRecord> list, QuoteRecord r, DateTime now, AppSettings s, string wantedNo, Func<int, int> pick)
+        {
             if (r == null) throw new ArgumentNullException();
             if (string.IsNullOrEmpty(r.InvoiceNo))
             {
-                r.InvoiceNo = NextInvoiceNo(list, now.Year, s == null ? "" : s.UsedInvoiceNos, pick);
+                r.InvoiceNo = NewInvoiceNo(list, now.Year, s == null ? "" : s.UsedInvoiceNos, wantedNo, pick);
                 if (s != null) s.UsedInvoiceNos = AddUsedInvoiceNo(s.UsedInvoiceNos, r.InvoiceNo);
                 r.BilledAt = Stamp(now);
                 r.Printed = true;
@@ -955,6 +1050,417 @@ namespace PrintPrice
             d.Bank = s.PayBank ?? "";
             d.FromName = s.QuoteName ?? "";
             return d;
+        }
+
+        // ---------- combined bill (several jobs on one invoice / quote; minimum price once on the whole bill) ----------
+
+        /// Whether jobs can go on one bill. Failed jobs are left off (FailedLeftOut). Code = the one invoice all the other
+        /// jobs are already on (re-open it, nothing recomputed); a mix of billed and unbilled jobs, or two codes, sets Clash
+        /// to the first job that has a code (and ClashCode). Ok = no clash and at least one job. Never null.
+        public static BillCheck BillProblem(IList<QuoteRecord> records)
+        {
+            var c = new BillCheck();
+            if (records == null) return c;
+            foreach (var r in records)
+            {
+                if (r == null) continue;
+                if (r.Failed) c.FailedLeftOut++;
+                else c.Jobs.Add(r);
+            }
+            string code = null;
+            bool same = true, any = false;
+            foreach (var r in c.Jobs)
+            {
+                string rc = (r.InvoiceNo ?? "").Trim();
+                if (rc.Length > 0) any = true;
+                if (code == null) code = rc;
+                else if (!string.Equals(code, rc, StringComparison.OrdinalIgnoreCase)) same = false;
+            }
+            if (!any) return c;
+            if (same) { c.Code = code; return c; }
+            foreach (var r in c.Jobs)
+                if (!string.IsNullOrEmpty((r.InvoiceNo ?? "").Trim()))
+                {
+                    c.Clash = r;
+                    c.ClashCode = r.InvoiceNo.Trim();
+                    break;
+                }
+            return c;
+        }
+
+        /// The records on invoice code (trimmed, case-insensitive), oldest first by SavedAt (same time: older list position
+        /// first; unreadable times last). Empty code / list = empty list. One job of a combined invoice -> all of them.
+        public static List<QuoteRecord> InvoiceGroup(List<QuoteRecord> list, string code)
+        {
+            var res = new List<QuoteRecord>();
+            string want = (code ?? "").Trim();
+            if (list == null || want.Length == 0) return res;
+            var pos = new Dictionary<QuoteRecord, int>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                var r = list[i];
+                if (r == null || pos.ContainsKey(r)) continue;
+                if (string.Equals((r.InvoiceNo ?? "").Trim(), want, StringComparison.OrdinalIgnoreCase)) { pos[r] = i; res.Add(r); }
+            }
+            res.Sort(delegate(QuoteRecord a, QuoteRecord b)
+            {
+                DateTime ta, tb;
+                bool ga = TryTime(a.SavedAt, out ta), gb = TryTime(b.SavedAt, out tb);
+                if (ga != gb) return ga ? -1 : 1;
+                int k = ga ? ta.CompareTo(tb) : 0;
+                return k != 0 ? k : pos[b].CompareTo(pos[a]);   // the list is newest first: a later position is older
+            });
+            return res;
+        }
+
+        /// One job's line on a combined bill. friends: its FriendsPrice. Customer: an invoiced job = OthersPrice - InvoiceTopUp
+        /// (as billed; never below 0); else its price without the minimum (Pricing.PriceWithoutMinimum with ToInput +
+        /// SavedSettings), or the saved OthersPrice as is when the calculated price isn't the saved one (old / edited record).
+        public static double BillPrice(QuoteRecord r, AppSettings current, bool friends)
+        {
+            if (r == null) return 0;
+            if (friends) return r.FriendsPrice;
+            if (!string.IsNullOrEmpty(r.InvoiceNo)) return Math.Max(0, r.OthersPrice - (GoodRate(r.InvoiceTopUp) ? r.InvoiceTopUp : 0));
+            try
+            {
+                var s = SavedSettings(r, current);
+                var input = ToInput(r);
+                if (Pricing.ShownOre(Pricing.Calculate(input, s).OthersPrice) != Pricing.ShownOre(r.OthersPrice)) return r.OthersPrice;
+                return Pricing.PriceWithoutMinimum(input, s);
+            }
+            catch (ArgumentException) { return r.OthersPrice; }   // impossible saved inputs: the saved price as is
+        }
+
+        /// The bill for jobs (BillProblem's Jobs) as lines + total. Not invoiced yet: live, with s's MinimumPrice / RoundTo
+        /// (null = defaults; Pricing.BillTotal). Already invoiced (re-open): nothing recomputed: lines = BillPrice, TopUp =
+        /// Σ InvoiceTopUp, Minimum = the largest MinimumPrice saved with the jobs. Friends: no top-up.
+        public static GroupBillInfo GroupBill(IList<QuoteRecord> jobs, AppSettings s, bool friends)
+        {
+            var g = new GroupBillInfo { Friends = friends };
+            if (jobs != null) foreach (var r in jobs) if (r != null) g.Jobs.Add(r);
+            if (s == null) s = new AppSettings();
+            g.Prices = new double[g.Jobs.Count];
+            bool billed = g.Jobs.Count > 0;
+            long sumOre = 0, topOre = 0;
+            double minSaved = 0;
+            for (int i = 0; i < g.Jobs.Count; i++)
+            {
+                var r = g.Jobs[i];
+                g.Prices[i] = BillPrice(r, s, friends);
+                sumOre += Pricing.ShownOre(Math.Max(0, g.Prices[i]));
+                if (string.IsNullOrEmpty(r.InvoiceNo)) billed = false;
+                else if (!friends && GoodRate(r.InvoiceTopUp)) topOre += Pricing.ShownOre(r.InvoiceTopUp);
+                if (GoodRate(r.MinimumPrice) && r.MinimumPrice > minSaved) minSaved = r.MinimumPrice;
+            }
+            g.Sum = sumOre / 100.0;
+            if (billed)
+            {
+                g.TopUp = topOre / 100.0;
+                g.Minimum = minSaved;
+                g.Total = (sumOre + topOre) / 100.0;
+            }
+            else
+            {
+                double top;
+                g.Total = Pricing.BillTotal(g.Prices, s.MinimumPrice, s.RoundTo, friends, out top);
+                g.TopUp = top;
+                g.Minimum = s.MinimumPrice;
+            }
+            return g;
+        }
+
+        // one row being summed (GroupBreakdown)
+        class SumRow
+        {
+            public QuoteLine Line;
+            public bool HasUnit, MixedUnit;
+            public double Unit;
+            public void AddUnit(double u)
+            {
+                if (!HasUnit) { HasUnit = true; Unit = u; }
+                else if (Math.Abs(Unit - u) > 1e-9) MixedUnit = true;
+            }
+        }
+
+        /// One breakdown for the whole combined bill (GroupBill's result): each job's rows as its single bill gets them
+        /// (ToInput, SavedSettings with current s for the rest, saved wear split) WITHOUT its own minimum, scaled to its
+        /// bill line like MatchSavedTotal when they differ (old / edited records; a job whose line still holds its own
+        /// minimum keeps that as a minimum row); no usable inputs = one "other" row. Then summed by kind (see
+        /// GroupBreakdownInfo) plus one minimum row = the bill's TopUp. TotalOre = the bill's total øre for øre. Pure.
+        public static GroupBreakdownInfo GroupBreakdown(GroupBillInfo bill, AppSettings s)
+        {
+            var res = new GroupBreakdownInfo();
+            if (bill == null) return res;
+            bool friends = bill.Friends;
+            var rows = new Dictionary<string, SumRow>(StringComparer.Ordinal);
+            var matRows = new List<SumRow>();
+            var matKeys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var parts = new Dictionary<string, SumRow>(StringComparer.Ordinal);
+            string plateKey = null;   // the build plate every print with wear used; "" = they differ
+            Func<string, SumRow> row = delegate(string key)
+            {
+                SumRow sr;
+                if (!rows.TryGetValue(key, out sr)) { sr = new SumRow { Line = new QuoteLine { Key = key } }; rows[key] = sr; }
+                return sr;
+            };
+
+            for (int i = 0; i < bill.Jobs.Count; i++)
+            {
+                var r = bill.Jobs[i];
+                double price = i < bill.Prices.Length ? bill.Prices[i] : 0;
+                long target = Pricing.ShownOre(Math.Max(0, double.IsNaN(price) || double.IsInfinity(price) ? 0 : price));
+                res.TotalOre += target;
+                bool scaled;
+                var b = JobBreakdown(r, s, friends, target, out scaled);
+                if (b == null) { row(QuoteLine.Other).Line.Ore += target; continue; }
+                foreach (var l in b.Lines)
+                {
+                    if (l.Key == QuoteLine.Material)
+                    {
+                        HistoryFilament f = null;
+                        if (r.Filaments != null && l.Index >= 0 && l.Index < r.Filaments.Count) f = r.Filaments[l.Index];
+                        string name = f != null && !string.IsNullOrWhiteSpace(f.Name) ? f.Name.Trim() : (r.MaterialName ?? "").Trim();
+                        string colour = f != null ? (f.Colour ?? "").Trim().ToUpperInvariant() : "";
+                        if (l.Ore == 0 && l.Quantity <= 0) continue;   // an empty material line adds nothing
+                        string mk = name + "\n" + colour;
+                        int at;
+                        if (!matKeys.TryGetValue(mk, out at))
+                        {
+                            at = matRows.Count;
+                            matKeys[mk] = at;
+                            matRows.Add(new SumRow { Line = new QuoteLine { Key = QuoteLine.Material, Index = at } });
+                            res.Materials.Add(new HistoryFilament { Name = name, Colour = colour, Type = f != null ? (f.Type ?? "").Trim() : "" });
+                        }
+                        var m = matRows[at];
+                        m.Line.Ore += l.Ore; m.Line.Quantity += l.Quantity;
+                        if (l.Ore > 0 || l.Quantity > 0) m.AddUnit(l.UnitPrice);
+                        if (scaled) m.MixedUnit = true;
+                        res.Materials[at].Grams += l.Quantity;
+                        continue;
+                    }
+                    var sr = row(l.Key);
+                    sr.Line.Ore += l.Ore;
+                    if (l.Key == QuoteLine.Power || l.Key == QuoteLine.Wear)
+                    {
+                        sr.Line.Quantity += l.Quantity;
+                        if (l.Ore > 0 || l.Quantity > 0) sr.AddUnit(l.UnitPrice);   // a job without power / wear doesn't count
+                        if (scaled && l.Ore > 0) sr.MixedUnit = true;
+                    }
+                    else if (l.Key != QuoteLine.Minimum && l.Ore > 0) sr.AddUnit(l.Quantity);   // %, rounding step: shown only when the same
+                    if (l.Key == QuoteLine.Wear)
+                    {
+                        string plate = PlateKeyOf(r, s);
+                        if (plateKey == null) plateKey = plate;
+                        else if (plateKey != plate) plateKey = "";
+                        var jobParts = l.Parts;
+                        if (jobParts == null && l.Ore > 0) { jobParts = EstimatedWearParts(r, s, l); res.EstimatedSplit = true; }
+                        if (jobParts != null)
+                            foreach (var p in jobParts)
+                            {
+                                SumRow pr;
+                                if (!parts.TryGetValue(p.Key, out pr)) { pr = new SumRow { Line = new QuoteLine { Key = p.Key } }; parts[p.Key] = pr; }
+                                pr.Line.Ore += p.Ore; pr.Line.Quantity += p.Quantity; pr.AddUnit(p.UnitPrice);
+                                if (scaled) pr.MixedUnit = true;
+                            }
+                    }
+                }
+            }
+
+            long top = friends ? 0 : Pricing.ShownOre(Math.Max(0, bill.TopUp));
+            res.TotalOre += top;
+            if (top > 0) row(QuoteLine.Minimum).Line.Ore += top;
+
+            // rows in order
+            foreach (var m in matRows)
+            {
+                m.Line.UnitPrice = m.MixedUnit ? 0 : m.Unit;
+                if (m.MixedUnit) res.SameRates = false;
+                res.Materials[m.Line.Index].PricePerKg = m.Line.UnitPrice;
+                m.Line.Exact = m.Line.Ore / 100.0;
+                res.Lines.Add(m.Line);
+            }
+            string[] order = { QuoteLine.Power, QuoteLine.Wear, QuoteLine.Failed, QuoteLine.Payback, QuoteLine.Work,
+                               QuoteLine.Other, QuoteLine.Minimum, QuoteLine.Rounding };
+            foreach (var k in order)
+            {
+                SumRow sr;
+                bool keep = k == QuoteLine.Power || k == QuoteLine.Work;
+                if (!rows.TryGetValue(k, out sr))
+                {
+                    if (keep && bill.Jobs.Count > 0) res.Lines.Add(new QuoteLine { Key = k });
+                    continue;
+                }
+                if (sr.Line.Ore == 0 && !keep) continue;
+                var l = sr.Line;
+                l.Exact = l.Ore / 100.0;
+                if (k == QuoteLine.Power || k == QuoteLine.Wear)
+                {
+                    l.UnitPrice = sr.MixedUnit ? 0 : sr.Unit;
+                    if (sr.MixedUnit) res.SameRates = false;
+                }
+                else if (k == QuoteLine.Minimum) l.Quantity = bill.Minimum;
+                else if (k != QuoteLine.Other) l.Quantity = sr.HasUnit && !sr.MixedUnit ? sr.Unit : 0;
+                if (k == QuoteLine.Wear && parts.Count > 0)
+                {
+                    res.PlateKey = plateKey ?? "";
+                    l.Parts = new List<QuoteLine>();
+                    foreach (var pk in new[] { QuoteLine.WearPrinter, QuoteLine.WearParts, QuoteLine.WearHotend, QuoteLine.WearPlate })
+                    {
+                        SumRow pr;
+                        if (!parts.TryGetValue(pk, out pr)) continue;
+                        pr.Line.UnitPrice = pr.MixedUnit ? 0 : pr.Unit;
+                        pr.Line.Exact = pr.Line.Ore / 100.0;
+                        l.Parts.Add(pr.Line);
+                    }
+                }
+                res.Lines.Add(l);
+            }
+            return res;
+        }
+
+        // one job's rows for GroupBreakdown, adding up to target øre; null = no usable inputs (one "other" row)
+        // the build plate key of r's print: its saved BedType, else today's (s), as Wear.FindPlate resolves it
+        static string PlateKeyOf(QuoteRecord r, AppSettings s)
+        {
+            string k = (r.BedType ?? "").Trim();
+            if (k.Length == 0 && s != null) k = (s.BedType ?? "").Trim();
+            return Wear.FindPlate(k).Key;
+        }
+
+        // A wear split for a print saved without one: the ratios Wear.Calculate gives for its saved printer model, nozzle,
+        // plate and first filament type (today's settings s for what it didn't save; type "PLA", not abrasive), scaled so the
+        // four parts add up exactly to the wear line's øre (SplitOre). Rates = the line's kr./h in those ratios.
+        static List<QuoteLine> EstimatedWearParts(QuoteRecord r, AppSettings s, QuoteLine wear)
+        {
+            if (s == null) s = new AppSettings();
+            string model = (r.PrinterModel ?? "").Trim(), nozzle = (r.Nozzle ?? "").Trim(), type = "";
+            if (model.Length == 0) model = s.PrinterModel;
+            if (nozzle.Length == 0) nozzle = s.Nozzle;
+            if (r.Filaments != null)
+                foreach (var f in r.Filaments)
+                    if (f != null && !string.IsNullOrWhiteSpace(f.Type)) { type = f.Type.Trim(); break; }
+            if (type.Length == 0) type = "PLA";
+            var w = Wear.Calculate(Wear.FindModel(model), Wear.FindNozzle(nozzle), false, type, Wear.FindPlate(PlateKeyOf(r, s)));
+            double[] v = { w.Printer, w.Parts, w.Hotend, w.Plate };
+            string[] keys = { QuoteLine.WearPrinter, QuoteLine.WearParts, QuoteLine.WearHotend, QuoteLine.WearPlate };
+            double sum = 0;
+            foreach (var x in v) sum += GoodRate(x) ? x : 0;
+            var res = new List<QuoteLine>(4);
+            for (int i = 0; i < 4; i++)
+            {
+                double share = sum > 0 ? (GoodRate(v[i]) ? v[i] : 0) / sum : (i == 0 ? 1 : 0);
+                res.Add(new QuoteLine { Key = keys[i], Exact = wear.Ore / 100.0 * share, Quantity = wear.Quantity, UnitPrice = wear.UnitPrice * share });
+            }
+            Pricing.SplitOre(res, wear.Ore);
+            return res;
+        }
+
+        // scaled = the rows were scaled to the line (their amounts no longer = quantity x rate)
+        static QuoteBreakdown JobBreakdown(QuoteRecord r, AppSettings current, bool friends, long target, out bool scaled)
+        {
+            scaled = false;
+            if (r == null) return null;
+            try
+            {
+                var s = SavedSettings(r, current);
+                var wear = SavedWear(r);
+                if (wear != null) s.AutoWearRate = 1;
+                var input = ToInput(r);
+                QuoteBreakdown b;
+                if (friends) b = Pricing.Breakdown(input, s, true, wear);
+                else
+                {
+                    var s0 = s.Clone();
+                    s0.MinimumPrice = 0;
+                    b = Pricing.Breakdown(input, s0, false, wear);
+                    if (b.TotalOre != target)
+                    {
+                        var own = Pricing.Breakdown(input, s, false, wear);   // a line that still holds its own minimum
+                        if (own.TotalOre == target) b = own;
+                    }
+                }
+                scaled = false;
+                if (b.TotalOre != target && target > 0) { Pricing.MatchSavedTotal(b, target / 100.0); scaled = true; }
+                return b.TotalOre == target ? b : null;
+            }
+            catch (ArgumentException) { return null; }
+        }
+
+        /// The invoice for several jobs (combined bill). Failed jobs are left off; one job left = exactly the single-job
+        /// MakeInvoice (its own minimum, InvoiceTopUp 0). All already on one invoice = re-issue: nothing recomputed (an
+        /// older invoice's empty BilledTo filled from Customer, as single re-issue). A clash (BillProblem) throws
+        /// InvalidOperationException. Else ONE new code (NextInvoiceNo), and every job gets the same BilledAt, snapshot
+        /// (from s; null = none), BilledTo (the first non-empty trimmed Customer among them) and Printed. Customer bill
+        /// (friends false): each OthersPrice = its BillPrice (whole øre) + its share of the top-up (Pricing.ShareOre by
+        /// price), share kept in InvoiceTopUp, so Σ OthersPrice = the bill total; minimum / rounding = s's (null =
+        /// defaults). Friends bill: prices unchanged, InvoiceTopUp 0. Returns the code. Does not save.
+        public static string MakeInvoice(List<QuoteRecord> list, IList<QuoteRecord> records, DateTime now, AppSettings s, bool friends)
+        {
+            return MakeInvoice(list, records, now, s, friends, null, null);
+        }
+
+        public static string MakeInvoice(List<QuoteRecord> list, IList<QuoteRecord> records, DateTime now, AppSettings s, bool friends,
+                                         Func<int, int> pick)
+        {
+            return MakeInvoice(list, records, now, s, friends, null, pick);
+        }
+
+        /// Issue #6: the group MakeInvoice with a wanted code for a NEW invoice (used when InvoiceFree, else a fresh one;
+        /// null / "" = a fresh one). One job left = the single MakeInvoice with the same wanted code; a re-issue ignores it.
+        public static string MakeInvoice(List<QuoteRecord> list, IList<QuoteRecord> records, DateTime now, AppSettings s, bool friends,
+                                         string wantedNo)
+        {
+            return MakeInvoice(list, records, now, s, friends, wantedNo, null);
+        }
+
+        static string MakeInvoice(List<QuoteRecord> list, IList<QuoteRecord> records, DateTime now, AppSettings s, bool friends,
+                                  string wantedNo, Func<int, int> pick)
+        {
+            if (records == null) throw new ArgumentNullException("records");
+            var check = BillProblem(records);
+            if (check.Jobs.Count == 0) throw new InvalidOperationException("No jobs to invoice.");
+            if (check.Clash != null) throw new InvalidOperationException("Job already on invoice " + check.ClashCode + ".");
+            var jobs = check.Jobs;
+            if (jobs.Count == 1) return MakeInvoice(list, jobs[0], now, s, wantedNo, pick);
+            if (check.Code.Length > 0)
+            {
+                foreach (var r in jobs) MakeInvoice(list, r, now, s, pick);   // keeps everything; fills an old empty BilledTo
+                return jobs[0].InvoiceNo;
+            }
+
+            var bill = GroupBill(jobs, s, friends);
+            long[] share = Pricing.ShareOre(bill.Prices, Pricing.ShownOre(bill.TopUp));
+            string name = "";
+            foreach (var r in jobs)
+            {
+                string c = (r.Customer ?? "").Trim();
+                if (c.Length > 0) { name = c; break; }
+            }
+            string code = NewInvoiceNo(list, now.Year, s == null ? "" : s.UsedInvoiceNos, wantedNo, pick);
+            if (s != null) s.UsedInvoiceNos = AddUsedInvoiceNo(s.UsedInvoiceNos, code);
+            string at = Stamp(now);
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                var r = jobs[i];
+                r.InvoiceNo = code;
+                r.BilledAt = at;
+                r.Printed = true;
+                if (s != null)
+                {
+                    r.InvoiceDue = s.InvoiceDue(now).ToString(DueFormat, Inv);
+                    r.InvoicePayMobilePay = s.PayMobilePay ?? "";
+                    r.InvoicePayBank = s.PayBank ?? "";
+                    r.InvoiceFromName = s.QuoteName ?? "";
+                }
+                r.BilledTo = name;
+                if (!friends)
+                {
+                    r.OthersPrice = (Pricing.ShownOre(Math.Max(0, bill.Prices[i])) + share[i]) / 100.0;
+                    r.InvoiceTopUp = share[i] / 100.0;
+                }
+                else r.InvoiceTopUp = 0;
+            }
+            return code;
         }
 
         /// Keeps the newest max entries (list is newest first). Older failed ones not yet made back are kept too; what the
@@ -1384,6 +1890,7 @@ namespace PrintPrice
         }
 
         /// What deleting ids would mean, for the confirm text (History window and website). Ids not in the list are ignored.
+        /// OnCombined / Combined: deleted jobs that are on a combined invoice (code on 2+ records), per code with how many stay.
         public static DeleteSummary SummarizeDelete(List<QuoteRecord> list, IEnumerable<string> ids)
         {
             if (list == null || ids == null) return new DeleteSummary();
@@ -1405,13 +1912,38 @@ namespace PrintPrice
             var remaining = new double[list.Count];
             s.DebtBefore = RunDebt(list, null, int.MaxValue, remaining, new double[list.Count]);
             var after = new List<QuoteRecord>(list.Count);
+            var codeCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in list)
+                if (r != null && !string.IsNullOrEmpty(r.InvoiceNo))
+                {
+                    int n; string c = r.InvoiceNo.Trim();
+                    codeCount.TryGetValue(c, out n);
+                    codeCount[c] = n + 1;
+                }
+            var cuts = new Dictionary<string, CombinedInvoiceCut>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < list.Count; i++)
             {
                 var r = list[i];
                 if (r == null) continue;
                 if (!gone(r)) { after.Add(r); continue; }
                 s.Count++;
-                if (!string.IsNullOrEmpty(r.InvoiceNo)) s.Invoices++;
+                if (!string.IsNullOrEmpty(r.InvoiceNo))
+                {
+                    s.Invoices++;
+                    string c = r.InvoiceNo.Trim();
+                    if (codeCount[c] >= 2)
+                    {
+                        CombinedInvoiceCut cut;
+                        if (!cuts.TryGetValue(c, out cut))
+                        {
+                            cut = new CombinedInvoiceCut { Code = c, Left = codeCount[c] };
+                            cuts[c] = cut;
+                            s.Combined.Add(cut);
+                        }
+                        cut.Gone++; cut.Left--;
+                        s.OnCombined++;
+                    }
+                }
                 if (r.Failed)
                 {
                     s.Failed++;
@@ -1464,6 +1996,7 @@ namespace PrintPrice
                 if (r.InvoicePayBank == null) r.InvoicePayBank = "";
                 if (r.InvoiceFromName == null) r.InvoiceFromName = "";
                 if (r.BilledTo == null) r.BilledTo = "";
+                if (!GoodRate(r.InvoiceTopUp)) r.InvoiceTopUp = 0;   // negative / NaN / infinity -> none
                 if (r.BedType == null) r.BedType = "";
                 if (r.Nozzle == null) r.Nozzle = "";
                 if (r.MaterialName == null) r.MaterialName = "";
@@ -2016,6 +2549,8 @@ namespace PrintPrice
                 keep.InvoiceNo = other.InvoiceNo; keep.BilledAt = other.BilledAt; keep.InvoiceDue = other.InvoiceDue;
                 keep.InvoicePayMobilePay = other.InvoicePayMobilePay; keep.InvoicePayBank = other.InvoicePayBank;
                 keep.InvoiceFromName = other.InvoiceFromName; keep.BilledTo = other.BilledTo;
+                // the price that was billed (a combined invoice changes OthersPrice) and its share of the top-up
+                keep.OthersPrice = other.OthersPrice; keep.InvoiceTopUp = other.InvoiceTopUp;
                 changed = true;
             }
             else if (!string.IsNullOrEmpty(keep.InvoiceNo) && keep.BilledTo.Trim().Length == 0 && other.BilledTo.Trim().Length > 0 &&
@@ -2115,7 +2650,8 @@ namespace PrintPrice
         /// - printers: an id both sides use for different models moves the records of the side whose settings are NOT kept to a
         ///   new id (MovePrinters); every printer id in either history or settings is reserved.
         /// - UsedInvoiceNos = both sides' lists + every invoice code in both histories (also replaced ones): never given again.
-        ///   Codes on 2+ different records are kept and listed in InvoiceClashes.
+        ///   Codes on 2+ different records are kept; listed in InvoiceClashes unless they all share one BilledAt (= one
+        ///   combined invoice, History.InvoiceGroup).
         public static RestoreResult Combine(List<QuoteRecord> current, AppSettings currentSettings, BackupData backup,
                                             bool replace, bool withSettings)
         {
@@ -2195,15 +2731,16 @@ namespace PrintPrice
             AddCodes(codes, seen, CodesOf(all));
             if (codes.Count > MaxUsedInvoiceNos) codes.RemoveRange(0, codes.Count - MaxUsedInvoiceNos);
             rs.UsedInvoiceNos = string.Join(",", codes.ToArray());
-            var count = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            // a code on several records with the same BilledAt is one combined invoice; a different BilledAt is a clash
+            var billedAt = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var clashed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in all)
             {
                 if (string.IsNullOrEmpty(r.InvoiceNo)) continue;
-                string c = r.InvoiceNo.Trim();
-                int n;
-                count.TryGetValue(c, out n);
-                count[c] = n + 1;
-                if (n + 1 == 2) res.InvoiceClashes.Add(c);
+                string c = r.InvoiceNo.Trim(), at = (r.BilledAt ?? "").Trim(), first;
+                if (!billedAt.TryGetValue(c, out first)) { billedAt[c] = at; continue; }
+                // no BilledAt (hand-edited / broken record) is never proof of one invoice: a clash, as before
+                if ((at.Length == 0 || at != first) && clashed.Add(c)) res.InvoiceClashes.Add(c);
             }
 
             // pictures

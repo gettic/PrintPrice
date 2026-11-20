@@ -39,7 +39,7 @@ namespace PrintPrice
         public static List<QuoteRow> Build(QuoteBreakdown b, IList<string> materialNames, double purgeGrams, int hours, int minutes, string plateName)
         {
             var rows = new List<QuoteRow>();
-            var lines = b.Lines;
+            var lines = FoldMinimum(b.Lines);   // the customer never sees a minimum-price top-up: it is part of Work & handling
             var mats = lines.FindAll(l => l.Key == QuoteLine.Material);
             long matOre = 0;
             foreach (var m in mats) matOre += m.Ore;
@@ -86,10 +86,6 @@ namespace PrintPrice
                     case QuoteLine.Work:
                         rows.Add(Head(L.S("Work & handling", "Arbejde & håndtering"), "", l.Ore, true));
                         break;
-                    case QuoteLine.Minimum:
-                        rows.Add(Head(L.S("Minimum price top-up", "Tillæg op til minimumspris"),
-                            L.F("lowest price {0} kr.", "laveste pris {0} kr.", Num.Fmt(l.Quantity)), l.Ore, true));
-                        break;
                     case QuoteLine.Rounding:
                         rows.Add(Head(L.S("Rounding", "Afrunding"),
                             L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity)), l.Ore, true));
@@ -100,6 +96,126 @@ namespace PrintPrice
                 }
             }
             return rows;
+        }
+
+        /// The rows of a combined bill's breakdown (History.GroupBreakdown as b.Lines; names by its Materials index, hours /
+        /// minutes = the jobs' summed time). As Build, but the details "g × kr/kg", "kWh × kr/kWh", "time × kr/h" only when
+        /// sameRates and the rate is known (else the summed grams / kWh / time); the top-up folded into Work & handling
+        /// (FoldMinimum); "%" and "nearest" only when
+        /// known; the "other" row (older quotes without a split); at most maxColours filament sub-rows, the rest summed in
+        /// one "N more colours" row.
+        public static List<QuoteRow> BuildGroup(QuoteBreakdown b, IList<string> materialNames, int hours, int minutes, string plateName,
+                                                bool sameRates, int maxColours)
+        {
+            var rows = new List<QuoteRow>();
+            var lines = FoldMinimum(b.Lines);   // the bill's top-up is shown inside Work & handling, never as its own row
+            var mats = lines.FindAll(l => l.Key == QuoteLine.Material);
+            long matOre = 0;
+            foreach (var m in mats) matOre += m.Ore;
+            Func<QuoteLine, string> matDetail = m => sameRates && m.UnitPrice > 0
+                ? Num.Fmt(m.Quantity) + " g  ×  " + Num.Fmt(m.UnitPrice) + " kr/kg" : Num.Fmt(Math.Round(m.Quantity, 2)) + " g";
+            Func<QuoteLine, string> matName = m =>
+            {
+                string name = materialNames != null && m.Index >= 0 && m.Index < materialNames.Count ? materialNames[m.Index] : "";
+                return string.IsNullOrEmpty(name) ? L.F("Colour {0}", "Farve {0}", m.Index + 1) : name;
+            };
+            string material = L.S("Material", "Materiale");
+            if (mats.Count == 1) rows.Add(Head(material, matDetail(mats[0]), matOre, true));
+            else if (mats.Count > 1)
+            {
+                rows.Add(Head(material, "", matOre, false));
+                int shown = mats.Count > maxColours ? Math.Max(1, maxColours - 1) : mats.Count;
+                for (int i = 0; i < shown; i++) rows.Add(Sub(matName(mats[i]), matDetail(mats[i]), mats[i].Ore, mats[i].Index));
+                if (shown < mats.Count)
+                {
+                    long rest = 0;
+                    double grams = 0;
+                    for (int i = shown; i < mats.Count; i++) { rest += mats[i].Ore; grams += mats[i].Quantity; }
+                    rows.Add(Sub(L.F("{0} more colours", "{0} farver mere", mats.Count - shown), Num.Fmt(Math.Round(grams, 2)) + " g", rest, -1));
+                }
+            }
+            foreach (var l in lines)
+            {
+                if (l.Key == QuoteLine.Material) continue;
+                if (rows.Count > 0) rows.Add(new QuoteRow { Kind = QuoteRowKind.Rule });
+                bool rate = sameRates && l.UnitPrice > 0;
+                switch (l.Key)
+                {
+                    case QuoteLine.Power:
+                        rows.Add(Head(L.S("Electricity", "Strøm"), rate ? N2(l.Quantity) + " kWh  ×  " + N2(l.UnitPrice) + " kr/kWh" : N2(l.Quantity) + " kWh", l.Ore, true));
+                        break;
+                    case QuoteLine.Wear:
+                        bool parts = l.Parts != null && l.Parts.Count > 0;
+                        rows.Add(Head(L.S("Machine wear", "Maskinslid"), rate ? Time(hours, minutes) + "  ×  " + N2(l.UnitPrice) + PerHour.TrimEnd() : Time(hours, minutes),
+                                      l.Ore, !parts));
+                        if (parts)
+                            foreach (var part in l.Parts)
+                                rows.Add(Sub(PartName(part.Key, plateName), sameRates && part.UnitPrice > 0 ? N2(part.UnitPrice) + PerHour : "", part.Ore, -1));
+                        break;
+                    case QuoteLine.Failed:
+                        rows.Add(Head(L.S("Failed-print allowance", "Tillæg for fejlprint"), l.Quantity > 0
+                            ? L.F("{0} % of material + electricity", "{0} % af materiale + strøm", Num.Fmt(l.Quantity)) : "", l.Ore, true));
+                        break;
+                    case QuoteLine.Payback:
+                        rows.Add(Head(L.S("Earlier failed prints", "Tidligere fejlprint"), "", l.Ore, true));
+                        break;
+                    case QuoteLine.Work:
+                        rows.Add(Head(L.S("Work & handling", "Arbejde & håndtering"), "", l.Ore, true));
+                        break;
+                    case QuoteLine.Other:
+                        rows.Add(Head(L.S("Other (older quotes)", "Andet (ældre tilbud)"), "", l.Ore, true));
+                        break;
+                    case QuoteLine.Rounding:
+                        rows.Add(Head(L.S("Rounding", "Afrunding"), l.Quantity > 0
+                            ? L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity)) : "", l.Ore, true));
+                        break;
+                    default:
+                        rows.Add(Head(l.Key, "", l.Ore, true));
+                        break;
+                }
+            }
+            return rows;
+        }
+
+        /// The breakdown lines as the customer sees them (the user's rule: never show the minimum-price top-up): every
+        /// "minimum" line's øre is added to the Work & handling line (copied, with no % detail left on it), or becomes a
+        /// Work & handling line in the minimum's place when there is none. The øre sum is unchanged. The saved data
+        /// (Pricing.Breakdown, History.GroupBreakdown, InvoiceTopUp) keeps its own minimum line; only the display folds it.
+        public static List<QuoteLine> FoldMinimum(List<QuoteLine> lines)
+        {
+            var res = new List<QuoteLine>();
+            if (lines == null) return res;
+            long minOre = 0;
+            int minAt = -1;
+            foreach (var l in lines)
+                if (l.Key == QuoteLine.Minimum) { minOre += l.Ore; if (minAt < 0) minAt = res.Count; }
+                else res.Add(l);
+            if (minAt < 0) return res;
+            int work = res.FindIndex(l => l.Key == QuoteLine.Work);
+            if (work >= 0)
+            {
+                var w = res[work];
+                res[work] = new QuoteLine { Key = QuoteLine.Work, Ore = w.Ore + minOre, Exact = w.Exact + minOre / 100.0, Index = w.Index };
+            }
+            else if (minOre != 0) res.Insert(minAt, new QuoteLine { Key = QuoteLine.Work, Ore = minOre, Exact = minOre / 100.0 });
+            return res;
+        }
+
+        /// Each job's amount on a combined bill as the customer sees it, in øre: its line (GroupBillInfo.Prices) plus its
+        /// share of the minimum top-up (Pricing.ShareOre by price, as History.MakeInvoice saves it), so the job amounts add up
+        /// to the total and no minimum line is needed. Friends / no top-up: the lines as they are.
+        public static long[] JobOre(GroupBillInfo bill)
+        {
+            int n = bill.Prices.Length;
+            var res = new long[n];
+            long[] share = bill.TopUp > 0 && !bill.Friends ? Pricing.ShareOre(bill.Prices, Pricing.ShownOre(bill.TopUp)) : null;
+            for (int i = 0; i < n; i++)
+            {
+                double p = bill.Prices[i];
+                long ore = !double.IsNaN(p) && !double.IsInfinity(p) && p > 0 ? Pricing.ShownOre(p) : 0;   // as Pricing.BillTotal sums them
+                res[i] = ore + (share != null && i < share.Length ? share[i] : 0);
+            }
+            return res;
         }
 
         /// The wear part's name (QuoteLine.WearPrinter / WearParts / WearHotend / WearPlate; plate = "Smooth PEI" or "").
@@ -183,6 +299,18 @@ namespace PrintPrice
             return name.Trim();
         }
 
+        /// An invoice's file name (no extension, issue #6): "2026-48213 - Mette Hansen" (the invoice number, then the
+        /// name on the invoice cut to 30 characters); characters Windows forbids -> "_". Single and combined invoices.
+        public static string InvoiceFileName(string code, string customer)
+        {
+            string name = (code ?? "").Trim();
+            string c = (customer ?? "").Trim();
+            if (c.Length > 30) c = c.Substring(0, 30).TrimEnd();
+            if (c.Length > 0) name += (name.Length > 0 ? " - " : "") + c;
+            foreach (char bad in BadFileChars) name = name.Replace(bad, '_');
+            return name.Trim();
+        }
+
         /// The job on screen as plain text (Copy text): "For:" line with a customer, the typed link or file, time and
         /// grams (+ " (N colours)" when colours > 0), both prices.
         public static string JobText(string customer, string source, int hours, int minutes, string grams, int colours,
@@ -226,6 +354,89 @@ namespace PrintPrice
                 if (bank.Length > 0) text += nl + L.S("Bank: ", "Bank: ") + bank;
                 if (mp.Length > 0 || bank.Length > 0)
                     text += nl + L.F("Please write invoice no. {0} with the payment.", "Skriv fakturanr. {0} ved betalingen.", r.InvoiceNo);
+            }
+            return text;
+        }
+
+        // ---------- combined bill (several History jobs on one quote / invoice) ----------
+
+        /// "3 prints" / "3 print" ("1 print").
+        public static string PrintsText(int n)
+        {
+            return n == 1 ? L.S("1 print", "1 print") : L.F("{0} prints", "{0} print", n);
+        }
+
+        /// A job's muted line on a combined bill: "3 h 10 m · 86 g · PLA Matte" (material left out when empty).
+        public static string JobDetail(QuoteRecord r, string material)
+        {
+            string m = (material ?? "").Trim();
+            return Time(r.Hours, r.Minutes) + " · " + Num.Fmt(r.Grams) + " g" + (m.Length > 0 ? " · " + m : "");
+        }
+
+        /// A job's faint line on a combined bill: "Quote no. 261103-1412 · 3 November 2026".
+        public static string JobSub(QuoteRecord r)
+        {
+            DateTime t;
+            if (!History.TryTime(r.SavedAt, out t)) return L.F("Quote no. {0}", "Tilbud nr. {0}", History.QuoteNumber(r));
+            return L.F("Quote no. {0} · {1}", "Tilbud nr. {0} · {1}", History.QuoteNumber(r), LongDate(t));
+        }
+
+        /// "3 prints · 7 h 40 m · 182 g" (time and grams summed).
+        public static string GroupSummary(IList<QuoteRecord> jobs)
+        {
+            int minutes = 0;
+            double grams = 0;
+            int n = 0;
+            if (jobs != null)
+                foreach (var r in jobs)
+                {
+                    if (r == null) continue;
+                    n++;
+                    minutes += Math.Max(0, r.Hours) * 60 + Math.Max(0, r.Minutes);
+                    grams += Math.Max(0, r.Grams);
+                }
+            return PrintsText(n) + " · " + Time(minutes / 60, minutes % 60) + " · " + Num.Fmt(Math.Round(grams, 2)) + " g";
+        }
+
+        /// The muted line before the total when a customer bill is below the minimum price: "Minimum price (50,00 kr.)".
+        public static string MinimumLabel(double minimum)
+        {
+            return L.F("Minimum price ({0})", "Minimumspris ({0})", Num.Kr(minimum));
+        }
+
+        /// Default file name of a combined bill: "2026-11-19 3 prints - Lene Hansen".
+        public static string GroupFileName(DateTime date, int jobs, string customer)
+        {
+            return FileName(date, PrintsText(jobs), customer);
+        }
+
+        /// A combined bill as plain text (Copy text): title + number, name, one line per job (name, time, grams, price),
+        /// each price with its share of any top-up (JobOre; the minimum is never shown), the total; invoice: dates and payment (inv = InvoiceInfo of
+        /// the first job: its snapshot when made). number = invoice code / quote number.
+        public static string GroupText(GroupBillInfo bill, bool invoice, string number, string customer, DateTime date, InvoiceDetails inv)
+        {
+            string nl = Environment.NewLine;
+            string text = (invoice ? L.S("Invoice", "Faktura") : L.S("3D print quote", "Tilbud på 3D-print")) + " " + number + nl;
+            string who = (customer ?? "").Trim();
+            if (who.Length > 0) text += (invoice ? L.S("Bill to: ", "Kunde: ") : L.S("For: ", "Til: ")) + who + nl;
+            text += PrintsText(bill.Jobs.Count) + ":" + nl;
+            long[] jobOre = JobOre(bill);   // each job with its share of any top-up: no minimum line, the lines add up to the total
+            for (int i = 0; i < bill.Jobs.Count; i++)
+            {
+                var r = bill.Jobs[i];
+                text += "- " + ModelName(r.Model) + ": " +
+                        L.F("{0} h {1} m, {2} g", "{0} t {1} m, {2} g", r.Hours, r.Minutes, Num.Fmt(r.Grams)) + ": " +
+                        Num.Kr(i < jobOre.Length ? jobOre[i] / 100.0 : 0) + nl;
+            }
+            text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(bill.Total);
+            if (invoice && inv != null)
+            {
+                text += nl + L.F("Invoice date {0}, please pay by {1}", "Fakturadato {0}, betales senest {1}", LongDate(date), LongDate(inv.Due));
+                string mp = (inv.MobilePay ?? "").Trim(), bank = (inv.Bank ?? "").Trim();
+                if (mp.Length > 0) text += nl + "MobilePay: " + mp;
+                if (bank.Length > 0) text += nl + L.S("Bank: ", "Bank: ") + bank;
+                if (mp.Length > 0 || bank.Length > 0)
+                    text += nl + L.F("Please write invoice no. {0} with the payment.", "Skriv fakturanr. {0} ved betalingen.", number);
             }
             return text;
         }

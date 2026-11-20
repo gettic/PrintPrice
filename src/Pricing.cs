@@ -48,6 +48,8 @@ namespace PrintPrice
     {
         public const string Material = "material", Power = "power", Wear = "wear", Failed = "failed", Payback = "payback",
             Work = "work", Minimum = "minimum", Rounding = "rounding";
+        // combined bill (History.GroupBreakdown): a job's price that can't be split (no usable saved inputs)
+        public const string Other = "other";
         // wear split (QuoteLine.Parts of the wear line)
         public const string WearPrinter = "wear.printer", WearParts = "wear.parts", WearHotend = "wear.hotend", WearPlate = "wear.plate";
 
@@ -414,6 +416,60 @@ namespace PrintPrice
                     foreach (var part in l.Parts) part.Exact *= k;
                     SplitOre(l.Parts, l.Ore);
                 }
+        }
+
+        // ---------- combined bill (several History jobs on one bill, minimum price once on the whole bill) ----------
+
+        /// The customer price of one job without the minimum price: Calculate with MinimumPrice 0 (same markup, wear,
+        /// payback and per-job rounding). s is not changed.
+        public static double PriceWithoutMinimum(QuoteInput input, AppSettings s)
+        {
+            var c = s.Clone();
+            c.MinimumPrice = 0;
+            return Calculate(input, c).OthersPrice;
+        }
+
+        /// A combined bill's total (kr., whole øre): the sum of the job prices (each as shown, whole øre) plus, on a customer
+        /// bill whose sum is above 0 and below minimum, a top-up = minimum - sum rounded UP to roundTo (whole øre when
+        /// roundTo <= 0). topUp = that top-up (0 = none: friends, minimum <= 0, sum 0, or sum >= minimum). Never negative.
+        public static double BillTotal(IList<double> prices, double minimum, double roundTo, bool friends, out double topUp)
+        {
+            long sum = 0;
+            if (prices != null)
+                foreach (var p in prices)
+                    if (!double.IsNaN(p) && !double.IsInfinity(p) && p > 0) sum += ShownOre(p);
+            long top = 0;
+            if (!friends && sum > 0 && !double.IsNaN(minimum) && !double.IsInfinity(minimum) && minimum > 0 &&
+                sum / 100.0 < minimum - 1e-9)
+            {
+                double need = RoundUp(minimum - sum / 100.0, roundTo);
+                top = Math.Max(0, (long)Math.Ceiling(need * 100.0 - 1e-6));
+            }
+            topUp = top / 100.0;
+            return (sum + top) / 100.0;
+        }
+
+        /// Splits amountOre (e.g. a bill's top-up in øre) over the jobs by their prices, in whole øre that add up exactly
+        /// (largest remainder, SplitOre; ties: the earlier job). All prices 0 = equal parts. Same order as prices.
+        public static long[] ShareOre(IList<double> prices, long amountOre)
+        {
+            int n = prices == null ? 0 : prices.Count;
+            var res = new long[n];
+            if (n == 0 || amountOre <= 0) return res;
+            double total = 0;
+            var p = new double[n];
+            for (int i = 0; i < n; i++)
+            {
+                double v = prices[i];
+                p[i] = double.IsNaN(v) || double.IsInfinity(v) || v < 0 ? 0 : v;
+                total += p[i];
+            }
+            var lines = new List<QuoteLine>(n);
+            for (int i = 0; i < n; i++)
+                lines.Add(new QuoteLine { Exact = total > 0 ? amountOre / 100.0 * p[i] / total : amountOre / 100.0 / n });
+            SplitOre(lines, amountOre);
+            for (int i = 0; i < n; i++) res[i] = lines[i].Ore;
+            return res;
         }
     }
 }

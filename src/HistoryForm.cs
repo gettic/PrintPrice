@@ -77,9 +77,10 @@ namespace PrintPrice
         public QuoteRecord Selected;
         /// True when the window closed with "Repeat print" (Selected = the quote to repeat), false for "Open again".
         public bool RepeatSelected;
-        /// Quote… / Invoice…: (owner, record, invoice) opens the quote window for the record (MainForm.ShowRecordQuote);
+        /// Quote… / Invoice…: (owner, selected records, invoice) opens the quote window for one record or a combined bill
+        /// for several (MainForm.ShowRecordsQuote); returns null, or why it can't (shown as a Warning in the info box).
         /// null = the two buttons are hidden.
-        public Action<IWin32Window, QuoteRecord, bool> QuoteRequested;
+        public Func<IWin32Window, List<QuoteRecord>, bool, string> QuoteRequested;
         /// Backup…: (owner) opens the Backup window (MainForm.OpenBackup); true = a restore replaced the list (in place)
         /// and the settings, so the window reloads. null = the button is hidden.
         public Func<IWin32Window, bool> BackupRequested;
@@ -534,7 +535,8 @@ namespace PrintPrice
                 miFailed.Checked = allFailed;
                 miFriends.Checked = allFriends;
                 miCustomer.Checked = allCustomers;
-                miOpen.Enabled = miRepeat.Enabled = miQuote.Enabled = miInvoice.Enabled = one;
+                miOpen.Enabled = miRepeat.Enabled = one;
+                miQuote.Enabled = miInvoice.Enabled = sel.Count > 0;   // several = one combined quote / invoice
                 miQuote.Visible = miInvoice.Visible = QuoteRequested != null;
                 miDelete.Text = one ? L.S("Delete…", "Slet…") : L.F("Delete {0} quotes…", "Slet {0} tilbud…", sel.Count);
                 string same = SharedName(sel);
@@ -1275,10 +1277,10 @@ namespace PrintPrice
             doneShown = false;
             string help = view == ViewList
                 ? L.S("Ctrl+click or Shift+click selects several quotes (Ctrl+A all), Delete deletes them. Quote… makes a quote page, Invoice… a bill " +
-                      "(it ticks Printed). Repeat print slices it with today's prices; Open again (or double-click) loads it as saved. Right-click for all of these.\n" +
+                      "for all selected (it ticks Printed). Repeat print slices it with today's prices; Open again (or double-click) loads it as saved. Right-click for all of these.\n" +
                       "Click For, Customer, Note, Printed or Failed to change them, changes are saved at once. Ctrl+1, 2, 3 or Ctrl+wheel: list, medium or large pictures.",
                       "Ctrl+klik eller Shift+klik vælger flere tilbud (Ctrl+A alle), Slet sletter dem. Tilbud… laver et tilbud, Faktura… en regning " +
-                      "(den sætter Printet). Print igen slicer det med dagens priser; Åbn igen (eller dobbeltklik) henter det som gemt. Højreklik for det hele.\n" +
+                      "for alle valgte (den sætter Printet). Print igen slicer det med dagens priser; Åbn igen (eller dobbeltklik) henter det som gemt. Højreklik for det hele.\n" +
                       "Klik på Til, Kunde, Note, Printet eller Fejlet for at ændre dem, ændringer gemmes med det samme. Ctrl+1, 2, 3 eller Ctrl+hjul: liste, mellemstore eller store billeder.")
                 : L.S("Ctrl+click or Shift+click selects several quotes (Ctrl+A all), Delete deletes them. Double-click or Enter opens a quote again; " +
                       "right-click for more.\n" +
@@ -1398,15 +1400,16 @@ namespace PrintPrice
             ShowInfo();
         }
 
-        /// One quote selected: Open again, Repeat print, Quote…, Invoice…; one or more: Delete; any quotes: Clear all….
+        /// One quote selected: Open again, Repeat print; one or more: Quote…, Invoice… (several = one combined bill),
+        /// Delete; any quotes: Clear all….
         void UpdateButtons()
         {
             int n = SelectedCount();
             bool one = n == 1;
             btnOpen.Enabled = one;
             btnRepeat.Enabled = one;
-            btnQuote.Enabled = one;
-            btnInvoice.Enabled = one;
+            btnQuote.Enabled = n > 0;
+            btnInvoice.Enabled = n > 0;
             btnDelete.Enabled = n > 0;
             btnClear.Enabled = list.Count > 0;
         }
@@ -1440,17 +1443,28 @@ namespace PrintPrice
             Close();
         }
 
-        /// Quote… / Invoice…: the quote window for the selected record over this window; afterwards the list shows the
-        /// name / price / Printed / invoice no. it may have set.
+        /// Quote… / Invoice…: the quote window for the selected record(s) over this window (several = one combined bill);
+        /// afterwards the list shows the name / price / Printed / invoice no. it may have set. A refusal (e.g. a job
+        /// already on another invoice) is shown as a Warning in the info box.
         void ShowQuote(bool invoice)
         {
-            var r = SelectedRecord();
-            if (r == null || QuoteRequested == null) return;
+            var sel = SelectedRecords();
+            if (sel.Count == 0 || QuoteRequested == null) return;
             if (grid.IsCurrentCellInEditMode) grid.EndEdit();
-            QuoteRequested(this, r, invoice);
+            string problem = QuoteRequested(this, sel, invoice);
             Fill();
+            if (!string.IsNullOrEmpty(problem)) ShowDone(problem, InfoKind.Warning, null, null);
             FocusList();
         }
+
+        // --test-bill (MainForm.TestBillFlow)
+        /// Selects these quotes (those shown) as a click would.
+        internal void TestSelect(List<QuoteRecord> records) { Fill(records, records.Count > 0 ? records[0] : null); }
+        /// Quote… (false) / Invoice… (true) on the selection, as the button does.
+        internal void TestQuote(bool invoice) { ShowQuote(invoice); }
+        internal bool TestQuoteButtonsOn { get { return btnQuote.Enabled && btnInvoice.Enabled; } }
+        internal string TestInfo { get { return info.Text ?? ""; } }
+        internal InfoKind TestInfoKind { get { return info.Kind; } }
 
         void ShowRowMenu(Point screen)
         {
@@ -1539,6 +1553,20 @@ namespace PrintPrice
                                     "Det tjente en del af et fejlet print ind: nye tilbud tjener det ind igen.")
                               : L.F("{0} of them earned back failed prints: new quotes earn that back again.",
                                     "{0} af dem tjente fejlede print ind: nye tilbud tjener det ind igen.", sum.PayingBack));
+            // combined invoices that lose jobs: the others keep their prices; the invoice then shows fewer prints
+            foreach (var cut in sum.Combined)
+            {
+                if (cut.Left <= 0) continue;   // the whole invoice goes
+                string left = QuoteRows.PrintsText(cut.Left);
+                lines.Add(one
+                    ? (cut.Left == 1
+                        ? L.F("It is on combined invoice {0} with 1 other print; the invoice will then show {1}.",
+                              "Det er på samlet faktura {0} med 1 andet print; fakturaen viser så {1}.", cut.Code, left)
+                        : L.F("It is on combined invoice {0} with {1} other prints; the invoice will then show {2}.",
+                              "Det er på samlet faktura {0} med {1} andre print; fakturaen viser så {2}.", cut.Code, cut.Left, left))
+                    : L.F("{0} of them are on combined invoice {1}; the invoice will then show {2}.",
+                          "{0} af dem er på samlet faktura {1}; fakturaen viser så {2}.", cut.Gone, cut.Code, left));
+            }
             return new BackupForm.AskForm(L.S("Delete", "Slet"), q, string.Join("\n", lines), L.S("Delete", "Slet"), L.S("Cancel", "Annullér"));
         }
 

@@ -1240,6 +1240,38 @@ namespace PrintPrice.Tests
             var d2 = HistRecord(t); d2.Model = "D";
             True("MakeInvoice in 2027 -> 2027-...", History.MakeInvoice(list, d2, new DateTime(2027, 1, 2, 9, 0, 0), st, Digits("11234")) == "2027-11234");
 
+            // issue #6: a wanted code (picked before the save dialog) is used while still free, else a fresh one
+            var wl = new List<QuoteRecord> { new QuoteRecord { InvoiceNo = "2026-22222" } };
+            var wst = new AppSettings { UsedInvoiceNos = "2026-33333" };
+            True("InvoiceFree: free / on a record / in the used list / blank / comma", History.InvoiceFree(wl, wst.UsedInvoiceNos, " 2026-44444 ")
+                 && !History.InvoiceFree(wl, wst.UsedInvoiceNos, "2026-22222") && !History.InvoiceFree(wl, wst.UsedInvoiceNos, "2026-33333")
+                 && !History.InvoiceFree(wl, "", "  ") && !History.InvoiceFree(null, null, null) && !History.InvoiceFree(null, "", "2026-1,2"));
+            var wa = HistRecord(t); wa.Customer = "Ole"; wl.Add(wa);
+            True("wanted free code 2026-44444 used", History.MakeInvoice(wl, wa, t, wst, " 2026-44444 ") == "2026-44444" && wa.InvoiceNo == "2026-44444"
+                 && wa.Printed && wa.BilledAt == "2026-11-04 14:05:33" && wa.BilledTo == "Ole" && wst.UsedInvoiceNos == "2026-33333,2026-44444");
+            True("re-issue ignores the wanted code", History.MakeInvoice(wl, wa, t, wst, "2026-55555") == "2026-44444" && wst.UsedInvoiceNos == "2026-33333,2026-44444");
+            var wb = HistRecord(t); wb.Model = "WB"; wl.Add(wb);
+            string wbNo = History.MakeInvoice(wl, wb, t, wst, "2026-22222");   // taken by a record
+            True("wanted code taken by a record -> a fresh one", CodeOk(wbNo, 2026) && wbNo != "2026-22222" && wbNo != "2026-33333" && wbNo != "2026-44444"
+                 && wst.UsedInvoiceNos == "2026-33333,2026-44444," + wbNo);
+            var wc = HistRecord(t); wc.Model = "WC"; wl.Add(wc);
+            string wcNo = History.MakeInvoice(wl, wc, t, wst, "2026-33333");   // only in the used list (record deleted)
+            True("wanted code in the used list -> a fresh one", CodeOk(wcNo, 2026) && wcNo != "2026-33333" && wcNo != wbNo);
+            var wd = HistRecord(t); wd.Model = "WD";
+            True("wanted null -> a fresh one", CodeOk(History.MakeInvoice(wl, wd, t, null, (string)null), 2026));
+            // the group version: one wanted code on all jobs; taken -> fresh; one job left -> single path with the code
+            var g1 = BillJob(18, t.AddHours(-2)); var g2 = BillJob(14, t.AddHours(-1));
+            var gs = new AppSettings { MinimumPrice = 50, RoundTo = 1, UsedInvoiceNos = "2026-33333" };
+            True("group wanted free code used on both", History.MakeInvoice(wl, new[] { g1, g2 }, t, gs, false, "2026-66666") == "2026-66666"
+                 && g1.InvoiceNo == "2026-66666" && g2.InvoiceNo == "2026-66666" && gs.UsedInvoiceNos == "2026-33333,2026-66666"
+                 && Pricing.ShownOre(g1.OthersPrice) + Pricing.ShownOre(g2.OthersPrice) == 5000);
+            var g3 = BillJob(18, t.AddHours(-2)); var g4 = BillJob(14, t.AddHours(-1));
+            string gNo = History.MakeInvoice(wl, new[] { g3, g4 }, t, gs, false, "2026-33333");
+            True("group wanted code taken -> a fresh one on both", CodeOk(gNo, 2026) && gNo != "2026-33333" && g3.InvoiceNo == gNo && g4.InvoiceNo == gNo);
+            var g5 = BillJob(18, t); var g6 = BillJob(14, t); History.MarkFailed(g6, true, t);
+            True("group with one job left: single invoice with the wanted code", History.MakeInvoice(wl, new[] { g5, g6 }, t, gs, false, "2026-77777") == "2026-77777"
+                 && g5.OthersPrice == 50 && g5.InvoiceTopUp == 0 && g6.InvoiceNo == "");
+
             // used list: last 2000 kept
             string used = "";
             for (int i = 0; i < 2005; i++) used = History.AddUsedInvoiceNo(used, "2026-N" + i);
@@ -3217,6 +3249,18 @@ namespace PrintPrice.Tests
                 Eq("MainInvoice=7 reads as 0", 0, AppSettings.FromIni(new string[] { "MainInvoice=7" }).MainInvoice);
                 Eq("MainInvoice=-1 reads as 0", 0, AppSettings.FromIni(new string[] { "MainInvoice=-1" }).MainInvoice);
                 Eq("MainInvoice missing reads as 0", 0, AppSettings.FromIni(new string[] { "SetupDone=1" }).MainInvoice);
+                // issue #6: InvoiceCopies (copy of every invoice PDF): default 1, 0 survives save/load, anything else reads as 1
+                Eq("InvoiceCopies default 1", 1, new AppSettings().InvoiceCopies);
+                Eq("InvoiceCopies new install (FromIni null) 1", 1, AppSettings.FromIni(null).InvoiceCopies);
+                var ic = new AppSettings(); ic.InvoiceCopies = 0;
+                Eq("InvoiceCopies 0 survives ToIni/FromIni", 0, AppSettings.FromIni(ic.ToIni()).InvoiceCopies);
+                True("InvoiceCopies line in ini", Array.IndexOf(ic.ToIni(), "InvoiceCopies=0") >= 0);
+                Eq("InvoiceCopies 1 survives ToIni/FromIni", 1, AppSettings.FromIni(new AppSettings().ToIni()).InvoiceCopies);
+                Eq("InvoiceCopies=7 reads as 1", 1, AppSettings.FromIni(new string[] { "InvoiceCopies=7" }).InvoiceCopies);
+                Eq("InvoiceCopies=-1 reads as 1", 1, AppSettings.FromIni(new string[] { "InvoiceCopies=-1" }).InvoiceCopies);
+                Eq("InvoiceCopies=abc keeps 1", 1, AppSettings.FromIni(new string[] { "InvoiceCopies=abc" }).InvoiceCopies);
+                Eq("InvoiceCopies missing reads as 1", 1, AppSettings.FromIni(new string[] { "SetupDone=1" }).InvoiceCopies);
+                Eq("InvoiceCopies Clone keeps 0", 0, ic.Clone().InvoiceCopies);
                 // 4a. first-time setup (idea 19): no settings.ini and no history.json = a new user -> setup window, empty quote name
                 Eq("new install: SetupDone 0", 0, fresh.SetupDone);
                 True("new install: QuoteName empty", fresh.QuoteName == "");
@@ -3491,9 +3535,348 @@ namespace PrintPrice.Tests
             SetupApplyTests();
             RecordBillTests();
             PrintStateTests();
+            CombinedBillTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
+        }
+
+        // ---------- combined bill: several History jobs on one invoice, minimum price once on the whole bill ----------
+
+        // simple settings: price = material only (1000 kr./kg, so grams = kr.), minimum 50, rounded up to whole kr.
+        static AppSettings BillSettings()
+        {
+            var s = new AppSettings();
+            s.PrinterWatts = 0; s.FriendsMarkupPct = 0; s.OthersMarkupPct = 0; s.MachineRatePerHour = 0; s.AutoWearRate = 0;
+            s.FailedPrintPct = 0; s.FailedPayback = 0; s.MinimumPrice = 50; s.RoundTo = 1;
+            return s;
+        }
+
+        static QuoteRecord BillJob(double grams, DateTime t)
+        {
+            var s = BillSettings();
+            var input = new QuoteInput { Hours = 1, Minutes = 0, FilamentGrams = grams, FilamentDkkPerKg = 1000, ElectricityDkkPerKwh = 0 };
+            return History.FromQuote(input, Pricing.Calculate(input, s), s, "Job" + grams, "", t);
+        }
+
+        static void CombinedBillTests()
+        {
+            double top;
+            // BillTotal: 30 + 25 + 20 = 75 >= 50 -> no top-up, total 75 (per job today: 50 + 50 + 50 = 150)
+            Eq("BillTotal 30+25+20 = 75", 75, Pricing.BillTotal(new[] { 30.0, 25, 20 }, 50, 1, false, out top));
+            Eq("BillTotal 30+25+20: no top-up", 0, top);
+            // 18 + 14 = 32 < 50 -> top-up 50 - 32 = 18 -> total 50 (today 100)
+            Eq("BillTotal 18+14 = 50", 50, Pricing.BillTotal(new[] { 18.0, 14 }, 50, 1, false, out top));
+            Eq("BillTotal 18+14: top-up 18", 18, top);
+            Eq("BillTotal friends 18+14 = 32", 32, Pricing.BillTotal(new[] { 18.0, 14 }, 50, 1, true, out top));
+            Eq("BillTotal friends: no top-up", 0, top);
+            Eq("BillTotal at the minimum 30+20 = 50", 50, Pricing.BillTotal(new[] { 30.0, 20 }, 50, 1, false, out top));
+            Eq("BillTotal at the minimum: no top-up", 0, top);
+            // rounding: 18,50 + 14 = 32,50; 50 - 32,50 = 17,50 rounded UP to 5 = 20 -> total 52,50
+            Eq("BillTotal round to 5: total 52,50", 52.50, Pricing.BillTotal(new[] { 18.5, 14 }, 50, 5, false, out top));
+            Eq("BillTotal round to 5: top-up 20", 20, top);
+            // no rounding: 17,50 -> total 50,00
+            Eq("BillTotal no rounding: total 50", 50, Pricing.BillTotal(new[] { 18.5, 14 }, 50, 0, false, out top));
+            Eq("BillTotal no rounding: top-up 17,50", 17.50, top);
+            // minimum 49,995, no rounding: 49,995 - 32 = 17,995 -> up to whole øre 18,00
+            Pricing.BillTotal(new[] { 18.0, 14 }, 49.995, 0, false, out top);
+            True("BillTotal top-up rounded up to whole øre: 18,00", Pricing.ShownOre(top) == 1800);
+            Eq("BillTotal minimum 0: plain sum 32", 32, Pricing.BillTotal(new[] { 18.0, 14 }, 0, 1, false, out top));
+            True("BillTotal minimum 0: no top-up", top == 0);
+            True("BillTotal empty / null / all 0: 0, no top-up", Pricing.BillTotal(new double[0], 50, 1, false, out top) == 0 && top == 0
+                 && Pricing.BillTotal(null, 50, 1, false, out top) == 0 && top == 0
+                 && Pricing.BillTotal(new[] { 0.0, 0 }, 50, 1, false, out top) == 0 && top == 0);
+            True("BillTotal never negative (negative / NaN prices ignored)", Pricing.BillTotal(new[] { -10.0, double.NaN, 60 }, 50, 1, false, out top) == 60 && top == 0);
+
+            // ShareOre: 18 kr. over 18 / 14: 18/32 x 18 = 10,125 (1012,5 øre), 14/32 x 18 = 7,875 (787,5); floors 1012 + 787 = 1799,
+            // 1 øre left, tie -> the earlier job: 1013 + 787 = 1800
+            var sh = Pricing.ShareOre(new[] { 18.0, 14 }, 1800);
+            True("ShareOre 18/14 of 18 kr. = 10,13 + 7,87", sh.Length == 2 && sh[0] == 1013 && sh[1] == 787);
+            // 20 kr. over 3 x 10: 666,67 each -> 666 x 3 = 1998, 2 left -> 667, 667, 666
+            sh = Pricing.ShareOre(new[] { 10.0, 10, 10 }, 2000);
+            True("ShareOre 3 equal jobs: 667 + 667 + 666 = 2000", sh[0] == 667 && sh[1] == 667 && sh[2] == 666);
+            sh = Pricing.ShareOre(new[] { 0.0, 0 }, 101);
+            True("ShareOre all prices 0: equal parts 51 + 50", sh[0] == 51 && sh[1] == 50);
+            sh = Pricing.ShareOre(new[] { 7.0, 13, 29, 31 }, 1999);
+            True("ShareOre 4 jobs sums exactly to 1999", sh[0] + sh[1] + sh[2] + sh[3] == 1999);
+            True("ShareOre nothing to share / no jobs", Pricing.ShareOre(new[] { 1.0 }, 0)[0] == 0 && Pricing.ShareOre(null, 100).Length == 0);
+
+            // PriceWithoutMinimum: 30 g x 1000 kr./kg = 30 kr.; with the minimum 50
+            var bs = BillSettings();
+            var in30 = new QuoteInput { Hours = 1, Minutes = 0, FilamentGrams = 30, FilamentDkkPerKg = 1000, ElectricityDkkPerKwh = 0 };
+            Eq("PriceWithoutMinimum 30 g = 30", 30, Pricing.PriceWithoutMinimum(in30, bs));
+            Eq("Calculate 30 g with minimum = 50", 50, Pricing.Calculate(in30, bs).OthersPrice);
+            True("PriceWithoutMinimum doesn't change the settings", bs.MinimumPrice == 50);
+
+            var t = new DateTime(2026, 11, 19, 10, 0, 0);
+            var ss = new AppSettings { MinimumPrice = 50, RoundTo = 1, InvoiceDueDays = 14, PayMobilePay = "12 34 56 78", PayBank = "BK", QuoteName = "Gettic 3D" };
+
+            // BillPrice: own price without the minimum; the job's saved price is 50
+            var j18 = BillJob(18, t.AddHours(-2)); var j14 = BillJob(14, t.AddHours(-1));
+            Eq("job 18 g saved customer price 50 (own minimum)", 50, j18.OthersPrice);
+            Eq("BillPrice 18 g = 18", 18, History.BillPrice(j18, ss, false));
+            Eq("BillPrice friends = FriendsPrice 18", 18, History.BillPrice(j18, ss, true));
+
+            // live bill (quote, nothing saved): 18 + 14 = 32 -> top-up 18 -> 50
+            var g = History.GroupBill(new[] { j18, j14 }, ss, false);
+            True("GroupBill live: 18 + 14, top-up 18, total 50, minimum 50", g.Prices.Length == 2 && Math.Abs(g.Prices[0] - 18) < 1e-9
+                 && Math.Abs(g.Prices[1] - 14) < 1e-9 && Math.Abs(g.Sum - 32) < 1e-9 && Math.Abs(g.TopUp - 18) < 1e-9
+                 && Math.Abs(g.Total - 50) < 1e-9 && g.Minimum == 50);
+            True("GroupBill live changes nothing", j18.OthersPrice == 50 && j18.InvoiceNo == "" && j18.InvoiceTopUp == 0);
+            var gf = History.GroupBill(new[] { j18, j14 }, ss, true);
+            True("GroupBill friends: 32, no top-up", Math.Abs(gf.Total - 32) < 1e-9 && gf.TopUp == 0);
+
+            // MakeInvoice for the group: one code, same date / snapshot / name / Printed; prices 18 + 10,13 and 14 + 7,87
+            var list = new List<QuoteRecord> { j14, j18 };
+            j14.Customer = "  Lene Hansen ";
+            string code = History.MakeInvoice(list, new[] { j18, j14 }, t, ss, false, Digits("11234"));
+            True("group invoice: one code on both", code == "2026-11234" && j18.InvoiceNo == code && j14.InvoiceNo == code);
+            True("group invoice: same BilledAt, Printed", j18.BilledAt == "2026-11-19 10:00:00" && j14.BilledAt == j18.BilledAt && j18.Printed && j14.Printed);
+            True("group invoice: same snapshot (due 19/11 + 14 = 3/12)", j18.InvoiceDue == "2026-12-03" && j14.InvoiceDue == "2026-12-03"
+                 && j18.InvoicePayMobilePay == "12 34 56 78" && j14.InvoicePayBank == "BK" && j18.InvoiceFromName == "Gettic 3D");
+            True("group invoice: BilledTo = first name given, on all", j18.BilledTo == "Lene Hansen" && j14.BilledTo == "Lene Hansen");
+            True("group invoice: code in the used list once", ss.UsedInvoiceNos == "2026-11234");
+            Eq("group invoice: 18 g job = 18 + 10,13 = 28,13", 28.13, j18.OthersPrice);
+            Eq("group invoice: 14 g job = 14 + 7,87 = 21,87", 21.87, j14.OthersPrice);
+            True("group invoice: shares kept (10,13 / 7,87)", Pricing.ShownOre(j18.InvoiceTopUp) == 1013 && Pricing.ShownOre(j14.InvoiceTopUp) == 787);
+            True("group invoice: saved prices sum to the total 50,00 exactly", Pricing.ShownOre(j18.OthersPrice) + Pricing.ShownOre(j14.OthersPrice) == 5000);
+            True("group invoice: friends price unchanged", Math.Abs(j18.FriendsPrice - 18) < 1e-9);
+
+            // re-open after the settings change: same numbers
+            ss.MinimumPrice = 100; ss.RoundTo = 5;
+            var grp = History.InvoiceGroup(list, " 2026-11234 ");
+            True("InvoiceGroup: both, oldest first", grp.Count == 2 && grp[0] == j18 && grp[1] == j14);
+            var chk = History.BillProblem(grp);
+            True("BillProblem of the made invoice: Ok, Code", chk.Ok && chk.Code == "2026-11234" && chk.Clash == null);
+            var g2 = History.GroupBill(grp, ss, false);
+            True("re-open: lines 18 + 14, minimum line 18 (50), total 50", Math.Abs(g2.Prices[0] - 18) < 1e-9 && Math.Abs(g2.Prices[1] - 14) < 1e-9
+                 && Math.Abs(g2.TopUp - 18) < 1e-9 && Math.Abs(g2.Total - 50) < 1e-9 && g2.Minimum == 50);
+            // re-issue: same code, nothing recomputed
+            True("re-issue group: same code, prices kept", History.MakeInvoice(list, grp, t.AddDays(3), ss, false, Digits("56789")) == "2026-11234"
+                 && Pricing.ShownOre(j18.OthersPrice) == 2813 && j18.BilledAt == "2026-11-19 10:00:00" && ss.UsedInvoiceNos == "2026-11234");
+            ss.MinimumPrice = 50; ss.RoundTo = 1;
+
+            // 3 jobs above the minimum together: 30 + 25 + 20 = 75, no top-up (today 150)
+            var a30 = BillJob(30, t.AddHours(-3)); var a25 = BillJob(25, t.AddHours(-2)); var a20 = BillJob(20, t.AddHours(-1));
+            var l3 = new List<QuoteRecord> { a20, a25, a30 };
+            History.MakeInvoice(l3, new[] { a30, a25, a20 }, t, ss, false, Digits("48213"));
+            True("3 jobs 75: prices 30 / 25 / 20, no shares", Pricing.ShownOre(a30.OthersPrice) == 3000 && Pricing.ShownOre(a25.OthersPrice) == 2500
+                 && Pricing.ShownOre(a20.OthersPrice) == 2000 && a30.InvoiceTopUp == 0 && a20.InvoiceTopUp == 0 && a30.BilledTo == "");
+            var g3 = History.GroupBill(History.InvoiceGroup(l3, "2026-48213"), ss, false);
+            True("3 jobs re-open: total 75, no minimum line", Math.Abs(g3.Total - 75) < 1e-9 && g3.TopUp == 0);
+
+            // friends bill: no top-up, prices unchanged
+            var f18 = BillJob(18, t.AddHours(-2)); var f14 = BillJob(14, t.AddHours(-1));
+            History.MakeInvoice(new List<QuoteRecord>(), new[] { f18, f14 }, t, ss, true, Digits("22222"));
+            True("friends group: one code, prices unchanged, no shares", f18.InvoiceNo == "2026-22222" && f14.InvoiceNo == "2026-22222"
+                 && f18.OthersPrice == 50 && f14.OthersPrice == 50 && f18.InvoiceTopUp == 0 && f14.InvoiceTopUp == 0);
+            var gfr = History.GroupBill(new[] { f18, f14 }, ss, true);
+            True("friends group re-open: 18 + 14 = 32", Math.Abs(gfr.Total - 32) < 1e-9 && gfr.TopUp == 0);
+
+            // one job = today's single invoice (own minimum, no share)
+            var o18 = BillJob(18, t); o18.Customer = "Ole";
+            History.MakeInvoice(new List<QuoteRecord>(), new[] { o18 }, t, ss, false, Digits("33333"));
+            True("one job: single invoice, own minimum 50 kept, InvoiceTopUp 0, BilledTo", o18.InvoiceNo == "2026-33333" && o18.OthersPrice == 50
+                 && o18.InvoiceTopUp == 0 && o18.BilledTo == "Ole");
+            Eq("one job re-open: line = 50", 50, History.BillPrice(o18, ss, false));
+
+            // failed jobs left off
+            var p18 = BillJob(18, t.AddHours(-3)); var pf = BillJob(14, t.AddHours(-2)); var p30 = BillJob(30, t.AddHours(-1));
+            History.MarkFailed(pf, true, t.AddHours(-1));
+            var pc = History.BillProblem(new[] { p18, pf, null, p30 });
+            True("BillProblem: failed left out", pc.Ok && pc.Jobs.Count == 2 && pc.FailedLeftOut == 1 && pc.Code == "");
+            History.MakeInvoice(new List<QuoteRecord>(), new[] { p18, pf, p30 }, t, ss, false, Digits("44444"));
+            True("failed job not invoiced, the others are (18 + 30 = 48 -> top-up 2)", pf.InvoiceNo == "" && p18.InvoiceNo == "2026-44444"
+                 && p30.InvoiceNo == "2026-44444" && Pricing.ShownOre(p18.OthersPrice) + Pricing.ShownOre(p30.OthersPrice) == 5000);
+            // 2 kr. over 18 / 30: 18/48 x 2 = 0,75; 30/48 x 2 = 1,25
+            True("failed case shares 0,75 / 1,25", Pricing.ShownOre(p18.InvoiceTopUp) == 75 && Pricing.ShownOre(p30.InvoiceTopUp) == 125);
+            var allFailed = History.BillProblem(new[] { pf });
+            True("BillProblem all failed: not Ok", !allFailed.Ok && allFailed.Jobs.Count == 0 && allFailed.FailedLeftOut == 1);
+            True("BillProblem null: not Ok", !History.BillProblem(null).Ok);
+
+            // mixed: one already billed (o18, single) + one not -> clash names the billed one; two codes -> clash
+            var n1 = BillJob(20, t);
+            var mix = History.BillProblem(new[] { n1, o18 });
+            True("BillProblem mix: clash = the billed job", !mix.Ok && mix.Clash == o18 && mix.ClashCode == "2026-33333");
+            var two = History.BillProblem(new[] { j18, o18 });
+            True("BillProblem two codes: clash", !two.Ok && two.Clash == j18 && two.ClashCode == "2026-11234");
+            bool threw = false;
+            try { History.MakeInvoice(list, new[] { n1, o18 }, t, ss, false); } catch (InvalidOperationException) { threw = true; }
+            True("MakeInvoice on a mix throws, nothing changed", threw && n1.InvoiceNo == "" && o18.InvoiceNo == "2026-33333");
+
+            // old record whose saved price isn't the calculated one: its saved price as is
+            var odd = BillJob(30, t.AddHours(-1)); odd.OthersPrice = 44;
+            var ok14 = BillJob(14, t);
+            Eq("BillPrice old record: saved 44 as is", 44, History.BillPrice(odd, ss, false));
+            History.MakeInvoice(new List<QuoteRecord>(), new[] { odd, ok14 }, t, ss, false, Digits("55555"));
+            True("old record + 14: 44 + 14 = 58 >= 50, no top-up", Pricing.ShownOre(odd.OthersPrice) == 4400 && Pricing.ShownOre(ok14.OthersPrice) == 1400
+                 && odd.InvoiceTopUp == 0);
+            var bad = BillJob(30, t); bad.Hours = -1;
+            Eq("BillPrice impossible inputs: saved price", 50, History.BillPrice(bad, ss, false));
+
+            // delete one job of a combined invoice: the summary says so, the rest keep their prices and shares
+            var dsum = History.SummarizeDelete(list, new[] { j18.Id });
+            True("SummarizeDelete: on combined invoice 2026-11234, 1 gone, 1 left", dsum.OnCombined == 1 && dsum.Combined.Count == 1
+                 && dsum.Combined[0].Code == "2026-11234" && dsum.Combined[0].Gone == 1 && dsum.Combined[0].Left == 1 && dsum.Invoices == 1);
+            True("SummarizeDelete single invoice: not combined", History.SummarizeDelete(new List<QuoteRecord> { o18 }, new[] { o18.Id }).OnCombined == 0);
+            History.RemoveMany(list, new[] { j18.Id });
+            var gd = History.GroupBill(History.InvoiceGroup(list, "2026-11234"), ss, false);
+            True("after delete: 14 + minimum 7,87 = 21,87", gd.Jobs.Count == 1 && Math.Abs(gd.Prices[0] - 14) < 1e-9
+                 && Pricing.ShownOre(gd.TopUp) == 787 && Pricing.ShownOre(gd.Total) == 2187);
+
+            // JSON: key round trip, missing -> 0, bad -> 0
+            var jr = History.ParseJson(History.ToJson(new List<QuoteRecord> { j14 }));
+            True("JSON round trip keeps InvoiceTopUp", Pricing.ShownOre(jr[0].InvoiceTopUp) == 787 && Pricing.ShownOre(jr[0].OthersPrice) == 2187);
+            var jo = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"x\",\"InvoiceNo\":\"2026-K7Q4\",\"OthersPrice\":50},{\"Id\":\"y\",\"InvoiceTopUp\":-5}]}");
+            True("JSON without the key -> 0; negative -> 0", jo[0].InvoiceTopUp == 0 && jo[1].InvoiceTopUp == 0);
+            Eq("old invoice without the key: line = saved price 50", 50, History.BillPrice(jo[0], ss, false));
+
+            // Combine: same code + same BilledAt = a combined invoice, not a clash; different BilledAt = a clash
+            var c1 = BillJob(18, t.AddHours(-2)); var c2 = BillJob(14, t.AddHours(-1));
+            History.MakeInvoice(new List<QuoteRecord>(), new[] { c1, c2 }, t, new AppSettings { MinimumPrice = 50, RoundTo = 1 }, false, Digits("66666"));
+            var res = History.Combine(new List<QuoteRecord> { c2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { c1 } }, false, false);
+            True("Combine: combined invoice is not a clash", res.Quotes.Count == 2 && res.InvoiceClashes.Count == 0);
+            var c3 = BillJob(20, t); c3.InvoiceNo = "2026-66666"; c3.BilledAt = "2026-11-20 09:00:00";
+            res = History.Combine(new List<QuoteRecord> { c2, c3 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { c1 } }, false, false);
+            True("Combine: same code, other BilledAt = a clash (listed once)", res.Quotes.Count == 3 && J(res.InvoiceClashes) == "2026-66666");
+            var e1 = BillJob(18, t); e1.InvoiceNo = "2026-E1E1"; var e2 = BillJob(14, t.AddHours(1)); e2.InvoiceNo = "2026-E1E1";
+            res = History.Combine(new List<QuoteRecord> { e1 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { e2 } }, false, false);
+            True("Combine: same code without BilledAt = a clash", J(res.InvoiceClashes) == "2026-E1E1");
+            // merge: this PC's copy has no invoice yet, the backup's is on the combined invoice -> invoice, price and share taken
+            var here = History.CopyQuotes(new List<QuoteRecord> { BillJob(18, t.AddHours(-2)) })[0];
+            here.Id = c1.Id;
+            res = History.Combine(new List<QuoteRecord> { here }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { c1 } }, false, false);
+            var hr = res.Quotes[0];
+            True("Merge: combined invoice filled in with its price and share", res.Updated == 1 && hr.InvoiceNo == "2026-66666"
+                 && Pricing.ShownOre(hr.OthersPrice) == 2813 && Pricing.ShownOre(hr.InvoiceTopUp) == 1013);
+            // backup round trip keeps the key
+            BackupData bd;
+            True("InvoiceTopUp: backup round trip", History.ReadBackup(History.ToBackup(new List<QuoteRecord> { c1 }, null, "1.23.0", t), out bd) == null
+                 && Pricing.ShownOre(bd.Quotes[0].InvoiceTopUp) == 1013);
+
+            GroupBreakdownTests();
+        }
+
+        static string GbText(GroupBreakdownInfo b)
+        {
+            var parts = new List<string>();
+            foreach (var l in b.Lines)
+            {
+                string p = l.Key + "=" + l.Ore;
+                if (l.Parts != null) foreach (var x in l.Parts) p += "[" + x.Key + "=" + x.Ore + "]";
+                parts.Add(p);
+            }
+            return string.Join(" ", parts.ToArray());
+        }
+
+        static long GbSum(GroupBreakdownInfo b)
+        {
+            long s = 0;
+            foreach (var l in b.Lines) s += l.Ore;
+            return s;
+        }
+
+        static void GroupBreakdownTests()
+        {
+            var t = new DateTime(2026, 11, 20, 10, 0, 0);
+            var ss = new AppSettings { MinimumPrice = 50, RoundTo = 1 };
+
+            // live 18 + 14 (same filament): material merged 18 + 14 = 32 g = 32,00; power / work 0 kept; minimum top-up 18,00
+            var j18 = BillJob(18, t.AddHours(-2)); var j14 = BillJob(14, t.AddHours(-1));
+            var g = History.GroupBill(new[] { j18, j14 }, ss, false);
+            var b = History.GroupBreakdown(g, ss);
+            True("GroupBreakdown live 18+14: material 3200, power 0, work 0, minimum 1800", GbText(b) == "material=3200 power=0 work=0 minimum=1800");
+            True("GroupBreakdown live: total = bill total 50,00 and = Σ rows", b.TotalOre == 5000 && GbSum(b) == 5000 && Pricing.ShownOre(g.Total) == 5000);
+            True("GroupBreakdown live: one merged material 32 g at 1000 kr./kg, same rates", b.Materials.Count == 1 && Math.Abs(b.Materials[0].Grams - 32) < 1e-9
+                 && b.Lines[0].Index == 0 && Math.Abs(b.Lines[0].Quantity - 32) < 1e-9 && b.Lines[0].UnitPrice == 1000 && b.SameRates);
+            True("GroupBreakdown minimum row: Quantity = minimum 50", b.Lines[3].Key == QuoteLine.Minimum && b.Lines[3].Quantity == 50);
+
+            // invoiced (18 + 10,13 and 14 + 7,87), then the minimum setting changes: re-opened rows are the same
+            History.MakeInvoice(new List<QuoteRecord>(), new[] { j18, j14 }, t, ss, false, Digits("12345"));
+            ss.MinimumPrice = 100;
+            var gi = History.GroupBill(History.InvoiceGroup(new List<QuoteRecord> { j14, j18 }, "2026-12345"), ss, false);
+            var bi = History.GroupBreakdown(gi, ss);
+            True("GroupBreakdown re-opened after the minimum changed: same rows", GbText(bi) == "material=3200 power=0 work=0 minimum=1800"
+                 && bi.TotalOre == 5000 && Pricing.ShownOre(gi.Total) == 5000);
+            ss.MinimumPrice = 50;
+
+            // friends: 18 + 14 = 32, no minimum row
+            var f18 = BillJob(18, t.AddHours(-2)); var f14 = BillJob(14, t.AddHours(-1));
+            var bf = History.GroupBreakdown(History.GroupBill(new[] { f18, f14 }, ss, true), ss);
+            True("GroupBreakdown friends: material 3200, no minimum", GbText(bf) == "material=3200 power=0 work=0" && bf.TotalOre == 3200);
+
+            // other colour = its own material row; another kr./kg merges grams but the rate is mixed
+            var c18 = BillJob(18, t.AddHours(-2)); c18.Filaments[0].Colour = "#ff0000";
+            var c14 = BillJob(14, t.AddHours(-1));
+            var bc = History.GroupBreakdown(History.GroupBill(new[] { c18, c14 }, ss, false), ss);
+            True("GroupBreakdown other colour: 2 material rows (18 g red, 14 g)", bc.Materials.Count == 2 && bc.Materials[0].Colour == "#FF0000"
+                 && Math.Abs(bc.Materials[0].Grams - 18) < 1e-9 && Math.Abs(bc.Materials[1].Grams - 14) < 1e-9
+                 && GbText(bc) == "material=1800 material=1400 power=0 work=0 minimum=1800" && bc.TotalOre == 5000);
+            // 20 g x 500 kr./kg = 10,00: same name / colour as the 1000 kr./kg jobs -> merged 18 + 20 = 38 g, rate 0 (mixed)
+            var s500 = BillSettings();
+            var in500 = new QuoteInput { Hours = 1, Minutes = 0, FilamentGrams = 20, FilamentDkkPerKg = 500, ElectricityDkkPerKwh = 0 };
+            var r500 = History.FromQuote(in500, Pricing.Calculate(in500, s500), s500, "Cheap", "", t);
+            var bm = History.GroupBreakdown(History.GroupBill(new[] { BillJob(18, t.AddHours(-1)), r500 }, ss, false), ss);
+            // 18 + 10 = 28 -> top-up 22 -> 50
+            True("GroupBreakdown merged grams 38, mixed rate -> UnitPrice 0, SameRates false", bm.Materials.Count == 1
+                 && Math.Abs(bm.Lines[0].Quantity - 38) < 1e-9 && bm.Lines[0].UnitPrice == 0 && !bm.SameRates
+                 && GbText(bm) == "material=2800 power=0 work=0 minimum=2200" && bm.TotalOre == 5000);
+
+            // old record whose saved price (44) isn't the calculated one (30): its rows scaled to 44; + 14 = 58, no top-up
+            var odd = BillJob(30, t.AddHours(-1)); odd.OthersPrice = 44;
+            var bo = History.GroupBreakdown(History.GroupBill(new[] { odd, BillJob(14, t) }, ss, false), ss);
+            True("GroupBreakdown old mismatched record: scaled 44 + 14 = 58, rate not shown", GbText(bo) == "material=5800 power=0 work=0"
+                 && bo.TotalOre == 5800 && Math.Abs(bo.Lines[0].Quantity - 44) < 1e-9 && bo.Lines[0].UnitPrice == 0 && !bo.SameRates);
+            // no usable inputs: one "other" row with its saved price 50 (+ 14 = 64)
+            var bad = BillJob(30, t); bad.Hours = -1;
+            var bb = History.GroupBreakdown(History.GroupBill(new[] { bad, BillJob(14, t) }, ss, false), ss);
+            True("GroupBreakdown no usable inputs: other row 50,00", GbText(bb) == "material=1400 power=0 work=0 other=5000" && bb.TotalOre == 6400);
+
+            // full formula (HistSettings: power, wear, failed 10 %, markups, no rounding): 54,6975 -> 54,70 each, + 18 g job
+            // with minimum 50: 54,70 + 54,70 + 18,00 = 127,40 >= 50 -> no top-up; rows must still add up to 127,40 exactly
+            var h1 = HistRecord(t.AddHours(-3)); var h2 = HistRecord(t.AddHours(-2));
+            var gh = History.GroupBill(new[] { h1, h2, BillJob(18, t) }, ss, false);
+            var bh = History.GroupBreakdown(gh, ss);
+            True("GroupBreakdown full formula: total 127,40 = bill total = Σ rows", bh.TotalOre == 12740 && Pricing.ShownOre(gh.Total) == 12740 && GbSum(bh) == 12740);
+            // material 21,60 + 21,60 + 18,00 = 61,20; power 1,10 x 2 = 2,20; wear 11,00 x 2 = 22,00; failed 2,27 x 2 = 4,54;
+            // work 24,97 x 0,75 = 18,7275 x 2 -> 18,73 + 18,73 (øre split per job) = 37,46: 61,20 + 2,20 + 22,00 + 4,54 + 37,46 = 127,40
+            // wear split estimated for prints saved without one (A1, 0.4 stainless, PLA, High Temp Plate): printer 2099 / 3000 =
+            // 0,69967, parts 600 / 1500 = 0,4, hotend 139 / 500 = 0,278, plate 200 / 600 = 0,33333 kr/h; sum 1,711.
+            // 11,00 kr. per print: 4,4981 / 2,5716 / 1,7873 / 2,1430 -> floors 449 + 257 + 178 + 214 = 1098, the 2 øre left go
+            // to the largest remainders (printer ,81, hotend ,73): 450 / 257 / 179 / 214 = 1100; two prints: 900 / 514 / 358 / 428
+            True("GroupBreakdown full formula rows (wear always split)", GbText(bh) ==
+                 "material=6120 power=220 wear=2200[wear.printer=900][wear.parts=514][wear.hotend=358][wear.plate=428] failed=454 work=3746");
+            True("GroupBreakdown estimated split flagged, one plate", bh.EstimatedSplit && bh.PlateKey == "High Temp Plate");
+
+            // a mix: h3 has a saved split 1 / 0,5 / 0,3 / 0,2 kr/h x 5,5 h = 5,50 / 2,75 / 1,65 / 1,10 (= 11,00), h4 estimated
+            // 4,50 / 2,57 / 1,79 / 2,14: parts 10,00 / 5,32 / 3,44 / 3,24 = 22,00 = the wear row
+            var h3 = HistRecord(t.AddHours(-3)); h3.WearPrinter = 1; h3.WearParts = 0.5; h3.WearHotend = 0.3; h3.WearPlate = 0.2;
+            var h4 = HistRecord(t.AddHours(-2));
+            var gx = History.GroupBill(new[] { h3, h4 }, ss, false);
+            var bx = History.GroupBreakdown(gx, ss);
+            True("GroupBreakdown mix saved + estimated split: parts 1000 / 532 / 344 / 324", bx.Lines[2].Key == QuoteLine.Wear && bx.Lines[2].Ore == 2200
+                 && bx.Lines[2].Parts != null && bx.Lines[2].Parts.Count == 4 && bx.Lines[2].Parts[0].Ore == 1000 && bx.Lines[2].Parts[1].Ore == 532
+                 && bx.Lines[2].Parts[2].Ore == 344 && bx.Lines[2].Parts[3].Ore == 324 && bx.EstimatedSplit);
+            True("GroupBreakdown mix: total = bill total = Σ rows (109,40)", bx.TotalOre == 10940 && Pricing.ShownOre(gx.Total) == 10940 && GbSum(bx) == 10940);
+            // all prints with a saved split: not estimated
+            var h5 = HistRecord(t.AddHours(-1)); h5.WearPrinter = 1; h5.WearParts = 0.5; h5.WearHotend = 0.3; h5.WearPlate = 0.2;
+            var ba = History.GroupBreakdown(History.GroupBill(new[] { h3, h5 }, ss, false), ss);
+            True("GroupBreakdown all saved splits: 1100 / 550 / 330 / 220, not estimated", !ba.EstimatedSplit && ba.Lines[2].Parts[0].Ore == 1100
+                 && ba.Lines[2].Parts[1].Ore == 550 && ba.Lines[2].Parts[2].Ore == 330 && ba.Lines[2].Parts[3].Ore == 220);
+            // different plates: PlateKey "" (general "Build plate"); the parts still add up to the wear row
+            var h6 = HistRecord(t.AddHours(-1)); h6.BedType = "Textured PEI Plate";
+            var bp = History.GroupBreakdown(History.GroupBill(new[] { h4, h6 }, ss, false), ss);
+            long ps = 0; foreach (var p in bp.Lines[2].Parts) ps += p.Ore;
+            True("GroupBreakdown different plates: PlateKey empty, parts = wear row 2200", bp.PlateKey == "" && ps == 2200 && bp.Lines[2].Ore == 2200
+                 && GbSum(bp) == bp.TotalOre);
+            // an old print without saved plate / nozzle / model: today's settings (s) give the ratios
+            var h7 = HistRecord(t.AddHours(-1)); h7.BedType = ""; h7.Nozzle = ""; h7.PrinterModel = "";
+            var st = new AppSettings { MinimumPrice = 50, RoundTo = 1, BedType = "Textured PEI Plate" };
+            var b7 = History.GroupBreakdown(History.GroupBill(new[] { h7, h6 }, st, false), st);
+            True("GroupBreakdown old print: today's plate -> same plate as h6", b7.PlateKey == "Textured PEI Plate" && b7.Lines[2].Parts.Count == 4);
+            True("GroupBreakdown full formula: power 1,1 kWh at 2 kr./kWh, wear 11 h at 2 kr./h", Math.Abs(bh.Lines[1].Quantity - 1.1) < 1e-9
+                 && bh.Lines[1].UnitPrice == 2 && Math.Abs(bh.Lines[2].Quantity - 11) < 1e-9 && bh.Lines[2].UnitPrice == 2);
+            True("GroupBreakdown null bill: empty", History.GroupBreakdown(null, ss).Lines.Count == 0);
         }
 
         // ---------- a bill made again from History = the bill made after slicing (RecordBreakdown / RecordQuoteInfo) ----------

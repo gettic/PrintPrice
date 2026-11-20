@@ -114,7 +114,7 @@ namespace PrintPrice
                         }
                     using (var hist = new HistoryForm(quotes, null, true))
                     {
-                        hist.QuoteRequested = (owner, rec, isInvoice) => { };   // shows Quote… / Invoice… (never clicked here)
+                        hist.QuoteRequested = (owner, recs, isInvoice) => null;   // shows Quote… / Invoice… (never clicked here)
                         hist.BackupRequested = owner => false;                  // shows Backup… (never clicked here)
                         hist.SamplePicturesForMode = HistoryForm.SamplePictures(folder);   // real model pictures (assets\history-samples)
                         Place(hist);
@@ -140,6 +140,50 @@ namespace PrintPrice
                         Snap(hist, folder, "history_undone.png");
                         hist.Hide();
                     }
+                    // combined bill (Part A): three small prints for Lene Hansen on one invoice (made: one code, below the
+                    // minimum: the top-up shared into the job lines and Work & handling, never shown), the same as a dark quote, the Invoice… window for them (two names: the warning line), and
+                    // 12 prints as a PDF (2 A4 pages: invoice_group12.pdf + each page's JPEG as _p1.png / _p2.png)
+                    var groupPictures = HistoryForm.SamplePictures(folder);
+                    Image[] gp;
+                    var madeJobs = main.SampleGroupJobs(3, true, groupPictures, out gp);
+                    using (var page = QuotePage.Render(main.SampleGroupData(madeJobs, gp, true), false))
+                        page.Save(Path.Combine(folder, "invoice_group.png"), ImageFormat.Png);
+                    Image[] gq;
+                    var openJobs = main.SampleGroupJobs(3, false, groupPictures, out gq);
+                    using (var page = QuotePage.Render(main.SampleGroupData(openJobs, gq, false), true))
+                        page.Save(Path.Combine(folder, "quote_group_dark.png"), ImageFormat.Png);
+                    openJobs[1].Customer = "Lene H.";
+                    using (var gf = main.SampleGroupWindow(openJobs, gq, true))
+                        if (gf != null)
+                        {
+                            Place(gf);
+                            gf.Show();
+                            Snap(gf, folder, "invoice_group_window.png");
+                            gf.Hide();
+                        }
+                    Image[] g4;
+                    var jobs4 = main.SampleGroupJobs(4, true, groupPictures, out g4);
+                    var pages4 = QuotePage.RenderPages(main.SampleGroupData(jobs4, g4, true), false);
+                    try { SavePdfPages(pages4, folder, "invoice_group4"); }   // 4 cards: a row of 3, then 1 + the total
+                    finally { foreach (var b in pages4) b.Dispose(); }
+                    foreach (var im in g4) if (im != null) im.Dispose();
+                    Image[] g12;
+                    var jobs12 = main.SampleGroupJobs(12, true, groupPictures, out g12);
+                    var data12 = main.SampleGroupData(jobs12, g12, true);
+                    using (var tall = QuotePage.Render(data12, false))
+                        tall.Save(Path.Combine(folder, "invoice_group12_tall.png"), ImageFormat.Png);
+                    var pages12 = QuotePage.RenderPages(data12, false);
+                    try { SavePdfPages(pages12, folder, "invoice_group12"); }
+                    finally { foreach (var b in pages12) b.Dispose(); }
+                    // the delete question for one job of the made invoice
+                    using (var hist = new HistoryForm(madeJobs, null, true))
+                    {
+                        hist.QuoteRequested = (owner, recs, isInvoice) => null;
+                        using (var ask = hist.NewDeleteAsk(new List<QuoteRecord> { madeJobs[1] }))
+                            SnapForm(ask, folder, "history_group_delete_ask.png");
+                    }
+                    foreach (var arr in new[] { gp, gq, g12 }) foreach (var im in arr) if (im != null) im.Dispose();
+
                     // the Backup window (idea 27) with made-up states: nothing is read, written or sent
                     // (a copy of the settings: the sample code is set on it; nothing goes online, nothing is saved)
                     using (var bf = new BackupForm(quotes, s.Clone(), BackupForm.TabBackup, true))
@@ -188,6 +232,10 @@ namespace PrintPrice
                         SnapForm(err, folder, "error_repeated.png");
                     main.SetSampleJob();   // back to the single-colour example for the update picture
                     main.SetSamplePicture(sample);
+                    // the single Benchy as a customer quote: below the minimum price, the top-up is inside Work & handling
+                    // (the minimum is never shown on a bill)
+                    using (var q = main.RenderSampleTopUpQuote())
+                        if (q != null) q.Save(Path.Combine(folder, "quote_topup.png"), ImageFormat.Png);
                     main.ShowUpdateButton(fake);
                     Snap(main, folder, "main_update.png");
 
@@ -323,7 +371,7 @@ namespace PrintPrice
                     using (var hist = new HistoryForm(pq, null, true))
                     {
                         hist.Settings = multi;
-                        hist.QuoteRequested = (owner, rec, isInvoice) => { };
+                        hist.QuoteRequested = (owner, recs, isInvoice) => null;
                         hist.BackupRequested = owner => false;   // shows Backup… like the real window
                         Place(hist);
                         hist.Show();
@@ -402,6 +450,36 @@ namespace PrintPrice
             using (var ms = new MemoryStream(pdf, start, end - start))
             using (var img = Image.FromStream(ms))
                 img.Save(Path.Combine(folder, "quote_pdf.png"), ImageFormat.Png);
+        }
+
+        /// Writes a several-page PDF (QuotePage.Pdf, as Save as PDF does for a combined bill) as name.pdf and each page's
+        /// JPEG inside it, decoded, as name_p1.png, name_p2.png… (the real page content of each A4 page).
+        static void SavePdfPages(List<Bitmap> pages, string folder, string name)
+        {
+            byte[] pdf = QuotePage.Pdf(pages);
+            File.WriteAllBytes(Path.Combine(folder, name + ".pdf"), pdf);
+            int at = 0, k = 0;
+            while (true)
+            {
+                int start = -1, end = -1;
+                for (int i = at; i + 1 < pdf.Length; i++)
+                    if (pdf[i] == 0xFF && pdf[i + 1] == 0xD8) { start = i; break; }
+                if (start < 0) break;
+                // the JPEG ends right before "\nendstream"
+                byte[] marker = System.Text.Encoding.ASCII.GetBytes("\nendstream");
+                for (int i = start; i + marker.Length <= pdf.Length && end < 0; i++)
+                {
+                    bool hit = true;
+                    for (int j = 0; j < marker.Length && hit; j++) hit = pdf[i + j] == marker[j];
+                    if (hit) end = i;
+                }
+                if (end < 0) break;
+                k++;
+                using (var ms = new MemoryStream(pdf, start, end - start))
+                using (var img = Image.FromStream(ms))
+                    img.Save(Path.Combine(folder, name + "_p" + k + ".png"), ImageFormat.Png);
+                at = end;
+            }
         }
 
         /// Left of every monitor, so nothing ever appears on screen, and not in the taskbar.

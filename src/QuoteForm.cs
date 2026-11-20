@@ -251,6 +251,16 @@ namespace PrintPrice
         internal bool TestCustomerLocked { get { return txtCustomer.ReadOnly; } }
         /// The four export buttons are on (an invoice: only with a name).
         internal bool TestActionsOn { get { return btnPdf.Enabled; } }
+        // --test-bill (MainForm.TestBillFlow)
+        /// The page data the preview shows now (the build callback with the window's price choice and name).
+        internal QuoteData TestData() { return build(Friends, Customer); }
+        internal string TestInfoText { get { return info.Text ?? ""; } }
+        internal string TestCustomer { get { return Customer; } }
+        /// Types a name into the name box (no effect when it is locked).
+        internal void TestSetCustomer(string name) { if (!txtCustomer.ReadOnly) txtCustomer.Text = name; }
+        internal bool TestStatusShown { get { return cmbStatus.Visible; } }
+        /// Picks the Customers / Friends & family price as a click would.
+        internal void TestFriends(bool friends) { if (friends) rbFriends.Checked = true; else rbCustomers.Checked = true; }
 
         Button ActionButton(string text, QuoteExport kind, Padding margin)
         {
@@ -278,6 +288,21 @@ namespace PrintPrice
         public void ShowNote(string text, InfoKind kind)
         {
             ShowInfo(text, kind);
+        }
+
+        /// One more line under the info box's text (e.g. "1 failed print is left off the bill."); a Warning stays a
+        /// Warning, an Info box becomes kind.
+        public void AddNote(string text, InfoKind kind)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            string now = info.Text ?? "";
+            ShowInfo(now.Length > 0 ? now + "\n" + text : text, info.Kind == InfoKind.Info ? kind : info.Kind);
+        }
+
+        /// A combined quote (several History jobs): no print status box (it would set one state on all of them).
+        public void HideStatus()
+        {
+            lblStatus.Visible = cmbStatus.Visible = false;
         }
 
         /// A made invoice (History's Invoice… on a billed quote): the name it was made out to stays; the box is read-only

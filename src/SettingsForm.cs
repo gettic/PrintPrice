@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -16,6 +17,8 @@ namespace PrintPrice
         TextBox txtDueDays, txtMobilePay, txtBank, txtPrinterName;   // invoice: pay within N days, ways to pay; printer name
         CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate, chkPayback;
         CheckBox chkMainInvoice;   // Quote & invoice tab: the main window's button makes invoices (AppSettings.MainInvoice)
+        CheckBox chkInvoiceCopies; // Quote & invoice tab: copy of every invoice PDF (AppSettings.InvoiceCopies, issue #6)
+        Button btnInvoiceFolder;   // … and "Open folder" beside it (MainForm.InvoicesFolder)
         ToolTip tip;               // dark tooltips (MainForm.DrawDarkTip)
         ComboBox cmbPaybackWho;   // 0 = customers only (FailedPaybackWho 2), 1 = both prices (1)
         Label lblCheck, lnkCheck;   // "v1.1.0 –" / check result, and the clickable "check now"
@@ -209,6 +212,20 @@ namespace PrintPrice
             Disposed += delegate { tip.Dispose(); };
             tip.SetToolTip(chkMainInvoice, L.S("On: the main window's button makes an invoice with a number.\nQuotes are still made from History.",
                                                "Til: knappen i hovedvinduet laver en faktura med nummer.\nTilbud kan stadig laves fra Historik."));
+            // issue #6: a copy of every saved invoice PDF in <settings folder>\Invoices + a button that opens that folder
+            int ic = t.RowCount++;
+            var copyFlow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };
+            chkInvoiceCopies = new CheckBox { Text = L.S("Keep a copy of every invoice PDF", "Gem en kopi af hver faktura-PDF"), AutoSize = true, Margin = new Padding(0, 6, 0, 4) };
+            btnInvoiceFolder = new Button { Text = L.S("Open folder", "Åbn mappe"), Size = new Size(80, 25), Padding = Padding.Empty, Margin = new Padding(12, 3, 0, 3),
+                                            UseMnemonic = false, Font = new Font("Segoe UI", 9f) };   // 9 pt like Add… / Back up… (box-high button)
+            btnInvoiceFolder.Click += delegate { OpenInvoiceFolder(); };
+            copyFlow.Controls.Add(chkInvoiceCopies);
+            copyFlow.Controls.Add(btnInvoiceFolder);
+            t.Controls.Add(copyFlow, 0, ic);
+            t.SetColumnSpan(copyFlow, 3);
+            tip.SetToolTip(chkInvoiceCopies, L.S("Every invoice PDF you save is also copied\ninto PrintPrice's Invoices folder.\nA copy is never overwritten.",
+                                                 "Hver faktura-PDF, du gemmer, kopieres også\ntil PrintPrices fakturamappe.\nEn kopi overskrives aldrig."));
+            tip.SetToolTip(btnInvoiceFolder, L.S("Open the Invoices folder\n", "Åbn fakturamappen\n") + MainForm.InvoicesFolder);
             txtDueDays = Row(t, L.S("Pay within", "Betalingsfrist"), L.S("days", "dage"));
             txtMobilePay = TextRow(t, L.S("MobilePay number", "MobilePay-nummer"), L.S("optional", "valgfrit"), 40);
             txtBank = TextRow(t, L.S("Bank account", "Bankkonto"), L.S("optional (reg. no. + account no.)", "valgfrit (reg.nr. + kontonr.)"), 60);
@@ -366,8 +383,11 @@ namespace PrintPrice
             foreach (var b in new[] { reset, ok, cancel }) b.Size = new Size(bw, Px(ButtonH));
             // Add… / Remove: box height, each its text + 24 px (flat buttons draw with inner padding), so the printer
             // drop-down keeps room for "Bambu Lab A1 mini"; its open list is as wide as the longest name
-            foreach (var b in new[] { btnAddPrinter, btnRemovePrinter, btnBackupTo, btnRestoreFrom, btnSetupAgain })
+            foreach (var b in new[] { btnAddPrinter, btnRemovePrinter, btnBackupTo, btnRestoreFrom, btnSetupAgain, btnInvoiceFolder })
                 b.Size = new Size(TextRenderer.MeasureText(b.Text, b.Font).Width + Px(24), txtWatts.Height);
+            // the copy check box centred on its Open folder button (measured)
+            chkInvoiceCopies.Margin = new Padding(0, Math.Max(0, btnInvoiceFolder.Margin.Top + (btnInvoiceFolder.Height - chkInvoiceCopies.Height) / 2), 0, 0);
+            btnInvoiceFolder.Margin = new Padding(btnInvoiceFolder.Margin.Left, btnInvoiceFolder.Margin.Top, 0, 4);
             FitHeight();
             FitPrinterList();
             fitted = true;
@@ -404,6 +424,21 @@ namespace PrintPrice
             if (!AppSettings.TestMode || !Program.Hidden) return;
             SelectedTab = TabApp;
             btnSetupAgain.PerformClick();
+        }
+
+        /// "Open folder" (Quote & invoice tab, issue #6): the invoice copies' folder in Explorer (made first if missing).
+        void OpenInvoiceFolder()
+        {
+            try
+            {
+                string dir = MainForm.InvoicesFolder;
+                Directory.CreateDirectory(dir);
+                System.Diagnostics.Process.Start("explorer.exe", "\"" + dir + "\"");
+            }
+            catch (Exception ex)
+            {
+                tip.Show(L.S("Couldn't open the folder: ", "Kunne ikke åbne mappen: ") + ex.Message, btnInvoiceFolder, 0, btnInvoiceFolder.Height + 2, 4000);
+            }
         }
 
         /// Back up… / Restore… on the App tab. After a restore the settings on disk are new: close without saving.
@@ -905,6 +940,7 @@ namespace PrintPrice
             txtMobilePay.Text = s.PayMobilePay ?? "";
             txtBank.Text = s.PayBank ?? "";
             chkMainInvoice.Checked = s.MainInvoice == 1;
+            chkInvoiceCopies.Checked = s.InvoiceCopies != 0;
             filling = false;
         }
 
@@ -1193,6 +1229,7 @@ namespace PrintPrice
             Result.PayMobilePay = txtMobilePay.Text.Trim();
             Result.PayBank = txtBank.Text.Trim();
             Result.MainInvoice = chkMainInvoice.Checked ? 1 : 0;
+            Result.InvoiceCopies = chkInvoiceCopies.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
         }

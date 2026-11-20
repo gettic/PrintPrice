@@ -50,6 +50,10 @@ namespace PrintPrice
         // Main window quote/invoice toggle (INI "MainInvoice"): 0 = quote (default), 1 = invoice. Any other value reads as 0.
         public double MainInvoice = 0;
 
+        // Issue #6: keep a copy of every invoice PDF in <Folder>\Invoices (INI "InvoiceCopies"): 1 = on (default), 0 = off.
+        // Any other value reads as 1.
+        public double InvoiceCopies = 1;
+
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
         public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
@@ -505,6 +509,7 @@ namespace PrintPrice
             d["LastPrinterId"] = LastPrinterId;
             d["SetupDone"] = SetupDone;
             d["MainInvoice"] = MainInvoice;
+            d["InvoiceCopies"] = InvoiceCopies;
             return d;
         }
 
@@ -560,6 +565,7 @@ namespace PrintPrice
                 case "LastPrinterId": if (v >= 1 && v < 1e9) LastPrinterId = Math.Floor(v); break;
                 case "SetupDone": SetupDone = v != 0 ? 1 : 0; break;
                 case "MainInvoice": MainInvoice = v == 1 ? 1 : 0; break;
+                case "InvoiceCopies": InvoiceCopies = v == 0 ? 0 : 1; break;
             }
         }
 

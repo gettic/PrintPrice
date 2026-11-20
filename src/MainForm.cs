@@ -31,6 +31,8 @@ namespace PrintPrice
         // the clipboard (text / "[picture]"), so a test run never opens a dialog or touches the user's clipboard
         static Func<QuoteExport, string, string> testExportPath;
         Action<string> testClipboard;
+        // --test-bill only (TestBillFlow): History's Quote… / Invoice… window is handed to this instead of ShowDialog
+        Action<QuoteForm> testRecordsForm;
         bool copyArrowPressed;       // the mouse press was on ▾: the Click that follows opens the menu instead of copying
         Panel leftCell;                   // left of the bottom buttons: update button or "Made by Gettic · GitHub"
         int autoMinHeight;                // the info box's normal minimum height (2 lines); raised to its height while a job runs (idea 26)
@@ -3111,17 +3113,19 @@ namespace PrintPrice
                 return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
             }
             DateTime now = DateTime.Now;
-            string path = null;
+            string path = null, wanted = null;
             if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
             {
-                path = AskExportPath(owner, kind, true, QuoteRows.FileName(now, QuoteModelName(), customer));
+                // "2026-48213 - Name": the number is picked now but only used once the file is saved (issue #6)
+                wanted = InvoiceCodeFor(null, now);
+                path = AskExportPath(owner, kind, true, QuoteRows.InvoiceFileName(wanted, customer));
                 if (path == null) return null;
             }
             QuoteRecord rec;
             string err = SaveToHistory(friends ? History.ForFriends : History.ForCustomer, customer, PrintState.Printed, out rec);
             if (rec == null) { failed = true; return err ?? L.S("Nothing to save yet.", "Der er ikke noget at gemme endnu."); }
             made[0] = rec;
-            return ExportRecordTo(rec, true, kind, friends, dark, customer, modelImage, null, path, now, out failed);
+            return ExportRecordTo(rec, true, kind, friends, dark, customer, modelImage, null, path, wanted, now, out failed);
         }
 
         /// Quote / invoice text to the clipboard (--test-invoice: to the test's own catcher instead).
@@ -3373,7 +3377,13 @@ namespace PrintPrice
                 History.RecentCustomers(history, 10), r.OthersPrice, r.FriendsPrice,
                 (friends, name) => BuildRecordQuote(r, friends, name, invoice, pic),
                 (IWin32Window o, QuoteExport kind, bool friends, bool dark, string customer, out bool failed) =>
-                    ExportRecord(o, r, invoice, kind, friends, dark, customer, pic, invoice ? (PrintState?)null : f.PrintStatus, out failed),
+                {
+                    bool before = InvoiceMade(r);
+                    string msg = ExportRecord(o, r, invoice, kind, friends, dark, customer, pic, invoice ? (PrintState?)null : f.PrintStatus, out failed);
+                    // made now: the name it was made out to stays (as the main window's Show invoice…)
+                    if (invoice && !before && InvoiceMade(r)) f.LockCustomer();
+                    return msg;
+                },
                 (friends, dark) =>
                 {
                     settings.QuoteDark = dark ? 1 : 0;   // the price choice belongs to the record (For), not to Settings
@@ -3449,21 +3459,7 @@ namespace PrintPrice
                 // N4: the saved price (as Copy text and the History list), with the saved wear split as sub-rows
                 Breakdown = History.RecordBreakdown(r, settings, friends)
             };
-            // a typed job (no slice): its one line has no name; the filament preset saved with it, as the fresh quote showed
-            string savedMaterial = BambuSlicer.ShortName(r.MaterialName ?? "").Trim();
-            bool typedLine = r.Filaments != null && r.Filaments.Count == 1 && string.IsNullOrEmpty(r.Filaments[0].Name)
-                             && string.IsNullOrEmpty(r.Filaments[0].Type);
-            if (r.Filaments != null)
-                for (int k = 0; k < r.Filaments.Count; k++)
-                {
-                    var f = r.Filaments[k];
-                    d.MaterialNames.Add(typedLine && savedMaterial.Length > 0 ? savedMaterial
-                        : MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
-                    d.MaterialColours.Add(ParseColour(f.Colour));
-                }
-            else d.MaterialNames.Add(savedMaterial.Length > 0 ? savedMaterial : BambuSlicer.ShortName(settings.FilamentPreset).Trim());
-            d.Material = QuoteRows.MaterialLine(r.Filaments != null ? r.Filaments.Select(f => f.Type) : null,
-                                                r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
+            FillRecordMaterial(d, r);
             if (invoice)
             {
                 DateTime billed = DateTime.MinValue;
@@ -3480,6 +3476,26 @@ namespace PrintPrice
                 d.Name = (inv.FromName ?? "").Trim();
             }
             return d;
+        }
+
+        /// The record's material names / colours (by filament line) and the details' Material line ("PLA, 4 colours").
+        void FillRecordMaterial(QuoteData d, QuoteRecord r)
+        {
+            // a typed job (no slice): its one line has no name; the filament preset saved with it, as the fresh quote showed
+            string savedMaterial = BambuSlicer.ShortName(r.MaterialName ?? "").Trim();
+            bool typedLine = r.Filaments != null && r.Filaments.Count == 1 && string.IsNullOrEmpty(r.Filaments[0].Name)
+                             && string.IsNullOrEmpty(r.Filaments[0].Type);
+            if (r.Filaments != null)
+                for (int k = 0; k < r.Filaments.Count; k++)
+                {
+                    var f = r.Filaments[k];
+                    d.MaterialNames.Add(typedLine && savedMaterial.Length > 0 ? savedMaterial
+                        : MaterialName(new FilamentUse { Slot = k + 1, Profile = f.Name ?? "", Type = f.Type ?? "", Colour = f.Colour ?? "" }));
+                    d.MaterialColours.Add(ParseColour(f.Colour));
+                }
+            else d.MaterialNames.Add(savedMaterial.Length > 0 ? savedMaterial : BambuSlicer.ShortName(settings.FilamentPreset).Trim());
+            d.Material = QuoteRows.MaterialLine(r.Filaments != null ? r.Filaments.Select(f => f.Type) : null,
+                                                r.Filaments != null ? r.Filaments.Count : 0, d.MaterialNames[0]);
         }
 
         /// One export of a record's quote / invoice: file dialog first (null = cancelled), then the record gets the name
@@ -3506,32 +3522,42 @@ namespace PrintPrice
                 return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
             }
             DateTime now = DateTime.Now;
-            string path = null;
+            string path = null, wanted = null;
             if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
             {
-                // "2026-11-02 Model - Name": the quote's date, for an invoice its date (today while it isn't made yet)
-                DateTime qd;
-                if (invoice) { if (string.IsNullOrEmpty(r.InvoiceNo) || !History.TryTime(r.BilledAt, out qd)) qd = now; }
-                else if (!History.TryTime(r.SavedAt, out qd)) qd = DateTime.Now;
-                path = AskExportPath(owner, kind, invoice, QuoteRows.FileName(qd, RecordModelName(r), customer));
+                if (invoice)
+                {
+                    // "2026-48213 - Name" (issue #6): a made invoice's number and kept name; a new one's number is picked
+                    // now and only used once the file is saved (a cancelled dialog uses none)
+                    wanted = InvoiceCodeFor(r.InvoiceNo, now);
+                    path = AskExportPath(owner, kind, true, QuoteRows.InvoiceFileName(wanted, InvoiceName(r, customer)));
+                }
+                else
+                {
+                    // "2026-11-02 Model - Name": the quote's date
+                    DateTime qd;
+                    if (!History.TryTime(r.SavedAt, out qd)) qd = DateTime.Now;
+                    path = AskExportPath(owner, kind, false, QuoteRows.FileName(qd, RecordModelName(r), customer));
+                }
                 if (path == null) return null;
             }
-            return ExportRecordTo(r, invoice, kind, friends, dark, customer, pic, state, path, now, out failed);
+            return ExportRecordTo(r, invoice, kind, friends, dark, customer, pic, state, path, wanted, now, out failed);
         }
 
-        /// The rest of ExportRecord once the file (path) is chosen: name, For, print state, invoice number, save, then the
-        /// page copied / written. Also the first export of the main window's "Show invoice…" (ExportJobInvoice).
+        /// The rest of ExportRecord once the file (path) is chosen: name, For, print state, invoice number (wantedNo = the
+        /// number in the file name, null = any new one), save, then the page copied / written (an invoice PDF also gets its
+        /// copy in the Invoices folder). Also the first export of the main window's "Show invoice…" (ExportJobInvoice).
         string ExportRecordTo(QuoteRecord r, bool invoice, QuoteExport kind, bool friends, bool dark, string customer,
-                              Image pic, PrintState? state, string path, DateTime now, out bool failed)
+                              Image pic, PrintState? state, string path, string wantedNo, DateTime now, out bool failed)
         {
             failed = false;
             if (!(invoice && InvoiceMade(r))) r.Customer = customer;   // MakeInvoice stores a new invoice's name from it (BilledTo)
             r.For = friends ? History.ForFriends : History.ForCustomer;
             if (state.HasValue) History.SetPrintState(r, state.Value, now);   // quotes only (the invoice window has no status)
-            string err = null;
+            string err = null, copyNote = null;
             if (invoice)
             {
-                History.MakeInvoice(history, r, now, settings);   // random code (never given twice: settings.UsedInvoiceNos), date, Printed
+                History.MakeInvoice(history, r, now, settings, wantedNo);   // random code (never given twice: settings.UsedInvoiceNos), date, Printed
                 if (!offline) settings.Save();
             }
             if (!offline) err = History.Save(history);
@@ -3550,7 +3576,12 @@ namespace PrintPrice
                     {
                         if (kind == QuoteExport.Copy) CopyPicture(bmp);
                         else if (kind == QuoteExport.Png) bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
-                        else QuotePage.SavePdf(bmp, path);
+                        else
+                        {
+                            byte[] pdf = QuotePage.Pdf(bmp);
+                            File.WriteAllBytes(path, pdf);
+                            if (invoice) copyNote = SaveInvoiceCopy(pdf, QuoteRows.InvoiceFileName(r.InvoiceNo, InvoiceName(r, customer)));
+                        }
                     }
                     done = kind == QuoteExport.Copy
                         ? (invoice ? L.S("✓ Invoice picture copied", "✓ Fakturaen er kopieret som billede") : L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede"))
@@ -3564,13 +3595,515 @@ namespace PrintPrice
             }
             if (err != null) { failed = true; return done + ". " + err; }
             return done + (invoice ? L.F(". Invoice no. {0} is in the history.", ". Faktura nr. {0} er gemt i historikken.", r.InvoiceNo)
-                                   : L.S(" and saved to history.", " og gemt i historikken."));
+                                   : L.S(" and saved to history.", " og gemt i historikken."))
+                        + (copyNote != null ? "\n" + copyNote : "");
+        }
+
+        // ---------- invoice file names and copies (issue #6) ----------
+
+        /// The folder every saved invoice PDF is copied to: <settings folder>\Invoices (the test folder in test mode).
+        internal static string InvoicesFolder
+        {
+            get { return Path.Combine(AppSettings.Folder, "Invoices"); }
+        }
+
+        /// The number an invoice file is named after, picked before the save dialog: a made invoice's own (madeNo), else
+        /// a free new code (History.NextInvoiceNo). Kept only in memory: a cancelled dialog uses no number; after a save
+        /// it goes to History.MakeInvoice(…, wantedNo), which takes it while it is still free.
+        string InvoiceCodeFor(string madeNo, DateTime now)
+        {
+            if (!string.IsNullOrEmpty(madeNo)) return madeNo.Trim();
+            EnsureHistory();
+            return History.NextInvoiceNo(history, now.Year, settings.UsedInvoiceNos);
+        }
+
+        /// The name on an invoice: a made one's kept name (BilledTo), else the typed name.
+        static string InvoiceName(QuoteRecord r, string customer)
+        {
+            return r != null && !string.IsNullOrWhiteSpace(r.BilledTo) ? r.BilledTo.Trim() : (customer ?? "").Trim();
+        }
+
+        /// Keeps a copy of a saved invoice PDF in InvoicesFolder as "<name>.pdf" (Settings "Keep a copy of every invoice
+        /// PDF", AppSettings.InvoiceCopies; never in picture mode). Never overwrites: a file with the same bytes is already
+        /// the copy (nothing written), a different one -> "<name> (2).pdf", "(3)", …. Returns null, or the line for the
+        /// status text when the copy failed (the real save has worked: not an error).
+        string SaveInvoiceCopy(byte[] pdf, string name)
+        {
+            if (offline || pdf == null || settings.InvoiceCopies == 0) return null;
+            try
+            {
+                string dir = InvoicesFolder;
+                Directory.CreateDirectory(dir);
+                for (int n = 1; n <= 999; n++)
+                {
+                    string target = Path.Combine(dir, name + (n == 1 ? "" : " (" + n + ")") + ".pdf");
+                    if (File.Exists(target))
+                    {
+                        if (SameBytes(target, pdf)) return null;   // already kept
+                        continue;
+                    }
+                    using (var fs = new FileStream(target, FileMode.CreateNew, FileAccess.Write))   // CreateNew: never over another file
+                        fs.Write(pdf, 0, pdf.Length);
+                    return null;
+                }
+                throw new IOException(L.S("too many copies with this name", "for mange kopier med dette navn"));
+            }
+            catch (Exception ex)
+            {
+                return L.F("The backup copy in PrintPrice's Invoices folder could not be saved: {0}",
+                           "Sikkerhedskopien i PrintPrices fakturamappe kunne ikke gemmes: {0}", ex.Message);
+            }
+        }
+
+        static bool SameBytes(string path, byte[] data)
+        {
+            var info = new FileInfo(path);
+            if (info.Length != data.Length) return false;
+            byte[] have = File.ReadAllBytes(path);
+            for (int i = 0; i < have.Length; i++) if (have[i] != data[i]) return false;
+            return true;
         }
 
         /// A record as plain text: title, name, model, time and grams, the chosen price; invoice: number, dates, payment.
         string RecordText(QuoteRecord r, bool friends, bool invoice)
         {
             return QuoteRows.RecordText(r, friends, invoice, settings, ShortLink(r.Source));
+        }
+
+        // ---------- combined bill: several History jobs on one quote / invoice (plans\combined-bill, Part A) ----------
+
+        /// History's Quote… / Invoice… for the selected records. One record = the one-job window as before (Invoice… on
+        /// a job of a combined invoice opens the whole invoice). Several: failed ones are left off; for an invoice a mix of
+        /// billed and unbilled jobs (or two invoices) is refused; all on one invoice = that invoice opened again. Returns
+        /// null when a window was shown (or there was nothing to show), else the refusal line for History's info box.
+        internal string ShowRecordsQuote(IWin32Window owner, List<QuoteRecord> records, bool invoice)
+        {
+            QuoteForm f;
+            string problem = NewRecordsQuoteForm(records, invoice, out f);
+            if (f == null) return problem;
+            using (f)
+            {
+                if (testRecordsForm != null) testRecordsForm(f);   // --test-bill: driven by the test, never shown
+                else f.ShowDialog(owner);
+            }
+            return null;
+        }
+
+        /// The window for ShowRecordsQuote (null + the refusal text when it can't open).
+        string NewRecordsQuoteForm(List<QuoteRecord> records, bool invoice, out QuoteForm f)
+        {
+            f = null;
+            var sel = records == null ? new List<QuoteRecord>() : records.Where(r => r != null).ToList();
+            if (sel.Count == 0) return null;
+            EnsureHistory();
+            var notes = new List<string>();
+            bool warn = false;
+            List<QuoteRecord> jobs;
+            if (sel.Count == 1)
+            {
+                var r = sel[0];
+                var group = invoice && InvoiceMade(r) ? History.InvoiceGroup(history, r.InvoiceNo) : null;
+                if (group == null || group.Count < 2) { f = NewRecordQuoteForm(r, invoice); return null; }
+                jobs = group;
+                notes.Add(group.Count == 2
+                    ? L.F("\"{0}\" is on combined invoice {1} with 1 other print: the whole invoice is shown.",
+                          "\"{0}\" er på samlet faktura {1} med 1 andet print: hele fakturaen vises.", RecordModelName(r), r.InvoiceNo.Trim())
+                    : L.F("\"{0}\" is on combined invoice {1} with {2} other prints: the whole invoice is shown.",
+                          "\"{0}\" er på samlet faktura {1} med {2} andre print: hele fakturaen vises.", RecordModelName(r), r.InvoiceNo.Trim(), group.Count - 1));
+            }
+            else
+            {
+                var check = History.BillProblem(sel);
+                if (invoice && check.Clash != null)
+                    return L.F("\"{0}\" is already on invoice {1}. Select only prints that aren't billed yet, or only the prints of that invoice.",
+                               "\"{0}\" er allerede på faktura {1}. Vælg kun print, der ikke er faktureret endnu, eller kun printene på den faktura.",
+                               RecordModelName(check.Clash), check.ClashCode);
+                if (check.Jobs.Count == 0)
+                    return L.S("All the selected prints are marked as failed: failed prints don't go on a bill.",
+                               "Alle de valgte print er markeret som fejlet: fejlede print kommer ikke på en regning.");
+                jobs = OldestFirst(check.Jobs);
+                if (check.FailedLeftOut > 0) { warn = true; notes.Add(FailedLeftOutText(check.FailedLeftOut)); }
+                if (invoice && check.Code.Length > 0)
+                {
+                    var group = History.InvoiceGroup(history, check.Code);
+                    if (group.Count > jobs.Count)
+                        notes.Add(L.F("Invoice {0} has {1} prints: the whole invoice is shown.", "Faktura {0} har {1} print: hele fakturaen vises.",
+                                      check.Code, group.Count));
+                    if (group.Count >= jobs.Count) jobs = group;
+                }
+                if (jobs.Count == 1)
+                {
+                    f = NewRecordQuoteForm(jobs[0], invoice);
+                    foreach (var n in notes) f.AddNote(n, warn ? InfoKind.Warning : InfoKind.Info);
+                    return null;
+                }
+            }
+            f = NewGroupQuoteForm(jobs, invoice, notes, warn, null);
+            return null;
+        }
+
+        static string FailedLeftOutText(int n)
+        {
+            return n == 1 ? L.S("1 failed print is left off the bill.", "1 fejlet print er udeladt af regningen.")
+                          : L.F("{0} failed prints are left off the bill.", "{0} fejlede print er udeladt af regningen.", n);
+        }
+
+        /// Oldest first by SavedAt (same time: the older list position first), as History.InvoiceGroup orders a bill.
+        static List<QuoteRecord> OldestFirst(List<QuoteRecord> jobs)
+        {
+            var pos = new Dictionary<QuoteRecord, int>();
+            var res = new List<QuoteRecord>();
+            foreach (var r in jobs) if (!pos.ContainsKey(r)) { pos[r] = res.Count; res.Add(r); }
+            res.Sort(delegate(QuoteRecord a, QuoteRecord b)
+            {
+                DateTime ta, tb;
+                bool ga = History.TryTime(a.SavedAt, out ta), gb = History.TryTime(b.SavedAt, out tb);
+                if (ga != gb) return ga ? -1 : 1;
+                int k = ga ? ta.CompareTo(tb) : 0;
+                return k != 0 ? k : pos[b].CompareTo(pos[a]);   // the selection is newest first: a later position is older
+            });
+            return res;
+        }
+
+        /// The jobs' names (trimmed, not empty), the most used first (same count: the first seen first).
+        static List<string> JobNames(List<QuoteRecord> jobs)
+        {
+            var count = new Dictionary<string, int>(StringComparer.CurrentCultureIgnoreCase);
+            var order = new List<string>();
+            foreach (var r in jobs)
+            {
+                string c = (r.Customer ?? "").Trim();
+                if (c.Length == 0) continue;
+                int k;
+                if (count.TryGetValue(c, out k)) count[c] = k + 1;
+                else { count[c] = 1; order.Add(c); }
+            }
+            return order.OrderByDescending(c => count[c]).ToList();   // OrderBy is stable: ties keep the first-seen order
+        }
+
+        /// The combined window: title "Invoice – 3 prints", the most used name (a made invoice: its kept name, read-only),
+        /// both totals on the price choices, notes (different names, failed left out, whole invoice) under the help.
+        /// samplePics: picture mode's pictures (null = each job's own, RecordPicture).
+        QuoteForm NewGroupQuoteForm(List<QuoteRecord> jobs, bool invoice, List<string> notes, bool warn, Image[] samplePics)
+        {
+            int n = jobs.Count;
+            bool made = invoice && jobs.All(r => InvoiceMade(r));
+            var pics = new Image[n];
+            var owned = new bool[n];
+            for (int i = 0; i < n; i++)
+            {
+                if (samplePics != null) pics[i] = i < samplePics.Length ? samplePics[i] : null;
+                else pics[i] = RecordPicture(jobs[i], out owned[i]);
+            }
+            DateTime when = Screenshots.Active ? new DateTime(2026, 11, 19, 10, 30, 0) : DateTime.Now;   // a combined quote's number and date
+            string code = made ? (jobs[0].InvoiceNo ?? "").Trim() : "";
+            string help = made
+                ? L.F("Invoice {0} for {1} prints is already made: it keeps its number, date, name and prices. Esc closes.",
+                      "Faktura {0} for {1} print er allerede lavet: den beholder sit nummer, sin dato, sit navn og sine priser. Esc lukker.", code, n)
+                : invoice
+                ? L.F("Making the invoice (copy or save) gives all {0} prints one number and ticks Printed in the history. Esc closes.",
+                      "Når fakturaen laves (kopi eller gem), får alle {0} print ét nummer, og Printet bliver sat i historikken. Esc lukker.", n)
+                : L.F("Copying or saving puts the name and price on these {0} quotes in the history. Esc closes.",
+                      "Når du kopierer eller gemmer, kommer navn og pris på disse {0} tilbud i historikken. Esc lukker.", n);
+            var names = JobNames(jobs);
+            string billTo = made ? History.InvoiceInfo(jobs[0], settings).BilledTo : names.Count > 0 ? names[0] : "";
+            if (!made && names.Count > 1)
+            {
+                warn = true;
+                string list = string.Join(", ", names.Take(3)) + (names.Count > 3 ? ", …" : "");
+                notes.Add(L.F("Different names on these prints ({0}): the name you type goes on all of them.",
+                              "Forskellige navne på disse print ({0}): navnet, du skriver, kommer på dem alle.", list));
+            }
+            bool friends = jobs.All(r => r.For == History.ForFriends);
+            double customerTotal = History.GroupBill(jobs, settings, false).Total;
+            double friendsTotal = History.GroupBill(jobs, settings, true).Total;
+            QuoteForm f = null;
+            f = new QuoteForm(QuoteRows.PrintsText(n), billTo, friends, settings.QuoteDark != 0,
+                History.RecentCustomers(history, 10), customerTotal, friendsTotal,
+                (fr, name) => BuildGroupQuote(jobs, fr, name, invoice, pics, when),
+                (IWin32Window o, QuoteExport kind, bool fr, bool dark, string customer, out bool failed) =>
+                {
+                    bool before = jobs.All(r => InvoiceMade(r));
+                    string msg = ExportGroup(o, jobs, invoice, kind, fr, dark, customer, pics, when, out failed);
+                    // made now: the name it was made out to stays (as the main window's Show invoice…)
+                    if (invoice && !before && jobs.All(r => InvoiceMade(r))) f.LockCustomer();
+                    return msg;
+                },
+                (fr, dark) =>
+                {
+                    settings.QuoteDark = dark ? 1 : 0;   // the price choice belongs to the records (For), not to Settings
+                    if (!offline) settings.Save();
+                },
+                invoice, help);
+            if (made) f.LockCustomer();
+            if (!invoice) f.HideStatus();   // one status for several quotes would overwrite theirs
+            foreach (var note in notes) f.AddNote(note, warn ? InfoKind.Warning : InfoKind.Info);
+            f.Disposed += delegate { for (int i = 0; i < n; i++) if (owned[i] && pics[i] != null) pics[i].Dispose(); };
+            return f;
+        }
+
+        /// Names and colour dots of GroupBreakdownInfo.Materials (by the material lines' Index).
+        void FillGroupMaterials(List<string> names, List<Color> colours, List<HistoryFilament> materials)
+        {
+            foreach (var m in materials)
+            {
+                bool unnamed = string.IsNullOrEmpty(m.Name) && string.IsNullOrEmpty(m.Type);
+                // older quotes saved without a filament name: Settings' filament, as their single page shows
+                names.Add(unnamed ? BambuSlicer.ShortName(settings.FilamentPreset ?? "").Trim() : MaterialName(new FilamentUse { Profile = m.Name ?? "", Type = m.Type ?? "", Colour = m.Colour ?? "" }));
+                colours.Add(ParseColour(m.Colour));
+            }
+        }
+
+        /// The page of a combined bill: one card per job (QuoteJob: picture, name, quote no. / date, print time, weight, its
+        /// print price = History.GroupBill's line + its share of any top-up, QuoteRows.JobOre, so the cards add up to the
+        /// total), the printer / plate when shared, the whole bill's breakdown (History.GroupBreakdown; its minimum line folded
+        /// into Work & handling when drawn: the minimum is never shown), the total. TopUpLabel / TopUpAmount are data for the
+        /// checks only. Quote: number / date / valid-until from when, today's name; invoice: its code, date and
+        /// snapshot once made (else "(new)" and today's settings).
+        QuoteData BuildGroupQuote(List<QuoteRecord> jobs, bool friends, string customer, bool invoice, Image[] pics, DateTime when)
+        {
+            var bill = History.GroupBill(jobs, settings, friends);
+            var d = new QuoteData
+            {
+                Name = (settings.QuoteName ?? "").Trim(),
+                Customer = (customer ?? "").Trim(),
+                Logo = Logo,
+                Number = History.QuoteNumber(when), Date = when, ValidUntil = settings.QuoteValidUntil(when),
+                Summary = QuoteRows.GroupSummary(jobs),
+                GroupFriends = friends,
+                GroupTotal = bill.Total,
+                Jobs = new List<QuoteJob>()
+            };
+            string printer = null;
+            bool samePrinter = true;
+            long[] jobOre = QuoteRows.JobOre(bill);   // with each job's share of any top-up: the minimum is never shown
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                var r = jobs[i];
+                var md = new QuoteData();
+                FillRecordMaterial(md, r);
+                long ore = i < jobOre.Length ? jobOre[i] : 0;
+                var job = new QuoteJob
+                {
+                    Name = RecordModelName(r),
+                    Detail = QuoteRows.JobDetail(r, md.Material),
+                    Sub = QuoteRows.JobSub(r),
+                    Amount = Num.Kr(ore / 100.0),
+                    Ore = ore,
+                    Picture = pics != null && i < pics.Length ? pics[i] : null,
+                    Hours = r.Hours, Minutes = r.Minutes,
+                    Weight = Num.Fmt(r.Grams) + " g"
+                };
+                d.Jobs.Add(job);
+                string pt = PrinterText(r);
+                if (printer == null) printer = pt;
+                else if (pt != printer) samePrinter = false;
+            }
+            d.Printer = samePrinter ? printer ?? "" : "";
+            // the whole bill's price breakdown (lines sum exactly to the bill's total; its minimum line is folded into
+            // Work & handling when drawn, QuoteRows.FoldMinimum)
+            var gb = History.GroupBreakdown(bill, settings);
+            d.Breakdown = new QuoteBreakdown { Friends = friends, Lines = gb.Lines, TotalOre = gb.TotalOre, Price = gb.Total };
+            d.GroupSameRates = gb.SameRates;
+            FillGroupMaterials(d.MaterialNames, d.MaterialColours, gb.Materials);
+            int minutes = 0;
+            string bed = null;
+            bool sameBed = true;
+            foreach (var r in jobs)
+            {
+                minutes += Math.Max(0, r.Hours) * 60 + Math.Max(0, r.Minutes);
+                // compared by the plate the page shows (an empty saved BedType = Settings' plate, as on its single page)
+                string bt = QuotePlate(r.BedType ?? "");
+                if (bed == null) bed = bt; else if (!string.Equals(bed, bt, StringComparison.OrdinalIgnoreCase)) sameBed = false;
+            }
+            d.Hours = minutes / 60;
+            d.Minutes = minutes % 60;
+            d.PlateName = sameBed && !string.IsNullOrEmpty(bed) ? bed : "";
+            if (bill.TopUp > 0)
+            {
+                // the minimum the top-up reaches (older records saved without it: the total, which is that minimum)
+                d.TopUpLabel = QuoteRows.MinimumLabel(bill.Minimum > 0 ? bill.Minimum : bill.Total);
+                d.TopUpAmount = Num.Kr(bill.TopUp);
+            }
+            if (invoice)
+            {
+                var first = jobs[0];
+                DateTime billed = DateTime.MinValue;
+                bool made = jobs.All(r => InvoiceMade(r)) && History.TryTime(first.BilledAt, out billed);
+                if (!made) billed = Screenshots.Active ? when : DateTime.Now;
+                d.Invoice = true;
+                d.InvoiceNo = made ? first.InvoiceNo.Trim() : L.S("(new)", "(ny)");
+                d.Date = billed;
+                var inv = History.InvoiceInfo(first, settings, billed);
+                d.Due = inv.Due;
+                d.PayMobilePay = (inv.MobilePay ?? "").Trim();
+                d.PayBank = (inv.Bank ?? "").Trim();
+                d.Name = (inv.FromName ?? "").Trim();
+            }
+            return d;
+        }
+
+        /// One export of a combined bill: file dialog first ("2026-11-19 3 prints - Name"; null = cancelled), then every
+        /// job gets the name (not on a made invoice: it keeps its name) and For; an invoice is made for all of them at
+        /// once (History.MakeInvoice: one code, Printed, prices with the minimum's shares); one Save; then the page(s).
+        string ExportGroup(IWin32Window owner, List<QuoteRecord> jobs, bool invoice, QuoteExport kind, bool friends, bool dark,
+                           string customer, Image[] pics, DateTime when, out bool failed)
+        {
+            failed = false;
+            customer = (customer ?? "").Trim();
+            bool made = invoice && jobs.All(r => InvoiceMade(r));
+            int forWho = friends ? History.ForFriends : History.ForCustomer;
+            string prints = QuoteRows.PrintsText(jobs.Count);
+            if (kind == QuoteExport.History)
+            {
+                // only the name and price (For) on each job; never makes an invoice
+                foreach (var r in jobs) { if (!made) r.Customer = customer; r.For = forWho; }
+                string e = offline ? null : History.Save(history);
+                if (e != null) { failed = true; return e; }
+                return L.F("✓ Saved to history ({0}).", "✓ Gemt i historikken ({0}).", prints);
+            }
+            if (invoice && customer.Length == 0)
+            {
+                failed = true;
+                return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen.");
+            }
+            DateTime now = DateTime.Now;
+            string path = null, wanted = null;
+            if (kind == QuoteExport.Png || kind == QuoteExport.Pdf)
+            {
+                if (invoice)
+                {
+                    // "2026-48213 - Name" (issue #6): the number is picked now, used only once the file is saved
+                    wanted = InvoiceCodeFor(made ? jobs[0].InvoiceNo : null, now);
+                    path = AskExportPath(owner, kind, true, QuoteRows.InvoiceFileName(wanted, made ? InvoiceName(jobs[0], customer) : customer));
+                }
+                else path = AskExportPath(owner, kind, false, QuoteRows.GroupFileName(when, jobs.Count, customer));
+                if (path == null) return null;
+            }
+            if (invoice && !made)
+            {
+                var check = History.BillProblem(jobs);
+                if (!check.Ok)
+                {
+                    failed = true;
+                    return check.Clash != null
+                        ? L.F("\"{0}\" is already on invoice {1}: no invoice was made.", "\"{0}\" er allerede på faktura {1}: der blev ikke lavet en faktura.",
+                              RecordModelName(check.Clash), check.ClashCode)
+                        : L.S("No prints to invoice.", "Ingen print at fakturere.");
+                }
+            }
+            foreach (var r in jobs) { if (!made) r.Customer = customer; r.For = forWho; }   // MakeInvoice takes the name from Customer
+            string err = null, copyNote = null;
+            if (invoice)
+            {
+                History.MakeInvoice(history, jobs, now, settings, friends, wanted);   // one code for all (the file's), Printed, the minimum's shares
+                if (!offline) settings.Save();
+            }
+            if (!offline) err = History.Save(history);
+            string done;
+            try
+            {
+                var data = BuildGroupQuote(jobs, friends, customer, invoice, pics, when);
+                if (kind == QuoteExport.Text)
+                {
+                    var bill = History.GroupBill(jobs, settings, friends);
+                    CopyText(QuoteRows.GroupText(bill, invoice, invoice ? data.InvoiceNo : data.Number, customer, data.Date,
+                                                 invoice ? History.InvoiceInfo(jobs[0], settings, data.Date) : null));
+                    done = invoice ? L.S("✓ Invoice text copied", "✓ Fakturaen er kopieret som tekst") : L.S("✓ Quote text copied", "✓ Tilbuddet er kopieret som tekst");
+                }
+                else if (kind == QuoteExport.Pdf)
+                {
+                    var pages = QuotePage.RenderPages(data, false);   // a printed PDF is always light; A4 pages
+                    try
+                    {
+                        byte[] pdf = QuotePage.Pdf(pages);
+                        File.WriteAllBytes(path, pdf);
+                        if (invoice) copyNote = SaveInvoiceCopy(pdf, QuoteRows.InvoiceFileName(jobs[0].InvoiceNo, InvoiceName(jobs[0], customer)));
+                    }
+                    finally { foreach (var b in pages) b.Dispose(); }
+                    done = pages.Count > 1 ? L.F("✓ Saved {0} ({1} pages)", "✓ Gemt {0} ({1} sider)", Path.GetFileName(path), pages.Count)
+                                           : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
+                }
+                else
+                {
+                    using (var bmp = QuotePage.Render(data, dark))
+                    {
+                        if (kind == QuoteExport.Copy) CopyPicture(bmp);
+                        else bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                    }
+                    done = kind == QuoteExport.Copy
+                        ? (invoice ? L.S("✓ Invoice picture copied", "✓ Fakturaen er kopieret som billede") : L.S("✓ Quote picture copied", "✓ Tilbuddet er kopieret som billede"))
+                        : L.F("✓ Saved {0}", "✓ Gemt {0}", Path.GetFileName(path));
+                }
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                return (kind == QuoteExport.Copy || kind == QuoteExport.Text ? L.S("Clipboard: ", "Udklipsholder: ") : "") + ex.Message;
+            }
+            if (err != null) { failed = true; return done + ". " + err; }
+            return done + (invoice ? L.F(". Invoice no. {0} is in the history ({1}).", ". Faktura nr. {0} er gemt i historikken ({1}).", jobs[0].InvoiceNo, prints)
+                                   : L.F(" and saved to history ({0}).", " og gemt i historikken ({0}).", prints))
+                        + (copyNote != null ? "\n" + copyNote : "");
+        }
+
+        /// Picture mode: made-up jobs for a combined bill (copies of HistoryForm.SampleQuotes, never saved): three small
+        /// customer prints for Lene Hansen (40 kr. together: a "Minimum price" line), or count jobs for the page-break
+        /// check; made = invoiced together (fixed code 2026-51907, 19 Nov 2026).
+        internal List<QuoteRecord> SampleGroupJobs(int count, bool made, Dictionary<string, byte[]> pictures, out Image[] pics)
+        {
+            var all = HistoryForm.SampleQuotes();
+            int[] order = { 7, 2, 0, 1, 3, 4, 6 };   // moon lamp, phone stand, benchy first; never the failed one (5)
+            var jobs = new List<QuoteRecord>();
+            var srcId = new Dictionary<QuoteRecord, string>();
+            for (int i = 0; i < count; i++)
+            {
+                var src = all[order[i % order.Length]];
+                var r = History.CopyQuotes(new List<QuoteRecord> { src })[0];
+                srcId[r] = src.Id;
+                r.Id = "group" + i;
+                r.InvoiceNo = r.BilledAt = r.BilledTo = r.InvoiceDue = "";
+                r.InvoiceTopUp = 0;
+                r.For = History.ForCustomer;
+                r.Customer = "Lene Hansen";
+                r.Printed = true;
+                r.PrintingSince = "";
+                DateTime t;
+                if (History.TryTime(src.SavedAt, out t)) r.SavedAt = History.Stamp(t.AddDays(16 + i / order.Length));
+                jobs.Add(r);
+            }
+            jobs = OldestFirst(jobs);
+            pics = new Image[jobs.Count];
+            for (int i = 0; i < jobs.Count; i++)
+            {
+                byte[] b;
+                if (pictures != null && pictures.TryGetValue(srcId[jobs[i]], out b)) pics[i] = History.PictureImage(b);
+            }
+            if (made)
+            {
+                var s = settings.Clone();
+                s.PayMobilePay = "12 34 56 78";
+                s.PayBank = L.S("reg. 1234, account 0012345678", "reg.nr. 1234, konto 0012345678");
+                var digits = new Queue<int>(new[] { 4, 1, 9, 0, 7 });   // 2026-51907
+                History.MakeInvoice(new List<QuoteRecord>(jobs), jobs, new DateTime(2026, 11, 19, 10, 30, 0), s, false,
+                                    k => digits.Count > 0 ? digits.Dequeue() : 0);
+            }
+            return jobs;
+        }
+
+        /// Picture mode: the page data of a combined bill of jobs (Lene Hansen, customer prices).
+        internal QuoteData SampleGroupData(List<QuoteRecord> jobs, Image[] pics, bool invoice)
+        {
+            return BuildGroupQuote(jobs, false, "Lene Hansen", invoice, pics, new DateTime(2026, 11, 19, 10, 30, 0));
+        }
+
+        /// Picture mode: History's Invoice… window for several jobs (nothing is saved).
+        internal QuoteForm SampleGroupWindow(List<QuoteRecord> jobs, Image[] pics, bool invoice)
+        {
+            if (!offline) return null;
+            EnsureHistory();
+            var f = NewGroupQuoteForm(jobs, invoice, new List<string>(), false, pics);
+            return f;
         }
 
         /// Picture mode: the invoice page of the job on screen (sample number, date, customer and payment ways; nothing saved).
@@ -3596,6 +4129,15 @@ namespace PrintPrice
             if (!offline || last == null || lastInput == null) return null;
             var when = new DateTime(2026, 11, 4, 17, 45, 0);
             return QuotePage.Render(BuildQuote(settings.QuoteFriends, when, History.QuoteNumber(when), customer), dark);
+        }
+
+        /// Picture mode: the job on screen as a light customer quote (not friends) for Mette Hansen, fixed date: the single
+        /// Benchy is below the minimum price, so its top-up shows inside Work & handling (quote_topup.png).
+        internal Bitmap RenderSampleTopUpQuote()
+        {
+            if (!offline || last == null || lastInput == null) return null;
+            var when = new DateTime(2026, 11, 4, 17, 45, 0);
+            return QuotePage.Render(BuildQuote(false, when, History.QuoteNumber(when), "Mette Hansen"), false);
         }
 
         /// Picture mode: the quote window for the job on screen, with a sample customer (fixed date; never saves:
@@ -3791,10 +4333,14 @@ namespace PrintPrice
             string dir = AppSettings.Folder;
             var log = new TestLog();
             log.Add(SetupTest.StandInNote);
-            string clip = null;
+            string clip = null, askedName = null;
             bool cancel = false;
             testClipboard = t => clip = t;
-            testExportPath = (kind, name) => cancel ? null : Path.Combine(dir, name + (kind == QuoteExport.Pdf ? ".pdf" : ".png"));
+            testExportPath = (kind, name) => { askedName = name; return cancel ? null : Path.Combine(dir, name + (kind == QuoteExport.Pdf ? ".pdf" : ".png")); };
+            string invDir = InvoicesFolder;
+            // the invoice copies (issue #6): the files in <test folder>\Invoices
+            Func<string[]> copies = () => { try { return Directory.Exists(invDir) ? Directory.GetFiles(invDir) : new string[0]; } catch { return new string[0]; } };
+            Func<string, string, bool> sameFile = (p1, p2) => { try { return File.ReadAllBytes(p1).SequenceEqual(File.ReadAllBytes(p2)); } catch { return false; } };
             QuoteForm f = null;
             try
             {
@@ -3831,11 +4377,38 @@ namespace PrintPrice
                 f = NewJobInvoiceForm("Test Kunde");
                 log.Check(history.Count == count0 && invoices() == inv0 && used() == used0, "1a window opened: nothing saved, no number used");
                 log.Check(f.TestActionsOn, "1b export buttons on (name given)");
+                int copies0 = copies().Length;
                 cancel = true;
+                askedName = null;
                 string msg = f.TestExport(QuoteExport.Pdf);
                 cancel = false;
                 log.Check(history.Count == count0 && invoices() == inv0 && used() == used0, "1c PDF dialog cancelled: nothing saved, no number used");
+                log.Check(askedName != null && System.Text.RegularExpressions.Regex.IsMatch(askedName, @"^\d{4}-[1-9]\d{4} - Test Kunde$"),
+                          "1f the dialog suggested \"" + askedName + "\" (number - name)");
+                log.Check(copies().Length == copies0, "1g cancelled: no invoice copy (" + copies().Length + " in Invoices)");
                 log.Check(!f.TestCustomerLocked, "1d name not locked before the invoice is made");
+                {
+                    // the minimum is never shown: its top-up is inside Work & handling (no "%"), the rows add up to the total
+                    var qd = f.TestData();
+                    var lines = qd != null && qd.Breakdown != null ? qd.Breakdown.Lines : null;
+                    if (lines == null) log.Check(false, "1e invoice page breakdown: none");
+                    else
+                    {
+                        var minLine = lines.FirstOrDefault(l => l.Key == QuoteLine.Minimum);
+                        long workOre = lines.Where(l => l.Key == QuoteLine.Work).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
+                        var shown = QuoteRows.FoldMinimum(lines);
+                        var rows = QuoteRows.Build(qd.Breakdown, qd.MaterialNames, qd.PurgeGrams, qd.Hours, qd.Minutes, qd.PlateName);
+                        var workRow = rows.FirstOrDefault(r => r.Kind == QuoteRowKind.Head && r.Label == L.S("Work & handling", "Arbejde & håndtering"));
+                        bool minDrawn = rows.Any(r => (r.Label + " " + r.Detail).IndexOf("inimum", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                                      (r.Label + " " + r.Detail).IndexOf(L.S("lowest price", "laveste pris"), StringComparison.OrdinalIgnoreCase) >= 0);
+                        log.Add("INFO job price " + Num.Kr(qd.Breakdown.TotalOre / 100.0) + (minLine != null ? ", top-up " + Num.Kr(minLine.Amount) : ", no top-up"));
+                        log.Check(!minDrawn && !shown.Any(l => l.Key == QuoteLine.Minimum) && shown.Sum(l => l.Ore) == qd.Breakdown.TotalOre &&
+                                  (workOre == 0 || (workRow != null && workRow.Amount == Num.Kr(workOre / 100.0) && workRow.Detail.Length == 0)),
+                                  "1e page rows: " + (minDrawn ? "a minimum row" : "no minimum row") + ", work & handling " +
+                                  (workRow != null ? workRow.Amount : "none") + " = work + top-up " + Num.Kr(workOre / 100.0) +
+                                  ", rows sum " + Num.Kr(shown.Sum(l => l.Ore) / 100.0) + " = total " + Num.Kr(qd.Breakdown.TotalOre / 100.0));
+                    }
+                }
 
                 // 4. Save to history in the invoice window: a plain quote, no number
                 msg = f.TestExport(QuoteExport.History);
@@ -3861,10 +4434,13 @@ namespace PrintPrice
                 log.Check(made != null && History.TryTime(made.BilledAt, out billedAt) && !string.IsNullOrEmpty(made.InvoiceDue), "2g billed date and due date saved");
                 log.Check(used().Split(',').Contains(no) && used().Split(',').Length == (used0.Length == 0 ? 0 : used0.Split(',').Length) + 1,
                           "2h UsedInvoiceNos got the number (only it)");
-                string pdf = Path.Combine(dir, QuoteRows.FileName(DateTime.Now, QuoteModelName(), "Test Kunde") + ".pdf");
+                string pdf = Path.Combine(dir, no + " - Test Kunde.pdf");
                 bool pdfOk = false;
                 try { pdfOk = File.Exists(pdf) && System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(pdf), 0, 5) == "%PDF-"; } catch { }
-                log.Check(pdfOk, "2i PDF written: " + Path.GetFileName(pdf));
+                log.Check(pdfOk && askedName == no + " - Test Kunde", "2i PDF written, named after the number: " + Path.GetFileName(pdf) + " (suggested \"" + askedName + "\")");
+                string copy1 = Path.Combine(invDir, no + " - Test Kunde.pdf");
+                log.Check(File.Exists(copy1) && sameFile(copy1, pdf) && copies().Length == copies0 + 1,
+                          "2o copy kept: Invoices\\" + Path.GetFileName(copy1) + " = the saved file (" + copies().Length + " in Invoices)");
                 string ini = "", json = "";
                 try { ini = File.ReadAllText(AppSettings.FilePath); } catch { }
                 try { json = File.ReadAllText(History.FilePath); } catch { }
@@ -3876,6 +4452,7 @@ namespace PrintPrice
                 msg = f.TestExport(QuoteExport.Text);
                 log.Check(f.TestInfoKind == InfoKind.Success && clip != null && no.Length > 0 && clip.Contains(no),
                           "2m Copy text: invoice text with " + no + " (" + msg + ")");
+                log.Check(clip != null && clip.IndexOf("inimum", StringComparison.OrdinalIgnoreCase) < 0, "2n Copy text names no minimum price");
 
                 // 3. another export from the same window: same number, nothing new
                 msg = f.TestExport(QuoteExport.Pdf);
@@ -3883,6 +4460,14 @@ namespace PrintPrice
                           "3b second PDF keeps " + no + ", still one invoice (" + msg.Replace("\n", " / ") + ")");
                 log.Check(used() .Split(',').Count(x => x == no) == 1 && used().Split(',').Length == (used0.Length == 0 ? 0 : used0.Split(',').Length) + 1,
                           "3c no other number used");
+                {
+                    // the same invoice again: the same name; its copy is not written twice (same bytes), never overwritten
+                    var mine = copies().Where(c => Path.GetFileName(c).StartsWith(no + " - Test Kunde", StringComparison.OrdinalIgnoreCase)).ToList();
+                    bool distinct = true;
+                    for (int i = 0; i < mine.Count; i++) for (int j = i + 1; j < mine.Count; j++) if (sameFile(mine[i], mine[j])) distinct = false;
+                    log.Check(askedName == no + " - Test Kunde" && mine.Count >= 1 && mine.Count <= 2 && distinct && mine.Any(c => sameFile(c, pdf)),
+                              "3d second PDF: same name, " + mine.Count + " copy file(s), none twice, one = the saved file");
+                }
                 f.Dispose(); f = null;
 
                 // the SAME unchanged job again within 10 minutes (History.SameQuote: an invoiced record is never the same
@@ -3930,6 +4515,68 @@ namespace PrintPrice
                           "7c invoices not renamed (" + inv1Text() + "; " + (made2 != null ? made2.InvoiceNo + " / " + made2.Customer + " / " + made2.BilledTo : "none") + ")");
                 log.Check(invoices() == inv0 + 2 && usedCount() == used1 + 1, "7d no number used");
                 f.Dispose(); f = null;
+
+                // 8. invoice copies (issue #6)
+                {
+                    string copy2 = Path.Combine(invDir, no2 + " - Anden Kunde.pdf");
+                    log.Check(File.Exists(copy2), "8a second invoice's copy: Invoices\\" + Path.GetFileName(copy2));
+                    // same bytes again: nothing new
+                    byte[] saved = File.ReadAllBytes(copy1);
+                    int n0 = copies().Length;
+                    string note = SaveInvoiceCopy(saved, no + " - Test Kunde");
+                    log.Check(note == null && copies().Length == n0, "8b same PDF again: no new copy (" + copies().Length + " files)");
+                    // the kept copy changed: the next one goes beside it, the changed file stays as it is
+                    byte[] changed = saved.Concat(new byte[] { 10 }).ToArray();
+                    File.WriteAllBytes(copy1, changed);
+                    note = SaveInvoiceCopy(saved, no + " - Test Kunde");
+                    var beside = copies().Where(c => Path.GetFileName(c).StartsWith(no + " - Test Kunde (", StringComparison.OrdinalIgnoreCase)).ToList();
+                    log.Check(note == null && copies().Length == n0 + 1 && beside.Any(c => File.ReadAllBytes(c).SequenceEqual(saved)) &&
+                              File.ReadAllBytes(copy1).SequenceEqual(changed),
+                              "8c a different older file: copy saved beside it as " + string.Join(", ", beside.Select(Path.GetFileName)) + ", the old file untouched");
+                    // switched off: no copy
+                    settings.InvoiceCopies = 0;
+                    note = SaveInvoiceCopy(saved, "Off test");
+                    settings.InvoiceCopies = 1;
+                    log.Check(note == null && !File.Exists(Path.Combine(invDir, "Off test.pdf")), "8d setting off: no copy");
+
+                    // an invoice picture: the number name, no copy
+                    int n1 = copies().Length;
+                    f = NewJobInvoiceForm("Fjerde Kunde");
+                    msg = f.TestExport(QuoteExport.Png);
+                    var made4 = history.FirstOrDefault(r => r.BilledTo == "Fjerde Kunde");
+                    string no4 = made4 != null ? made4.InvoiceNo ?? "" : "";
+                    log.Check(f.TestInfoKind == InfoKind.Success && no4.Length > 0 && askedName == no4 + " - Fjerde Kunde" &&
+                              File.Exists(Path.Combine(dir, no4 + " - Fjerde Kunde.png")) && copies().Length == n1,
+                              "8e invoice picture \"" + askedName + ".png\": no copy (" + msg.Replace("\n", " / ") + ")");
+                    f.Dispose(); f = null;
+
+                    // a quote PDF (▾ quick menu): the date name, no copy
+                    MenuExport(QuoteExport.Pdf);
+                    log.Check(askedName != null && askedName.StartsWith(DateTime.Now.ToString("yyyy-MM-dd")) && copies().Length == n1,
+                              "8f quote PDF \"" + askedName + "\": date name, no copy");
+
+                    // the copy can't be made (a file where the folder should be): the PDF is still saved, the text says so
+                    string moved = invDir + "_kept";
+                    Directory.Move(invDir, moved);
+                    try
+                    {
+                        File.WriteAllText(invDir, "not a folder");
+                        f = NewJobInvoiceForm("Femte Kunde");
+                        msg = f.TestExport(QuoteExport.Pdf);
+                        var made5 = history.FirstOrDefault(r => r.BilledTo == "Femte Kunde");
+                        string no5 = made5 != null ? made5.InvoiceNo ?? "" : "";
+                        log.Check(f.TestInfoKind == InfoKind.Success && no5.Length > 0 && File.Exists(Path.Combine(dir, no5 + " - Femte Kunde.pdf")) &&
+                                  msg.Contains(L.S("Invoices folder could not be saved", "fakturamappe kunne ikke gemmes")),
+                                  "8g copy failed: PDF still saved, not an error, with the note (" + msg.Replace("\n", " / ") + ")");
+                        f.Dispose(); f = null;
+                    }
+                    finally
+                    {
+                        try { File.Delete(invDir); } catch { }
+                        try { Directory.Move(moved, invDir); } catch { }
+                    }
+                    log.Check(Directory.Exists(invDir) && File.Exists(copy1), "8h Invoices folder back as it was");
+                }
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
             finally
@@ -3939,6 +4586,450 @@ namespace PrintPrice
                 testExportPath = null;
             }
             try { File.WriteAllLines(Path.Combine(dir, "test_invoice.txt"), log.Lines); } catch { }
+            Program.EndTestRun(log.Ok ? 0 : 4);
+        }
+
+        /// Test run "--settings <folder> --hidden --test-bill" (combined bill, plans\combined-bill), only in test mode: jobs
+        /// are saved from the main window into the test folder's history, then the real History window (HistoryForm.Show
+        /// off-screen, its own selection + Quote… / Invoice… code -> ShowRecordsQuote) opens the combined windows, which are
+        /// handed to the test instead of ShowDialog (testRecordsForm) and exported with their own Export. File dialogs
+        /// answer with files in the folder, the clipboard is caught. Results in <folder>\test_bill.txt; exit 0 / 4.
+        internal void TestBillFlow()
+        {
+            if (!AppSettings.TestMode || !Program.Hidden) return;
+            string dir = AppSettings.Folder;
+            var log = new TestLog();
+            log.Add(SetupTest.StandInNote);
+            string clip = null, askedName = null;
+            bool cancel = false;
+            testClipboard = t => clip = t;
+            testExportPath = (kind, name) => { askedName = name; return cancel ? null : Path.Combine(dir, name + (kind == QuoteExport.Pdf ? ".pdf" : ".png")); };
+            string invDir = InvoicesFolder;
+            Func<string, string, bool> sameFile = (p1, p2) => { try { return File.ReadAllBytes(p1).SequenceEqual(File.ReadAllBytes(p2)); } catch { return false; } };
+            Action<QuoteForm> onWindow = null;
+            testRecordsForm = f => { if (onWindow != null) onWindow(f); };
+            HistoryForm hist = null;
+            Func<double, long> ore = Pricing.ShownOre;
+            Func<string, int> pdfPages = path =>
+            {
+                try
+                {
+                    string t = System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(path));
+                    return System.Text.RegularExpressions.Regex.Matches(t, @"/Type /Page /").Count;
+                }
+                catch { return -1; }
+            };
+            // the combined breakdown of a window's page: rows sum exactly to the total, one minimum row = the top-up (none
+            // without), material grams = the jobs' grams
+            Func<QuoteData, string> bdText = d => d.Breakdown == null || d.Breakdown.Lines == null ? "none"
+                : string.Join(";", d.Breakdown.Lines.Select(l => l.Key + "=" + l.Ore));
+            Action<string, QuoteData, List<QuoteRecord>> checkBd = (step, d, recs) =>
+            {
+                var lines = d.Breakdown != null ? d.Breakdown.Lines : null;
+                if (lines == null || lines.Count == 0) { log.Check(false, step + " breakdown: none"); return; }
+                long sum = lines.Sum(l => l.Ore);
+                log.Check(sum == ore(d.GroupTotal) && d.Breakdown.TotalOre == sum,
+                          step + " breakdown rows sum " + Num.Kr(sum / 100.0) + " = total " + Num.Kr(d.GroupTotal) + " (" + bdText(d) + ")");
+                // saved data: one minimum line = the top-up (none without); drawn: never a minimum row, the top-up is inside
+                // Work & handling (no "%" on it then), the shown lines still sum to the total
+                var minLine = lines.FirstOrDefault(l => l.Key == QuoteLine.Minimum);
+                int mins = lines.Count(l => l.Key == QuoteLine.Minimum);
+                bool topUp = d.TopUpAmount.Length > 0;
+                log.Check(topUp ? mins == 1 && Num.Kr(minLine.Amount) == d.TopUpAmount : mins == 0,
+                          step + " saved minimum line " + (minLine != null ? Num.Kr(minLine.Amount) : "none") + ", top-up " + (topUp ? d.TopUpAmount : "none"));
+                var shown = QuoteRows.FoldMinimum(lines);
+                long workOre = lines.Where(l => l.Key == QuoteLine.Work).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
+                var workShown = shown.FirstOrDefault(l => l.Key == QuoteLine.Work);
+                log.Check(!shown.Any(l => l.Key == QuoteLine.Minimum) && shown.Sum(l => l.Ore) == sum &&
+                          (workOre == 0 ? workShown == null || workShown.Ore == 0 : workShown != null && workShown.Ore == workOre),
+                          step + " shown lines: no minimum, work & handling " + (workShown != null ? Num.Kr(workShown.Amount) : "none") +
+                          " = work + top-up " + Num.Kr(workOre / 100.0) + ", sum " + Num.Kr(shown.Sum(l => l.Ore) / 100.0));
+                var rows = QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates, 6);
+                var workRow = rows.FirstOrDefault(r => r.Kind == QuoteRowKind.Head && r.Label == L.S("Work & handling", "Arbejde & håndtering"));
+                bool minDrawn = rows.Any(r => (r.Label + " " + r.Detail).IndexOf(L.S("inimum", "inimum"), StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                              (r.Label + " " + r.Detail).IndexOf(L.S("lowest price", "laveste pris"), StringComparison.OrdinalIgnoreCase) >= 0);
+                log.Check(!minDrawn && (workOre == 0 || (workRow != null && workRow.Amount == Num.Kr(workOre / 100.0) && workRow.Detail.Length == 0)),
+                          step + " drawn rows: " + (minDrawn ? "a minimum row" : "no minimum row") + ", work & handling " +
+                          (workRow != null ? workRow.Amount + " \"" + workRow.Detail + "\"" : "none"));
+                // the job lines carry their share of the top-up: they add up to the total
+                var jobOre = QuoteRows.JobOre(History.GroupBill(recs, settings, d.GroupFriends));
+                var want1 = jobOre.Select(o => Num.Kr(o / 100.0)).OrderBy(x => x).ToList();
+                var have1 = d.Jobs.Select(j => j.Amount).OrderBy(x => x).ToList();
+                log.Check(jobOre.Sum() == ore(d.GroupTotal) && want1.SequenceEqual(have1),
+                          step + " job lines " + string.Join(" + ", have1) + " = total " + Num.Kr(d.GroupTotal));
+                // machine wear: always its full split (History.GroupBreakdown fills Parts), the parts add up to the wear row, drawn under it
+                var wearLine = lines.FirstOrDefault(l => l.Key == QuoteLine.Wear);
+                if (wearLine != null && wearLine.Ore > 0)
+                {
+                    long partSum = wearLine.Parts != null ? wearLine.Parts.Sum(pt => pt.Ore) : -1;
+                    int wearAt = rows.FindIndex(r => r.Kind == QuoteRowKind.Head && r.Label == L.S("Machine wear", "Maskinslid"));
+                    int subs = 0;
+                    for (int k = wearAt + 1; wearAt >= 0 && k < rows.Count && rows[k].Kind == QuoteRowKind.Sub; k++) subs++;
+                    log.Check(wearLine.Parts != null && wearLine.Parts.Count > 0 && partSum == wearLine.Ore && subs == wearLine.Parts.Count,
+                              step + " machine wear " + Num.Kr(wearLine.Amount) + ": " + (wearLine.Parts != null ? wearLine.Parts.Count : 0) +
+                              " parts summing " + Num.Kr(partSum / 100.0) + ", " + subs + " drawn under it");
+                }
+                // the cards (side by side): print time, weight and a print price each (its top-up share inside); they add up
+                var bad = new List<string>();
+                foreach (var j in d.Jobs)
+                    if (j.Amount != Num.Kr(j.Ore / 100.0) || string.IsNullOrEmpty(j.Weight) || j.Ore < 0)
+                        bad.Add(j.Name + ": price " + j.Amount + " / " + Num.Kr(j.Ore / 100.0) + ", weight \"" + j.Weight + "\"");
+                log.Check(bad.Count == 0 && d.Jobs.Sum(j => j.Ore) == ore(d.GroupTotal),
+                          step + " cards: print prices sum " + Num.Kr(d.Jobs.Sum(j => j.Ore) / 100.0) + " = total " + Num.Kr(d.GroupTotal) +
+                          (bad.Count > 0 ? " (" + string.Join("; ", bad) + ")" : ""));
+                double grams = lines.Where(l => l.Key == QuoteLine.Material).Sum(l => l.Quantity), want = recs.Sum(r => r.Grams);
+                log.Check(Math.Abs(grams - want) < 0.05, step + " material grams " + Num.Fmt(Math.Round(grams, 2)) + " = the jobs' " + Num.Fmt(Math.Round(want, 2)));
+            };
+            try
+            {
+                EnsureHistory();
+                double minimum = settings.MinimumPrice;
+                log.Add("INFO settings: minimum price " + Num.Kr(minimum) + ", round to " + Num.Fmt(settings.RoundTo) + ", " + history.Count + " records before");
+                log.Check(minimum > 0, "minimum price is on (" + Num.Kr(minimum) + ")");
+
+                // seed: real records saved from the main window (a typed one-colour job each; different names = never "the same quote")
+                Func<string, int, double, QuoteRecord> save = (model, minutes, grams) =>
+                {
+                    var one = new SliceResult { Seconds = minutes * 60, Grams = grams, Plates = 1 };
+                    one.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#F07850", Type = "PLA", Profile = "Bambu PLA Matte @BBL A1", Grams = grams });
+                    SetColours(one);
+                    txtUrl.Text = SingleBenchyLink;
+                    txtHours.Text = (minutes / 60).ToString();
+                    txtMinutes.Text = (minutes % 60).ToString();
+                    txtGrams.Text = Num.Fmt(grams);
+                    rowPrice[0].Text = "200";
+                    txtElecPrice.Text = "3,65";
+                    jobModel = model;
+                    SetJobLoaded(true);
+                    Recalculate();
+                    QuoteRecord rec;
+                    string err = SaveToHistory(History.ForCustomer, null, out rec);
+                    if (err != null) log.Add("INFO save " + model + ": " + err);
+                    return err == null ? rec : null;
+                };
+                var a = save("Bill A small", 12, 3);
+                var b = save("Bill B small", 14, 4);
+                var e1 = save("Bill E1", 10, 2.5);
+                var e2 = save("Bill E2", 11, 2.6);
+                var f1 = save("Bill F1", 15, 3.1);
+                var f2 = save("Bill F2", 16, 3.2);
+                var f3 = save("Bill F3", 17, 3.3);
+                var g1 = save("Bill G1", 40, 12);
+                var g2 = save("Bill G2", 45, 14);
+                var x1 = save("Bill failed 1", 20, 5);
+                var x2 = save("Bill failed 2", 21, 5.5);
+                var single = save("Bill single", 50, 15);
+                var pages = new List<QuoteRecord>();
+                for (int i = 1; i <= 12; i++) pages.Add(save("Bill page " + i, 20 + i, 4 + i));
+                var seeded = new List<QuoteRecord> { a, b, e1, e2, f1, f2, f3, g1, g2, x1, x2, single };
+                seeded.AddRange(pages);
+                log.Check(seeded.All(r => r != null), "seeded " + seeded.Count(r => r != null) + " records from the main window");
+                // the plan's examples: hand-set saved prices (not the calculated ones, so the bill uses them as they are)
+                e1.OthersPrice = 18; e2.OthersPrice = 14;
+                f1.OthersPrice = 30; f2.OthersPrice = 25; f3.OthersPrice = 20;
+                a.Customer = "Lene Hansen"; b.Customer = "Lene H.";
+                DateTime now0 = DateTime.Now;
+                History.MarkFailed(x1, true, now0);
+                History.MarkFailed(x2, true, now0);
+                log.Check(History.Save(history) == null, "history saved with the seeded records");
+                double singlePrice = single.OthersPrice;
+
+                hist = new HistoryForm(history, null, false);
+                hist.Settings = settings;
+                var asked = new List<QuoteRecord>();
+                hist.QuoteRequested = (o, recs, inv) => { asked = recs; return ShowRecordsQuote(o, recs, inv); };
+                hist.Show();
+                Application.DoEvents();
+                var h = hist;
+                // runs Quote… / Invoice… on these records in the History window; act gets the window (false = none opened)
+                Func<List<QuoteRecord>, bool, Action<QuoteForm>, bool> run = (recs, inv, act) =>
+                {
+                    bool got = false;
+                    onWindow = f => { got = true; try { act(f); } catch (Exception ex) { log.Check(false, "exception in the window: " + ex.Message); } };
+                    h.TestSelect(recs);
+                    h.TestQuote(inv);
+                    onWindow = null;
+                    return got;
+                };
+                Func<List<QuoteRecord>, string> codes = recs => string.Join(",", recs.Select(r => string.IsNullOrEmpty(r.InvoiceNo) ? "-" : r.InvoiceNo));
+
+                // 0. the buttons follow the selection
+                h.TestSelect(new List<QuoteRecord> { e1, e2 });
+                log.Check(h.SampleSelected().Count == 2 && h.TestQuoteButtonsOn, "0 two selected: Quote… and Invoice… are on");
+
+                // 1. the plan's example 18 + 14 = 32 -> "Minimum price" 18 -> total 50 (with today's minimum / rounding)
+                double top1;
+                double total1 = Pricing.BillTotal(new[] { 18.0, 14.0 }, minimum, settings.RoundTo, false, out top1);
+                log.Add("INFO expected 18 + 14: top-up " + Num.Kr(top1) + ", total " + Num.Kr(total1));
+                string code1 = "";
+                bool ok = run(new List<QuoteRecord> { e1, e2 }, true, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(f.Text == L.F("Invoice – {0}", "Faktura – {0}", QuoteRows.PrintsText(2)), "1a title \"" + f.Text + "\"");
+                    log.Check(QuotePage.IsGroup(d) && d.Jobs.Count == 2, "1b two job lines");
+                    log.Check(ore(d.GroupTotal) == ore(total1) && ore(total1) >= ore(minimum) && d.TopUpAmount == Num.Kr(top1) &&
+                              d.TopUpLabel == QuoteRows.MinimumLabel(minimum),
+                              "1c 18 + 14: \"" + d.TopUpLabel + "\" " + d.TopUpAmount + ", total " + Num.Kr(d.GroupTotal));
+                    // the lines carry their share of the top-up (the minimum is never shown): 18 / 14 + ShareOre, sum = total
+                    var sh1 = Pricing.ShareOre(new double[] { 18, 14 }, ore(top1));
+                    log.Check(d.Jobs[0].Amount == Num.Kr((1800 + sh1[0]) / 100.0) && d.Jobs[1].Amount == Num.Kr((1400 + sh1[1]) / 100.0) &&
+                              1800 + sh1[0] + 1400 + sh1[1] == ore(d.GroupTotal),
+                              "1d lines 18 / 14 + their top-up share: " + d.Jobs[0].Amount + " / " + d.Jobs[1].Amount + " = total " + Num.Kr(d.GroupTotal));
+                    checkBd("1n", d, new List<QuoteRecord> { e1, e2 });
+                    log.Check(!f.TestActionsOn, "1e no name yet: exports off");
+                    f.TestSetCustomer("Test Kunde");
+                    // issue #6: a cancelled dialog uses no number; the suggested name is "<number> - <name>"
+                    string usedBefore = settings.UsedInvoiceNos ?? "";
+                    cancel = true;
+                    askedName = null;
+                    f.TestExport(QuoteExport.Pdf);
+                    cancel = false;
+                    string cancelledName = askedName;
+                    log.Check(string.IsNullOrEmpty(e1.InvoiceNo) && string.IsNullOrEmpty(e2.InvoiceNo) && (settings.UsedInvoiceNos ?? "") == usedBefore,
+                              "1o combined PDF dialog cancelled: no number used");
+                    log.Check(cancelledName != null && System.Text.RegularExpressions.Regex.IsMatch(cancelledName, @"^\d{4}-[1-9]\d{4} - Test Kunde$"),
+                              "1p the dialog suggested \"" + cancelledName + "\" (number - name)");
+                    string msg = f.TestExport(QuoteExport.Pdf);
+                    log.Check(f.TestInfoKind == InfoKind.Success, "1f PDF: " + msg.Replace("\n", " / "));
+                    code1 = e1.InvoiceNo ?? "";
+                    log.Check(askedName == code1 + " - Test Kunde", "1q saved as \"" + askedName + "\" = the invoice's number " + code1);
+                });
+                log.Check(ok, "1 the combined invoice window opened");
+                log.Check(code1.Length > 0 && e2.InvoiceNo == code1, "1g one shared number: " + codes(new List<QuoteRecord> { e1, e2 }));
+                log.Check(e1.BilledAt == e2.BilledAt && e1.Printed && e2.Printed, "1h same invoice date, Printed on both");
+                log.Check(e1.BilledTo == "Test Kunde" && e2.BilledTo == "Test Kunde" && e1.Customer == "Test Kunde" && e2.Customer == "Test Kunde",
+                          "1i name on both (Customer + BilledTo)");
+                log.Check(ore(e1.OthersPrice) + ore(e2.OthersPrice) == ore(total1), "1j saved prices " + Num.Kr(e1.OthersPrice) + " + " +
+                          Num.Kr(e2.OthersPrice) + " = the total " + Num.Kr(total1));
+                log.Check(ore(e1.InvoiceTopUp) + ore(e2.InvoiceTopUp) == ore(top1), "1k top-up shares " + Num.Kr(e1.InvoiceTopUp) + " + " + Num.Kr(e2.InvoiceTopUp));
+                string pdf1 = Path.Combine(dir, code1 + " - Test Kunde.pdf");
+                log.Check(pdfPages(pdf1) == 1, "1l " + Path.GetFileName(pdf1) + ": " + pdfPages(pdf1) + " page");
+                string copyB = Path.Combine(invDir, code1 + " - Test Kunde.pdf");
+                log.Check(File.Exists(copyB) && sameFile(copyB, pdf1), "1r combined invoice copy: Invoices\\" + Path.GetFileName(copyB) + " = the saved file");
+                string json = "";
+                try { json = File.ReadAllText(History.FilePath); } catch { }
+                log.Check(code1.Length > 0 && json.Contains(code1) && json.Contains("InvoiceTopUp"), "1m history.json has the invoice and InvoiceTopUp");
+
+                // 2. 30 + 25 + 20 = 75: no top-up; Copy text lists every job
+                ok = run(new List<QuoteRecord> { f1, f2, f3 }, true, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(ore(d.GroupTotal) == 7500 && d.TopUpLabel.Length == 0, "2a 30 + 25 + 20: total " + Num.Kr(d.GroupTotal) + ", no minimum line");
+                    checkBd("2e", d, new List<QuoteRecord> { f1, f2, f3 });
+                    f.TestSetCustomer("Test Kunde");
+                    clip = null;
+                    string msg = f.TestExport(QuoteExport.Text);
+                    log.Check(f.TestInfoKind == InfoKind.Success && clip != null && clip.Contains("Bill F1") && clip.Contains("Bill F3") &&
+                              clip.Contains(Num.Kr(75)) && clip.Contains(f1.InvoiceNo ?? "?"), "2b Copy text: every job, total, number (" + msg + ")");
+                });
+                log.Check(ok && f1.InvoiceNo == f2.InvoiceNo && f2.InvoiceNo == f3.InvoiceNo && !string.IsNullOrEmpty(f1.InvoiceNo),
+                          "2c one number " + codes(new List<QuoteRecord> { f1, f2, f3 }));
+                log.Check(ore(f1.OthersPrice) == 3000 && ore(f2.OthersPrice) == 2500 && ore(f3.OthersPrice) == 2000 &&
+                          f1.InvoiceTopUp == 0 && f2.InvoiceTopUp == 0 && f3.InvoiceTopUp == 0, "2d prices unchanged, no shares");
+
+                // 3. live jobs (calculated prices): a quote first (different names, no status box, nothing invoiced), then the invoice
+                double liveTotal = 0;
+                string liveBd = "";
+                ok = run(new List<QuoteRecord> { a, b }, false, f =>
+                {
+                    log.Check(f.TestInfoText.Contains("Lene Hansen") && f.TestInfoText.Contains("Lene H."), "3a different names warned: " + f.TestInfoText.Replace("\n", " / "));
+                    log.Check(f.TestCustomer == "Lene Hansen", "3b name box starts with \"" + f.TestCustomer + "\"");
+                    log.Check(!f.TestStatusShown, "3c no print status box on a combined quote");
+                    var d = f.TestData();
+                    double pa = Pricing.PriceWithoutMinimum(History.ToInput(a), History.SavedSettings(a, settings));
+                    double pb = Pricing.PriceWithoutMinimum(History.ToInput(b), History.SavedSettings(b, settings));
+                    // without their own minimum, plus their share of the bill's one top-up (never shown), adding up to the total
+                    long topOre = Math.Max(0, ore(d.GroupTotal) - ore(pa) - ore(pb));
+                    var sh3 = Pricing.ShareOre(new[] { pa, pb }, topOre);
+                    log.Check(d.Jobs[0].Amount == Num.Kr((ore(pa) + sh3[0]) / 100.0) && d.Jobs[1].Amount == Num.Kr((ore(pb) + sh3[1]) / 100.0) &&
+                              ore(pa) + sh3[0] + ore(pb) + sh3[1] == ore(d.GroupTotal),
+                              "3d lines without their own minimum " + Num.Kr(pa) + " / " + Num.Kr(pb) + " + top-up share: " +
+                              d.Jobs[0].Amount + " / " + d.Jobs[1].Amount + " = total " + Num.Kr(d.GroupTotal) +
+                              " (saved " + Num.Kr(a.OthersPrice) + " / " + Num.Kr(b.OthersPrice) + ")");
+                    log.Check(d.Number == History.QuoteNumber(DateTime.Now) || d.Number.Length == 11, "3e quote number " + d.Number);
+                    log.Check(ore(pa) + ore(pb) < ore(minimum) ? d.TopUpLabel.Length > 0 && ore(d.GroupTotal) >= ore(minimum) : d.TopUpLabel.Length == 0,
+                              "3f top-up " + d.TopUpAmount + ", total " + Num.Kr(d.GroupTotal));
+                    checkBd("3m", d, new List<QuoteRecord> { a, b });
+                    f.TestFriends(true);   // friends price: its own breakdown, no minimum row
+                    var df = f.TestData();
+                    log.Check(df.GroupFriends && df.TopUpAmount.Length == 0, "3n friends: no top-up, total " + Num.Kr(df.GroupTotal));
+                    checkBd("3n", df, new List<QuoteRecord> { a, b });
+                    f.TestFriends(false);
+                    string msg = f.TestExport(QuoteExport.History);
+                    log.Check(f.TestInfoKind == InfoKind.Success, "3g Save to history: " + msg);
+                });
+                log.Check(ok && a.Customer == "Lene Hansen" && b.Customer == "Lene Hansen" && string.IsNullOrEmpty(a.InvoiceNo) && string.IsNullOrEmpty(b.InvoiceNo),
+                          "3h quote: the name on both, no invoice");
+                ok = run(new List<QuoteRecord> { a, b }, true, f =>
+                {
+                    var d = f.TestData();
+                    liveTotal = d.GroupTotal;
+                    liveBd = bdText(d);
+                    string msg = f.TestExport(QuoteExport.Copy);
+                    log.Check(f.TestInfoKind == InfoKind.Success, "3i invoice Copy picture: " + msg.Replace("\n", " / "));
+                    log.Check(f.TestCustomerLocked, "3j name locked once made (box read-only: " + f.TestCustomerLocked + ", name \"" + f.TestCustomer +
+                              "\", invoice " + (a.InvoiceNo ?? "") + " / " + (b.InvoiceNo ?? "") + ", BilledTo \"" + a.BilledTo + "\")");
+                });
+                log.Check(ok && !string.IsNullOrEmpty(a.InvoiceNo) && a.InvoiceNo == b.InvoiceNo, "3k one number " + codes(new List<QuoteRecord> { a, b }));
+                log.Check(ore(a.OthersPrice) + ore(b.OthersPrice) == ore(liveTotal), "3l saved prices " + Num.Kr(a.OthersPrice) + " + " + Num.Kr(b.OthersPrice) +
+                          " = the bill's total " + Num.Kr(liveTotal));
+
+                // 4. opening again: one member opens the whole invoice, same numbers even after the minimum price changed
+                settings.MinimumPrice = minimum + 30;
+                ok = run(new List<QuoteRecord> { a }, true, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(f.Text == L.F("Invoice – {0}", "Faktura – {0}", QuoteRows.PrintsText(2)), "4a one job of it -> \"" + f.Text + "\"");
+                    log.Check(f.TestInfoText.Contains(a.InvoiceNo), "4b says the whole invoice is shown: " + f.TestInfoText.Replace("\n", " / "));
+                    log.Check(f.TestCustomerLocked && f.TestCustomer == "Lene Hansen", "4c kept name, read-only");
+                    log.Check(ore(d.GroupTotal) == ore(liveTotal) && d.InvoiceNo == a.InvoiceNo, "4d same total " + Num.Kr(d.GroupTotal) + " and number " + d.InvoiceNo);
+                    log.Check(bdText(d) == liveBd, "4g same breakdown rows as when it was made (" + bdText(d) + " / then " + liveBd + ")");
+                    checkBd("4h", d, new List<QuoteRecord> { a, b });
+                });
+                log.Check(ok, "4 reopened");
+                ok = run(new List<QuoteRecord> { e1, e2 }, true, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(ore(d.GroupTotal) == ore(total1) && d.TopUpAmount == Num.Kr(top1) && d.TopUpLabel == QuoteRows.MinimumLabel(minimum),
+                              "4e 18 + 14 again: " + d.TopUpLabel + " " + d.TopUpAmount + ", total " + Num.Kr(d.GroupTotal) + " (minimum now " + Num.Kr(settings.MinimumPrice) + ")");
+                    int before = history.Count(r => !string.IsNullOrEmpty(r.InvoiceNo));
+                    string msg = f.TestExport(QuoteExport.Text);
+                    log.Check(f.TestInfoKind == InfoKind.Success && e1.InvoiceNo == code1 && history.Count(r => !string.IsNullOrEmpty(r.InvoiceNo)) == before,
+                              "4f export again keeps " + code1 + " (" + msg + ")");
+                    // the minimum is never shown: the Copy text has no minimum line, each job line = its saved price (top-up share inside)
+                    var have = d.Jobs.Select(j => j.Amount).OrderBy(x => x).ToList();
+                    var saved = new[] { e1, e2 }.Select(r => Num.Kr(r.OthersPrice)).OrderBy(x => x).ToList();
+                    log.Check(clip != null && clip.IndexOf("inimum", StringComparison.OrdinalIgnoreCase) < 0 && clip.Contains(Num.Kr(d.GroupTotal)) &&
+                              saved.All(x => clip.Contains(x)) && have.SequenceEqual(saved),
+                              "4i no minimum shown: job lines " + string.Join(" + ", have) + " = saved prices " + string.Join(" + ", saved) +
+                              ", Copy text without a minimum line");
+                });
+                settings.MinimumPrice = minimum;
+                settings.Save();
+
+                // 5. refused: billed + unbilled, two invoices; a quote of a mix is fine
+                int inv5 = history.Count(r => !string.IsNullOrEmpty(r.InvoiceNo));
+                ok = run(new List<QuoteRecord> { e1, single }, true, f => { });
+                log.Check(!ok && h.TestInfoKind == InfoKind.Warning && h.TestInfo.Contains(code1) && string.IsNullOrEmpty(single.InvoiceNo),
+                          "5a billed + unbilled refused: " + h.TestInfo.Replace("\n", " / "));
+                ok = run(new List<QuoteRecord> { e1, f1 }, true, f => { });
+                log.Check(!ok && h.TestInfoKind == InfoKind.Warning, "5b two invoices refused: " + h.TestInfo.Replace("\n", " / "));
+                ok = run(new List<QuoteRecord> { e1, single }, false, f => { });
+                log.Check(ok && history.Count(r => !string.IsNullOrEmpty(r.InvoiceNo)) == inv5, "5c a quote of the same mix opens, nothing invoiced");
+
+                // 6. failed prints: left off the bill; all failed = nothing opens
+                ok = run(new List<QuoteRecord> { g1, x1, g2 }, true, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(d.Jobs.Count == 2 && f.TestInfoText.Contains(L.S("1 failed print is left off the bill.", "1 fejlet print er udeladt af regningen.")),
+                              "6a failed one left out: " + d.Jobs.Count + " lines, " + f.TestInfoText.Replace("\n", " / "));
+                    checkBd("6d", d, new List<QuoteRecord> { g1, g2 });
+                    f.TestSetCustomer("Test Kunde");
+                    f.TestExport(QuoteExport.Text);
+                });
+                log.Check(ok && !string.IsNullOrEmpty(g1.InvoiceNo) && g1.InvoiceNo == g2.InvoiceNo && string.IsNullOrEmpty(x1.InvoiceNo),
+                          "6b invoice on the two good ones only: " + codes(new List<QuoteRecord> { g1, g2, x1 }));
+                ok = run(new List<QuoteRecord> { x1, x2 }, true, f => { });
+                log.Check(!ok && h.TestInfoKind == InfoKind.Warning, "6c all failed: nothing opens (" + h.TestInfo.Replace("\n", " / ") + ")");
+
+                // 7. delete one job of the 3-job invoice: the others keep their number and prices; reopening shows 2
+                string codeF = f1.InvoiceNo;
+                var sum = History.SummarizeDelete(history, new List<string> { f1.Id });
+                log.Check(sum.OnCombined == 1 && sum.Combined.Count == 1 && sum.Combined[0].Left == 2, "7a delete question knows the combined invoice (" +
+                          sum.OnCombined + " on it, " + (sum.Combined.Count > 0 ? sum.Combined[0].Left : -1) + " left)");
+                h.DoDelete(new List<QuoteRecord> { f1 });
+                log.Check(!history.Contains(f1) && f2.InvoiceNo == codeF && f3.InvoiceNo == codeF && ore(f2.OthersPrice) == 2500 && ore(f3.OthersPrice) == 2000,
+                          "7b others kept " + codeF + " and their prices");
+                ok = run(new List<QuoteRecord> { f2 }, true, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(QuotePage.IsGroup(d) && d.Jobs.Count == 2 && ore(d.GroupTotal) == 4500, "7c reopened: " + (d.Jobs != null ? d.Jobs.Count : 0) +
+                              " prints, total " + Num.Kr(d.GroupTotal));
+                    checkBd("7d", d, new List<QuoteRecord> { f2, f3 });
+                });
+                log.Check(ok, "7 reopened after the delete");
+
+                // 8. job cards side by side (3 a row, as many rows on a page as fit), then one breakdown + total + payment kept
+                // together after the last row, or on the next page with a note under the cards ("…on the next page →") on
+                // every page before it; 3 prints = 1 page when it fits; 4 = all 4 cards on page 1 + the breakdown on page 2
+                Func<string, bool> notesRight = lay =>
+                {
+                    var parts = lay.Split(new[] { " | " }, StringSplitOptions.None);
+                    for (int k = 0; k < parts.Length; k++)
+                    {
+                        bool last = k == parts.Length - 1, note = parts[k].Contains("+note"), tot = parts[k].EndsWith("+total");
+                        if (last ? (!tot || note) : (tot || !note)) return false;
+                    }
+                    return true;
+                };
+                foreach (int cnt in new[] { 3, 4 })
+                {
+                    var some = pages.Take(cnt).ToList();
+                    foreach (bool inv in new[] { false, true })
+                    {
+                        var dq = BuildGroupQuote(some, false, "Test Kunde", inv, null, DateTime.Now);
+                        bool fitsN;
+                        string layN = QuotePage.PageLayout(dq, out fitsN);
+                        // 3: one page, or (a long breakdown) the cards + note, then the breakdown page
+                        bool okN = fitsN && notesRight(layN) &&
+                                   (cnt <= 3 ? layN == "0-3+total" || layN == "0-3+note | 3-3+total" : layN == "0-4+note | 4-4+total");
+                        log.Check(okN, "8g " + cnt + " prints (" + (inv ? "invoice" : "quote") + ") = " + QuotePage.PageCount(dq) +
+                                  " A4 page(s): " + layN);
+                    }
+                }
+                ok = run(pages, false, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(QuotePage.PageCount(d) == 2, "8a 12 prints = " + QuotePage.PageCount(d) + " A4 pages");
+                    checkBd("8e", d, pages);
+                    bool fits;
+                    string lay = QuotePage.PageLayout(d, out fits);
+                    log.Check(fits && notesRight(lay) && lay == "0-9+note | 9-12+total",
+                              "8f 3 rows of cards + the note on page 1, the last row + breakdown + total + payment on page 2: " + lay);
+                    f.TestSetCustomer("Test Kunde");
+                    string msg = f.TestExport(QuoteExport.Pdf);
+                    log.Check(f.TestInfoKind == InfoKind.Success, "8b PDF: " + msg.Replace("\n", " / "));
+                });
+                string pdf12 = Path.Combine(dir, QuoteRows.GroupFileName(DateTime.Now, 12, "Test Kunde") + ".pdf");
+                int n12 = pdfPages(pdf12);
+                string pdfText = "";
+                try { pdfText = System.Text.Encoding.ASCII.GetString(File.ReadAllBytes(pdf12)); } catch { }
+                log.Check(ok && n12 == 2 && pdfText.Contains("/Count 2"), "8c " + Path.GetFileName(pdf12) + ": " + n12 + " pages");
+                log.Check(pages.All(r => string.IsNullOrEmpty(r.InvoiceNo) && r.Customer == "Test Kunde"), "8d quote: names on all 12, no invoice");
+                log.Check(!File.Exists(Path.Combine(invDir, Path.GetFileName(pdf12))) &&
+                          (!Directory.Exists(invDir) || !Directory.GetFiles(invDir).Any(p => Path.GetFileName(p).Contains(QuoteRows.PrintsText(12)))),
+                          "8g a combined quote PDF keeps the date name and gets no invoice copy");
+
+                // 9. one job = the single-job invoice as before (own minimum, no share)
+                ok = run(new List<QuoteRecord> { single }, true, f =>
+                {
+                    var d = f.TestData();
+                    log.Check(f.Text == L.F("Invoice – {0}", "Faktura – {0}", "Bill single") && !QuotePage.IsGroup(d), "9a single window \"" + f.Text + "\"");
+                    log.Check(d.Breakdown != null && ore(d.Breakdown.Total) == ore(singlePrice), "9b its saved price " + Num.Kr(singlePrice));
+                    bool fits1;
+                    log.Check(QuotePage.PageCount(d) == 1 && QuotePage.PageLayout(d, out fits1) == "single" && d.Breakdown.Lines.Sum(l => l.Ore) == ore(singlePrice),
+                              "9h single page with its own breakdown (rows sum to its price)");
+                    f.TestSetCustomer("Test Kunde");
+                    string msg = f.TestExport(QuoteExport.Pdf);
+                    log.Check(f.TestInfoKind == InfoKind.Success, "9c PDF: " + msg.Replace("\n", " / "));
+                    log.Check(f.TestCustomerLocked, "9g single: name locked once made (read-only: " + f.TestCustomerLocked + ", name \"" + f.TestCustomer + "\")");
+                });
+                string pdfS = Path.Combine(dir, (single.InvoiceNo ?? "") + " - Test Kunde.pdf");
+                log.Check(ok && !string.IsNullOrEmpty(single.InvoiceNo) && single.InvoiceTopUp == 0 && ore(single.OthersPrice) == ore(singlePrice) &&
+                          pdfPages(pdfS) == 1, "9d single invoice " + single.InvoiceNo + ": price unchanged, no share, " + pdfPages(pdfS) + " page");
+                string copyS = Path.Combine(invDir, (single.InvoiceNo ?? "") + " - Test Kunde.pdf");
+                log.Check(File.Exists(copyS) && sameFile(copyS, pdfS), "9i single invoice copy: Invoices\\" + Path.GetFileName(copyS));                log.Check(History.InvoiceGroup(history, single.InvoiceNo).Count == 1, "9e its number is on that job only");
+                log.Check(asked.Count == 1 && ReferenceEquals(asked[0], single), "9f History handed over the selected record");
+            }
+            catch (Exception ex) { log.Check(false, "exception: " + ex); }
+            finally
+            {
+                testRecordsForm = null;
+                testClipboard = null;
+                testExportPath = null;
+                if (hist != null) { try { hist.Close(); hist.Dispose(); } catch { } }
+            }
+            try { File.WriteAllLines(Path.Combine(dir, "test_bill.txt"), log.Lines); } catch { }
             Program.EndTestRun(log.Ok ? 0 : 4);
         }
 
@@ -4296,7 +5387,7 @@ namespace PrintPrice
             historyProblem = null;   // shown once
             using (var dlg = new HistoryForm(history, problem, offline))
             {
-                dlg.QuoteRequested = (owner, rec, invoice) => ShowRecordQuote(owner, rec, invoice);
+                dlg.QuoteRequested = (owner, recs, invoice) => ShowRecordsQuote(owner, recs, invoice);
                 dlg.Settings = settings;   // printer names (Printer column / filter with 2+ printers)
                 // Backup…: the Restore tab first while the history is empty (a new PC)
                 dlg.BackupRequested = owner =>
