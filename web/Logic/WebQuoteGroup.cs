@@ -248,8 +248,22 @@ namespace PrintPrice.Web
                 d.PayMobilePay = (inv.MobilePay ?? "").Trim();
                 d.PayBank = (inv.Bank ?? "").Trim();
                 d.Name = (inv.FromName ?? "").Trim();
+                d.PaidAt = made ? PaidAll(jobs) : DateTime.MinValue;   // paid-tick
             }
             return d;
+        }
+
+        /// Paid-tick: the latest paid date when every job is marked paid (= InvoiceRow.Paid / PaidAt), else MinValue.
+        public static DateTime PaidAll(IList<QuoteRecord> jobs)
+        {
+            DateTime latest = DateTime.MinValue, p;
+            if (jobs == null || jobs.Count == 0) return latest;
+            foreach (var j in jobs)
+            {
+                if (!History.PaidOn(j, out p)) return DateTime.MinValue;
+                if (p > latest) latest = p;
+            }
+            return latest;
         }
 
         // ---------- exports (MainForm.ExportGroup without the file part) ----------

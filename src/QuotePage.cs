@@ -43,6 +43,7 @@ namespace PrintPrice
         public bool Invoice;
         public string InvoiceNo = "";     // History.MakeInvoice / NextInvoiceNo ("2026-48213": year + 5 random digits); Date = the invoice date
         public DateTime Due;              // AppSettings.InvoiceDue(Date)
+        public string PaidLine = "";      // paid-tick: History.PaidText ("Paid 05-11-2026 – thank you") instead of "Please pay by …"; "" = unpaid
         public string PayMobilePay = "";  // AppSettings.PayMobilePay ("" = no line)
         public string PayBank = "";       // AppSettings.PayBank ("" = no line)
         // combined bill (History: 2+ jobs on one quote / invoice; MainForm.BuildGroupQuote): Jobs with 2+ entries replaces the
@@ -576,7 +577,7 @@ namespace PrintPrice
                     using (var br = new SolidBrush(p.Stripe)) g.FillRectangle(br, L0, y + 12, 8, 86);
                 }
                 T(L.S("Total", "I alt"), F(26, true), p.Ink, 80, y + 22, 0, near);
-                T(d.Invoice ? L.F("Please pay by {0}", "Betales senest {0}", LongDate(d.Due)) : L.S("Shipping not included", "Fragt er ikke inkluderet"),
+                T(d.Invoice ? PayLine(d) : L.S("Shipping not included", "Fragt er ikke inkluderet"),
                   F(16, false), p.Muted, 80, y + 62, 0, near);
                 T(Num.Kr(d.Breakdown.Total), F(56, true), p.Total, 420, y + 14, 510, far);
                 y += compact ? 128 : 140;
@@ -587,6 +588,7 @@ namespace PrintPrice
                     var pay = new List<string>();
                     if (!string.IsNullOrEmpty(d.PayMobilePay)) pay.Add("MobilePay: " + d.PayMobilePay);
                     if (!string.IsNullOrEmpty(d.PayBank)) pay.Add(L.S("Bank: ", "Bank: ") + d.PayBank);
+                    if (!string.IsNullOrEmpty(d.PaidLine)) pay.Clear();   // paid-tick: a paid invoice has no Payment block
                     if (pay.Count > 0)
                     {
                         T(L.S("Payment", "Betaling"), F(19, true), p.Ink, L0 + 3, y, 0, near);
@@ -752,7 +754,7 @@ namespace PrintPrice
                 }
                 T(L.S("Total", "I alt") + " · " + QuoteRows.PrintsText(d.Jobs.Count), F(26, true), p.Ink, 80, y + 22, 340, near);
                 // small line: the job prices "34,08 + 8,89 + 7,03 · please pay by …" when that fits left of the total
-                string small = d.Invoice ? L.F("Please pay by {0}", "Betales senest {0}", LongDate(d.Due)) : L.S("Shipping not included", "Fragt er ikke inkluderet");
+                string small = d.Invoice ? PayLine(d) : L.S("Shipping not included", "Fragt er ikke inkluderet");
                 string total = Num.Kr(d.GroupTotal);
                 float smallW = 900 - 80 - 30 - g.MeasureString(total, F(56, true)).Width;
                 var sums = new List<string>();
@@ -768,6 +770,7 @@ namespace PrintPrice
                     var pay = new List<string>();
                     if (!string.IsNullOrEmpty(d.PayMobilePay)) pay.Add("MobilePay: " + d.PayMobilePay);
                     if (!string.IsNullOrEmpty(d.PayBank)) pay.Add(L.S("Bank: ", "Bank: ") + d.PayBank);
+                    if (!string.IsNullOrEmpty(d.PaidLine)) pay.Clear();   // paid-tick: a paid invoice has no Payment block
                     if (pay.Count > 0)
                     {
                         T(L.S("Payment", "Betaling"), F(19, true), p.Ink, L0 + 3, y, 0, near);
@@ -960,6 +963,13 @@ namespace PrintPrice
         }
 
         static string LongDate(DateTime t) { return QuoteRows.LongDate(t); }
+
+        /// The invoice's line under the total: "Paid 05-11-2026 – thank you" once marked paid (paid-tick), else "Please pay by …".
+        static string PayLine(QuoteData d)
+        {
+            if (!string.IsNullOrEmpty(d.PaidLine)) return d.PaidLine;
+            return L.F("Please pay by {0}", "Betales senest {0}", LongDate(d.Due));
+        }
 
         static GraphicsPath RoundRect(float x, float y, float w, float h, float r)
         {

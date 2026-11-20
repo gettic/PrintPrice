@@ -28,6 +28,7 @@ namespace PrintPrice.Web
             public QuoteBreakdown Breakdown;
             public bool Invoice;
             public string InvoiceNo = "", PayMobilePay = "", PayBank = "";
+            public DateTime PaidAt = DateTime.MinValue;   // paid-tick: a made invoice marked paid (MinValue = not paid)
             // combined bill (2+ Jobs, WebQuoteGroup.cs = QuoteData's group fields): cards, summary, the whole bill's
             // Breakdown (History.GroupBreakdown; MaterialNames / MaterialColours by its Materials), its total
             public List<Card> Jobs;
@@ -143,6 +144,8 @@ namespace PrintPrice.Web
                 d.PayBank = (inv.Bank ?? "").Trim();
                 d.Name = (inv.FromName ?? "").Trim();
                 if (made) d.Customer = (inv.BilledTo ?? "").Trim();   // a made invoice keeps the name it was made out to
+                DateTime paid;
+                if (made && History.PaidOn(r, out paid)) d.PaidAt = paid;   // paid-tick: "Paid 05-11-2026 – thank you"
             }
             return d;
         }
@@ -363,6 +366,7 @@ namespace PrintPrice.Web
 
         public static string TotalNote(Sheet d)
         {
+            if (d.Invoice && d.PaidAt != DateTime.MinValue) return History.PaidText(d.PaidAt);   // paid-tick
             return d.Invoice ? L.F("Please pay by {0}", "Betales senest {0}", QuoteRows.LongDate(d.Due))
                              : L.S("Shipping not included", "Fragt er ikke inkluderet");
         }
@@ -371,6 +375,7 @@ namespace PrintPrice.Web
         public static List<string> PayLines(Sheet d)
         {
             var pay = new List<string>();
+            if (d.PaidAt != DateTime.MinValue) return pay;   // paid-tick: a paid invoice hides the Payment block (= the desktop)
             if (!string.IsNullOrEmpty(d.PayMobilePay)) pay.Add("MobilePay: " + d.PayMobilePay);
             if (!string.IsNullOrEmpty(d.PayBank)) pay.Add(L.S("Bank: ", "Bank: ") + d.PayBank);
             return pay;

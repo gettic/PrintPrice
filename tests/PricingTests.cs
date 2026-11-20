@@ -2208,6 +2208,9 @@ namespace PrintPrice.Tests
             // 7. error texts
             True("BedErrorText A1M", Has(BambuSlicer.BedErrorText("A1M"), "Bambu Lab A1 mini", "180 × 180 × 180 mm", "plate in the file is empty"));
             True("BedErrorText P1S", Has(BambuSlicer.BedErrorText("P1S"), "256 × 256 × 250 mm"));
+            True("BedErrorText A1 points to Scale…", Has(BambuSlicer.BedErrorText("A1"), "Scale…"));
+            True("SliceException.IsBedError: -50 yes; -100 / 0 / message only no", new SliceException("m", -50, null).IsBedError
+                 && !new SliceException("m", -100, null).IsBedError && !new SliceException("m", 0, null).IsBedError && !new SliceException("m").IsBedError);
             True("BedErrorText \"\" -> A1", Has(BambuSlicer.BedErrorText(""), "Bambu Lab A1", "256 × 256 × 256 mm"));
             True("SliceErrorText -50 = BedErrorText", BambuSlicer.SliceErrorText(-50, "a.stl", "One of the plate is empty…", "A1M")
                  == BambuSlicer.BedErrorText("A1M"));
@@ -2220,6 +2223,7 @@ namespace PrintPrice.Tests
             try
             {
                 True("BedErrorText A1M Danish", Has(BambuSlicer.BedErrorText("A1M"), "byggepladen"));
+                True("BedErrorText A1 Danish points to Skalér…", Has(BambuSlicer.BedErrorText("A1"), "Skalér…"));
                 True("UnsupportedPrinterText Danish", Has(BambuSlicer.UnsupportedPrinterText("X"), "https://github.com/gettic/PrintPrice/issues", "endnu"));
             }
             finally { L.Danish = false; }
@@ -3679,6 +3683,7 @@ namespace PrintPrice.Tests
             TowerHistoryTests();
             TowerSlicerTests();
             InvoiceListTests();
+            PaidTests();
             CombinedBillTests();
             ReviewFixTests();
             SettingsSafeTests();
@@ -5323,6 +5328,185 @@ namespace PrintPrice.Tests
                  && BambuSlicer.CanScale(@"C:\x\a.3mf") && !BambuSlicer.CanScale(""));
             True("ReadAsSliced: .gcode read at 100 %, not at 150 % (SliceFile refuses the scale); missing .stl not", BambuSlicer.ReadAsSliced(@"C:\x\a.gcode", 100)
                  && !BambuSlicer.ReadAsSliced(@"C:\x\a.gcode", 150) && !BambuSlicer.ReadAsSliced(@"C:\x\no-such-file.stl", 150));
+            TooSmallTests();
+            SlicedOffBedTests();
+        }
+
+        // ---------- paid-tick (plans\paid-tick part A): QuoteRecord.PaidAt, SetPaid, InvoiceRow.Paid, Payment filter, UnpaidSummary ----------
+
+        static void PaidTests()
+        {
+            var now = new DateTime(2026, 11, 20, 12, 0, 0);
+            // JSON: PaidAt always written ("" = unpaid); both save back byte-identical; old records unpaid
+            var u = Inv(now.AddDays(-5), "2026-11111", "2026-11-18 10:00:00", "2026-12-02", 72.72);
+            var p = Inv(now.AddDays(-5), "2026-44444", "2026-10-18 10:00:00", "2026-11-01", 40.00); p.PaidAt = "2026-11-05";
+            string ju = History.ToJson(new List<QuoteRecord> { u }), jp = History.ToJson(new List<QuoteRecord> { p });
+            True("Paid JSON: unpaid \"PaidAt\":\"\", paid \"PaidAt\":\"2026-11-05\"", ju.Contains("\"PaidAt\":\"\"") && jp.Contains("\"PaidAt\":\"2026-11-05\""));
+            // an unpaid record's text differs from the paid one only in the PaidAt value (nothing else moves)
+            var u2 = History.ParseJson(ju)[0]; u2.PaidAt = "2026-11-05";
+            True("Paid JSON: ticking changes only the PaidAt value", History.ToJson(new List<QuoteRecord> { u2 }) == ju.Replace("\"PaidAt\":\"\"", "\"PaidAt\":\"2026-11-05\""));
+            var bu = History.ParseJson(ju); var bp = History.ParseJson(jp);
+            True("Paid JSON: round trip byte-identical, unpaid / paid 05-11-2026", History.ToJson(bu) == ju && History.ToJson(bp) == jp
+                 && !History.IsPaid(bu[0]) && bu[0].PaidAt == "" && History.IsPaid(bp[0]) && bp[0].PaidAt == "2026-11-05");
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"InvoiceNo\":\"2026-K7Q4\"}]}");
+            True("Paid: old invoice without the key = unpaid, saved back with \"PaidAt\":\"\"", old[0].PaidAt == "" && !History.IsPaid(old[0])
+                 && History.ToJson(old).Contains("\"PaidAt\":\"\""));
+            // clean-up: unreadable / no invoice number -> unpaid; spaces trimmed
+            var cl = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"InvoiceNo\":\"2026-1\",\"PaidAt\":\"soon\"},"
+                                       + "{\"Id\":\"b\",\"PaidAt\":\"2026-11-05\"},{\"Id\":\"c\",\"InvoiceNo\":\"2026-2\",\"PaidAt\":\" 2026-11-05 \"},{\"Id\":\"d\",\"InvoiceNo\":\"2026-3\",\"PaidAt\":null}]}");
+            True("Paid clean-up: bad date / no invoice / null -> \"\", \" 2026-11-05 \" trimmed", cl[0].PaidAt == "" && cl[1].PaidAt == "" && cl[2].PaidAt == "2026-11-05"
+                 && cl[3].PaidAt == "");
+            True("Paid: CopyQuotes keeps it", History.CopyQuotes(new List<QuoteRecord> { p })[0].PaidAt == "2026-11-05");
+            DateTime pd;
+            True("PaidOn: 05-11-2026; unpaid / null false", History.PaidOn(p, out pd) && pd == new DateTime(2026, 11, 5) && !History.PaidOn(u, out pd) && !History.PaidOn(null, out pd));
+
+            // SetPaid on a combined invoice (3 jobs, one with spaces around the number); a job already paid keeps its date
+            var b1 = Inv(now.AddDays(-4), "2026-22222", "2026-11-19 09:00:00", "2026-11-19", 10.10);
+            var b2 = Inv(now.AddDays(-3), "2026-22222", "2026-11-19 09:00:00", "2026-11-19", 20.20);
+            var b3 = Inv(now.AddDays(-2), " 2026-22222 ", "2026-11-19 09:00:00", "2026-11-19", 30.30);
+            var other = HistRecord(now);
+            var list = new List<QuoteRecord> { b3, other, u, b1, p, b2 };
+            b2.PaidAt = "2026-11-19";
+            True("SetPaid: 2 of 3 jobs change (one already paid keeps 19-11), others untouched", History.SetPaid(list, "2026-22222", true, now) == 2
+                 && b1.PaidAt == "2026-11-20" && b3.PaidAt == "2026-11-20" && b2.PaidAt == "2026-11-19" && u.PaidAt == "" && other.PaidAt == "");
+            True("SetPaid: again = 0; unknown / empty number = 0", History.SetPaid(list, "2026-22222", true, now) == 0
+                 && History.SetPaid(list, "2026-99999", true, now) == 0 && History.SetPaid(list, "", true, now) == 0 && History.SetPaid(null, "x", true, now) == 0);
+            var rows = History.Invoices(list, now);
+            var B = rows.Find(x => x.No == "2026-22222");
+            True("Invoices: combined all paid -> Paid, PaidAt = latest 20-11, not overdue though past due", B.Paid && B.PaidAt == new DateTime(2026, 11, 20)
+                 && !B.Overdue(now));
+            True("SetPaid off: 3 jobs unpaid (case / spaces ignored)", History.SetPaid(list, " 2026-22222", false, now) == 3 && b1.PaidAt == "" && b2.PaidAt == "" && b3.PaidAt == "");
+            b1.PaidAt = "2026-11-20";   // only one of three paid
+            rows = History.Invoices(list, now);
+            B = rows.Find(x => x.No == "2026-22222");
+            var A = rows.Find(x => x.No == "2026-11111");
+            var P = rows.Find(x => x.No == "2026-44444");
+            True("Invoices: 1 of 3 paid = unpaid, overdue (due 19-11); A unpaid not due; P paid 05-11 not overdue", !B.Paid && B.PaidAt == DateTime.MinValue && B.Overdue(now)
+                 && !A.Paid && !A.Overdue(now) && P.Paid && P.PaidAt == new DateTime(2026, 11, 5) && !P.Overdue(now));
+            // Payment filter (rows newest first: B 19-11, A 18-11, P 18-10)
+            Func<int, string> pay = delegate(int payment)
+            {
+                var hits = new List<string>();
+                foreach (var r in rows)
+                    if (History.InvoiceMatches(r, "", History.InvoiceStatusAll, DateTime.MinValue, DateTime.MaxValue, payment, now)) hits.Add(r.No);
+                return string.Join(",", hits);
+            };
+            True("Payment filter: all / unpaid / overdue / paid", pay(History.PaymentAll) == "2026-22222,2026-11111,2026-44444"
+                 && pay(History.PaymentUnpaid) == "2026-22222,2026-11111" && pay(History.PaymentOverdue) == "2026-22222" && pay(History.PaymentPaid) == "2026-44444");
+            True("Payment filter: search still applies", !History.InvoiceMatches(B, "nothing", History.InvoiceStatusAll, DateTime.MinValue, DateTime.MaxValue, History.PaymentAll, now));
+            // unpaid: B 10,10 + 20,20 + 30,30 = 60,60 and A 72,72 = 133,32 kr., 2 invoices, 1 overdue
+            var us = History.UnpaidSummary(rows, now);
+            True("UnpaidSummary: 2 invoices, 133,32 kr., 1 overdue", us.Count == 2 && Math.Abs(us.Total - 133.32) < 1e-9 && us.Overdue == 1);
+            var none = History.UnpaidSummary(null, now);
+            True("UnpaidSummary: null -> 0", none.Count == 0 && none.Total == 0 && none.Overdue == 0);
+
+            // re-issuing an invoice keeps its paid date
+            var ri = HistRecord(now);
+            var rl = new List<QuoteRecord> { ri };
+            string no = History.MakeInvoice(rl, ri, now, new AppSettings());
+            History.SetPaid(rl, no, true, now);
+            string no2 = History.MakeInvoice(rl, ri, now.AddDays(1), new AppSettings());
+            True("Re-issue keeps the number and PaidAt 20-11", no2 == no && ri.PaidAt == "2026-11-20");
+
+            // backup: merge fills only when unpaid here; replace takes the backup's
+            var theirs = BRec("P", "2026-11-20 12:00:00"); theirs.InvoiceNo = "2026-55555"; theirs.BilledAt = "2026-11-20 12:00:00"; theirs.PaidAt = "2026-11-10";
+            var mine = BRec("P", "2026-11-20 12:00:00"); mine.InvoiceNo = "2026-55555"; mine.BilledAt = "2026-11-20 12:00:00";
+            var res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Paid merge: unpaid here -> 10-11 from the backup", res.Quotes[0].PaidAt == "2026-11-10");
+            var mine2 = BRec("P", "2026-11-20 12:00:00"); mine2.InvoiceNo = "2026-55555"; mine2.BilledAt = "2026-11-20 12:00:00"; mine2.PaidAt = "2026-11-01";
+            res = History.Combine(new List<QuoteRecord> { mine2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Paid merge: paid 01-11 here stays", res.Quotes[0].PaidAt == "2026-11-01");
+            var unpaidBackup = BRec("P", "2026-11-20 12:00:00"); unpaidBackup.InvoiceNo = "2026-55555"; unpaidBackup.BilledAt = "2026-11-20 12:00:00";
+            res = History.Combine(new List<QuoteRecord> { mine2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { unpaidBackup } }, true, false);
+            True("Paid restore (replace): the backup's unpaid wins", res.Quotes.Count == 1 && res.Quotes[0].PaidAt == "");
+
+            // the PDF line
+            bool wasDanish = L.Danish;
+            try
+            {
+                L.Danish = false;
+                True("PaidText EN", History.PaidText(new DateTime(2026, 11, 5)) == "Paid 05-11-2026 – thank you");
+                L.Danish = true;
+                True("PaidText DA", History.PaidText(new DateTime(2026, 11, 5)) == "Betalt 05-11-2026 – tak");
+            }
+            finally { L.Danish = wasDanish; }
+        }
+
+        // ---------- off the plate after slicing (plans\too-small): BambuSlicer.SlicedOffBed; samples tests\gcode-samples\results ----------
+
+        static void SlicedOffBedTests()
+        {
+            double nan = double.NaN;
+            True("SlicedOffBed: A1 321,75 × 321,75 × 240 (Benchy 500 %) yes", BambuSlicer.SlicedOffBed("A1", nan, nan, 321.75, 321.75, 240));
+            // 2,0 + 252,0 = 254,0 <= 256; 62,9 + 130,2 = 193,1
+            True("SlicedOffBed: A1 at 2,0 / 62,9, 252,0 × 130,2 × 201,6 no", !BambuSlicer.SlicedOffBed("A1", 2.0, 62.9, 252.0, 130.2, 201.6));
+            True("SlicedOffBed: A1 from x -18,5 yes; -0,4 no (0,5 mm slack)", BambuSlicer.SlicedOffBed("A1", -18.5, 50, 100, 100, 100)
+                 && !BambuSlicer.SlicedOffBed("A1", -0.4, 0, 100, 100, 10));
+            // 200 + 60 = 260 > 256 + 0,5
+            True("SlicedOffBed: A1 at x 200, 60 wide yes", BambuSlicer.SlicedOffBed("A1", 200, 10, 60, 50, 10));
+            // A1 mini 180: 10 + 175 = 185 > 180,5 yes; 2 + 175 = 177 no
+            True("SlicedOffBed: A1 mini 10 + 175 yes, 2 + 175 no", BambuSlicer.SlicedOffBed("A1M", 10, 10, 175, 50, 10) && !BambuSlicer.SlicedOffBed("A1M", 2, 10, 175, 50, 10));
+            True("SlicedOffBed: P1S 251 mm high (max 250) yes", BambuSlicer.SlicedOffBed("P1S", nan, nan, 100, 100, 251));
+            True("SlicedOffBed: unknown size (0) no", !BambuSlicer.SlicedOffBed("A1", 0, 0, 0, 10, 10));
+
+            // result.json: two plates of 150 × 150 × 3 (plate 2 at x 360,2 = the plate grid, size check only) -> fits
+            string dir = System.IO.Path.Combine(GcodeDir(), "results");
+            string two = System.IO.File.ReadAllText(System.IO.Path.Combine(dir, "two_plates_result.json"));
+            True("SlicedOffBed(stats): two plates 150 × 150 fit (plate 2's x 360 not a position)", !BambuSlicer.SlicedOffBed("A1", BambuSlicer.ParseSliceResult(two)));
+            string wide = two.Replace("\"width\": 149.99998474121094", "\"width\": 300");
+            True("SlicedOffBed(stats): plate 2 300 wide -> yes (sample edited)", wide != two && BambuSlicer.SlicedOffBed("A1", BambuSlicer.ParseSliceResult(wide)));
+            string big = System.IO.File.ReadAllText(System.IO.Path.Combine(dir, "benchy_500_result.json"));
+            True("SlicedOffBed(stats): Benchy 500 % (321,75 mm from x -18,5) yes", BambuSlicer.SlicedOffBed("A1", BambuSlicer.ParseSliceResult(big)));
+            True("SlicedOffBed(stats): null no", !BambuSlicer.SlicedOffBed("A1", (SliceStats)null));
+        }
+
+        // ---------- too small to print (plans\too-small): -100 "Failed slicing the model" on a scaled-down job ----------
+
+        static void TooSmallTests()
+        {
+            const string failed = "Failed slicing the model. Please verify the slicing of all plates on Orca Slicer before uploading.";
+            True("IsFailedSlice: -100 / 0 + \"Failed slicing the model\" yes", BambuSlicer.IsFailedSlice(-100, null) && BambuSlicer.IsFailedSlice(0, failed));
+            True("IsFailedSlice: 0 / 0 boom / -50 with the text / -17 no", !BambuSlicer.IsFailedSlice(0, null) && !BambuSlicer.IsFailedSlice(0, "boom")
+                 && !BambuSlicer.IsFailedSlice(-50, failed) && !BambuSlicer.IsFailedSlice(-17, null));
+            True("IsTooSmallFailure: -100 at 20 % and at 100 × 100 × 50 % yes", BambuSlicer.IsTooSmallFailure(-100, "x", ScaleXyz.Uniform(20))
+                 && BambuSlicer.IsTooSmallFailure(-100, "x", new ScaleXyz(100, 100, 50)));
+            True("IsTooSmallFailure: -100 at 100 % / 150 % / None / null no", !BambuSlicer.IsTooSmallFailure(-100, "x", ScaleXyz.Uniform(100))
+                 && !BambuSlicer.IsTooSmallFailure(-100, "x", ScaleXyz.Uniform(150)) && !BambuSlicer.IsTooSmallFailure(-100, "x", ScaleXyz.None)
+                 && !BambuSlicer.IsTooSmallFailure(-100, "x", null));
+            True("IsTooSmallFailure: -50 / -61 / -6 at 20 % no", !BambuSlicer.IsTooSmallFailure(-50, "x", ScaleXyz.Uniform(20))
+                 && !BambuSlicer.IsTooSmallFailure(-61, "x", ScaleXyz.Uniform(20)) && !BambuSlicer.IsTooSmallFailure(-6, "x", ScaleXyz.Uniform(20)));
+            True("IsTooSmallFailure(exception): null no, (m, -100, x) at 20 % yes, plain message no",
+                 !BambuSlicer.IsTooSmallFailure((SliceException)null, ScaleXyz.Uniform(20))
+                 && BambuSlicer.IsTooSmallFailure(new SliceException("m", -100, "x"), ScaleXyz.Uniform(20))
+                 && !BambuSlicer.IsTooSmallFailure(new SliceException("m"), ScaleXyz.Uniform(20)));
+            True("IsSmallSize: 9,9 / 9,94 yes; 9,96 / 10 / unknown / NaN no", BambuSlicer.IsSmallSize(20, 20, 9.9) && BambuSlicer.IsSmallSize(20, 20, 9.94)
+                 && !BambuSlicer.IsSmallSize(20, 20, 9.96) && !BambuSlicer.IsSmallSize(20, 20, 10) && !BambuSlicer.IsSmallSize(0, 5, 5)
+                 && !BambuSlicer.IsSmallSize(double.NaN, 5, 5));
+            bool wasDanish = L.Danish;
+            try
+            {
+                // 60 × 31 × 48 mm at 20 % = 12,0 × 6,2 × 9,6 mm
+                L.Danish = false;
+                True("TooSmallText EN with size", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 60, 31, 48) ==
+                     "Too small to print at 20 %: the model would be only 12,0 × 6,2 × 9,6 mm, and its thinnest parts vanish when sliced. Try a bigger size.");
+                const string noSizeEn = "Too small to print at 20 %: the thinnest parts vanish when sliced. Try a bigger size.";
+                True("TooSmallText EN unknown size (0 / NaN)", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 0, 31, 48) == noSizeEn
+                     && BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), double.NaN, 31, 48) == noSizeEn);
+                // 20 × 20 × 10 at 100 × 100 × 50 % = 20,0 × 20,0 × 5,0 mm
+                string xyz = BambuSlicer.TooSmallText(new ScaleXyz(100, 100, 50), 20, 20, 10);
+                True("TooSmallText X/Y/Z: \"100 × 100 × 50 %\", \"20,0 × 20,0 × 5,0 mm\"", xyz.Contains("100 × 100 × 50 %") && xyz.Contains("20,0 × 20,0 × 5,0 mm"));
+                True("SliceErrorText -100 EN = plain too-thin text", BambuSlicer.SliceErrorText(-100, "a.stl", failed, "A1")
+                     == "Bambu Studio could not slice a.stl: parts of the model are too thin to print, or the model is damaged.");
+                L.Danish = true;
+                True("TooSmallText DA with size", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 60, 31, 48) ==
+                     "For lille til at printe ved 20 %: modellen ville kun være 12,0 × 6,2 × 9,6 mm, og de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.");
+                const string noSizeDa = "For lille til at printe ved 20 %: de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.";
+                True("TooSmallText DA unknown size (0 / NaN)", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 0, 31, 48) == noSizeDa
+                     && BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), double.NaN, 31, 48) == noSizeDa);
+                True("SliceErrorText -100 DA = plain too-thin text", BambuSlicer.SliceErrorText(-100, "a.stl", failed, "A1")
+                     == "Bambu Studio kunne ikke slice a.stl: dele af modellen er for tynde til at printe, eller modellen er beskadiget.");
+            }
+            finally { L.Danish = wasDanish; }
         }
 
         // ---------- issue #7 part 2: Invoices window helpers (History.Invoices / InvoiceMatches / InvoicePeriod / AgeText) ----------

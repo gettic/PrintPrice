@@ -559,3 +559,11 @@ table.hist td.stcol { position: relative; white-space: nowrap; }
 /* the live price's source credit (elprisenligenu.dk) */
 .power-credit { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
 .power-credit a { color: var(--muted); }
+
+/* paid-tick: the Invoice cell's tick, the phone chip and sheet button (green = paid) */
+.paidbtn { margin-left: 6px; padding: 1px 9px; height: 22px; font-size: 12px; line-height: 1; border: 1px solid var(--border); border-radius: 10px;
+    background: transparent; color: var(--muted); vertical-align: middle; }
+.paidbtn:hover { background: var(--hot-back); color: var(--text); }
+.paidbtn.on, .chip.paidchip.on { color: var(--friends); border-color: color-mix(in srgb, var(--friends) 45%, var(--back)); }
+.paidsheet.on { color: var(--friends); }
+.sheet .paidsheet { grid-column: 1 / -1; }

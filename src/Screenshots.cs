@@ -52,6 +52,8 @@ namespace PrintPrice
                     using (var sw = main.SampleScaleWindow("150")) if (sw != null) SnapForm(sw, folder, "scale.png");
                     using (var sw = main.SampleScaleWindow("500")) if (sw != null) SnapForm(sw, folder, "scale_toobig.png");
                     using (var sw = main.SampleScaleWindow("5")) if (sw != null) SnapForm(sw, folder, "scale_bad.png");
+                    // too small: Benchy at 20 % (12 × 6,2 × 9,6 mm): the soft muted note under the boxes, Apply still on
+                    using (var sw = main.SampleScaleWindow("20")) if (sw != null) SnapForm(sw, folder, "scale_small.png");
                     // step 2: X / Y / Z (the lock off, 150 × 100 × 50 %), a height typed in mm (36 mm = 75 %), a STEP job
                     // (the lock forced on, its note), a typed mm too big for 500 %
                     using (var sw = main.SampleScaleWindowXyz(new double[] { 150, 100, 50 }, -1, 0, false)) if (sw != null) SnapForm(sw, folder, "scale_xyz.png");
@@ -77,6 +79,8 @@ namespace PrintPrice
                     // the invoice page of the same job (sample code, customer and payment ways)
                     using (var inv = main.RenderSampleInvoice())
                         if (inv != null) inv.Save(Path.Combine(folder, "invoice_light.png"), ImageFormat.Png);
+                    using (var inv = main.RenderSampleInvoice(true))   // paid-tick: "Paid 12-11-2026 – thank you"
+                        if (inv != null) inv.Save(Path.Combine(folder, "invoice_paid.png"), ImageFormat.Png);
                     using (var qf = main.SampleQuoteWindow("Mette Hansen"))
                         if (qf != null)
                         {
@@ -200,8 +204,23 @@ namespace PrintPrice
                             inv.TestSearch("");
                             inv.TestStatusFilter(2);   // Printing now: only the 4-colour Benchy's invoice
                             Snap(inv, folder, "invoices_filter.png");
+                            // paid-tick: Payment = Unpaid (the overdue one in amber), the bottom "Unpaid: …" line
+                            inv.TestStatusFilter(0);
+                            inv.TestPayment(1);
+                            Snap(inv, folder, "invoices_unpaid.png");
+                            inv.TestPayment(0);
                             inv.Hide();
                         }
+                        // fit-to-screen: as on a 1366 px screen at 125 % (1093 px working width at 96 dpi)
+                        HistoryForm.InvoicesForm.TestScreenWidth = 1093;
+                        using (var inv = hist.NewInvoicesForm())
+                        {
+                            Place(inv);
+                            inv.Show(hist);
+                            Snap(inv, folder, "invoices_narrow.png");
+                            inv.Hide();
+                        }
+                        HistoryForm.InvoicesForm.TestScreenWidth = 0;
                         hist.Hide();
                     }
                     // combined bill (Part A): three small prints for Lene Hansen on one invoice (made: one code, below the

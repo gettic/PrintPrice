@@ -309,6 +309,12 @@ namespace PrintPrice
                             log.Check(view == v, "view is " + arg);
                             break;
                         }
+                        case "search":
+                            // search "<text>": History's search box (filters at once); "search" alone clears it
+                            txtSearch.Text = arg.Trim('"');
+                            Application.DoEvents();
+                            log.Add("  search \"" + txtSearch.Text + "\": shown " + TestShownCount);
+                            break;
                         case "month":
                         {
                             int index = -1;
@@ -433,9 +439,15 @@ namespace PrintPrice
                             if (testInv != null) { log.Check(false, "the Invoices window is already open"); break; }
                             log.Check(btnInvoices.Visible && btnInvoices.Enabled, "Invoices… button can be clicked");
                             invoicesShowInHistory = null;
+                            // "invoices screen=<px>": as on a screen that wide (fit-to-screen, paid-tick); logs the window width
+                            int scr = 0;
+                            if (arg.StartsWith("screen=")) int.TryParse(arg.Substring(7), out scr);
+                            InvoicesForm.TestScreenWidth = scr;
                             testInv = NewInvoicesForm();
                             testInv.Show(this);
                             Application.DoEvents();
+                            InvoicesForm.TestScreenWidth = 0;
+                            if (scr > 0) log.Check(testInv.TestWidth <= scr, "Invoices window " + testInv.TestWidth + " px wide fits a " + scr + " px screen");
                             log.Add("  " + testInv.TestStateLine());
                             break;
                         case "inv":
@@ -485,6 +497,7 @@ namespace PrintPrice
         static readonly string[] InvStateNames = { "notprinted", "printing", "printed", "failed" };
         static readonly string[] InvFilterNames = { "all", "notprinted", "printing", "printed", "failed", "mixed" };
         static readonly string[] InvPeriodNames = { "all", "month", "30days", "year" };
+        static readonly string[] InvPaymentNames = { "all", "unpaid", "overdue", "paid" };
 
         /// inv search <text> | filter <all|notprinted|printing|printed|failed|mixed> | period <all|month|30days|year> |
         /// select <invoice no.|#row> | set <notprinted|printing|printed|failed> [yes|no] | showinhistory | close | snap [name]
@@ -512,6 +525,18 @@ namespace PrintPrice
                     testInv.TestPeriod(i);
                     break;
                 }
+                case "payment":
+                {
+                    int i = Array.IndexOf(InvPaymentNames, rest);
+                    if (i < 0) { log.Check(false, "unknown inv payment: " + rest); return; }
+                    testInv.TestPayment(i);
+                    break;
+                }
+                case "paid":
+                    // the Paid cell's click / Space on the selected invoice: paid <-> unpaid, saved at once
+                    if (testInv.TestSelected == null) { log.Check(false, "inv paid: no invoice selected"); return; }
+                    testInv.TestTogglePaid();
+                    break;
                 case "select":
                 {
                     string no = rest;
@@ -564,7 +589,7 @@ namespace PrintPrice
             log.Add("  " + testInv.TestStateLine());
         }
 
-        /// expect inv rows <n> | sorted | first <no> | state <no> <notprinted|printing|printed|failed|mixed> |
+        /// expect inv paid <no|#n> <yes|no> | unpaid "<text>" | rows <n> | sorted | first <no> | state <no> <notprinted|printing|printed|failed|mixed> |
         /// prints <no> <n> | count "<text>" | info "<text>" | has <no> | hasnot <no>
         void TestExpectInvoices(string arg, TestLog log)
         {
@@ -605,6 +630,30 @@ namespace PrintPrice
                 case "rows":
                     log.Check(int.TryParse(rest, out n) && rows.Count == n, "Invoices rows " + rows.Count + " (expected " + rest + ")");
                     break;
+                case "paid":
+                {
+                    // paid <no|#n> <yes|no>: the row's tick, every job in memory and in history.json (PaidAt set / "")
+                    var r = w.Length == 2 ? find(w[0]) : null;
+                    if (r == null) { log.Check(false, "expect inv paid: invoice " + rest + " not listed"); break; }
+                    bool want = w[1] == "yes";
+                    var ids = new HashSet<string>(r.Jobs.Select(j => j.Id));
+                    var file = HistoryTest.FileRecords();
+                    // yes = every job paid; no = not all (a partly paid combined invoice is unpaid); memory and file agree per job
+                    string ms = string.Join(",", list.Where(x => ids.Contains(x.Id)).OrderBy(x => x.Id).Select(x => History.IsPaid(x) ? "paid" : "unpaid"));
+                    string fls = file == null ? "-" : string.Join(",", file.Where(x => ids.Contains(x.Id)).OrderBy(x => x.Id).Select(x => History.IsPaid(x) ? "paid" : "unpaid"));
+                    bool allPaid = ms.Length > 0 && ms.Split(',').All(s => s == "paid");
+                    bool mem = allPaid == want;
+                    bool fs = file != null && fls == ms;
+                    log.Check(r.Paid == want && mem && fs, "invoice " + r.No + " (" + r.Jobs.Count + " print(s)) paid " + r.Paid + ", memory [" + ms + "], file [" + fls + "] (expected " + w[1] + ")" +
+                                                         (r.Paid ? ", tip \"" + (testInv.TestPaidTip(rows.IndexOf(r)) ?? "").Replace("\n", " / ") + "\"" : ""));
+                    break;
+                }
+                case "unpaid":
+                {
+                    string want = rest.Trim('"');
+                    log.Check(testInv.TestUnpaidLine.Contains(want), "Invoices unpaid line \"" + testInv.TestUnpaidLine + "\" contains \"" + want + "\"");
+                    break;
+                }
                 case "sorted":
                 {
                     // newest invoice date first, unreadable dates last, then number descending (History.Invoices)

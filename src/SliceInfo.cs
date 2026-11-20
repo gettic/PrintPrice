@@ -229,6 +229,21 @@ namespace PrintPrice
     public class SliceException : Exception
     {
         public SliceException(string message) : base(message) { }
+
+        /// A failed Bambu Studio CLI run: its exit code and result.json error_string (null = none).
+        public SliceException(string message, int exitCode, string cliError) : base(message)
+        {
+            ExitCode = exitCode;
+            CliError = cliError;
+        }
+
+        /// The CLI's exit code (0 = not a CLI failure / unknown), e.g. -100 = "Failed slicing the model", -50 = plate.
+        public int ExitCode { get; private set; }
+        /// The CLI's error_string from result.json (null = none).
+        public string CliError { get; private set; }
+        /// True for a bed refusal (BedErrorText): the CLI's -50 (doesn't fit / empty plate) and our own SlicedOffBed
+        /// check after a slice (thrown with the same code).
+        public bool IsBedError { get { return ExitCode == -50; } }
     }
 
     /// Text-only part of BambuSlicer (printer table, slice_info / project_settings parsing). The rest is in Slicer.cs.

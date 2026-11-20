@@ -1276,7 +1276,15 @@ namespace PrintPrice
             catch (OperationCanceledException) { SetAuto(L.S("Cancelled.", "Annulleret."), false); }
             // a failed job clears the last one's numbers (Repeat print keeps them: it shows the saved quote instead; Scale…
             // keeps the shown job at its old size)
-            catch (SliceException ex) { if (beforeFill == null && rescale == null) ClearJobNumbers(); SetAutoError(ex.Message); }
+            catch (SliceException ex)
+            {
+                lastSliceBedError = ex.IsBedError;   // Repeat print: refused, not the saved numbers (release-test-5)
+                if (beforeFill == null && rescale == null) ClearJobNumbers();
+                // too small (plans\too-small): a slice that failed on a job scaled down says so, with the size it would have
+                // been (from the shown job's size at 100 %, known after Scale…; a repeat / first slice: no mm)
+                var sc = scalePct ?? ScaleXyz.None;
+                SetAutoError(BambuSlicer.IsTooSmallFailure(ex, sc) ? TooSmallMessage(sc, rescale != null) : ex.Message);
+            }
             catch (Exception ex)
             {
                 if (beforeFill == null && rescale == null) ClearJobNumbers();
@@ -1504,6 +1512,16 @@ namespace PrintPrice
         }
 
         static string ScaleLinkText { get { return L.S("Scale…", "Skalér…"); } }
+
+        /// The too-small text for a failed slice at scale (BambuSlicer.TooSmallText). sameJob = Scale… on the shown job: its
+        /// 100 % size = the last slice's size at jobScale (still the old one: it changes only after a slice); else unknown.
+        string TooSmallMessage(ScaleXyz scale, bool sameJob)
+        {
+            var r = sameJob ? lastJobResult : null;
+            if (r == null || !(r.SizeX > 0) || !(r.SizeY > 0) || !(r.SizeZ > 0)) return BambuSlicer.TooSmallText(scale, 0, 0, 0);
+            return BambuSlicer.TooSmallText(scale, BambuSlicer.SizeAt(r.SizeX, jobScale.X, 100), BambuSlicer.SizeAt(r.SizeY, jobScale.Y, 100),
+                                            BambuSlicer.SizeAt(r.SizeZ, jobScale.Z, 100));
+        }
 
         /// The Scale window for the shown job (issue #8); Apply slices the same files again at the new size.
         void ShowScaleWindow()
@@ -3919,9 +3937,14 @@ namespace PrintPrice
                 d.PayMobilePay = (inv.MobilePay ?? "").Trim();
                 d.PayBank = (inv.Bank ?? "").Trim();
                 d.Name = (inv.FromName ?? "").Trim();
+                DateTime paidOn;   // paid-tick: "Paid 05-11-2026 – thank you" instead of "Please pay by …"
+                if (made && History.PaidOn(r, out paidOn)) d.PaidLine = History.PaidText(paidOn);
             }
             return d;
         }
+
+        /// paid-tick: a combined invoice is paid when every job is; the latest paid date ("" = not paid).
+        static string GroupPaidLine(List<QuoteRecord> jobs) { return QuoteRows.PaidLine(jobs); }
 
         /// The record's material names / colours (by filament line) and the details' Material line ("PLA, 4 colours").
         void FillRecordMaterial(QuoteData d, QuoteRecord r)
@@ -4091,6 +4114,7 @@ namespace PrintPrice
         /// A record as plain text: title, name, model, time and grams, the chosen price; invoice: number, dates, payment.
         string RecordText(QuoteRecord r, bool friends, bool invoice)
         {
+            // paid-tick: the paid line ("Paid 05-11-2026 – thank you") comes from the shared QuoteRows.RecordText
             return WithTowerLine(QuoteRows.RecordText(r, friends, invoice, settings, ShortLink(r.Source)),
                                  settings.QuoteShowTower == 1 && History.ShowsTower(r) ? r.TowerGrams : -1);   // issue #8 step 3
         }
@@ -4401,6 +4425,7 @@ namespace PrintPrice
                 d.Date = billed;
                 var inv = History.InvoiceInfo(first, settings, billed);
                 d.Due = inv.Due;
+                if (made) d.PaidLine = GroupPaidLine(jobs);   // paid-tick: all jobs paid -> "Paid … – thank you"
                 d.PayMobilePay = (inv.MobilePay ?? "").Trim();
                 d.PayBank = (inv.Bank ?? "").Trim();
                 d.Name = (inv.FromName ?? "").Trim();
@@ -4472,8 +4497,9 @@ namespace PrintPrice
                 () =>
                 {
                     var bill = History.GroupBill(jobs, settings, friends);
-                    return QuoteRows.GroupText(bill, invoice, invoice ? getData().InvoiceNo : getData().Number, customer, getData().Date,
-                                               invoice ? History.InvoiceInfo(jobs[0], settings, getData().Date) : null);
+                    var gd = getData();
+                    return QuoteRows.GroupText(bill, invoice, invoice ? gd.InvoiceNo : gd.Number, customer, gd.Date,
+                                               invoice ? History.InvoiceInfo(jobs[0], settings, gd.Date) : null);
                 },
                 d => QuotePage.Render(getData(), d),
                 () => QuotePage.RenderPages(getData(), false),   // A4 pages
@@ -4546,7 +4572,7 @@ namespace PrintPrice
         }
 
         /// Picture mode: the invoice page of the job on screen (sample number, date, customer and payment ways; nothing saved).
-        internal Bitmap RenderSampleInvoice()
+        internal Bitmap RenderSampleInvoice(bool samplePaid = false)
         {
             if (!offline || last == null || lastInput == null) return null;
             var when = new DateTime(2026, 11, 4, 17, 45, 0);
@@ -4556,6 +4582,7 @@ namespace PrintPrice
             d.Due = settings.InvoiceDue(when);
             d.PayMobilePay = "12 34 56 78";
             d.PayBank = L.S("reg. 1234, account 0012345678", "reg.nr. 1234, konto 0012345678");
+            if (samplePaid) d.PaidLine = History.PaidText(new DateTime(2026, 11, 12));   // paid-tick picture
             return QuotePage.Render(d, false);
         }
 
@@ -5281,6 +5308,30 @@ namespace PrintPrice
                 }
                 finally { settings.QuoteShowTower = keepShow; }
                 ClearJob();
+
+                // 13. paid-tick: a made invoice marked paid says "Paid 05-11-2026 – thank you" instead of "Please pay by …" on
+                // its page and in Copy text; unticked it is back
+                {
+                    var madeInv = history.FirstOrDefault(x => x != null && !string.IsNullOrEmpty(x.InvoiceNo) &&
+                                                              history.Count(y => y != null && string.Equals((y.InvoiceNo ?? "").Trim(), x.InvoiceNo.Trim(), StringComparison.OrdinalIgnoreCase)) == 1);
+                    if (madeInv == null) log.Check(false, "13 a made single invoice to mark paid");
+                    else
+                    {
+                        DateTime now13 = DateTime.Now;
+                        string paidLine = History.PaidText(now13.Date);
+                        History.SetPaid(history, madeInv.InvoiceNo, true, now13);
+                        var pd = BuildRecordQuote(madeInv, madeInv.For == History.ForFriends, madeInv.Customer, true, null);
+                        string pt = RecordText(madeInv, madeInv.For == History.ForFriends, true);
+                        log.Check(pd.PaidLine == paidLine && pt.Contains(paidLine) && !pt.Contains(L.S("please pay by", "betales senest")),
+                                  "13a paid: page line \"" + pd.PaidLine + "\", Copy text has it and no \"please pay by\"");
+                        using (var bmp = QuotePage.Render(pd, false)) bmp.Save(Path.Combine(dir, "test_invoice_paid.png"), System.Drawing.Imaging.ImageFormat.Png);
+                        History.SetPaid(history, madeInv.InvoiceNo, false, now13);
+                        pd = BuildRecordQuote(madeInv, madeInv.For == History.ForFriends, madeInv.Customer, true, null);
+                        pt = RecordText(madeInv, madeInv.For == History.ForFriends, true);
+                        log.Check(pd.PaidLine == "" && pt.Contains(L.S("please pay by", "betales senest")), "13b unpaid again: \"Please pay by …\" is back");
+                        History.Save(history);
+                    }
+                }
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
             finally
@@ -5912,6 +5963,34 @@ namespace PrintPrice
                         log.Check(sel.Count == 2 && sel.All(r => r.InvoiceNo == "2026-51907") && sh.TestInfo.Contains("2026-51907"),
                                   "11q History selects its 2 prints (" + sh.TestInfo + ")");
                         if (!f.IsDisposed) f.Dispose();
+                        // paid-tick (release-test-5): the combined invoice partly paid = unpaid (Please pay by + Payment block);
+                        // all paid = "Paid … – thank you", no Payment details on the page or in Copy text
+                        string keepMp = settings.PayMobilePay;
+                        try
+                        {
+                            settings.PayMobilePay = "12 34 56 78";
+                            var cj = sample.Where(r => r.InvoiceNo == "2026-51907").ToList();
+                            foreach (var j in cj) { j.PaidAt = ""; j.InvoicePayMobilePay = "12 34 56 78"; }   // the made invoice's snapshot
+                            cj[0].PaidAt = now11.ToString("yyyy-MM-dd");
+                            Func<string> gtext = () => QuoteRows.GroupText(History.GroupBill(cj, settings, cj[0].For == History.ForFriends), true, "2026-51907",
+                                                                           "Mads", now11, History.InvoiceInfo(cj[0], settings, now11));
+                            var gq = BuildGroupQuote(cj, cj[0].For == History.ForFriends, "Mads", true, null, now11);
+                            string gt = gtext();
+                            log.Check(gq.PaidLine == "" && gt.Contains("MobilePay") && gt.Contains(L.S("please pay by", "betales senest")),
+                                      "11t combined, 1 of 2 paid: still unpaid (Please pay by + MobilePay): line \"" + gq.PaidLine + "\", text \"" + gt.Replace(Environment.NewLine, " / ") + "\"");
+                            var rows = History.Invoices(sample, now11, settings);
+                            var pr = rows.FirstOrDefault(r => r.No == "2026-51907");
+                            log.Check(pr != null && !pr.Paid, "11u the Invoices row of a partly paid combined invoice is Unpaid");
+                            cj[1].PaidAt = now11.AddDays(-1).ToString("yyyy-MM-dd");
+                            gq = BuildGroupQuote(cj, cj[0].For == History.ForFriends, "Mads", true, null, now11);
+                            gt = gtext();
+                            string pl = History.PaidText(now11.Date);
+                            log.Check(gq.PaidLine == pl && gt.Contains(pl) && !gt.Contains("MobilePay") && !gt.Contains(L.S("please pay by", "betales senest")),
+                                      "11v combined, all paid: \"" + gq.PaidLine + "\" (latest date), no MobilePay / Please pay by in Copy text");
+                            using (var bmp = QuotePage.Render(gq, false))
+                                bmp.Save(Path.Combine(AppSettings.Folder, "test_bill_paid_group.png"), System.Drawing.Imaging.ImageFormat.Png);
+                        }
+                        finally { settings.PayMobilePay = keepMp; }
                     }
                     // r. the real (test) list: Open invoice opens the invoice window of that number
                     {
@@ -6135,6 +6214,7 @@ namespace PrintPrice
                 ScaleXyz specScale = ScaleXyz.None, specRescale = null;
                 bool? specTower = null;     // issue #8 step 3: "tower=on|off" = the first slice's switch (else Settings)
                 bool toggleTower = false;   // "toggle-tower=1": then the tower link (slices again with the other switch)
+                bool expectTooSmall = false, expectTooBig = false;   // expect=too-big: refused by the bed check / Scale window, nothing saved   // "expect-too-small=1": scale= (or rescale=) fails with BambuSlicer.TooSmallText (plans\too-small)
                 string baseDir = Path.GetDirectoryName(specFile);
                 foreach (var raw in File.ReadAllLines(specFile))
                 {
@@ -6163,6 +6243,8 @@ namespace PrintPrice
                         continue;
                     }
                     if (line.StartsWith("toggle-tower=", StringComparison.OrdinalIgnoreCase)) { toggleTower = line.Substring(13).Trim() == "1"; continue; }
+                    if (line.Equals("expect=too-big", StringComparison.OrdinalIgnoreCase)) { expectTooBig = true; continue; }
+                    if (line.StartsWith("expect-too-small=", StringComparison.OrdinalIgnoreCase)) { expectTooSmall = line.Substring(17).Trim() == "1"; continue; }
                     if (line.StartsWith("close-after=", StringComparison.OrdinalIgnoreCase))
                     {
                         double.TryParse(line.Substring(12).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out closeAfter);
@@ -6200,13 +6282,48 @@ namespace PrintPrice
                     var files = parts.Select(p => p.File).ToList();
                     txtUrl.Text = files.Count == 1 ? files[0] : L.F("{0} files: ", "{0} filer: ", files.Count) + string.Join(", ", files.Select(Path.GetFileName));
                     lastJobResult = null;
+                    EnsureHistory();
+                    int historyBefore = history != null ? history.Count : 0;
                     if (specScale.IsScaled || specRescale != null)
                         log.Add("spec: scale: " + specScale.Text + (specRescale != null ? ", rescale: " + specRescale.Text : ""));
                     if (specTower.HasValue) { towerForNextSlice = specTower.Value; log.Add("spec: tower " + (specTower.Value ? "on" : "off")); }
                     bool done = await AnalyzeAsync(null, files, null, parts, together, specScale, null);
-                    check(done && lastJobResult != null, "sliced");
+                    if (!done) log.Add("failed: " + (lblAuto.Text ?? "").Replace("\n", " / "));   // too small: BambuSlicer.TooSmallText
+                    if (expectTooSmall && specRescale == null)
+                    {
+                        // "expect-too-small=1" with scale=: the first slice fails with the too-small text (no mm: size unknown)
+                        string want = TooSmallMessage(specScale, false);
+                        check(!done && (lblAuto.Text ?? "").Contains(want), "too small at " + specScale.Text + ": \"" + want + "\"");
+                        try { File.WriteAllLines(Path.Combine(dir, "test_slice.txt"), log); } catch { }
+                        Screenshots.Snap(this, dir, "test_slice.png");
+                        Program.EndTestRun(ok ? 0 : 4);
+                        return;
+                    }
+                    bool skipSave = false;   // a too-big refusal / an expected failure: nothing is saved
+                    if (expectTooBig && specRescale == null && !done)
+                    {
+                        // too big for the slicer itself: fine for expect=too-big (nothing to save)
+                        check(true, "not sliced (too big): " + (lblAuto.Text ?? "").Replace("\n", " / "));
+                        skipSave = true;
+                    }
+                    else check(done && lastJobResult != null, "sliced");
                     check(!done || jobTower == (specTower ?? SettingsTower), "sliced with tower " + ((specTower ?? SettingsTower) ? "on" : "off"));
                     TestJobLines(log, lastJobResult);
+                    // bed check (plans\paid-tick part B): scale= sliced at a size that doesn't fit the printer is refused, as the
+                    // Scale window would refuse it (the same ScaleForm.FitsAt); expect=too-big wants that refusal
+                    if (done && specRescale == null && lastJobResult != null)
+                    {
+                        var r0 = lastJobResult;
+                        var one = new double[] { 100, 100, 100 };
+                        bool fits = ScaleForm.FitsAt(settings.PrinterModel, new[] { r0.SizeX, r0.SizeY, r0.SizeZ }, one, one);
+                        if (!fits)
+                        {
+                            log.Add("refused: " + BambuSlicer.TooBigText(settings.PrinterModel) + " (sliced size " + BambuSlicer.SizeText(r0.SizeX, r0.SizeY, r0.SizeZ) + ")");
+                            skipSave = true;
+                        }
+                        if (expectTooBig) check(!fits, "too big for the bed: refused, nothing saved");
+                        else check(fits, "fits the bed" + (r0.SizeX > 0 ? " (" + BambuSlicer.SizeText(r0.SizeX, r0.SizeY, r0.SizeZ) + ")" : " (size unknown)"));
+                    }
                     if (done && toggleTower)
                     {
                         // the job's "Prime tower: on/off" link: the same files, size and colours again with the other switch
@@ -6226,21 +6343,55 @@ namespace PrintPrice
                         // the Scale window's Apply: the same files again at the new size, the ✓ line says it
                         var first = lastJobResult;
                         check(CanScaleJob, "Scale… offered after the slice");
+                        string refused = null;   // the real Scale window's Apply off: it stops here, as a user couldn't press it
                         using (var sf = NewScaleForm())
                         {
                             sf.SampleType(specRescale);
-                            log.Add("scale window: size " + sf.TestSizeText + " | " + sf.TestInfoText.Replace("\n", " / ") + " | Apply " + (sf.TestApplyOn ? "on" : "off"));
+                            log.Add("scale window: size " + sf.TestSizeText + " | " + sf.TestInfoText.Replace("\n", " / ") + " | Apply " + (sf.TestApplyOn ? "on" : "off") +
+                                    " | small note: " + (sf.TestSmallNote.Length > 0 ? sf.TestSmallNote : "(none)"));
+                            if (!sf.TestApplyOn) refused = sf.TestInfoText.Replace("\n", " / ");
                         }
-                        lastJobResult = null;
+                        if (refused != null)
+                        {
+                            log.Add("refused by the Scale window: " + refused);
+                            check(expectTooBig, "Scale window refused " + specRescale.Text + (expectTooBig ? " (expected too big)" : ""));
+                            skipSave = true;
+                        }
+                        else
+                        {
+                        // lastJobResult kept (as on a real Apply: a too-small failure takes the 100 % size from it)
+                        string tooSmallWant = TooSmallMessage(specRescale, true);
                         done = await RescaleAsync(specRescale);
-                        check(done && lastJobResult != null && SameScale(jobScale, specRescale), "sliced again at " + specRescale.Text);
-                        check((lblAuto.Text ?? "").Contains("(" + ScaleLabel(specRescale) + ")"), "result line names the scale: " + lblAuto.Text);
+                        if (expectTooSmall)
+                        {
+                            string got = lblAuto.Text ?? "";
+                            log.Add("failed: " + got.Replace("\n", " / "));
+                            check(!done && got.Contains(tooSmallWant), "too small at " + specRescale.Text + ": \"" + tooSmallWant + "\"");
+                        }
+                        else
+                        {
+                            check(done && lastJobResult != null && !ReferenceEquals(lastJobResult, first) && SameScale(jobScale, specRescale), "sliced again at " + specRescale.Text);
+                            check((lblAuto.Text ?? "").Contains("(" + ScaleLabel(specRescale) + ")"), "result line names the scale: " + lblAuto.Text);
+                        }
                         TestJobLines(log, lastJobResult);
                         if (first != null && lastJobResult != null && first.SizeZ > 0 && lastJobResult.SizeZ > 0)
                             log.Add("size " + BambuSlicer.SizeText(first.SizeX, first.SizeY, first.SizeZ) + " -> " +
                                     BambuSlicer.SizeText(lastJobResult.SizeX, lastJobResult.SizeY, lastJobResult.SizeZ) + " (expected " +
                                     BambuSlicer.SizeText(BambuSlicer.SizeAt(first.SizeX, specScale.X, specRescale.X), BambuSlicer.SizeAt(first.SizeY, specScale.Y, specRescale.Y),
                                                          BambuSlicer.SizeAt(first.SizeZ, specScale.Z, specRescale.Z)) + ")");
+                        if (expectTooSmall) skipSave = true;   // the failed Apply keeps the old job: nothing new to save
+                        if (expectTooBig) check(false, "expected the Scale window to refuse " + specRescale.Text);
+                        }
+                    }
+                    if (skipSave)
+                    {
+                        EnsureHistory();
+                        log.Add("not saved (history " + (history != null ? history.Count : 0) + " quotes)");
+                        check(history == null || history.Count == historyBefore, "nothing saved");
+                        Screenshots.Snap(this, dir, "test_slice.png");
+                        try { File.WriteAllLines(Path.Combine(dir, "test_slice.txt"), log); } catch { }
+                        Program.EndTestRun(ok ? 0 : 4);
+                        return;
                     }
                     QuoteRecord rec = null;
                     string err = done ? SaveToHistory(0, null, out rec) : "not sliced";
@@ -6287,7 +6438,23 @@ namespace PrintPrice
                     log.Add("original: " + r.Id + " " + RecordName(r) + ", saved " + r.SavedAt);
                     TestRecordLines(log, r);
                     lastJobResult = null;
+                    int before = history.Count;
                     await RepeatAsync(r);
+                    // release-test-5: "test_repeat_expect.txt" = "too-big" in the settings folder: the repeat must be refused (bed),
+                    // with Save off and nothing saved
+                    string expect = "";
+                    try { string ef = Path.Combine(dir, "test_repeat_expect.txt"); if (File.Exists(ef)) expect = File.ReadAllText(ef).Trim(); } catch { }
+                    if (expect == "too-big")
+                    {
+                        check(lastSliceBedError && repeatLine == null, "refused (bed): " + lblAuto.Text);
+                        check(!btnSave.Enabled && !btnCopy.Enabled, "Save to history and Copy are off");
+                        check(txtGrams.Text == "", "the saved time and weight aren't used (grams box \"" + txtGrams.Text + "\")");
+                        check(history.Count == before, "nothing saved (history " + history.Count + " quotes)");
+                        Screenshots.Snap(this, dir, "test_repeat.png");
+                        try { File.WriteAllLines(Path.Combine(dir, "test_repeat.txt"), log); } catch { }
+                        Program.EndTestRun(ok ? 0 : 4);
+                        return;
+                    }
                     check(repeatWhy == null && lastJobResult != null, "sliced again" + (repeatWhy != null ? " (not: " + repeatWhy + ")" : ""));
                     TestJobLines(log, lastJobResult);
                     QuoteRecord rec;
@@ -6696,9 +6863,11 @@ namespace PrintPrice
                     }
                 }
                 towerForNextSlice = History.PrimeTowerFor(r, settings);   // issue #8 step 3: the saved tower switch
+                lastSliceBedError = false;
                 bool done = await AnalyzeAsync(id, paths, res => KeepSavedMaterials(res, r), parts, History.PartsTogether(r),
                                                RecordScale(r), null);   // issue #8: at the saved size
                 if (done) { repeatOf = r; ShowRepeatLine(r, null); return; }
+                if (lastSliceBedError) { RefuseRepeat(r); return; }
                 string failed = (lblAuto.Text ?? "").Trim().TrimEnd('.');
                 FillFromRecord(r, true);
                 repeatOf = r;
@@ -6712,13 +6881,32 @@ namespace PrintPrice
                 return;
             }
             towerForNextSlice = History.PrimeTowerFor(r, settings);   // issue #8 step 3: the saved tower switch
+            lastSliceBedError = false;
             bool ok = await AnalyzeAsync(id, local ? new List<string> { src } : null, res => KeepSavedMaterials(res, r), null, false,
                                          RecordScale(r), null);   // issue #8: at the saved size
             if (ok) { repeatOf = r; ShowRepeatLine(r, null); return; }
+            if (lastSliceBedError) { RefuseRepeat(r); return; }
             string why = (lblAuto.Text ?? "").Trim().TrimEnd('.');
             FillFromRecord(r, true);   // back to the saved time, grams and colours (Analyze reset the job)
             repeatOf = r;
             ShowRepeatLine(r, why.Length > 0 ? why : L.S("slicing failed", "slicing mislykkedes"));
+        }
+
+        /// The last slice failed because the model doesn't fit the bed (SliceException.IsBedError); RepeatAsync reads it.
+        bool lastSliceBedError;
+
+        /// Repeat print refused by the bed (release-test-5, user: "Refuse, no save"): the saved time and weight are NOT used
+        /// (they'd price a print the printer can't make); the boxes are cleared so Save to history / Copy stay off, and the
+        /// error says why (BedErrorText already in lblAuto, with "Repeat print of …:" in front).
+        void RefuseRepeat(QuoteRecord r)
+        {
+            string why = (lblAuto.Text ?? "").Trim();
+            repeatOf = null;
+            repeatLine = null;
+            repeatWhy = null;
+            ClearJobNumbers();
+            SetAutoError(L.F("↻ Repeat print of {0}: not possible on this printer. {1}", "↻ Print igen af {0}: kan ikke lade sig gøre på denne printer. {1}",
+                             RecordName(r), why));
         }
 
         /// A repeat's new slice keeps the saved material per colour (name and type) when the colour count is the same,

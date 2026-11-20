@@ -112,6 +112,9 @@ static class WebTests
         // 14. issue #8 step 3: prime tower (read files, note, quotes / invoices, JSON)
         TowerTests.Run(True, Eq);
 
+        // 15. paid-tick: History's paid tick, Unpaid invoices filter, paid line on invoices
+        PaidTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

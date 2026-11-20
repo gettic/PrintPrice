@@ -406,15 +406,30 @@ namespace PrintPrice
                 DateTime billed;
                 if (!History.TryTime(r.BilledAt, out billed)) billed = DateTime.Now;
                 var inv = History.InvoiceInfo(r, settings, billed);
-                text += nl + L.F("Invoice date {0}, please pay by {1}", "Fakturadato {0}, betales senest {1}",
-                                 LongDate(billed), LongDate(inv.Due));
-                string mp = (inv.MobilePay ?? "").Trim(), bank = (inv.Bank ?? "").Trim();
+                string paid = string.IsNullOrEmpty(r.InvoiceNo) ? "" : PaidLine(new[] { r });   // paid-tick
+                text += nl + (paid.Length > 0 ? L.F("Invoice date {0}.", "Fakturadato {0}.", LongDate(billed)) + " " + paid
+                                              : L.F("Invoice date {0}, please pay by {1}", "Fakturadato {0}, betales senest {1}", LongDate(billed), LongDate(inv.Due)));
+                string mp = paid.Length > 0 ? "" : (inv.MobilePay ?? "").Trim(), bank = paid.Length > 0 ? "" : (inv.Bank ?? "").Trim();   // paid: no payment details
                 if (mp.Length > 0) text += nl + "MobilePay: " + mp;
                 if (bank.Length > 0) text += nl + L.S("Bank: ", "Bank: ") + bank;
                 if (mp.Length > 0 || bank.Length > 0)
                     text += nl + L.F("Please write invoice no. {0} with the payment.", "Skriv fakturanr. {0} ved betalingen.", r.InvoiceNo);
             }
             return text;
+        }
+
+        /// paid-tick: "Paid 05-11-2026 – thank you" (History.PaidText, the latest paid date) when every job is paid, else "".
+        public static string PaidLine(IList<QuoteRecord> jobs)
+        {
+            if (jobs == null || jobs.Count == 0) return "";
+            DateTime latest = DateTime.MinValue;
+            foreach (var j in jobs)
+            {
+                DateTime day;
+                if (j == null || !History.PaidOn(j, out day)) return "";
+                if (day > latest) latest = day;
+            }
+            return History.PaidText(latest);
         }
 
         // ---------- combined bill (several History jobs on one quote / invoice) ----------
@@ -490,8 +505,10 @@ namespace PrintPrice
             text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(bill.Total);
             if (invoice && inv != null)
             {
-                text += nl + L.F("Invoice date {0}, please pay by {1}", "Fakturadato {0}, betales senest {1}", LongDate(date), LongDate(inv.Due));
-                string mp = (inv.MobilePay ?? "").Trim(), bank = (inv.Bank ?? "").Trim();
+                string paid = bill.Jobs.TrueForAll(j => j != null && !string.IsNullOrEmpty(j.InvoiceNo)) ? PaidLine(bill.Jobs) : "";   // paid-tick
+                text += nl + (paid.Length > 0 ? L.F("Invoice date {0}.", "Fakturadato {0}.", LongDate(date)) + " " + paid
+                                              : L.F("Invoice date {0}, please pay by {1}", "Fakturadato {0}, betales senest {1}", LongDate(date), LongDate(inv.Due)));
+                string mp = paid.Length > 0 ? "" : (inv.MobilePay ?? "").Trim(), bank = paid.Length > 0 ? "" : (inv.Bank ?? "").Trim();   // paid: no payment details
                 if (mp.Length > 0) text += nl + "MobilePay: " + mp;
                 if (bank.Length > 0) text += nl + L.S("Bank: ", "Bank: ") + bank;
                 if (mp.Length > 0 || bank.Length > 0)

@@ -21,6 +21,8 @@ namespace PrintPrice
         public int ColourChanges;      // filament_change_times
         public double TowerSeconds;    // issue #8 step 3: feature_type_times "Prime tower", summed over plates
         public List<double[]> ObjectSizes = new List<double[]>();   // issue #8: per object {width X, depth Y, height Z} mm, as sliced (scaled)
+        // plans\too-small: per object {plate id (0 = missing), bbox x, bbox y, width, depth, height} as placed (SlicedOffBed)
+        public List<double[]> ObjectBoxes = new List<double[]>();
     }
 
     /// Drives the Bambu Studio command line to slice models with Bambu Lab A1 / A1 mini / P1S profiles.
@@ -54,21 +56,28 @@ namespace PrintPrice
             catch { return null; }
         }
 
-        /// The error text for a model that doesn't fit the printer's build volume (CLI exit code -50).
+        /// The CLI's exit code for "doesn't fit the plate / a plate is empty"; RunSlice also uses it for SlicedOffBed, so
+        /// SliceException.IsBedError covers both.
+        public const int BedErrorCode = -50;
+
+        /// The error text for a model that doesn't fit the printer's build volume (CLI exit code -50, or SlicedOffBed).
+        /// Points to the app's own "Scale…" link (MainForm.ScaleLinkText).
         public static string BedErrorText(string model)
         {
             var p = FindPrinter(model);
             return L.F("The model doesn't fit on the {0}'s build plate ({1} × {2} × {3} mm), or a plate in the file is empty. " +
-                       "Choose a bigger printer, or scale the model down in Bambu Studio.",
+                       "Choose a bigger printer, or use Scale… to make it smaller.",
                        "Modellen passer ikke på byggepladen i {0} ({1} × {2} × {3} mm), eller en plade i filen er tom. " +
-                       "Vælg en større printer, eller skalér modellen ned i Bambu Studio.",
+                       "Vælg en større printer, eller brug Skalér… til at gøre den mindre.",
                        p.MachineName, p.BedX, p.BedY, p.BedZ);
         }
 
-        /// The user-facing text when the CLI fails: -50 = BedErrorText(model), else "could not slice <file>: <error>".
+        /// The user-facing text when the CLI fails: -50 = BedErrorText(model), -100 (IsFailedSlice) = FailedSliceText(file),
+        /// else "could not slice <file>: <error>".
         public static string SliceErrorText(int exitCode, string fileName, string cliError, string model)
         {
-            if (exitCode == -50) return BedErrorText(model);
+            if (exitCode == BedErrorCode) return BedErrorText(model);
+            if (IsFailedSlice(exitCode, cliError)) return FailedSliceText(fileName);
             return L.F("Bambu Studio could not slice {0}: {1}", "Bambu Studio kunne ikke slice {0}: {1}",
                 fileName, string.IsNullOrEmpty(cliError) ? L.F("it stopped with error {0}", "den stoppede med fejl {0}", exitCode) : cliError);
         }
@@ -615,13 +624,17 @@ namespace PrintPrice
             {
                 string bed = "";
                 var clash = IsPlateError(exit, error) ? ClashingFilaments(workDir, filaments, out bed) : null;
-                throw new SliceException(SliceErrorText(exit, shownName, error, printer, bed, clash));
+                throw new SliceException(SliceErrorText(exit, shownName, error, printer, bed, clash), exit, error);
             }
 
             var res = ReadSliceInfo(out3mf);
             if (res == null) throw new SliceException(L.F("Bambu Studio returned no print estimate for {0}.",
                 "Bambu Studio gav intet printestimat for {0}.", shownName));
-            ApplySliceStats(res, ParseSliceResult(resultText));
+            var stats = ParseSliceResult(resultText);
+            // our own slice only (pre-sliced files and G-code never come here): a model the arrange step left hanging off
+            // the plate is refused like the CLI's own -50
+            if (SlicedOffBed(printer, stats)) throw new SliceException(BedErrorText(printer), BedErrorCode, null);
+            ApplySliceStats(res, stats);
             return res;
         }
 
@@ -1142,7 +1155,14 @@ namespace PrintPrice
                             var bb = ob != null && ob.TryGetValue("bbox", out bo) ? bo as Dictionary<string, object> : null;
                             if (bb == null) continue;
                             double w = JsonNum(bb, "width"), dp = JsonNum(bb, "depth"), h = JsonNum(bb, "height");
-                            if (w > 0 && dp > 0 && h > 0) st.ObjectSizes.Add(new[] { w, dp, h });
+                            if (w > 0 && dp > 0 && h > 0)
+                            {
+                                st.ObjectSizes.Add(new[] { w, dp, h });
+                                object xo, yo;
+                                double bx = bb.TryGetValue("x", out xo) ? JsonNum(bb, "x") : double.NaN;
+                                double by = bb.TryGetValue("y", out yo) ? JsonNum(bb, "y") : double.NaN;
+                                st.ObjectBoxes.Add(new[] { p.ContainsKey("id") ? JsonNum(p, "id") : 0, bx, by, w, dp, h });
+                            }
                         }
                     object fo;
                     var fils = p.TryGetValue("filaments", out fo) ? fo as System.Collections.IEnumerable : null;
@@ -1617,6 +1637,117 @@ namespace PrintPrice
             var p = FindPrinter(printer);
             return L.F("Too big for the {0} (max {1} × {2} × {3} mm).", "For stor til {0} (maks. {1} × {2} × {3} mm).",
                        p.MachineName, p.BedX, p.BedY, p.BedZ);
+        }
+
+        // ---------- off the plate after slicing (plans\too-small) ----------
+        // A model too big for the bed is turned (e.g. 45°) by the CLI's arrange and still sliced with exit 0, hanging off the
+        // plate (Benchy 500 % on the A1: bbox 321,75 × 321,75 mm from x -18,5). RunSlice refuses such a slice with BedErrorText.
+
+        /// How far (mm) an object may lie past the plate edge before SlicedOffBed counts it (rounding in result.json).
+        public const double OffBedSlackMm = 0.5;
+
+        /// Pure: true when an object as sliced (bbox from result.json, mm) doesn't fit the printer (FitsBed) or, with a known
+        /// position (minX / minY not NaN), lies outside 0..BedX / 0..BedY by more than OffBedSlackMm. printer = "A1",
+        /// "A1M", "P1S" (unknown = A1). Unknown size (any <= 0) = false.
+        public static bool SlicedOffBed(string printer, double minX, double minY, double sizeX, double sizeY, double sizeZ)
+        {
+            if (!(sizeX > 0) || !(sizeY > 0) || !(sizeZ > 0)) return false;
+            if (!FitsBed(printer, sizeX, sizeY, sizeZ)) return true;
+            var p = FindPrinter(printer);
+            if (!double.IsNaN(minX) && !double.IsInfinity(minX) && (minX < -OffBedSlackMm || minX + sizeX > p.BedX + OffBedSlackMm)) return true;
+            if (!double.IsNaN(minY) && !double.IsInfinity(minY) && (minY < -OffBedSlackMm || minY + sizeY > p.BedY + OffBedSlackMm)) return true;
+            return false;
+        }
+
+        /// Pure: SlicedOffBed for every object in a result.json (stats.ObjectBoxes). The position is checked on plate 1 only:
+        /// later plates' x / y include the plate's offset in Bambu Studio's plate grid (plate 2 at x 360 on the A1), so
+        /// they get the size check alone. null stats = false.
+        public static bool SlicedOffBed(string printer, SliceStats stats)
+        {
+            if (stats == null || stats.ObjectBoxes == null) return false;
+            foreach (var b in stats.ObjectBoxes)
+            {
+                if (b == null || b.Length < 6) continue;
+                bool plate1 = Math.Abs(b[0] - 1) < 0.001;
+                if (SlicedOffBed(printer, plate1 ? b[1] : double.NaN, plate1 ? b[2] : double.NaN, b[3], b[4], b[5])) return true;
+            }
+            return false;
+        }
+
+        // ---------- too small to print (plans\too-small) ----------
+        // Bambu Studio fails with -100 "Failed slicing the model" (warning "empty layer between A and B") when parts get
+        // thinner than one line (~0,4 mm). The thinnest part decides, not the overall size (Benchy fails at 27 %, works at
+        // 30 %; a 20 mm block slices at 5 %), so no size or % rule predicts it: only the failure on a scaled-down job counts.
+
+        /// The CLI's exit code for "Failed slicing the model" (too thin parts, faulty mesh, or a floating object).
+        public const int FailedSliceCode = -100;
+
+        /// Pure: the CLI's "Failed slicing the model": exit -100, or an unknown exit (0) with error_string starting with
+        /// "Failed slicing the model". Any other exit code = false.
+        public static bool IsFailedSlice(int exitCode, string cliError)
+        {
+            if (exitCode == FailedSliceCode) return true;
+            if (exitCode != 0) return false;
+            return !string.IsNullOrEmpty(cliError) &&
+                   cliError.TrimStart().StartsWith("Failed slicing the model", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// Pure: true when a failed slice (IsFailedSlice) happened on a job scaled down (any axis under 100 %). Not scaled /
+        /// only scaled up / null scale = false (then the original itself has the problem: keep the normal error).
+        public static bool IsTooSmallFailure(int exitCode, string cliError, ScaleXyz scale)
+        {
+            if (scale == null || !IsFailedSlice(exitCode, cliError)) return false;
+            return scale.X < 100 - 0.005 || scale.Y < 100 - 0.005 || scale.Z < 100 - 0.005;
+        }
+
+        /// Same as above for a caught SliceException (null = false).
+        public static bool IsTooSmallFailure(SliceException ex, ScaleXyz scale)
+        {
+            return ex != null && IsTooSmallFailure(ex.ExitCode, ex.CliError, scale);
+        }
+
+        /// The plain text for a -100 that isn't about our scale: "Bambu Studio could not slice <file>: parts of the model
+        /// are too thin to print, or the model is damaged." (both languages).
+        public static string FailedSliceText(string fileName)
+        {
+            return L.F("Bambu Studio could not slice {0}: parts of the model are too thin to print, or the model is damaged.",
+                       "Bambu Studio kunne ikke slice {0}: dele af modellen er for tynde til at printe, eller modellen er beskadiget.",
+                       fileName);
+        }
+
+        /// Pure: the result-line text for IsTooSmallFailure. x100/y100/z100 = the model's size at 100 % (mm; any <= 0 /
+        /// NaN = unknown, then no size in the text). The size shown is at the job's scale (per axis).
+        /// "Too small to print at 20 %: the model would be only 12,0 × 6,2 × 9,6 mm, and its thinnest parts vanish when
+        /// sliced. Try a bigger size."
+        public static string TooSmallText(ScaleXyz scale, double x100, double y100, double z100)
+        {
+            var s = scale ?? ScaleXyz.None;
+            if (Known(x100) && Known(y100) && Known(z100))
+                return L.F("Too small to print at {0}: the model would be only {1}, and its thinnest parts vanish when sliced. Try a bigger size.",
+                           "For lille til at printe ved {0}: modellen ville kun være {1}, og de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.",
+                           s.Text, SizeText(x100 * s.X / 100, y100 * s.Y / 100, z100 * s.Z / 100));
+            return L.F("Too small to print at {0}: the thinnest parts vanish when sliced. Try a bigger size.",
+                       "For lille til at printe ved {0}: de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.", s.Text);
+        }
+
+        static bool Known(double mm) { return !double.IsNaN(mm) && !double.IsInfinity(mm) && mm > 0; }
+
+        /// The Scale window's soft note shows when the scaled model's smallest side is under this (mm).
+        public const double SmallSizeMm = 10;
+
+        /// Pure: the Scale window's soft note: true when the smallest side of x × y × z mm (as SizeText shows it, 1 decimal)
+        /// is under SmallSizeMm. Unknown size (any <= 0 / NaN) = false. Never blocks anything.
+        public static bool IsSmallSize(double x, double y, double z)
+        {
+            if (!Known(x) || !Known(y) || !Known(z)) return false;
+            double min = Math.Min(x, Math.Min(y, z));
+            return Math.Round(min, 1, MidpointRounding.AwayFromZero) < SmallSizeMm;
+        }
+
+        /// "Small prints can lose thin parts or fail to slice." (both languages).
+        public static string SmallScaleNote()
+        {
+            return L.S("Small prints can lose thin parts or fail to slice.", "Små print kan miste tynde dele eller fejle ved slicing.");
         }
 
         const long MaxPictureBytes = 4 * 1048576;

@@ -149,6 +149,9 @@ namespace PrintPrice
         // invoice (History.MakeInvoice): number like "2026-006" ("" = no invoice yet) and the date it was made (TimeFormat)
         public string InvoiceNo = "";
         public string BilledAt = "";
+        // paid-tick: the day the invoice was marked paid ("yyyy-MM-dd", History.DueFormat); "" = unpaid (old records too).
+        // Always written ("PaidAt":"" when unpaid; older versions ignore it). History.SetPaid / IsPaid.
+        public string PaidAt = "";
 
         // invoice snapshot, made with a new number (MakeInvoice), so a re-issued invoice shows what the customer got.
         // "" in older records (History.InvoiceInfo then uses today's settings). InvoiceDue set = snapshot exists.
@@ -207,8 +210,18 @@ namespace PrintPrice
         public bool Friends;                       // the oldest job is For friends & family
         public double Total;                       // kr.: Σ shown saved prices (History.PriceFor), whole øre
         public PrintState? State;                  // the one status of all its jobs; null = mixed
-        /// Due date passed (a hint only: the app doesn't track paid).
-        public bool Overdue(DateTime today) { return Due != DateTime.MinValue && Due.Date < today.Date; }
+        public bool Paid;                          // paid-tick: every job has a PaidAt (History.SetPaid)
+        public DateTime PaidAt = DateTime.MinValue;   // the latest job's paid date when Paid; else MinValue
+        /// Not paid and the due date has passed.
+        public bool Overdue(DateTime today) { return !Paid && Due != DateTime.MinValue && Due.Date < today.Date; }
+    }
+
+    /// The Invoices window's bottom line (History.UnpaidSummary): unpaid invoices, their kr. and how many are overdue.
+    public class UnpaidTotals
+    {
+        public int Count;
+        public double Total;                       // kr., whole øre
+        public int Overdue;
     }
 
     /// The print status chosen in the quote window (History.SetPrintState / PrintStateOf). Values are the box's order.
@@ -1144,6 +1157,17 @@ namespace PrintPrice
                 }
                 row.Due = (due ?? InvoiceInfo(jobs[0], s, now)).Due.Date;
                 row.Total = ore / 100.0;
+                // paid-tick: paid only when every job is; the date = the latest one
+                bool allPaid = true;
+                DateTime latest = DateTime.MinValue;
+                foreach (var j in jobs)
+                {
+                    DateTime p;
+                    if (!PaidOn(j, out p)) { allPaid = false; break; }
+                    if (p > latest) latest = p;
+                }
+                row.Paid = allPaid;
+                row.PaidAt = allPaid ? latest : DateTime.MinValue;
                 rows.Add(row);
             }
             rows.Sort(delegate(InvoiceRow a, InvoiceRow b)
@@ -1189,6 +1213,88 @@ namespace PrintPrice
             foreach (var j in row.Jobs)
                 if (j != null && (Has(j.Customer, q) || Has(ModelText(j), q))) return true;
             return false;
+        }
+
+        // ---------- paid-tick (plans\paid-tick): PaidAt per job, one invoice number = one tick ----------
+
+        /// Payment filter values for the InvoiceMatches overload: all, unpaid (also overdue), overdue only, paid.
+        public const int PaymentAll = 0, PaymentUnpaid = 1, PaymentOverdue = 2, PaymentPaid = 3;
+
+        // "yyyy-MM-dd" (DueFormat), trimmed; false for null / "" / unreadable
+        static bool TryPaidDate(string s, out DateTime day)
+        {
+            return DateTime.TryParseExact((s ?? "").Trim(), DueFormat, Inv, DateTimeStyles.None, out day);
+        }
+
+        /// True when r is marked paid (a readable PaidAt). null = false.
+        public static bool IsPaid(QuoteRecord r)
+        {
+            DateTime d;
+            return PaidOn(r, out d);
+        }
+
+        /// r's paid date (date only); false = unpaid.
+        public static bool PaidOn(QuoteRecord r, out DateTime day)
+        {
+            day = DateTime.MinValue;
+            return r != null && TryPaidDate(r.PaidAt, out day);
+        }
+
+        /// Ticks / unticks the invoice number `no` (trimmed, case-insensitive): every job on it gets PaidAt = now's date when
+        /// paid (a job already paid keeps its date), "" when not. Returns how many records changed (0 = number not found /
+        /// nothing to change). Doesn't save.
+        public static int SetPaid(List<QuoteRecord> list, string no, bool paid, DateTime now)
+        {
+            string want = (no ?? "").Trim();
+            if (list == null || want.Length == 0) return 0;
+            string today = now.Date.ToString(DueFormat, Inv);
+            int n = 0;
+            foreach (var r in list)
+            {
+                if (r == null || !string.Equals((r.InvoiceNo ?? "").Trim(), want, StringComparison.OrdinalIgnoreCase)) continue;
+                if (paid) { if (IsPaid(r)) continue; r.PaidAt = today; }
+                else { if ((r.PaidAt ?? "").Length == 0) continue; r.PaidAt = ""; }
+                n++;
+            }
+            return n;
+        }
+
+        /// The PDF's line instead of "Please pay by …": "Paid 05-11-2026 – thank you" / "Betalt 05-11-2026 – tak".
+        public static string PaidText(DateTime paidAt)
+        {
+            return L.F("Paid {0} – thank you", "Betalt {0} – tak", paidAt.ToString("dd-MM-yyyy", Inv));
+        }
+
+        /// InvoiceMatches + the Payment filter (PaymentAll / PaymentUnpaid (overdue too) / PaymentOverdue / PaymentPaid);
+        /// overdue = InvoiceRow.Overdue(today).
+        public static bool InvoiceMatches(InvoiceRow row, string query, int status, DateTime from, DateTime to, int payment, DateTime today)
+        {
+            if (!InvoiceMatches(row, query, status, from, to)) return false;
+            switch (payment)
+            {
+                case PaymentUnpaid: return !row.Paid;
+                case PaymentOverdue: return row.Overdue(today);
+                case PaymentPaid: return row.Paid;
+                default: return true;
+            }
+        }
+
+        /// The bottom line "Unpaid: 3 invoices · 125,64 kr. · 1 overdue": unpaid rows, their Σ Total (whole øre) and the
+        /// overdue ones among them. null rows = all 0.
+        public static UnpaidTotals UnpaidSummary(IEnumerable<InvoiceRow> rows, DateTime today)
+        {
+            var u = new UnpaidTotals();
+            long ore = 0;
+            if (rows != null)
+                foreach (var r in rows)
+                {
+                    if (r == null || r.Paid) continue;
+                    u.Count++;
+                    ore += (long)Math.Round(r.Total * 100, MidpointRounding.AwayFromZero);
+                    if (r.Overdue(today)) u.Overdue++;
+                }
+            u.Total = ore / 100.0;
+            return u;
         }
 
         static bool Has(string s, string q)
@@ -2378,6 +2484,9 @@ namespace PrintPrice
                 if (r.PrinterModel == null) r.PrinterModel = "";
                 if (r.InvoiceNo == null) r.InvoiceNo = "";
                 if (r.BilledAt == null) r.BilledAt = "";
+                // paid-tick: an unreadable date, or one on a record without an invoice number = unpaid
+                DateTime paidDay;
+                r.PaidAt = r.InvoiceNo.Trim().Length > 0 && TryPaidDate(r.PaidAt, out paidDay) ? paidDay.ToString(DueFormat, Inv) : "";
                 if (r.InvoiceDue == null) r.InvoiceDue = "";
                 if (r.InvoicePayMobilePay == null) r.InvoicePayMobilePay = "";
                 if (r.InvoicePayBank == null) r.InvoicePayBank = "";
@@ -3036,6 +3145,9 @@ namespace PrintPrice
                 var mine = PrintStart(keep);
                 if (mine == null || ps.Value > mine.Value) { keep.PrintingSince = other.PrintingSince.Trim(); changed = true; }
             }
+            // paid-tick: filled only when unpaid here and the other copy is paid for the same invoice number
+            if (!IsPaid(keep) && IsPaid(other) && string.Equals((keep.InvoiceNo ?? "").Trim(), (other.InvoiceNo ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+            { keep.PaidAt = other.PaidAt.Trim(); changed = true; }
             if (keep.Note.Trim().Length == 0 && other.Note.Trim().Length > 0) { keep.Note = other.Note; changed = true; }
             if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
             if (keep.Parts == null && other.Parts != null) { keep.Parts = other.Parts.Copy(); changed = true; }   // idea 21

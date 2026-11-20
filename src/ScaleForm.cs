@@ -67,7 +67,12 @@ namespace PrintPrice
                                      Margin = new Padding(0, 0, 0, uniformOnly != null ? 2 : 8), Checked = uniformOnly != null || cur.IsUniform,
                                      AutoCheck = uniformOnly == null, UseMnemonic = false };
             var grid = new TableLayoutPanel { ColumnCount = 5, RowCount = 3, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                                              Margin = new Padding(0, 0, 0, 10), Padding = Padding.Empty };
+                                              Margin = new Padding(0, 0, 0, 2), Padding = Padding.Empty };
+            // too small: the muted "Small prints can lose thin parts…" line under the boxes; its line is always kept (empty
+            // when not small), so nothing moves when it shows
+            smallNote = new Theme.PlainLabel { AutoSize = false, Tag = "muted", UseMnemonic = false, AutoEllipsis = true,
+                                               Font = new Font("Segoe UI", 9f), Margin = new Padding(0, 0, 0, 8),
+                                               Size = new Size(ContentW, 18) };
             for (int c = 0; c < 5; c++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             string[] caps = { L.S("X (width):", "X (bredde):"), L.S("Y (depth):", "Y (dybde):"), L.S("Z (height):", "Z (højde):") };
             string[] names = { L.S("width", "bredde"), L.S("depth", "dybde"), L.S("height", "højde") };
@@ -121,6 +126,7 @@ namespace PrintPrice
                 root.Controls.Add(formatNote);
             }
             root.Controls.Add(grid);
+            root.Controls.Add(smallNote);
             root.Controls.Add(info);
             root.Controls.Add(bottom);
             AcceptButton = btnApply;
@@ -153,6 +159,7 @@ namespace PrintPrice
             {
                 int w = (int)Math.Round(ContentW * DeviceDpi / 96f);
                 info.SetWidth(w);
+                smallNote.Size = new Size(w, TextRenderer.MeasureText("Ag", smallNote.Font).Height + Px(2));
                 if (formatNote != null) formatNote.MaximumSize = new Size(Math.Max(1, w - Px(NoteIndent)), 0);
                 // qol: the box is never shorter than the help text, so an error line doesn't move the buttons
                 string shown = info.Text;
@@ -189,6 +196,7 @@ namespace PrintPrice
 
         const int NoteIndent = 18;   // the tick's text start (box 13 + gap), so the note lines up under "Same in every direction"
         Label formatNote;            // the uniformOnly note (null = none)
+        Label smallNote;             // too small: BambuSlicer.SmallScaleNote() when IsSmallSize, else "" (its line always kept)
         ToolTip tip;                 // the locked tick's dark tooltip
 
         static Label Caption(string text)
@@ -200,6 +208,15 @@ namespace PrintPrice
         {
             // qol: drawn without GDI's side padding, so the unit's text starts 6 px after the box frame (the box's right margin)
             return new SettingsForm.UnitLabel { Text = text, AutoSize = true, UseMnemonic = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 0, 6) };
+        }
+
+        /// The size at pct fits the printer's bed (size = mm at the current % per axis; any size unknown = fits). Shared by the
+        /// window's Apply and --test-slice's bed check, so the two can't drift.
+        internal static bool FitsAt(string printer, double[] size, double[] current, double[] pct)
+        {
+            if (size == null || size.Length < 3 || !(size[0] > 0) || !(size[1] > 0) || !(size[2] > 0)) return true;
+            return BambuSlicer.FitsBed(printer, BambuSlicer.SizeAt(size[0], current[0], pct[0]), BambuSlicer.SizeAt(size[1], current[1], pct[1]),
+                                       BambuSlicer.SizeAt(size[2], current[2], pct[2]));
         }
 
         bool SizeKnown { get { return size[0] > 0 && size[1] > 0 && size[2] > 0; } }
@@ -287,6 +304,11 @@ namespace PrintPrice
                 mb.Text = ok ? Num.Fmt(Math.Round(BambuSlicer.SizeAt(size[i], current[i], p), 1)) : "–";
             }
             syncing = false;
+            // too small (plans\too-small): a soft muted note when the smallest side would be under 10 mm (never blocks)
+            bool small = SizeKnown && allOk && mmError == null &&
+                         BambuSlicer.IsSmallSize(BambuSlicer.SizeAt(size[0], current[0], pct[0]), BambuSlicer.SizeAt(size[1], current[1], pct[1]),
+                                                 BambuSlicer.SizeAt(size[2], current[2], pct[2]));
+            smallNote.Text = small ? BambuSlicer.SmallScaleNote() : "";
 
             if (mmError != null)
             {
@@ -302,8 +324,7 @@ namespace PrintPrice
                 SetApply(false);
                 return;
             }
-            bool fits = !SizeKnown || BambuSlicer.FitsBed(printer, BambuSlicer.SizeAt(size[0], current[0], pct[0]),
-                                                           BambuSlicer.SizeAt(size[1], current[1], pct[1]), BambuSlicer.SizeAt(size[2], current[2], pct[2]));
+            bool fits = FitsAt(printer, size, current, pct);
             if (!fits)
             {
                 info.Text = BambuSlicer.TooBigText(printer);
@@ -357,6 +378,7 @@ namespace PrintPrice
         }
         internal string TestPctText { get { return pctBox[0].Text + " / " + pctBox[1].Text + " / " + pctBox[2].Text; } }
         internal string TestInfoText { get { return info.Text ?? ""; } }
+        internal string TestSmallNote { get { return smallNote.Text ?? ""; } }
         internal InfoKind TestInfoKind { get { return info.Kind; } }
         internal bool TestApplyOn { get { return btnApply.Enabled; } }
         internal bool TestLockOn { get { return chkSame.Checked; } }

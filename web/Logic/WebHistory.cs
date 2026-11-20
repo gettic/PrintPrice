@@ -304,8 +304,57 @@ namespace PrintPrice.Web
         /// printerNames: null with one printer (the printer's name isn't searched then).
         public static bool Matches(QuoteRecord r, Filter f, Dictionary<string, string> printerNames)
         {
-            return History.Matches(r, f.Month, f.PrinterId, f.Show, f.Query,
+            bool unpaid = f.Show == ShowUnpaidInvoices;   // paid-tick: the website's own Show value
+            if (unpaid && !IsUnpaidInvoice(r)) return false;
+            return History.Matches(r, f.Month, f.PrinterId, unpaid ? History.ShowAll : f.Show, f.Query,
                                    printerNames != null ? (Func<QuoteRecord, string>)(x => PrinterText(x, printerNames)) : null, DateTime.Now);
+        }
+
+        // ---------- paid-tick (plans\paid-tick): History.SetPaid / IsPaid on the History page ----------
+
+        /// Show value "Unpaid invoices" (website only; after History's 0-8).
+        public const int ShowUnpaidInvoices = 9;
+
+        /// A made invoice (number) not marked paid. null = false.
+        public static bool IsUnpaidInvoice(QuoteRecord r)
+        {
+            return r != null && (r.InvoiceNo ?? "").Trim().Length > 0 && !History.IsPaid(r);
+        }
+
+        public static string ShowUnpaidText { get { return L.S("Unpaid invoices", "Ubetalte fakturaer"); } }
+        public static string PaymentHeading { get { return L.S("Payment", "Betaling"); } }
+
+        /// The Invoice cell's tick: "✓ Paid" / "Unpaid" ("✓ Betalt" / "Ubetalt").
+        public static string PaidMark(QuoteRecord r) { return History.IsPaid(r) ? L.S("✓ Paid", "✓ Betalt") : L.S("Unpaid", "Ubetalt"); }
+
+        /// Its tip: "Paid 05-11-2026. Click to mark invoice 2026-48213 as unpaid." / "Click to mark invoice … as paid."
+        public static string PaidTip(QuoteRecord r)
+        {
+            string no = (r.InvoiceNo ?? "").Trim();
+            DateTime d;
+            if (History.PaidOn(r, out d))
+                return L.F("Paid {0}. Click to mark invoice {1} as unpaid.", "Betalt {0}. Klik for at markere faktura {1} som ubetalt.", d.ToString("dd-MM-yyyy", Inv), no);
+            return L.F("Click to mark invoice {0} as paid (all its prints).", "Klik for at markere faktura {0} som betalt (alle dens print).", no);
+        }
+
+        /// The phone sheet's button: "Mark as paid" / "Mark as unpaid".
+        public static string PaidButton(QuoteRecord r) { return History.IsPaid(r) ? L.S("Mark as unpaid", "Markér som ubetalt") : L.S("Mark as paid", "Markér som betalt"); }
+
+        /// Ticks / unticks r's invoice number for all its jobs (History.SetPaid); returns the new state. Doesn't save.
+        public static bool TogglePaid(List<QuoteRecord> list, QuoteRecord r, DateTime now)
+        {
+            bool paid = !History.IsPaid(r);
+            History.SetPaid(list, r.InvoiceNo, paid, now);
+            return paid;
+        }
+
+        /// The line after a toggle: "✓ Invoice 2026-48213 marked as paid." / "… as unpaid." (+ " (3 prints)").
+        public static string PaidDoneText(string no, bool paid, int jobs)
+        {
+            string n = (no ?? "").Trim();
+            string s = paid ? L.F("✓ Invoice {0} marked as paid", "✓ Faktura {0} markeret som betalt", n)
+                            : L.F("✓ Invoice {0} marked as unpaid", "✓ Faktura {0} markeret som ubetalt", n);
+            return s + (jobs >= 2 ? " (" + QuoteRows.PrintsText(jobs) + ")" : "") + ".";
         }
 
         public static List<QuoteRecord> Apply(List<QuoteRecord> list, Filter f, Dictionary<string, string> printerNames)

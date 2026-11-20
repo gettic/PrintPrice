@@ -1,0 +1,93 @@
+{
+    "error_string": "Success.",
+    "layer_height": 0.20000000298023224,
+    "peak_rss_mb": 615.765625,
+    "plate_index": 0,
+    "return_code": 0,
+    "sliced_plates": [
+        {
+            "feature_type_times": {
+                "Bottom surface": 406.9807434082031,
+                "Bridge": 2744.089111328125,
+                "Custom": 25.552194595336914,
+                "Gap infill": 183.9410858154297,
+                "Inner wall": 4637.9462890625,
+                "Internal solid infill": 4526.544921875,
+                "Outer wall": 7206.6640625,
+                "Overhang wall": 506.0955505371094,
+                "Sparse infill": 20593.833984375,
+                "Top surface": 1931.531494140625,
+                "Travel": 5304.52490234375,
+                "Undefined": 5298.1025390625
+            },
+            "filament_change_times": 0,
+            "filaments": [
+                {
+                    "filament_id": "GFA00",
+                    "id": 1,
+                    "main_used_g": 599.1939697265625,
+                    "total_used_g": 599.1939697265625
+                }
+            ],
+            "id": 1,
+            "layer_filament_change": 0,
+            "main_predication": 48093.91015625,
+            "obj_cached_cnt": 0,
+            "objects": [
+                {
+                    "bbox": {
+                        "depth": 321.7512512207031,
+                        "height": 240.0,
+                        "width": 321.7512512207031,
+                        "x": -18.521360397338867,
+                        "y": -47.22990798950195,
+                        "z": 0.0
+                    },
+                    "id": 5,
+                    "name": "3dbenchy.stl",
+                    "triangle_count": 225154
+                }
+            ],
+            "times": {
+                "conflict_check_time": 0,
+                "detect_overhangs_time": 30,
+                "export_gcode_time": 2436,
+                "flush_plan_time": 0,
+                "generate_support_material_time": 420,
+                "infill_generate_time": 800,
+                "infill_time": 1749,
+                "ironing_time": 0,
+                "make_perimeters_time": 1063,
+                "multifilament_segment_2d_time": 0,
+                "other_slice_time": 6,
+                "prepare_infill_time": 949,
+                "region_split_time": 2,
+                "skirt_brim_time": 10,
+                "slice_layers_time": 404,
+                "sliced_time": 6189,
+                "sliced_time_with_cache": 2446,
+                "support_detect_time": 0,
+                "support_interface_time": 0,
+                "support_normal_generate_time": 0,
+                "support_toolpath_time": 0,
+                "support_tree_generate_time": 0,
+                "toolpath_time": 447,
+                "wall_time": 657,
+                "wipe_tower_time": 28
+            },
+            "total_predication": 48113.01171875,
+            "triangle_count": 225154,
+            "warning_message": "It seems object 3dbenchy.stl has floating regions. Please re-orient the object or enable support generation."
+        }
+    ],
+    "sparse_infill_density": 15.0,
+    "times": {
+        "export_3mf_time": 1697,
+        "export_slicedata_time": 0,
+        "export_time": 2015,
+        "import_time": 235,
+        "load_slicedata_time": 0,
+        "prepare_time": 267
+    },
+    "wall_loops": 2
+}
