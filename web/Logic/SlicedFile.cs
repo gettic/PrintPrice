@@ -127,11 +127,12 @@ namespace PrintPrice.Web
         }
 
         // ---------- prime tower (issue #8 step 3; = Slicer.ReadGcodeFile's / PlateTower's pass) ----------
-        // The counting is the desktop's BambuSlicer.TowerFromGcode + ApplyTower (SliceInfo.cs). It needs every line, so a
-        // G-code is read whole once (in 8 MB pieces) and a .gcode.3mf's plate G-codes are inflated line by line from
-        // their compressed bytes. Anything that fails = unknown (no tower part shown), never an error for the file.
+        // The counting is the desktop's BambuSlicer.TowerCounter (TowerFromGcode's steps) + ApplyTower (SliceInfo.cs). It
+        // needs every line, so a G-code is read once and a .gcode.3mf's plate G-codes are inflated on the way; either is
+        // fetched one ChunkStream piece (8 MB) at a time and fed line by line (optimizer v1.28: peak memory ~8 MB, not
+        // the file). Anything that fails = unknown (no tower part shown), never an error for the file.
 
-        /// Biggest G-code (or compressed plate G-code) read for the count; bigger = unknown.
+        /// Biggest G-code (or compressed plate G-code) read for the count; bigger = unknown (keeps the read time sane).
         public const long MaxTowerBytes = 512L * 1048576;
 
         static async Task CountGcodeTower(IRangeSource src, SliceResult res)
@@ -139,9 +140,7 @@ namespace PrintPrice.Web
             try
             {
                 if (src.Length > MaxTowerBytes) return;
-                var all = await ChunkStream.Read(src, 0, src.Length);
-                if (all == null) return;
-                BambuSlicer.ApplyTower(res, BambuSlicer.TowerFromGcode(Lines(all)));
+                BambuSlicer.ApplyTower(res, await CountLines(new ChunkStream(src, 0, src.Length)));
             }
             catch (Exception) { }
         }
@@ -158,7 +157,7 @@ namespace PrintPrice.Web
                         || !e.Name.EndsWith(".gcode", StringComparison.OrdinalIgnoreCase)) continue;
                     var s = await zip.OpenStream(e.Name, MaxTowerBytes);
                     if (s == null) return null;
-                    var plate = BambuSlicer.TowerFromGcode(Lines(s));   // Lines disposes s
+                    var plate = await CountLines(s);
                     if (total == null) total = new GcodeTower();
                     BambuSlicer.AddTower(total, plate);
                 }
@@ -167,14 +166,17 @@ namespace PrintPrice.Web
             catch (Exception) { return null; }
         }
 
-        /// A stream's lines, one at a time (UTF-8, BOM skipped); disposes the stream at the end.
-        static IEnumerable<string> Lines(System.IO.Stream s)
+        /// A stream's lines (UTF-8, BOM skipped; read with ReadLineAsync so each piece is fetched when needed) fed to one
+        /// TowerCounter; disposes the stream. Throws when the stream can't be read (callers: unknown).
+        static async Task<GcodeTower> CountLines(System.IO.Stream s)
         {
+            var c = new BambuSlicer.TowerCounter();
             using (var sr = new System.IO.StreamReader(s, Encoding.UTF8, true, 65536))
             {
                 string line;
-                while ((line = sr.ReadLine()) != null) yield return line;
+                while ((line = await sr.ReadLineAsync()) != null) c.Feed(line);
             }
+            return c.Result();
         }
     }
 }

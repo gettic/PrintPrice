@@ -3682,6 +3682,7 @@ namespace PrintPrice.Tests
             ScaleFileTests();
             TowerHistoryTests();
             TowerSlicerTests();
+            GcodeThumbnailTests();
             InvoiceListTests();
             PaidTests();
             CombinedBillTests();
@@ -5006,6 +5007,17 @@ namespace PrintPrice.Tests
 
         static bool G(GcodeTower t, int slot, double grams) { return t.Grams.Count >= slot && Math.Abs(t.Grams[slot - 1] - grams) <= 0.01; }
 
+        // a real A1 slice with a thumbnail block (tests\gcode-samples\thumbnail\red_block_thumbnail.gcode, made by online)
+        static void GcodeThumbnailTests()
+        {
+            string path = System.IO.Path.Combine(GcodeDir(), "thumbnail", "red_block_thumbnail.gcode");
+            var pic = BambuSlicer.ReadGcodePicture(path);
+            True("ReadGcodePicture: PNG (89 50 4E 47 0D 0A 1A 0A)", pic != null && pic.Length > 8 && pic[0] == 0x89 && pic[1] == 0x50 && pic[2] == 0x4E
+                 && pic[3] == 0x47 && pic[4] == 0x0D && pic[5] == 0x0A && pic[6] == 0x1A && pic[7] == 0x0A);
+            var res = BambuSlicer.ReadGcodeFile(path);
+            True("ReadGcodeFile: picture, FromSlicedFile, about 2,21 g", res != null && res.Picture != null && res.FromSlicedFile && Math.Abs(res.Grams - 2.21) < 0.01);
+        }
+
         static void TowerSlicerTests()
         {
             // 1-2. real slices: tower on vs off (plan: counted 1,098 / 0,606 g = on - off 1,10 / 0,60)
@@ -5038,6 +5050,23 @@ namespace PrintPrice.Tests
             // no header: 100 × π × 0,875² × 1,24 / 1000 = 0,298
             var td = TowerOf("M83\n; FEATURE: Prime tower\nG1 X1 Y1 E100\n");
             True("TowerFromGcode: no header -> 1,75 mm / 1,24 -> 0,298 g", td.Grams.Count == 1 && td.Grams[0] == 0.298);
+            // TowerCounter fed in two pieces with a Result() in between = TowerFromGcode on the whole file
+            var cubeLines = new List<string>(System.IO.File.ReadLines(System.IO.Path.Combine(GcodeDir(), "tower", "cubes_3colour.gcode")));
+            var counter = new BambuSlicer.TowerCounter();
+            int half = cubeLines.Count / 2;
+            for (int i = 0; i < half; i++) counter.Feed(cubeLines[i]);
+            var mid = counter.Result();
+            for (int i = half; i < cubeLines.Count; i++) counter.Feed(cubeLines[i]);
+            var whole = counter.Result();
+            bool sameGrams = whole.Grams.Count == cubes.Grams.Count;
+            for (int i = 0; sameGrams && i < cubes.Grams.Count; i++) if (whole.Grams[i] != cubes.Grams[i]) sameGrams = false;
+            True("TowerCounter: two pieces + Result() in between = TowerFromGcode (grams, blocks)", mid != null && sameGrams && whole.Blocks == cubes.Blocks
+                 && whole.Blocks > mid.Blocks);
+            True("IsMoveLine: G1 X1 E.1 / g0 / G01<tab>X1 / G3;c yes", BambuSlicer.IsMoveLine("G1 X1 E.1") && BambuSlicer.IsMoveLine("g0")
+                 && BambuSlicer.IsMoveLine("G01\tX1") && BambuSlicer.IsMoveLine("G3;c"));
+            True("IsMoveLine: G10 / G28 / G92 E0 / G010 / G1X10 / M83 / G / null no", !BambuSlicer.IsMoveLine("G10") && !BambuSlicer.IsMoveLine("G28")
+                 && !BambuSlicer.IsMoveLine("G92 E0") && !BambuSlicer.IsMoveLine("G010") && !BambuSlicer.IsMoveLine("G1X10") && !BambuSlicer.IsMoveLine("M83")
+                 && !BambuSlicer.IsMoveLine("G") && !BambuSlicer.IsMoveLine(null));
             True("TowerFromGcode: null -> empty, no blocks", BambuSlicer.TowerFromGcode(null).Grams.Count == 0 && BambuSlicer.TowerFromGcode(null).Blocks == 0);
 
             // 6. ApplyTower
@@ -5425,9 +5454,12 @@ namespace PrintPrice.Tests
             try
             {
                 L.Danish = false;
-                True("PaidText EN", History.PaidText(new DateTime(2026, 11, 5)) == "Paid 05-11-2026 – thank you");
+                True("PaidText EN (long date like the invoice header)", History.PaidText(new DateTime(2026, 11, 12)) == "Paid 12 November 2026 – thank you"
+                     && History.PaidText(new DateTime(2026, 11, 5)) == "Paid 5 November 2026 – thank you"
+                     && History.PaidText(new DateTime(2026, 11, 12)).Contains(QuoteRows.LongDate(new DateTime(2026, 11, 12))));
                 L.Danish = true;
-                True("PaidText DA", History.PaidText(new DateTime(2026, 11, 5)) == "Betalt 05-11-2026 – tak");
+                True("PaidText DA (long date like the invoice header)", History.PaidText(new DateTime(2026, 11, 12)) == "Betalt 12. november 2026 – tak"
+                     && History.PaidText(new DateTime(2026, 11, 12)).Contains(QuoteRows.LongDate(new DateTime(2026, 11, 12))));
             }
             finally { L.Danish = wasDanish; }
         }

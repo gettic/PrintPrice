@@ -135,9 +135,10 @@ namespace PrintPrice.Web
             catch (InvalidDataException) { return null; }
         }
 
-        /// Issue #8 step 3: the entry as a stream for one pass (the prime tower count in a plate G-code): only the
-        /// compressed bytes are held (fetched in ChunkBytes pieces), the text is inflated while it is read, never whole.
-        /// Null when missing, compressed bigger than maxCompressed, another method, or unreadable. The caller disposes it.
+        /// Issue #8 step 3: the entry as a stream for one pass (the prime tower count in a plate G-code): the compressed
+        /// bytes are fetched one ChunkBytes piece at a time while it is read (ReadAsync), the text inflated on the way,
+        /// never whole. Null when missing, compressed bigger than maxCompressed, another method, or unreadable header;
+        /// a file that changes later = IOException while reading. The caller disposes it.
         public async Task<Stream> OpenStream(string name, long maxCompressed)
         {
             var e = Find(name);
@@ -146,8 +147,7 @@ namespace PrintPrice.Web
             byte[] head = await src.Read(e.HeaderOffset, 30);
             if (head.Length < 30 || U32(head, 0) != 0x04034b50) return null;
             long dataStart = e.HeaderOffset + 30 + U16(head, 26) + U16(head, 28);
-            var data = await ChunkStream.Read(src, dataStart, e.CompressedSize);
-            if (data == null) return null;
+            var data = new ChunkStream(src, dataStart, e.CompressedSize);   // fetched piece by piece while it is read
             return e.Method == 0 ? (Stream)data : new DeflateStream(data, CompressionMode.Decompress);
         }
 
@@ -163,43 +163,78 @@ namespace PrintPrice.Web
         static long U32(byte[] b, int i) { return (uint)(b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)); }
     }
 
-    /// A read-only, forward-only stream over byte pieces fetched by ranges (no single huge array, no copy into one).
+    /// A read-only, forward-only stream over a byte range, fetched lazily ChunkBytes at a time (optimizer v1.28 item 2):
+    /// only the current piece is held, so a big G-code never sits in memory whole. Read it with ReadAsync (StreamReader.
+    /// ReadLineAsync, DeflateStream.ReadAsync): the browser can't wait for File.slice synchronously, so the sync Read only
+    /// works when the next piece is already there (always with BytesSource). A source that gives fewer bytes than asked
+    /// (file changed / gone) = IOException.
     public sealed class ChunkStream : Stream
     {
         public const int ChunkBytes = 8 * 1048576;   // one File.slice per 8 MB
-        readonly List<byte[]> chunks;
-        int at, pos;
+        readonly IRangeSource src;
+        readonly long start, length;
+        long fetched;          // bytes fetched so far (from start)
+        byte[] piece = new byte[0];
+        int pos;
+        public int Pieces;     // tests: how many pieces were fetched
+        public int MaxPiece;   // tests: the biggest piece held
 
-        public ChunkStream(List<byte[]> chunks) { this.chunks = chunks ?? new List<byte[]>(); }
-
-        /// length bytes from offset, fetched ChunkBytes at a time; null when the source gives fewer (file changed / gone).
-        public static async Task<ChunkStream> Read(IRangeSource src, long offset, long length)
+        public ChunkStream(IRangeSource src, long offset, long length)
         {
-            var list = new List<byte[]>();
-            long done = 0;
-            while (done < length)
+            this.src = src; start = offset; this.length = Math.Max(0, length);
+        }
+
+        Task<byte[]> Next()
+        {
+            int n = (int)Math.Min(ChunkBytes, length - fetched);
+            return src.Read(start + fetched, n);
+        }
+
+        void Take(byte[] b)
+        {
+            int want = (int)Math.Min(ChunkBytes, length - fetched);
+            if (b == null || b.Length < want) throw new IOException("The file changed while it was read.");
+            piece = b; pos = 0; fetched += b.Length; Pieces++;
+            if (b.Length > MaxPiece) MaxPiece = b.Length;
+        }
+
+        int Copy(Span<byte> dest)
+        {
+            int n = Math.Min(dest.Length, piece.Length - pos);
+            piece.AsSpan(pos, n).CopyTo(dest);
+            pos += n;
+            return n;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, System.Threading.CancellationToken cancel = default(System.Threading.CancellationToken))
+        {
+            if (buffer.Length == 0) return 0;
+            if (pos >= piece.Length)
             {
-                int n = (int)Math.Min(ChunkBytes, length - done);
-                byte[] b = await src.Read(offset + done, n);
-                if (b == null || b.Length == 0) return null;
-                list.Add(b);
-                done += b.Length;
+                if (fetched >= length) return 0;
+                piece = new byte[0];   // let the old piece go before the next one arrives
+                Take(await Next());
             }
-            return new ChunkStream(list);
+            return Copy(buffer.Span);
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, System.Threading.CancellationToken cancel)
+        {
+            return ReadAsync(new Memory<byte>(buffer, offset, count), cancel).AsTask();
         }
 
         public override int Read(byte[] buffer, int offset, int count)
         {
-            int total = 0;
-            while (count > 0 && at < chunks.Count)
+            if (count == 0) return 0;
+            if (pos >= piece.Length)
             {
-                var c = chunks[at];
-                int n = Math.Min(count, c.Length - pos);
-                if (n <= 0) { at++; pos = 0; continue; }
-                Buffer.BlockCopy(c, pos, buffer, offset, n);
-                pos += n; offset += n; count -= n; total += n;
+                if (fetched >= length) return 0;
+                var t = Next();
+                if (!t.IsCompleted) throw new NotSupportedException("ChunkStream: use ReadAsync.");
+                piece = new byte[0];
+                Take(t.GetAwaiter().GetResult());
             }
-            return total;
+            return Copy(new Span<byte>(buffer, offset, count));
         }
 
         public override bool CanRead { get { return true; } }

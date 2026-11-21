@@ -77,6 +77,9 @@ namespace PrintPrice
             string narrowCue;   // the search hint then (null = the normal one)
             internal string TestCue { get { return narrowCue ?? L.S("Number, name or model", "Nummer, navn eller model"); } }
             const int RowsShown = 12;
+            int rowsShown = RowsShown;   // qol 6: fewer (min 5) when the window would be taller than the screen
+            /// Test / picture mode: the screen's working height (px) for the fit check (0 = the real screen).
+            internal static int TestScreenHeight;
 
             /// Status filter items -> History.InvoiceMatches values.
             static readonly int[] StatusValues =
@@ -119,13 +122,20 @@ namespace PrintPrice
                 top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
                 top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
                 Func<string, Label> cap = t => new Label { Text = t, AutoSize = true, UseMnemonic = false, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, 8, 0) };
-                txtSearch = new TextBox { Width = 220, Anchor = AnchorStyles.Left, Margin = new Padding(0, 3, 24, 3), Tag = "single" };
+                txtSearch = new TextBox { Width = 220, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 24, 3), Tag = "single" };
                 txtSearch.HandleCreated += delegate
                 {
                     SendMessage(txtSearch.Handle, 0x1501, (IntPtr)1, TestCue);   // EM_SETCUEBANNER (shorter when narrow)
                 };
-                txtSearch.TextChanged += delegate { Fill(); };
-                cmbStatus = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170, Anchor = AnchorStyles.Left, Margin = new Padding(0, 3, 24, 3) };
+                // optimizer 3b: the list follows 200 ms after the last key (Enter, Esc and leaving the box: at once)
+                searchTimer = new Timer { Interval = 200 };
+                searchTimer.Tick += delegate { searchTimer.Stop(); Fill(); };
+                txtSearch.TextChanged += delegate { searchTimer.Stop(); searchTimer.Start(); };
+                // leaving the box runs a waiting search at once; when that leave came from a click in the list, the click is
+                // swallowed too (Windows moves the focus before the list sees the mouse-down)
+                txtSearch.Leave += delegate { if (ApplyPendingSearch()) leaveFlushTick = Environment.TickCount; };
+                txtSearch.KeyPress += (ks, ke) => { if (ke.KeyChar == '\r') { ke.Handled = true; FlushSearch(); } };
+                cmbStatus = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 24, 3) };
                 cmbStatus.Items.AddRange(new object[]
                 {
                     L.S("All invoices", "Alle fakturaer"), QuoteRows.StateName(PrintState.NotPrinted), QuoteRows.StateName(PrintState.Printing),
@@ -133,7 +143,7 @@ namespace PrintPrice
                 });
                 cmbStatus.SelectedIndex = 0;
                 cmbStatus.SelectedIndexChanged += delegate { Fill(); };
-                cmbPeriod = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Anchor = AnchorStyles.Left, Margin = new Padding(0, 3, 24, 3) };
+                cmbPeriod = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 24, 3) };
                 cmbPeriod.Items.AddRange(new object[]
                 {
                     L.S("All time", "Al tid"), L.S("This month", "Denne måned"), L.S("Last 30 days", "Sidste 30 dage"), L.S("This year", "I år")
@@ -141,7 +151,7 @@ namespace PrintPrice
                 cmbPeriod.SelectedIndex = 0;
                 cmbPeriod.SelectedIndexChanged += delegate { Fill(); };
                 // paid-tick: All / Unpaid (overdue too) / Overdue / Paid
-                cmbPayment = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130, Anchor = AnchorStyles.Left, Margin = new Padding(0, 3, 0, 3) };
+                cmbPayment = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 0, 3) };
                 cmbPayment.Items.AddRange(new object[] { L.S("All", "Alle"), L.S("Unpaid", "Ubetalte"), L.S("Overdue", "Forfaldne"), L.S("Paid", "Betalte") });
                 cmbPayment.SelectedIndex = 0;
                 cmbPayment.SelectedIndexChanged += delegate { Fill(); };
@@ -192,6 +202,7 @@ namespace PrintPrice
                 colPaid = TextColumn(L.S("Paid", "Betalt"), false);   // paid-tick: ✓ Paid / Unpaid / Overdue, click toggles
                 colStatus = TextColumn(L.S("Status", "Status"), false);
                 grid.Columns.AddRange(new DataGridViewColumn[] { colNo, colTo, colPrints, colDate, colAge, colDue, colTotal, colPaid, colStatus });
+                grid.SearchPending = SearchWasPending;   // release-test-6: a click / Space during the 200 ms search delay is swallowed
                 grid.CellFormatting += CellFormatting;
                 grid.CellPainting += PaintStatus;
                 grid.CellPainting += PaintPaid;
@@ -221,6 +232,16 @@ namespace PrintPrice
                     rowMenu.Show(Cursor.Position);
                 };
                 grid.SelectionChanged += delegate { UpdateButtons(); };
+                // qol 9: nothing matches the search / filters -> a grey line in the empty list
+                grid.Paint += (s, e) =>
+                {
+                    if (shown == null || shown.Count > 0 || rows == null || rows.Count == 0) return;
+                    var area = grid.ClientRectangle;
+                    area.Y += grid.ColumnHeadersHeight + Px(18);
+                    area.Height = grid.RowTemplate.Height;
+                    TextRenderer.DrawText(e.Graphics, EmptyText, grid.Font, area, Theme.Muted,
+                                          TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                };
                 grid.HandleCreated += delegate { DarkScrollBars(grid); };
                 // dark tooltips: the prints of a combined invoice, a cut-off name, the due hint
                 tip = new ToolTip { OwnerDraw = true, InitialDelay = 400 };
@@ -253,7 +274,8 @@ namespace PrintPrice
                 // paid-tick: "Unpaid: 3 invoices · 125,64 kr." (+ amber " · 1 overdue") next to Show in History
                 lblUnpaid = new Label { AutoSize = true, UseMnemonic = false, Margin = Padding.Empty, ForeColor = Theme.Text };
                 lblOverdue = new Label { AutoSize = true, UseMnemonic = false, Margin = Padding.Empty, ForeColor = Theme.Warning };
-                var unpaidFlow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(16, 0, 0, 0), Anchor = AnchorStyles.Left };
+                // a plain panel: "· 1 overdue" is placed by hand 6 px into the first label's right-hand slack (qol 7)
+                var unpaidFlow = new Panel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Margin = new Padding(16, 0, 0, 0), Anchor = AnchorStyles.Left };
                 unpaidFlow.Controls.Add(lblUnpaid);
                 unpaidFlow.Controls.Add(lblOverdue);
                 Func<string, Button> button = t => new Button
@@ -323,12 +345,13 @@ namespace PrintPrice
                 // the age text stays current: redrawn every 10 minutes (crosses midnight within 10 minutes)
                 ageTimer = new Timer { Interval = 600000 };
                 ageTimer.Tick += delegate { RefreshAges(); };
-                FormClosed += delegate { ageTimer.Stop(); ageTimer.Dispose(); tip.Dispose(); rowMenu.Dispose(); statusMenu.Dispose(); };
+                FormClosed += delegate { ageTimer.Stop(); ageTimer.Dispose(); searchTimer.Stop(); searchTimer.Dispose(); tip.Dispose(); rowMenu.Dispose(); statusMenu.Dispose(); };
 
                 Theme.Apply(this);
                 lblOverdue.ForeColor = Theme.Warning;   // after Apply (it sets label colours)
+                gridFrame.BackColor = Theme.Border;     // qol 1: Apply resets it (the 1 px list frame)
                 ResumeLayout(true);
-                Load += delegate { FitLayout(); Build(null); ShowHelp(); ageTimer.Start(); };
+                Load += delegate { FitLayout(); Build(null); ShowHelp(); FitHeight(); ageTimer.Start(); };
                 Shown += delegate { if (!Program.Hidden && !Screenshots.Active) grid.Focus(); };
             }
 
@@ -353,8 +376,12 @@ namespace PrintPrice
                 colNo.Width = Math.Max(widest(head, new[] { "Invoice no.", "Faktura nr." }), widest(grid.Font, new[] { "2026-00000", "2026-WWWW" })) + pad;
                 colTo.Width = Px(160);
                 colDate.Width = Math.Max(widest(head, new[] { "Invoice date", "Fakturadato" }), widest(grid.Font, new[] { "00-00-0000" })) + pad;
-                colAge.Width = Math.Max(widest(head, new[] { "Created", "Oprettet" }),
-                                        widest(grid.Font, new[] { "30 days ago", "11 months ago", "for 30 dage siden", "for 11 måneder siden" })) + pad;
+                // qol 3: this language only; it may shrink to the ages really shown (before Prints gives way)
+                colAge.Width = Math.Max(widest(head, new[] { L.S("Created", "Oprettet") }),
+                                        widest(grid.Font, new[] { L.S("30 days ago", "for 30 dage siden"), L.S("11 months ago", "for 11 måneder siden") })) + pad;
+                var nowRows = History.Invoices(list, DateTime.Now, settings);
+                int ageMin = Math.Max(widest(head, new[] { L.S("Created", "Oprettet") }),
+                                      nowRows.Count == 0 ? 0 : nowRows.Max(r => TextRenderer.MeasureText(History.AgeText(r.BilledAt, DateTime.Now), grid.Font).Width)) + pad;
                 colDue.Width = Math.Max(widest(head, new[] { "Due", "Forfald" }), widest(grid.Font, new[] { "00-00-0000" })) + pad;
                 colTotal.Width = Math.Max(widest(head, new[] { "Total", "I alt" }), widest(bold, new[] { "00.000,00 kr." })) + pad;
                 colStatus.Width = Math.Max(widest(head, new[] { "Status" }),
@@ -377,6 +404,7 @@ namespace PrintPrice
                 int chrome = Width - ClientSize.Width + 2 * Px(14) + SystemInformation.VerticalScrollBarWidth + 2;
                 Func<int> colsW = () => colNo.Width + colTo.Width + printsW + colDate.Width + colAge.Width + colDue.Width + colTotal.Width + colPaid.Width + colStatus.Width;
                 int over = colsW() + chrome - screenW;
+                if (over > 0) { int cut = Math.Max(0, Math.Min(over, colAge.Width - ageMin)); colAge.Width -= cut; over -= cut; }
                 if (over > 0) { int cut = Math.Min(over, printsW - Px(110)); printsW -= cut; over -= cut; }
                 if (over > 0) { int cut = Math.Min(over, colTo.Width - Px(110)); colTo.Width -= cut; over -= cut; }
                 narrow = colsW() + chrome + Px(40) > screenW;
@@ -392,7 +420,8 @@ namespace PrintPrice
                     cmbPayment.Width = Px(110);
                 }
                 int cols = colsW();
-                gridFrame.Size = new Size(cols + SystemInformation.VerticalScrollBarWidth + 2, grid.ColumnHeadersHeight + RowsShown * rowH + 2);
+                rowsShown = RowsShown;
+                gridFrame.Size = new Size(cols + SystemInformation.VerticalScrollBarWidth + 2, grid.ColumnHeadersHeight + rowsShown * rowH + 2);
                 info.SetWidth(gridFrame.Width);
                 // the real width after layout (margins the estimate missed): still too wide -> the Prints column gives the rest
                 PerformLayout();
@@ -403,6 +432,58 @@ namespace PrintPrice
                     info.SetWidth(gridFrame.Width);
                     PerformLayout();
                 }
+            }
+
+            /// qol 6: too tall for the screen (e.g. 1366 x 768 at 125 %) -> fewer rows, at least 5. After the help text is in
+            /// (its lines set the info box height).
+            void FitHeight()
+            {
+                PerformLayout();
+                int rowH = grid.RowTemplate.Height;
+                int screenH = TestScreenHeight > 0 ? TestScreenHeight : Screen.FromControl(this).WorkingArea.Height;
+                int tooTall = Height - screenH;
+                if (tooTall > 0)
+                {
+                    int less = Math.Min(RowsShown - 5, (tooTall + rowH - 1) / rowH);
+                    rowsShown = RowsShown - less;
+                    gridFrame.Height = grid.ColumnHeadersHeight + rowsShown * rowH + 2;
+                    PerformLayout();
+                }
+            }
+
+            static string EmptyText { get { return L.S("No invoices match the search or filters.", "Ingen fakturaer passer til søgningen eller filtrene."); } }
+
+            readonly Timer searchTimer;
+
+            /// A search still waiting for its 200 ms runs now (Enter, Esc, leaving the box, the test steps).
+            void FlushSearch() { ApplyPendingSearch(); }
+
+            int leaveFlushTick;   // when leaving the search box ran a waiting search (0 = not just now)
+
+            /// The grid asks on a mouse-down / Space: a waiting search runs now, or one just ran because the search box lost
+            /// the focus to this click (within 300 ms): true = swallow the click.
+            bool SearchWasPending()
+            {
+                if (ApplyPendingSearch()) return true;
+                bool justLeft = leaveFlushTick != 0 && unchecked(Environment.TickCount - leaveFlushTick) < 300;
+                leaveFlushTick = 0;
+                return justLeft;
+            }
+
+            /// Runs a waiting search now; true = there was one (the grid then swallows the click / Space that asked).
+            bool ApplyPendingSearch()
+            {
+                if (!searchTimer.Enabled) return false;
+                searchTimer.Stop();
+                Fill();
+                return true;
+            }
+
+            /// qol 4: Esc in a search box with text clears it first (the next Esc closes).
+            protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+            {
+                if (keyData == Keys.Escape && (txtSearch.Focused || ActiveControl == txtSearch) && txtSearch.TextLength > 0) { txtSearch.Clear(); FlushSearch(); return true; }
+                return base.ProcessCmdKey(ref msg, keyData);
             }
 
             /// Rows from the list again (statuses, names and totals may have changed), keeping the selected invoice.
@@ -417,6 +498,7 @@ namespace PrintPrice
 
             void Fill(string keepNo)
             {
+                searchTimer.Stop();   // this fill uses the search box as it is now
                 DateTime now = DateTime.Now, from, to;
                 History.InvoicePeriod(PeriodValues[Math.Max(0, cmbPeriod.SelectedIndex)], now, out from, out to);
                 int status = StatusValues[Math.Max(0, cmbStatus.SelectedIndex)];
@@ -457,6 +539,11 @@ namespace PrintPrice
                                      " · " + KrNb(u.Total);
                     lblOverdue.Text = u.Overdue > 0 ? "· " + L.F("{0} overdue", "{0} forfaldne", u.Overdue).Replace("1 forfaldne", "1 forfalden") : "";
                 }
+                // qol 7: the gap before "· 1 overdue" as a space: placed 6 px into the first label's right-hand slack
+                lblUnpaid.Location = Point.Empty;
+                lblOverdue.Location = new Point(Math.Max(0, lblUnpaid.Right - Px(6)), 0);
+                lblOverdue.BringToFront();   // over the first label's empty end
+                grid.Invalidate();   // the "no invoices match" line
                 UpdateButtons();
                 if (!doneShown) ShowHelp();
             }
@@ -598,7 +685,7 @@ namespace PrintPrice
                 info.Text = L.S("Double-click or Enter opens an invoice. Click Status to change the print status of all its prints (saved at once).\n" +
                                 "Click Paid (or Space) to mark an invoice paid or unpaid. Unpaid invoices past their due date are in amber.",
                                 "Dobbeltklik eller Enter åbner en faktura. Klik på Status for at ændre printstatus for alle dens print (gemmes med det samme).\n" +
-                                "Klik på Betalt (eller mellemrum) for at markere en faktura som betalt eller ubetalt. Ubetalte fakturaer over forfaldsdatoen står med gult.");
+                                "Klik på Betalt (eller mellemrumstasten) for at markere en faktura som betalt eller ubetalt. Ubetalte fakturaer, der har overskredet forfaldsdatoen, står med gult.");
             }
 
             void ShowDone(string text, InfoKind kind)
@@ -616,6 +703,10 @@ namespace PrintPrice
                 if (row == null) return;
                 bool paid = !row.Paid;
                 DateTime now = DateTime.Now;
+                // qol 5: Undo puts each job's paid date back as it was
+                var ids = new HashSet<string>(row.Jobs.Select(j => j.Id));
+                var before = list.Where(j => ids.Contains(j.Id)).Select(j => new KeyValuePair<QuoteRecord, string>(j, j.PaidAt ?? "")).ToList();
+                string no = row.No;
                 History.SetPaid(list, row.No, paid, now);
                 if (save != null) save();
                 Build(row.No);
@@ -624,8 +715,22 @@ namespace PrintPrice
                                    : L.F("✓ Invoice {0}: marked as unpaid.", "✓ Faktura {0}: markeret som ubetalt.", row.No);
                 if (gone) text += " " + L.S("It no longer shows with this filter.", "Den vises ikke længere med dette filter.");
                 ShowDone(text, InfoKind.Success);
+                undoPaid = () =>
+                {
+                    undoPaid = null;
+                    foreach (var kv in before) kv.Key.PaidAt = kv.Value;
+                    if (save != null) save();
+                    Build(no);
+                    var back = rows.FirstOrDefault(r => string.Equals(r.No, no, StringComparison.OrdinalIgnoreCase));
+                    ShowDone(back != null && back.Paid ? L.F("✓ Undone: invoice {0} is paid again.", "✓ Fortrudt: faktura {0} er betalt igen.", no)
+                                                       : L.F("✓ Undone: invoice {0} is unpaid again.", "✓ Fortrudt: faktura {0} er ubetalt igen.", no), InfoKind.Success);
+                    grid.Focus();
+                };
+                info.SetLink(L.S("Undo", "Fortryd"), () => { if (undoPaid != null) undoPaid(); });
                 grid.Focus();
             }
+
+            Action undoPaid;   // the last paid / unpaid tick's Undo (null = none)
 
             void OpenSelected()
             {
@@ -710,11 +815,63 @@ namespace PrintPrice
             internal string TestInfoText { get { return (info.Text ?? "").Replace("\n", " / "); } }
             internal InfoKind TestInfoKind { get { return info.Kind; } }
             internal string TestCell(int row, int col) { return row >= 0 && row < grid.Rows.Count ? Convert.ToString(grid.Rows[row].Cells[col].FormattedValue) : ""; }
-            internal void TestSearch(string text) { txtSearch.Text = text; }
+            internal void TestSearch(string text) { txtSearch.Text = text; FlushSearch(); }   // no 200 ms wait in tests
             internal void TestStatusFilter(int index) { cmbStatus.SelectedIndex = index; }
             internal void TestPeriod(int index) { cmbPeriod.SelectedIndex = index; }
             internal void TestPayment(int index) { cmbPayment.SelectedIndex = index; }
             internal void TestTogglePaid() { TogglePaid(SelectedRow()); }
+            // release-test-6: the real input paths (window messages through the same handlers a user's keys and clicks use)
+            [System.Runtime.InteropServices.DllImport("user32.dll")]
+            static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+            static IntPtr XY(Point p) { return (IntPtr)((p.Y << 16) | (p.X & 0xFFFF)); }
+            static void TestClickAt(Control c, Point p)
+            {
+                SendMessage(c.Handle, 0x201, (IntPtr)1, XY(p));   // WM_LBUTTONDOWN, MK_LBUTTON
+                SendMessage(c.Handle, 0x202, IntPtr.Zero, XY(p));  // WM_LBUTTONUP
+                Application.DoEvents();
+            }
+            /// The "Undo" link on the ✓ line, clicked like a user would; false = no Undo link on screen.
+            internal bool TestUndoPaid()
+            {
+                var lc = info.LinkControl;
+                if (lc == null || !lc.Visible || !info.Visible || lc.Text != L.S("Undo", "Fortryd") || lc.Width <= 0) return false;
+                TestClickAt(lc, new Point(lc.Width / 2, lc.Height / 2));
+                return true;
+            }
+            /// Esc in the search box through the form's key handling (ProcessCmdKey, then Cancel = Close): true = handled.
+            internal bool TestEscape()
+            {
+                ActiveControl = txtSearch;
+                var m = Message.Create(txtSearch.Handle, 0x100, (IntPtr)Keys.Escape, IntPtr.Zero);   // WM_KEYDOWN
+                return txtSearch.PreProcessMessage(ref m);
+            }
+            internal bool TestClosedByEscape { get { return DialogResult == DialogResult.Cancel || IsDisposed || !Visible; } }
+            /// Space in the list (WM_KEYDOWN to the grid: OnKeyDown -> the KeyDown handler).
+            internal void TestSpace()
+            {
+                ActiveControl = grid;
+                SendMessage(grid.Handle, 0x100, (IntPtr)Keys.Space, IntPtr.Zero);
+                SendMessage(grid.Handle, 0x101, (IntPtr)Keys.Space, IntPtr.Zero);
+                Application.DoEvents();
+            }
+            /// A mouse click on the Paid cell of the row now showing invoice no (WM_LBUTTONDOWN / UP at the cell's middle).
+            internal bool TestClickPaid(string no)
+            {
+                int i = shown.FindIndex(r => string.Equals(r.No, no, StringComparison.OrdinalIgnoreCase));
+                if (i < 0) return false;
+                var rc = grid.GetCellDisplayRectangle(colPaid.Index, i, false);
+                if (rc.Width <= 0) return false;
+                TestClickAt(grid, new Point(rc.Left + rc.Width / 2, rc.Top + rc.Height / 2));
+                return true;
+            }
+            /// Types into the search box without running the waiting search (the 200 ms delay test).
+            internal void TestType(string text) { ActiveControl = txtSearch; txtSearch.Text = text; }   // typed with the focus in the box
+            internal bool TestSearchWaiting { get { return searchTimer.Enabled; } }
+            internal string TestSearchText { get { return txtSearch.Text; } }
+            internal bool TestLastSwallowed { get { return grid.LastClickSwallowed; } }
+            internal string TestEmptyText { get { return shown.Count == 0 && rows.Count > 0 ? EmptyText : ""; } }
+            internal int TestRowsShown { get { return rowsShown; } }
+            internal int TestHeight { get { return Height; } }
             internal string TestUnpaidLine { get { return lblUnpaid.Text + (lblOverdue.Text.Length > 0 ? " " + lblOverdue.Text : ""); } }
             internal int TestWidth { get { return Width; } }
             internal string TestPaidTip(int rowIndex) { return rowIndex >= 0 && rowIndex < shown.Count ? TipFor(rowIndex, colPaid.Index) : null; }

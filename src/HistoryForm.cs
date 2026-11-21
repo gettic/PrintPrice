@@ -146,7 +146,7 @@ namespace PrintPrice
             {
                 SendMessage(txtSearch.Handle, 0x1501, (IntPtr)1, L.S("Model, name, link or note", "Model, navn, link eller note"));   // EM_SETCUEBANNER
             };
-            txtSearch.TextChanged += delegate { Fill(); };
+            txtSearch.TextChanged += delegate { SearchTyped(); };   // optimizer 3b: 200 ms after the last key
             txtSearch.Width = 220;
             // month: "All months" or one month (newest first); ‹ = older, › = newer; the cards show that month
             cmbMonth = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 4, 3) };
@@ -236,6 +236,7 @@ namespace PrintPrice
                 ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
                 ScrollBars = ScrollBars.Vertical, StandardTab = true
             };
+            grid.SearchPending = SearchWasPending;   // a click during the 200 ms search delay: search, swallow the click
             grid.DefaultCellStyle.BackColor = Theme.Input;
             grid.DefaultCellStyle.ForeColor = Theme.Text;
             grid.DefaultCellStyle.SelectionBackColor = Theme.InfoAccent;
@@ -602,8 +603,8 @@ namespace PrintPrice
             AcceptButton = btnOpen;
             // Enter in the search box only searches (it filters as you type): no Open again from there
             txtSearch.Enter += delegate { AcceptButton = null; };
-            txtSearch.Leave += delegate { AcceptButton = btnOpen; };
-            txtSearch.KeyPress += (ks, ke) => { if (ke.KeyChar == '\r') ke.Handled = true; };   // no ding
+            txtSearch.Leave += delegate { AcceptButton = btnOpen; if (ApplyPendingSearch()) leaveFlushTick = Environment.TickCount; };
+            txtSearch.KeyPress += (ks, ke) => { if (ke.KeyChar == '\r') { ke.Handled = true; FlushSearch(); } };   // no ding; Enter searches at once
             CancelButton = close;
             Theme.Apply(this);
             // Apply resets these
@@ -878,6 +879,65 @@ namespace PrintPrice
 
         void Fill(ICollection<QuoteRecord> keep, QuoteRecord keepCurrent)
         {
+            Fill(keep, keepCurrent, false);
+        }
+
+        // ---------- search as you type (optimizer 3a / 3b) ----------
+        System.Windows.Forms.Timer searchTimer;
+
+        /// A key in the search box: the list follows 200 ms after the last one (Enter, Esc and leaving the box: at once).
+        void SearchTyped()
+        {
+            if (searchTimer == null)
+            {
+                searchTimer = new System.Windows.Forms.Timer { Interval = 200 };
+                searchTimer.Tick += delegate { searchTimer.Stop(); FillSearch(); };
+                FormClosed += delegate { searchTimer.Stop(); searchTimer.Dispose(); };
+            }
+            searchTimer.Stop();
+            searchTimer.Start();
+        }
+
+        /// A search still waiting for its delay runs now (also called by the test steps, so they don't wait).
+        internal void FlushSearch() { ApplyPendingSearch(); }
+
+        int leaveFlushTick;   // when leaving the search box ran a waiting search (0 = not just now)
+
+        /// The grid asks on a mouse-down / Space: a waiting search runs now, or one just ran because the search box lost the
+        /// focus to this click (Windows moves the focus before the list sees the mouse-down; within 300 ms): true = swallow.
+        bool SearchWasPending()
+        {
+            if (ApplyPendingSearch()) return true;
+            bool justLeft = leaveFlushTick != 0 && unchecked(Environment.TickCount - leaveFlushTick) < 300;
+            leaveFlushTick = 0;
+            return justLeft;
+        }
+
+        /// Runs a waiting search now; true = there was one (the grid then swallows the click / Space that asked).
+        bool ApplyPendingSearch()
+        {
+            if (searchTimer == null || !searchTimer.Enabled) return false;
+            searchTimer.Stop();
+            FillSearch();
+            return true;
+        }
+
+        /// The search changed: nothing is rebuilt when the same quotes match; else the list only (the month cards, profit
+        /// tip and printing timer don't depend on the search).
+        void FillSearch()
+        {
+            if (IsDisposed) return;
+            var now = new List<QuoteRecord>();
+            foreach (var r in list) if (Matches(r)) now.Add(r);
+            bool same = now.Count == shown.Count;
+            for (int i = 0; same && i < now.Count; i++) same = now[i] == shown[i];
+            if (same) return;
+            Fill(null, null, true);
+        }
+
+        void Fill(ICollection<QuoteRecord> keep, QuoteRecord keepCurrent, bool searchOnly)
+        {
+            if (searchTimer != null) searchTimer.Stop();   // this fill uses the search box as it is now
             if (grid.IsCurrentCellInEditMode) grid.EndEdit();
             if (keep == null) { keep = new HashSet<QuoteRecord>(SelectedRecords()); keepCurrent = CurrentRecord(); }
             shown.Clear();
@@ -890,6 +950,7 @@ namespace PrintPrice
             }
             UpdateCount();
             UpdateButtons();
+            if (searchOnly) return;
             UpdateCards();
             SchedulePrintingRedraw();
         }
@@ -1181,7 +1242,7 @@ namespace PrintPrice
             if (keyData == (Keys.Control | Keys.D3) || keyData == (Keys.Control | Keys.NumPad3)) { SetView(ViewLarge); return true; }
             if (keyData == (Keys.Control | Keys.I)) { InvoicesClicked(); return true; }   // issue #7: the Invoices window
             // Esc in the search box with text: clears the search first (the next Esc closes the window)
-            if (keyData == Keys.Escape && txtSearch.Focused && txtSearch.TextLength > 0) { txtSearch.Clear(); return true; }
+            if (keyData == Keys.Escape && (txtSearch.Focused || ActiveControl == txtSearch) && txtSearch.TextLength > 0) { txtSearch.Clear(); FlushSearch(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -1268,7 +1329,8 @@ namespace PrintPrice
         {
             if (!shared.HasValue)
             {
-                var r0 = new Rectangle(cell.X + (int)Math.Round(7 * sc), cell.Y, cell.Width - (int)Math.Round(9 * sc), cell.Height);
+                // qol 10: lined up with the marked states' text (mark 7 + 14 + gap 6 px)
+                var r0 = new Rectangle(cell.X + (int)Math.Round(27 * sc), cell.Y, Math.Max(1, cell.Width - (int)Math.Round(29 * sc)), cell.Height);
                 TextRenderer.DrawText(g, L.S("Mixed", "Blandet"), font, r0, selected ? Color.White : Theme.Muted,
                                       TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
                 return;
@@ -1977,10 +2039,35 @@ namespace PrintPrice
         }
 
         /// Enter (when not editing a cell) = Open again, instead of moving to the next row.
+        /// Fast-click fix (release-test-6): a mouse-down or Space while a search is still waiting for its 200 ms applies the
+        /// search and is swallowed (no edit, toggle or selection from it): SearchPending returns true when it applied one.
         sealed class HistoryGrid : DataGridView
         {
             public Action OpenRequested;
+            public Func<bool> SearchPending;
+            bool swallow;                       // the rest of a swallowed click (up / click / double-click)
+            public bool LastClickSwallowed;     // tests: the last mouse-down / Space was swallowed
             public HistoryGrid() { DoubleBuffered = true; }
+            bool Pending() { return SearchPending != null && SearchPending(); }
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                swallow = LastClickSwallowed = Pending();
+                if (swallow) { if (CanFocus) Focus(); return; }
+                base.OnMouseDown(e);
+            }
+            protected override void OnMouseUp(MouseEventArgs e) { if (swallow) return; base.OnMouseUp(e); }
+            protected override void OnMouseClick(MouseEventArgs e) { if (swallow) return; base.OnMouseClick(e); }
+            protected override void OnMouseDoubleClick(MouseEventArgs e) { if (swallow) return; base.OnMouseDoubleClick(e); }
+            protected override void OnCellClick(DataGridViewCellEventArgs e) { if (swallow) return; base.OnCellClick(e); }
+            protected override void OnCellMouseClick(DataGridViewCellMouseEventArgs e) { if (swallow) return; base.OnCellMouseClick(e); }
+            protected override void OnCellMouseUp(DataGridViewCellMouseEventArgs e) { if (swallow) return; base.OnCellMouseUp(e); }
+            protected override void OnCellDoubleClick(DataGridViewCellEventArgs e) { if (swallow) return; base.OnCellDoubleClick(e); }
+            protected override void OnCellMouseDoubleClick(DataGridViewCellMouseEventArgs e) { if (swallow) return; base.OnCellMouseDoubleClick(e); }
+            protected override void OnKeyDown(KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Space && Pending()) { LastClickSwallowed = true; e.Handled = true; return; }
+                base.OnKeyDown(e);
+            }
             protected override bool ProcessDialogKey(Keys keyData)
             {
                 if (keyData == Keys.Enter && !IsCurrentCellInEditMode && OpenRequested != null) { OpenRequested(); return true; }

@@ -1080,74 +1080,106 @@ namespace PrintPrice
         /// DefaultDensity). Grams has an entry for every slot seen (tower or header), rounded to 0,001 g. Never null, never throws.
         public static GcodeTower TowerFromGcode(IEnumerable<string> lines)
         {
-            var t = new GcodeTower();
-            if (lines == null) return t;
-            var mm = new List<double>();
-            List<double> dia = null, rho = null;
-            bool relative = false, inTower = false;
-            double lastE = 0;
-            int tool = 0;
-            var spaces = new[] { ' ', '\t' };
-            foreach (var raw in lines)
+            var c = new TowerCounter();
+            if (lines == null) return c.Result();
+            foreach (var raw in lines) c.Feed(raw);
+            return c.Result();
+        }
+
+        /// TowerFromGcode in steps (optimizer v1.28: the website reads a G-code in pieces): Feed every line in order, then
+        /// Result(). Same rules and results as TowerFromGcode (which uses it). Result() can be called any time and doesn't
+        /// change the state. Never throws (null lines are skipped).
+        public sealed class TowerCounter
+        {
+            static readonly char[] Spaces = { ' ', '\t' };
+            readonly List<double> mm = new List<double>();
+            List<double> dia, rho;
+            bool relative, inTower;
+            double lastE;
+            int tool, blocks;
+
+            public void Feed(string raw)
             {
-                if (raw == null) continue;
+                if (raw == null) return;
                 string line = raw.Trim();
-                if (line.Length == 0) continue;
+                if (line.Length == 0) return;
                 if (line[0] == ';')
                 {
                     int kind = TowerMarker(line);
-                    if (kind == 1) { if (!inTower) t.Blocks++; inTower = true; }
+                    if (kind == 1) { if (!inTower) blocks++; inTower = true; }
                     else if (kind == 0) inTower = false;
                     else if (dia == null || rho == null)
                     {
                         if (dia == null) dia = HeaderNumbers(line, "filament_diameter");
                         if (rho == null) rho = HeaderNumbers(line, "filament_density");
                     }
-                    continue;
+                    return;
                 }
+                // fast path (optimizer v1.28): relative E outside a tower = a move can't change anything (no lastE to
+                // keep, nothing counted), so skip it before the Substring / Split; same results, most lines are moves
+                if (relative && !inTower && IsMoveLine(line)) return;
                 int semi = line.IndexOf(';');
                 if (semi >= 0) line = line.Substring(0, semi);
-                var parts = line.Split(spaces, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length == 0) continue;
+                var parts = line.Split(Spaces, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length == 0) return;
                 string cmd = parts[0].ToUpperInvariant();
-                if (cmd == "M83") { relative = true; continue; }
-                if (cmd == "M82") { relative = false; continue; }
+                if (cmd == "M83") { relative = true; return; }
+                if (cmd == "M82") { relative = false; return; }
                 if (cmd.Length >= 2 && cmd[0] == 'T')
                 {
                     int n;
                     if (int.TryParse(cmd.Substring(1), NumberStyles.None, CultureInfo.InvariantCulture, out n) && n < 16) tool = n;
-                    continue;
+                    return;
                 }
                 if (cmd == "G92")
                 {
                     double v;
                     if (parts.Length == 1) lastE = 0;   // plain G92 = all axes 0
                     else if (Axis(parts, 'E', out v)) lastE = v;
-                    continue;
+                    return;
                 }
-                if (cmd != "G0" && cmd != "G1" && cmd != "G2" && cmd != "G3" && cmd != "G00" && cmd != "G01" && cmd != "G02" && cmd != "G03") continue;
+                if (cmd != "G0" && cmd != "G1" && cmd != "G2" && cmd != "G3" && cmd != "G00" && cmd != "G01" && cmd != "G02" && cmd != "G03") return;
                 double e;
-                if (!Axis(parts, 'E', out e)) continue;
+                if (!Axis(parts, 'E', out e)) return;
                 double delta = relative ? e : e - lastE;
                 if (!relative) lastE = e;
-                if (!inTower || delta <= 0) continue;
+                if (!inTower || delta <= 0) return;
                 double dummy;
-                if (!Axis(parts, 'X', out dummy) && !Axis(parts, 'Y', out dummy)) continue;
+                if (!Axis(parts, 'X', out dummy) && !Axis(parts, 'Y', out dummy)) return;
                 while (mm.Count <= tool) mm.Add(0);
                 mm[tool] += delta;
             }
-            int slots = Math.Max(mm.Count, Math.Max(dia == null ? 0 : dia.Count, rho == null ? 0 : rho.Count));
-            for (int i = 0; i < slots; i++)
+
+            public GcodeTower Result()
             {
-                double length = i < mm.Count ? mm[i] : 0;
-                double d = dia == null || dia.Count == 0 ? DefaultDiameter : dia[Math.Min(i, dia.Count - 1)];
-                double r = rho == null || rho.Count == 0 ? DefaultDensity : rho[Math.Min(i, rho.Count - 1)];
-                if (d <= 0) d = DefaultDiameter;
-                if (r <= 0) r = DefaultDensity;
-                double g = length * Math.PI * (d / 2) * (d / 2) * r / 1000.0;
-                t.Grams.Add(Math.Round(g, 3));
+                var t = new GcodeTower();
+                t.Blocks = blocks;
+                int slots = Math.Max(mm.Count, Math.Max(dia == null ? 0 : dia.Count, rho == null ? 0 : rho.Count));
+                for (int i = 0; i < slots; i++)
+                {
+                    double length = i < mm.Count ? mm[i] : 0;
+                    double d = dia == null || dia.Count == 0 ? DefaultDiameter : dia[Math.Min(i, dia.Count - 1)];
+                    double r = rho == null || rho.Count == 0 ? DefaultDensity : rho[Math.Min(i, rho.Count - 1)];
+                    if (d <= 0) d = DefaultDiameter;
+                    if (r <= 0) r = DefaultDensity;
+                    double g = length * Math.PI * (d / 2) * (d / 2) * r / 1000.0;
+                    t.Grams.Add(Math.Round(g, 3));
+                }
+                return t;
             }
-            return t;
+        }
+
+        /// True when a trimmed, non-comment line's command is G0-G3 / G00-G03 (any case), followed by a space, tab, ';' or
+        /// the end: the same commands TowerFromGcode's Split path treats as moves ("G10", "G28", "G92", "G010" = false).
+        internal static bool IsMoveLine(string line)
+        {
+            if (line == null || line.Length < 2 || (line[0] != 'G' && line[0] != 'g')) return false;
+            int i = 1;
+            if (line[i] == '0' && i + 1 < line.Length && line[i + 1] >= '0' && line[i + 1] <= '9') i++;
+            char c = line[i];
+            if (c < '0' || c > '3') return false;
+            i++;
+            return i == line.Length || line[i] == ' ' || line[i] == '\t' || line[i] == ';';
         }
 
         /// 1 = a prime / wipe tower section starts, 0 = another feature starts, -1 = not a feature line.

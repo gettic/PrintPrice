@@ -478,7 +478,8 @@ namespace PrintPrice
                         // right block: invoice no., invoice date, due date (the customer is in the "Bill to" row)
                         T(L.F("Invoice no. {0}", "Faktura nr. {0}", d.InvoiceNo), F(17, false), p.HeaderText, 560, 46, 400, far);
                         T(L.F("Invoice date {0}", "Fakturadato {0}", LongDate(d.Date)), F(17, false), p.HeaderMuted, 560, 74, 400, far);
-                        T(L.F("Due {0}", "Forfald {0}", LongDate(d.Due)), F(17, false), p.HeaderMuted, 560, 102, 400, far);
+                        if (string.IsNullOrEmpty(d.PaidLine))   // paid-tick (qol 8): a paid invoice has no due date in the header
+                            T(L.F("Due {0}", "Forfald {0}", LongDate(d.Due)), F(17, false), p.HeaderMuted, 560, 102, 400, far);
                     }
                     else
                     {
@@ -759,7 +760,9 @@ namespace PrintPrice
                 float smallW = 900 - 80 - 30 - g.MeasureString(total, F(56, true)).Width;
                 var sums = new List<string>();
                 foreach (var j in d.Jobs) sums.Add(Num.N2(j.Ore / 100.0));
-                string withSums = string.Join(" + ", sums) + " · " + (small.Length > 0 ? char.ToLower(small[0]) + small.Substring(1) : small);
+                // "· please pay by …" lower-case; the paid line keeps its capital ("· Paid 12 November 2026 – thank you", qol 8)
+                bool lower = small.Length > 0 && string.IsNullOrEmpty(d.PaidLine);
+                string withSums = string.Join(" + ", sums) + " · " + (lower ? char.ToLower(small[0]) + small.Substring(1) : small);
                 if (g.MeasureString(withSums, F(16, false)).Width <= smallW) small = withSums;
                 T(small, F(16, false), p.Muted, 80, y + 62, 0, near);
                 T(total, F(56, true), p.Total, 420, y + 14, 510, far);

@@ -24,6 +24,7 @@ static class TowerTests
         try
         {
             Files();
+            Lazy();
             Note();
             Quotes();
             JsonText();
@@ -125,6 +126,69 @@ static class TowerTests
         }
     }
 
+    /// A source like the browser's File.slice: every read finishes later (never synchronously), so a ChunkStream can only
+    /// be read with ReadAsync; records the biggest single read. short = the file "changes" (gives half of each read).
+    sealed class AsyncSource : IRangeSource
+    {
+        readonly byte[] data; readonly bool shortReads;
+        public int MaxRead, Reads; public long BytesRead;
+        public AsyncSource(byte[] data, bool shortReads = false) { this.data = data; this.shortReads = shortReads; }
+        public long Length { get { return data.Length; } }
+        public async System.Threading.Tasks.Task<byte[]> Read(long offset, int count)
+        {
+            await System.Threading.Tasks.Task.Yield();
+            Reads++;
+            if (count > MaxRead) MaxRead = count;
+            if (offset < 0 || offset >= data.Length || count <= 0) return new byte[0];
+            int n = (int)Math.Min(count, data.Length - offset);
+            if (shortReads && n > 1) n /= 2;
+            var b = new byte[n];
+            Buffer.BlockCopy(data, (int)offset, b, 0, n);
+            BytesRead += n;
+            return b;
+        }
+    }
+
+    // optimizer v1.28 item 2: the tower count reads a big G-code one 8 MB piece at a time (ReadAsync + ReadLineAsync into
+    // BambuSlicer.TowerCounter), with the same numbers as TowerFromGcode over the whole text
+    static void Lazy()
+    {
+        string body = Gcode("L_on_names.gcode");
+        if (body == null) return;
+        body = body.Substring(Head.Length) + "; Æblegrød – farveskift ØÅ\n";   // multi-byte UTF-8 crossing piece edges
+        var sb = new StringBuilder(Head);
+        while (sb.Length < 20 * 1048576) sb.Append(body);
+        string text = sb.ToString();
+        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        var want = BambuSlicer.TowerFromGcode(text.Split('\n'));
+        Func<SliceResult, bool> same = r => r != null && r.Filaments.Count == want.Grams.Count && r.TowerGrams == Math.Round(want.Total, 3)
+                                            && r.Filaments.Select((f, i) => f.TowerGrams == want.Grams[i]).All(x => x);
+        var src = new AsyncSource(bytes);
+        var job = SlicedFile.Read(src, "big_tower.gcode", "Bambu PLA Matte").GetAwaiter().GetResult();
+        True("lazy G-code (" + bytes.Length / 1048576 + " MB, async reads): tower " + Slots(job.Result) + " = TowerFromGcode " + want.Total.ToString("0.###"),
+             want.Total > 100 && same(job.Result));
+        True("lazy G-code: no read bigger than 8 MB (" + src.MaxRead + "), whole file once (" + src.BytesRead + " of " + bytes.Length + ")",
+             src.MaxRead <= ChunkStream.ChunkBytes && src.BytesRead <= bytes.Length + SlicedFile.GcodeHeadBytes);
+        var cs = new ChunkStream(new AsyncSource(bytes), 0, bytes.Length);
+        var buf = new byte[65536]; int got; long total = 0;
+        while ((got = cs.ReadAsync(buf, 0, buf.Length).GetAwaiter().GetResult()) > 0) total += got;
+        True("ChunkStream: " + cs.Pieces + " pieces, biggest held " + cs.MaxPiece + ", all bytes", total == bytes.Length && cs.MaxPiece <= ChunkStream.ChunkBytes
+             && cs.Pieces == (bytes.Length + ChunkStream.ChunkBytes - 1) / ChunkStream.ChunkBytes);
+        bool syncRefused = false;
+        try { got = new ChunkStream(new AsyncSource(bytes), 0, bytes.Length).Read(buf, 0, 10); } catch (NotSupportedException) { syncRefused = true; }
+        True("ChunkStream: a sync read that would wait is refused (the browser can't wait)", syncRefused);
+        var changed = SlicedFile.Read(new AsyncSource(bytes, true), "big_tower.gcode", "Bambu PLA Matte").GetAwaiter().GetResult();
+        True("file changed while counting: tower unknown, no error", changed.Error == null && (changed.Result == null || changed.Result.TowerGrams == -1));
+        // the same G-code as a .gcode.3mf plate (deflated, inflated on the way)
+        var zip = Zip(new Dictionary<string, byte[]> { { "Metadata/plate_1.gcode", bytes } });
+        var zipSrc = new AsyncSource(zip);
+        var z = ZipRanges.Open(zipSrc).GetAwaiter().GetResult();
+        var s = z.OpenStream("Metadata/plate_1.gcode", SlicedFile.MaxTowerBytes).GetAwaiter().GetResult();
+        var c = new BambuSlicer.TowerCounter();
+        using (var sr = new StreamReader(s, Encoding.UTF8, true, 65536)) { string line; while ((line = sr.ReadLineAsync().GetAwaiter().GetResult()) != null) c.Feed(line); }
+        var zt = c.Result();
+        True("lazy plate G-code in a zip (async inflate): same grams", zt.Grams.Count == want.Grams.Count && zt.Grams.Select((g, i) => g == want.Grams[i]).All(x => x));
+    }
     // the note under the colour rows = MainForm.PurgeNote (one line: the page wraps at " · ")
     static void Note()
     {
@@ -138,7 +202,13 @@ static class TowerTests
         L.Danish = true;
         True("note DA: " + note(9.37, -1, 1.70, 3700), note(9.37, -1, 1.70, 3700) == "heraf 7,7 g til farveskift · primetårn 1,7 g · 1 t 2 min");
         L.Danish = false;
-        True("TowerText = the desktop's", WebCalc.TowerText(1.7, 314, false) == "prime tower 1,7 g" && WebCalc.TowerText(0, 314, true) == "");
+        foreach (var c in new[] { new[] { 9.37, -1, 1.70, 314 }, new[] { -1, -1, 1.70, -1 }, new[] { 9.37, 0.2, 0, -1 }, new[] { -1.0, -1, -1, -1 } })
+        {
+            string n, tw;
+            QuoteRows.PurgeNoteParts(c[0], c[1], c[2], c[3], out n, out tw);
+            True("note = shared PurgeNoteJoin (one line): " + note(c[0], c[1], c[2], c[3]), note(c[0], c[1], c[2], c[3]) == QuoteRows.PurgeNoteJoin(n, tw, false));
+        }
+        True("TowerText = the desktop's", QuoteRows.TowerText(1.7, 314, false) == "prime tower 1,7 g" && QuoteRows.TowerText(0, 314, true) == "");
     }
 
     static QuoteRecord Two(double tower, double purge = 9.37)

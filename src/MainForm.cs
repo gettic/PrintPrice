@@ -1532,7 +1532,7 @@ namespace PrintPrice
             using (f)
             {
                 if (f.ShowDialog(this) != DialogResult.OK) return;
-                pct = f.Scale;
+                pct = f.Result;
             }
             var _ = RescaleAsync(pct);
         }
@@ -2471,25 +2471,15 @@ namespace PrintPrice
         /// As above; the tower part goes on a second line when both don't fit width px on one (width <= 0 = always one).
         static string PurgeNote(SliceResult r, int width)
         {
-            double tower = r.TowerGrams > 0.005 ? r.TowerGrams : 0;
-            double flush = r.PurgeGrams > 0 ? Math.Max(0, r.PurgeGrams - tower) : r.PurgeGrams;
-            bool g = flush > 0.5, h = r.ColourChangeHours >= 0.05;
-            string grams = g ? flush.ToString(flush >= 10 ? "0" : "0.#", Num.Dk) : "";
-            string hours = h ? r.ColourChangeHours.ToString("0.#", Num.Dk) : "";
-            string note = "";
-            if (g && h) note = L.F("incl. {0} g and {1} h for colour changes", "heraf {0} g og {1} t til farveskift", grams, hours);
-            else if (g) note = L.F("incl. {0} g for colour changes", "heraf {0} g til farveskift", grams);
-            else if (h) note = L.F("{0} h for colour changes", "{0} t til farveskift", hours);
-            string t = TowerText(tower, r.TowerSeconds, true);
-            if (t.Length == 0) return note;
-            string up = char.ToUpper(t[0]) + t.Substring(1);
-            if (note.Length == 0) return up;
-            string one = note + " · " + t;
-            if (width <= 0 || width == int.MaxValue) return one;
+            // the wording is shared with the website (QuoteRows.PurgeNoteParts / PurgeNoteJoin); only the fit is measured here
+            string note, t;
+            QuoteRows.PurgeNoteParts(r.PurgeGrams, r.ColourChangeHours, r.TowerGrams, r.TowerSeconds, out note, out t);
+            string one = QuoteRows.PurgeNoteJoin(note, t, false);
+            if (note.Length == 0 || t.Length == 0 || width <= 0 || width == int.MaxValue) return one;
             using (var f = new Font("Segoe UI", 9f))   // lblPurge's font
                 if (TextRenderer.MeasureText(one, f, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width <= width)
                     return one;
-            return note + "\n" + up;
+            return QuoteRows.PurgeNoteJoin(note, t, true);
         }
 
         /// The quote's "incl. N g for colour changes": the flush only when the tower note is on the page (QuoteShowTower),
@@ -2501,17 +2491,7 @@ namespace PrintPrice
         }
 
         /// "prime tower 1,70 g · 5 min" (DA "primetårn …"); withTime false / seconds unknown = grams only; grams <= 0 = "".
-        internal static string TowerText(double grams, double seconds, bool withTime)
-        {
-            if (!(grams > 0.005)) return "";
-            string s = L.F("prime tower {0} g", "primetårn {0} g", grams.ToString("0.0", Num.Dk));   // one decimal (qol)
-            if (withTime && seconds >= 30)
-            {
-                int min = (int)Math.Round(seconds / 60);
-                s += " · " + (min >= 60 ? (min / 60) + L.S(" h ", " t ") + (min % 60) + " min" : min + " min");
-            }
-            return s;
-        }
+        internal static string TowerText(double grams, double seconds, bool withTime) { return QuoteRows.TowerText(grams, seconds, withTime); }
 
         /// Material name of a filament: the profile's short name ("Bambu PLA Matte", "@BBL A1 …" dropped), else its type
         /// ("PLA"), else "Colour 3". Also the key of its remembered kr/kg.
@@ -6344,12 +6324,20 @@ namespace PrintPrice
                         var first = lastJobResult;
                         check(CanScaleJob, "Scale… offered after the slice");
                         string refused = null;   // the real Scale window's Apply off: it stops here, as a user couldn't press it
+                        ScaleXyz applied = null;  // release-test-6: the real Apply button pressed; its Result is what gets sliced
                         using (var sf = NewScaleForm())
                         {
                             sf.SampleType(specRescale);
                             log.Add("scale window: size " + sf.TestSizeText + " | " + sf.TestInfoText.Replace("\n", " / ") + " | Apply " + (sf.TestApplyOn ? "on" : "off") +
                                     " | small note: " + (sf.TestSmallNote.Length > 0 ? sf.TestSmallNote : "(none)"));
                             if (!sf.TestApplyOn) refused = sf.TestInfoText.Replace("\n", " / ");
+                            else
+                            {
+                                bool okApply = sf.TestPressApply(this);
+                                applied = sf.Result;
+                                check(okApply && applied != null && SameScale(applied, specRescale),
+                                      "Apply pressed: Result " + (applied != null ? applied.Text : "none") + " (typed " + specRescale.Text + ")");
+                            }
                         }
                         if (refused != null)
                         {
@@ -6361,7 +6349,7 @@ namespace PrintPrice
                         {
                         // lastJobResult kept (as on a real Apply: a too-small failure takes the 100 % size from it)
                         string tooSmallWant = TooSmallMessage(specRescale, true);
-                        done = await RescaleAsync(specRescale);
+                        done = await RescaleAsync(applied ?? specRescale);   // the Scale window's Result, as Scale… does
                         if (expectTooSmall)
                         {
                             string got = lblAuto.Text ?? "";
@@ -6394,11 +6382,28 @@ namespace PrintPrice
                         return;
                     }
                     QuoteRecord rec = null;
+                    bool hadPicture = modelImage != null;   // a G-code without a thumbnail shows the logo: nothing to save
                     string err = done ? SaveToHistory(0, null, out rec) : "not sliced";
                     if (err != null) rec = null;
                     check(err == null && rec != null, "saved to history" + (err != null ? ": " + err : ""));
                     // idea 29: the slice render is shown before the job ends, so the quote saved right after has it
-                    check(rec != null && History.HasPicture(rec.Id), "record saved with its plate picture");
+                    if (hadPicture || !done) check(rec != null && History.HasPicture(rec.Id), "record saved with its plate picture");
+                    else check(rec != null && !History.HasPicture(rec.Id), "no picture to save (the file has none)");
+                    // a G-code job with a thumbnail: Open again shows the saved picture, and the picture-only reader that an old
+                    // record without a saved picture uses (FillFromRecord -> BambuSlicer.ReadGcodePicture) finds it too
+                    string gsrc = rec != null ? (rec.Source ?? "").Trim().Trim('"') : "";
+                    if (rec != null && hadPicture && BambuSlicer.IsGcodeFile(gsrc) && File.Exists(gsrc))
+                    {
+                        byte[] thumb = BambuSlicer.ReadGcodePicture(gsrc);
+                        check(thumb != null && thumb.Length > 0, "ReadGcodePicture finds the thumbnail (" + (thumb != null ? thumb.Length + " bytes" : "none") + ")");
+                        ClearJob();
+                        await LoadModelPicture(() => BambuSlicer.ReadGcodePicture(gsrc), true);
+                        check(modelImage != null, "the reader's picture shows (as an old record opened again)");
+                        ClearJob();
+                        Reopen(rec);
+                        check(modelImage != null, "Open again shows the saved picture");
+                        Screenshots.Snap(this, dir, "test_slice_reopened.png");
+                    }
                     TestRecordLines(log, rec);
                     var savedParts = rec != null ? History.PartsOf(rec) : null;
                     check(savedParts != null && savedParts.Count == parts.Count, "record keeps the " + parts.Count + " part(s)");
@@ -6462,7 +6467,8 @@ namespace PrintPrice
                     if (err != null) rec = null;
                     check(err == null && rec != null, "saved to history" + (err != null ? ": " + err : ""));
                     check(rec != null && rec.RepeatOf == (r.Id ?? ""), "saved as a repeat of the original");
-                    check(rec != null && History.HasPicture(rec.Id), "record saved with its plate picture");   // idea 29
+                    if (modelImage != null) check(rec != null && History.HasPicture(rec.Id), "record saved with its plate picture");   // idea 29
+                    else check(rec != null && !History.HasPicture(rec.Id), "no picture to save (the file has none)");
                     TestRecordLines(log, rec);
                     var a = History.PartsOf(r);
                     var b = rec != null ? History.PartsOf(rec) : null;
@@ -6959,7 +6965,7 @@ namespace PrintPrice
             else if (!offline && src.EndsWith(".3mf", StringComparison.OrdinalIgnoreCase) && File.Exists(src))
                 picture = LoadModelPicture(() => BambuSlicer.FromProject(src), true);   // a local project still has its own picture
             else if (!offline && BambuSlicer.IsGcodeFile(src) && File.Exists(src))
-                picture = LoadModelPicture(() => BambuSlicer.ReadGcodeFile(src).Picture, true);   // a G-code's thumbnail (errors = none)
+                picture = LoadModelPicture(() => BambuSlicer.ReadGcodePicture(src), true);   // picture-only read (optimizer 4)   // a G-code's thumbnail (errors = none)
 
             SliceResult slice = null;
             var one = History.SingleLine(r);   // one colour saved with its material (null: old record or 2+ colours)

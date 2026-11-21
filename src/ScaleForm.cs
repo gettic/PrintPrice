@@ -9,7 +9,7 @@ namespace PrintPrice
     /// all three, as in step 1; forced on with a note when a file can only be scaled uniformly, e.g. STEP), and an mm box
     /// per axis worked out live from the last slice; typing mm sets that axis's % (with the lock on: all three). A warning
     /// when it gets too big for the printer, "Reset to 100 %", "Apply (slices again)" and "Cancel". Apply =
-    /// DialogResult.OK with Scale; MainForm slices the job again at that size. Owner: ui.
+    /// DialogResult.OK with Result; MainForm slices the job again at that size. Owner: ui.
     internal sealed class ScaleForm : CaptionForm
     {
         const int ContentW = 380;
@@ -25,9 +25,9 @@ namespace PrintPrice
         string mmError;      // that mm box's problem (red box + red line), null = fine
 
         /// The chosen scale (valid after OK).
-        public ScaleXyz Scale { get; private set; }
+        public ScaleXyz Result { get; private set; }   // the chosen size (DialogResult.OK)
         /// Step 1's single value: X (= all axes when uniform).
-        public double Pct { get { return Scale.X; } }
+        public double Pct { get { return Result.X; } }
 
         /// currentScale = the scale the job was sliced at; x / y / z = its measured size at that scale (0 = unknown, e.g. a
         /// sliced file read without slicing); objects = how many were measured (2+ = the size is the biggest one's);
@@ -40,7 +40,7 @@ namespace PrintPrice
             this.objects = objects;
             this.printer = printer;
             this.uniformOnly = uniformOnly;
-            Scale = cur;
+            Result = cur;
 
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96F, 96F);
@@ -353,7 +353,7 @@ namespace PrintPrice
             if (!btnApply.Enabled) return;
             var p = new double[3];
             for (int i = 0; i < 3; i++) if (!BambuSlicer.TryParseScale(pctBox[i].Text, out p[i])) return;
-            Scale = Locked ? ScaleXyz.Uniform(p[0]) : new ScaleXyz(p[0], p[1], p[2]);
+            Result = Locked ? ScaleXyz.Uniform(p[0]) : new ScaleXyz(p[0], p[1], p[2]);
             DialogResult = DialogResult.OK;
         }
 
@@ -381,6 +381,15 @@ namespace PrintPrice
         internal string TestSmallNote { get { return smallNote.Text ?? ""; } }
         internal InfoKind TestInfoKind { get { return info.Kind; } }
         internal bool TestApplyOn { get { return btnApply.Enabled; } }
+        /// The real Apply button (shown first: a hidden button can't be clicked); true = the window ended with OK and Result.
+        internal bool TestPressApply(IWin32Window owner)
+        {
+            if (!Visible) Show(owner);
+            Application.DoEvents();
+            btnApply.PerformClick();
+            Application.DoEvents();
+            return DialogResult == DialogResult.OK;
+        }
         internal bool TestLockOn { get { return chkSame.Checked; } }
 
         protected override void OnHandleCreated(EventArgs e)

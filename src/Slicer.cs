@@ -692,6 +692,29 @@ namespace PrintPrice
             }
         }
 
+        /// Only the thumbnail of a G-code file (optimizer v1.28: reopening an old record), without the time/grams parse and
+        /// the whole-file tower pass of ReadGcodeFile: GcodeThumbnail of the first GcodeHeadBytes; not found there = the
+        /// head + last GcodeTailBytes (as ReadGcodeFile reads them). Binary G-code, no thumbnail or any error = null.
+        public static byte[] ReadGcodePicture(string path)
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    long len = fs.Length;
+                    byte[] head = ReadRange(fs, 0, (int)Math.Min(len, GcodeHeadBytes));
+                    if (IsBinaryGcode(path, head)) return null;
+                    string text = System.Text.Encoding.UTF8.GetString(head);
+                    var pic = GcodeThumbnail(text);
+                    if (pic != null || len <= head.Length) return pic;
+                    long start = Math.Max(head.Length, len - GcodeTailBytes);
+                    byte[] tail = ReadRange(fs, start, (int)(len - start));
+                    return GcodeThumbnail(text + "\n" + System.Text.Encoding.UTF8.GetString(tail));
+                }
+            }
+            catch (Exception) { return null; }
+        }
+
         static byte[] ReadRange(Stream s, long offset, int count)
         {
             var buf = new byte[count];

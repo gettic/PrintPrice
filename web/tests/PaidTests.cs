@@ -5,7 +5,7 @@ using PrintPrice;
 using PrintPrice.Web;
 
 // paid-tick on the website (plans\paid-tick): History's Invoice cell tick (History.SetPaid on the whole number), the
-// "Unpaid invoices" filter, the invoice page's "Paid 05-11-2026 – thank you" line (single + combined), JSON + backup.
+// "Unpaid invoices" filter, the invoice page's "Paid 5 November 2026 – thank you" line (single + combined, no Due line), JSON + backup.
 static class PaidTests
 {
     static Action<string, bool> True;
@@ -70,12 +70,14 @@ static class PaidTests
         var list = List();
         var c = list[2];
         var d = WebQuote.FromRecord(c, s, false, "", true, DateTime.Now, null);
-        True("paid invoice: \"Paid 05-11-2026 – thank you\" instead of Please pay by", WebQuote.TotalNote(d) == "Paid 05-11-2026 – thank you");
+        True("paid invoice: \"Paid 5 November 2026 – thank you\" instead of Please pay by", WebQuote.TotalNote(d) == "Paid 5 November 2026 – thank you");
+        True("paid invoice: no Due line in the header", !WebQuote.HeaderLines(d).Any(h => h.StartsWith("Due ")) && WebQuote.HeaderLines(d).Count == 2);
+        True("unpaid invoice: Due line kept", WebQuote.HeaderLines(WebQuote.FromRecord(list[0], s, false, "", true, DateTime.Now, null)).Any(h => h.StartsWith("Due ")));
         s.PayMobilePay = "12 34 56 78";
         True("paid invoice: no Payment block", WebQuote.PayLines(WebQuote.FromRecord(c, s, false, "", true, DateTime.Now, null)).Count == 0
              && WebQuote.PayLines(WebQuote.FromRecord(list[0], s, false, "", true, DateTime.Now, null)).Count == 1);
         L.Danish = true;
-        True("DA: Betalt 05-11-2026 – tak", WebQuote.TotalNote(WebQuote.FromRecord(c, s, false, "", true, DateTime.Now, null)) == "Betalt 05-11-2026 – tak");
+        True("DA: Betalt 5. november 2026 – tak", WebQuote.TotalNote(WebQuote.FromRecord(c, s, false, "", true, DateTime.Now, null)) == "Betalt 5. november 2026 – tak");
         L.Danish = false;
         True("unpaid invoice: Please pay by", WebQuote.TotalNote(WebQuote.FromRecord(list[0], s, false, "", true, DateTime.Now, null)).StartsWith("Please pay by"));
         True("quote of a paid record: Shipping line", WebQuote.TotalNote(WebQuote.FromRecord(c, s, false, "", false, DateTime.Now, null)) == "Shipping not included");
@@ -83,18 +85,19 @@ static class PaidTests
         True("combined, unpaid: Please pay by", WebQuote.TotalNote(WebQuote.FromRecords(jobs, s, false, "", true, DateTime.Now, DateTime.Now, null)).StartsWith("Please pay by"));
         list[0].PaidAt = "2026-11-03"; list[1].PaidAt = "2026-11-06";
         var g = WebQuote.FromRecords(jobs, s, false, "", true, DateTime.Now, DateTime.Now, null);
-        True("combined, all paid: the latest date", WebQuote.TotalNote(g) == "Paid 06-11-2026 – thank you");
+        True("combined, all paid: the latest date", WebQuote.TotalNote(g) == "Paid 6 November 2026 – thank you");
+        True("combined, all paid: no Due line in the header", !WebQuote.HeaderLines(g).Any(h => h.StartsWith("Due ")));
         True("combined, all paid: no Payment block", WebQuote.PayLines(g).Count == 0);
         list[0].PaidAt = "";
         True("combined, one unpaid: Please pay by", WebQuote.TotalNote(WebQuote.FromRecords(jobs, s, false, "", true, DateTime.Now, DateTime.Now, null)).StartsWith("Please pay by"));
         True("combined, one unpaid: Payment block kept", WebQuote.PayLines(WebQuote.FromRecords(jobs, s, false, "", true, DateTime.Now, DateTime.Now, null)).Count == 1);
-        True("Copy text (shared QuoteRows) of a paid invoice: paid, no payment lines", QuoteRows.RecordText(c, false, true, s, "").Contains("Paid 05-11-2026")
+        True("Copy text (shared QuoteRows) of a paid invoice: paid, no payment lines", QuoteRows.RecordText(c, false, true, s, "").Contains("Paid 5 November 2026")
              && !QuoteRows.RecordText(c, false, true, s, "").Contains("MobilePay"));
         // the drawn page has the line
         list[0].PaidAt = "2026-11-03";
         bool drawn = WebQuote.DrawPages(WebQuote.FromRecords(jobs, s, false, "", true, DateTime.Now, DateTime.Now, null), false)
-                             .Any(p => p.Items.Any(i => (i.Text ?? "").ToLowerInvariant().Contains("paid 06-11-2026 – thank you")));
-        True("combined page draws the paid line", drawn);
+                             .Any(p => p.Items.Any(i => (i.Text ?? "").Contains(" · Paid 6 November 2026 – thank you")));
+        True("combined page draws \"· Paid …\" with a capital P", drawn);
     }
 
     static void JsonText()

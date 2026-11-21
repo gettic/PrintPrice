@@ -1259,10 +1259,13 @@ namespace PrintPrice
             return n;
         }
 
-        /// The PDF's line instead of "Please pay by …": "Paid 05-11-2026 – thank you" / "Betalt 05-11-2026 – tak".
+        /// The PDF's line instead of "Please pay by …": "Paid 12 November 2026 – thank you" / "Betalt 12. november 2026 – tak".
         public static string PaidText(DateTime paidAt)
         {
-            return L.F("Paid {0} – thank you", "Betalt {0} – tak", paidAt.ToString("dd-MM-yyyy", Inv));
+            // the long date of the invoice header (same format as QuoteRows.LongDate): "12 November 2026" / "12. november 2026"
+            string date = L.Danish ? paidAt.ToString("d. MMMM yyyy", Num.Dk)
+                                   : paidAt.ToString("d MMMM yyyy", CultureInfo.GetCultureInfo("en-GB"));
+            return L.F("Paid {0} – thank you", "Betalt {0} – tak", date);
         }
 
         /// InvoiceMatches + the Payment filter (PaymentAll / PaymentUnpaid (overdue too) / PaymentOverdue / PaymentPaid);

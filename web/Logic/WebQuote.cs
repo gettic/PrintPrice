@@ -333,7 +333,8 @@ namespace PrintPrice.Web
             {
                 l.Add(L.F("Invoice no. {0}", "Faktura nr. {0}", d.InvoiceNo));
                 l.Add(L.F("Invoice date {0}", "Fakturadato {0}", QuoteRows.LongDate(d.Date)));
-                l.Add(L.F("Due {0}", "Forfald {0}", QuoteRows.LongDate(d.Due)));
+                if (d.PaidAt == DateTime.MinValue)   // paid-tick (qol 8): a paid invoice has no due date in the header
+                    l.Add(L.F("Due {0}", "Forfald {0}", QuoteRows.LongDate(d.Due)));
             }
             else
             {
@@ -453,7 +454,7 @@ namespace PrintPrice.Web
                 var h = HeaderLines(d);
                 T(h[0], 17, false, "headtext", 560, 46, 400, "r");
                 T(h[1], 17, false, "headmuted", 560, 74, 400, "r");
-                T(h[2], 17, false, "headmuted", 560, 102, 400, "r");
+                if (h.Count > 2) T(h[2], 17, false, "headmuted", 560, 102, 400, "r");   // no Due line once paid
             }
             else
             {

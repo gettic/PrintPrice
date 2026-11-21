@@ -23,6 +23,14 @@ namespace PrintPrice
     /// --test-history helpers shared by MainForm.TestHistoryFlow and HistoryForm.TestPlay (plans\history-test-hook\plan.md).
     internal static class HistoryTest
     {
+        /// Pumps window messages for ms milliseconds (timers such as the 200 ms search delay run).
+        public static void Pump(int ms)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < ms) { Application.DoEvents(); System.Threading.Thread.Sleep(10); }
+            Application.DoEvents();
+        }
+
         /// "cmd rest of line" -> cmd (lower case) + arg (trimmed, "" when none).
         public static void Split(string line, out string cmd, out string arg)
         {
@@ -218,6 +226,20 @@ namespace PrintPrice
                     log.Check(ok, "invoice " + (w.Length > 0 ? w[0] : "?") + ": memory [" + m + "], file [" + fs + "] (expected all " + (w.Length > 1 ? w[1] : "?") + ")");
                     break;
                 }
+                case "waiting":
+                    // waiting yes|no: a typed search still waiting for its 200 ms
+                    if (form == null) { log.Check(false, "expect waiting works only inside open..close"); break; }
+                    log.Check(form.TestSearchWaiting == (rest == "yes"), "search waiting " + form.TestSearchWaiting + " (expected " + rest + ")");
+                    break;
+                case "swallowed":
+                    // swallowed yes|no: the last click / Space in the list was swallowed by a waiting search
+                    if (form == null) { log.Check(false, "expect swallowed works only inside open..close"); break; }
+                    log.Check(form.TestLastSwallowed == (rest == "yes"), "last click swallowed " + form.TestLastSwallowed + " (expected " + rest + ")");
+                    break;
+                case "searchtext":
+                    if (form == null) { log.Check(false, "expect searchtext works only inside open..close"); break; }
+                    log.Check(form.TestSearchText == rest.Trim('"'), "search box \"" + form.TestSearchText + "\" (expected " + rest + ")");
+                    break;
                 case "shown":
                     // rows / cards the list shows now (month and printer filter applied)
                     if (form == null) { log.Check(false, "expect shown works only inside open..close"); break; }
@@ -271,6 +293,23 @@ namespace PrintPrice
         }
 
         internal int TestShownCount { get { return shown.Count; } }
+        internal bool TestSearchWaiting { get { return searchTimer != null && searchTimer.Enabled; } }
+        internal bool TestLastSwallowed { get { return grid.LastClickSwallowed; } }
+        internal string TestSearchText { get { return txtSearch.Text; } }
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SendMessageW")]
+        static extern IntPtr TestSendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        /// A real mouse click (WM_LBUTTONDOWN / UP) on a list row's Date cell (list view); false = no such row on screen.
+        internal bool TestClickRow(int row)
+        {
+            if (view != ViewList || row < 0 || row >= grid.Rows.Count) return false;
+            var rc = grid.GetCellDisplayRectangle(1, row, false);
+            if (rc.Width <= 0) return false;
+            var xy = (IntPtr)(((rc.Top + rc.Height / 2) << 16) | ((rc.Left + rc.Width / 2) & 0xFFFF));
+            TestSendMessage(grid.Handle, 0x201, (IntPtr)1, xy);
+            TestSendMessage(grid.Handle, 0x202, IntPtr.Zero, xy);
+            Application.DoEvents();
+            return true;
+        }
 
         internal string TestInfoText() { return (info.Text ?? "").Replace("\n", " / "); }
 
@@ -312,9 +351,44 @@ namespace PrintPrice
                         case "search":
                             // search "<text>": History's search box (filters at once); "search" alone clears it
                             txtSearch.Text = arg.Trim('"');
+                            FlushSearch();   // no 200 ms wait in tests
                             Application.DoEvents();
                             log.Add("  search \"" + txtSearch.Text + "\": shown " + TestShownCount);
                             break;
+                        // release-test-6: the real delay and input paths
+                        case "type":
+                            // type "<text>": as typed (focus in the box), the 200 ms search delay NOT skipped
+                            ActiveControl = txtSearch;
+                            txtSearch.Text = arg.Trim('"');
+                            log.Add("  typed \"" + txtSearch.Text + "\": waiting " + TestSearchWaiting + ", shown " + TestShownCount);
+                            break;
+                        case "wait":
+                        {
+                            // wait <ms>: messages pumped (timers run) for that long
+                            int ms;
+                            if (!int.TryParse(arg, out ms)) ms = 300;
+                            HistoryTest.Pump(ms);
+                            log.Add("  waited " + ms + " ms: waiting " + TestSearchWaiting + ", shown " + TestShownCount);
+                            break;
+                        }
+                        case "click":
+                        {
+                            // click <row#> (1 = top): a real mouse click (window messages) on that row's Date cell
+                            int row;
+                            log.Check(int.TryParse(arg, out row) && TestClickRow(row - 1), "clicked row " + arg);
+                            log.Add("  click: swallowed " + grid.LastClickSwallowed + ", current " + (CurrentRecord() != null ? CurrentRecord().Id : "none") + ", shown " + TestShownCount);
+                            break;
+                        }
+                        case "esc":
+                        {
+                            // Esc in the search box through the real key handling (ProcessCmdKey / Cancel)
+                            ActiveControl = txtSearch;
+                            var m = Message.Create(txtSearch.Handle, 0x100, (IntPtr)Keys.Escape, IntPtr.Zero);
+                            bool handled = txtSearch.PreProcessMessage(ref m);
+                            Application.DoEvents();
+                            log.Add("  esc: handled " + handled + ", search \"" + txtSearch.Text + "\", closed " + (IsDisposed || !Visible || DialogResult == DialogResult.Cancel));
+                            break;
+                        }
                         case "month":
                         {
                             int index = -1;
@@ -440,14 +514,24 @@ namespace PrintPrice
                             log.Check(btnInvoices.Visible && btnInvoices.Enabled, "Invoices… button can be clicked");
                             invoicesShowInHistory = null;
                             // "invoices screen=<px>": as on a screen that wide (fit-to-screen, paid-tick); logs the window width
-                            int scr = 0;
-                            if (arg.StartsWith("screen=")) int.TryParse(arg.Substring(7), out scr);
+                            // "invoices screen=<w>[x<h>]" (qol 6: the height too: fewer rows, at least 5)
+                            int scr = 0, scrH = 0;
+                            if (arg.StartsWith("screen="))
+                            {
+                                var wh = arg.Substring(7).Split('x');
+                                int.TryParse(wh[0], out scr);
+                                if (wh.Length > 1) int.TryParse(wh[1], out scrH);
+                            }
                             InvoicesForm.TestScreenWidth = scr;
+                            InvoicesForm.TestScreenHeight = scrH;
                             testInv = NewInvoicesForm();
                             testInv.Show(this);
                             Application.DoEvents();
                             InvoicesForm.TestScreenWidth = 0;
+                            InvoicesForm.TestScreenHeight = 0;
                             if (scr > 0) log.Check(testInv.TestWidth <= scr, "Invoices window " + testInv.TestWidth + " px wide fits a " + scr + " px screen");
+                            if (scrH > 0) log.Check(testInv.TestHeight <= scrH && testInv.TestRowsShown >= 5,
+                                                    "Invoices window " + testInv.TestHeight + " px tall fits a " + scrH + " px screen (" + testInv.TestRowsShown + " rows)");
                             log.Add("  " + testInv.TestStateLine());
                             break;
                         case "inv":
@@ -536,6 +620,38 @@ namespace PrintPrice
                     // the Paid cell's click / Space on the selected invoice: paid <-> unpaid, saved at once
                     if (testInv.TestSelected == null) { log.Check(false, "inv paid: no invoice selected"); return; }
                     testInv.TestTogglePaid();
+                    break;
+                case "undo":
+                    // qol 5: the Undo link on the ✓ line after a paid / unpaid tick, clicked on screen (fails when it isn't there)
+                    log.Check(testInv.TestUndoPaid(), "Undo link of the last paid / unpaid tick is on screen and clicked");
+                    break;
+                // release-test-6: real keys / clicks and the real 200 ms search delay
+                case "type":
+                    testInv.TestType(rest.Trim('"'));
+                    log.Add("  typed \"" + rest.Trim('"') + "\": waiting " + testInv.TestSearchWaiting + ", rows " + testInv.TestRowCount);
+                    break;
+                case "wait":
+                {
+                    int ms;
+                    if (!int.TryParse(rest, out ms)) ms = 300;
+                    HistoryTest.Pump(ms);
+                    log.Add("  waited " + ms + " ms: waiting " + testInv.TestSearchWaiting + ", rows " + testInv.TestRowCount);
+                    break;
+                }
+                case "esc":
+                {
+                    bool handled = testInv.TestEscape();
+                    Application.DoEvents();
+                    log.Add("  esc: handled " + handled + ", closed " + testInv.TestClosedByEscape);
+                    break;
+                }
+                case "space":
+                    testInv.TestSpace();
+                    log.Add("  space: swallowed " + testInv.TestLastSwallowed);
+                    break;
+                case "clickpaid":
+                    log.Check(testInv.TestClickPaid(rest), "clicked the Paid cell of " + rest);
+                    log.Add("  click: swallowed " + testInv.TestLastSwallowed);
                     break;
                 case "select":
                 {
@@ -646,6 +762,26 @@ namespace PrintPrice
                     bool fs = file != null && fls == ms;
                     log.Check(r.Paid == want && mem && fs, "invoice " + r.No + " (" + r.Jobs.Count + " print(s)) paid " + r.Paid + ", memory [" + ms + "], file [" + fls + "] (expected " + w[1] + ")" +
                                                          (r.Paid ? ", tip \"" + (testInv.TestPaidTip(rows.IndexOf(r)) ?? "").Replace("\n", " / ") + "\"" : ""));
+                    break;
+                }
+                case "waiting":
+                    log.Check(testInv.TestSearchWaiting == (rest == "yes"), "Invoices search waiting " + testInv.TestSearchWaiting + " (expected " + rest + ")");
+                    break;
+                case "swallowed":
+                    log.Check(testInv.TestLastSwallowed == (rest == "yes"), "Invoices last click / Space swallowed " + testInv.TestLastSwallowed + " (expected " + rest + ")");
+                    break;
+                case "closed":
+                    log.Check(testInv.TestClosedByEscape == (rest == "yes"), "Invoices closed by Esc " + testInv.TestClosedByEscape + " (expected " + rest + ")");
+                    break;
+                case "search":
+                    log.Check(testInv.TestSearchText == rest.Trim('"'), "Invoices search box \"" + testInv.TestSearchText + "\" (expected " + rest + ")");
+                    break;
+                case "empty":
+                {
+                    // qol 9: the grey "No invoices match …" line ("" = not shown)
+                    string want = rest.Trim('"');
+                    log.Check(want.Length == 0 ? testInv.TestEmptyText.Length == 0 : testInv.TestEmptyText.Contains(want),
+                              "Invoices empty line \"" + testInv.TestEmptyText + "\" (expected \"" + want + "\")");
                     break;
                 }
                 case "unpaid":

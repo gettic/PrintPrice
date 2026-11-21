@@ -550,7 +550,9 @@ namespace PrintPrice.Web
             double smallW = 900 - 80 - 30 - TextW(total, 56, true);
             var sums = new List<string>();
             foreach (var j in d.Jobs) sums.Add(Num.N2(j.Ore / 100.0));
-            string withSums = string.Join(" + ", sums.ToArray()) + " · " + (small.Length > 0 ? char.ToLower(small[0]) + small.Substring(1) : small);
+            // "· please pay by …" lower-case; the paid line keeps its capital ("· Paid 12 November 2026 – thank you", qol 8)
+            bool lower = small.Length > 0 && d.PaidAt == DateTime.MinValue;
+            string withSums = string.Join(" + ", sums.ToArray()) + " · " + (lower ? char.ToLower(small[0]) + small.Substring(1) : small);
             if (TextW(withSums, 16, false) <= smallW) small = withSums;
             Tx(it, small, 16, false, "muted", 80, y + 62, 0, "l");
             Tx(it, total, 56, true, "total", 420, y + 14, 510, "r");

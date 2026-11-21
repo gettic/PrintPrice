@@ -209,10 +209,14 @@ namespace PrintPrice
                             inv.TestPayment(1);
                             Snap(inv, folder, "invoices_unpaid.png");
                             inv.TestPayment(0);
+                            inv.TestSearch("zzz");   // qol 9: nothing matches
+                            Snap(inv, folder, "invoices_empty.png");
+                            inv.TestSearch("");
                             inv.Hide();
                         }
-                        // fit-to-screen: as on a 1366 px screen at 125 % (1093 px working width at 96 dpi)
+                        // fit-to-screen: as on a 1366 x 768 screen at 125 % (1093 x 582 px working area at 96 dpi, taskbar off)
                         HistoryForm.InvoicesForm.TestScreenWidth = 1093;
+                        HistoryForm.InvoicesForm.TestScreenHeight = 582;
                         using (var inv = hist.NewInvoicesForm())
                         {
                             Place(inv);
@@ -221,6 +225,7 @@ namespace PrintPrice
                             inv.Hide();
                         }
                         HistoryForm.InvoicesForm.TestScreenWidth = 0;
+                        HistoryForm.InvoicesForm.TestScreenHeight = 0;
                         hist.Hide();
                     }
                     // combined bill (Part A): three small prints for Lene Hansen on one invoice (made: one code, below the

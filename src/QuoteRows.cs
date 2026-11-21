@@ -418,6 +418,48 @@ namespace PrintPrice
             return text;
         }
 
+        // ---------- colour-change / prime tower note (desktop's material table note; shared with the website) ----------
+
+        /// "prime tower 1,7 g · 5 min" (DA "primetårn …"); withTime false / seconds &lt; 30 = grams only; grams &lt;= 0 = "".
+        public static string TowerText(double grams, double seconds, bool withTime)
+        {
+            if (!(grams > 0.005)) return "";
+            string s = L.F("prime tower {0} g", "primetårn {0} g", grams.ToString("0.0", Num.Dk));   // one decimal (qol)
+            if (withTime && seconds >= 30)
+            {
+                int min = (int)Math.Round(seconds / 60);
+                s += " · " + (min >= 60 ? (min / 60) + L.S(" h ", " t ") + (min % 60) + " min" : min + " min");
+            }
+            return s;
+        }
+
+        /// The note's two parts: note = "incl. 124 g and 8,7 h for colour changes" (the flush only: purge less the tower; grams
+        /// only above 0,5 g, hours from 0,05 h; "" = none), tower = TowerText(…, true) lower-case ("" = no tower).
+        public static void PurgeNoteParts(double purgeGrams, double colourChangeHours, double towerGrams, double towerSeconds,
+                                          out string note, out string tower)
+        {
+            double tw = towerGrams > 0.005 ? towerGrams : 0;
+            double flush = purgeGrams > 0 ? Math.Max(0, purgeGrams - tw) : purgeGrams;
+            bool g = flush > 0.5, h = colourChangeHours >= 0.05;
+            string grams = g ? flush.ToString(flush >= 10 ? "0" : "0.#", Num.Dk) : "";
+            string hours = h ? colourChangeHours.ToString("0.#", Num.Dk) : "";
+            note = "";
+            if (g && h) note = L.F("incl. {0} g and {1} h for colour changes", "heraf {0} g og {1} t til farveskift", grams, hours);
+            else if (g) note = L.F("incl. {0} g for colour changes", "heraf {0} g til farveskift", grams);
+            else if (h) note = L.F("{0} h for colour changes", "{0} t til farveskift", hours);
+            tower = TowerText(tw, towerSeconds, true);
+        }
+
+        /// The parts as one text: "note · tower" (twoLines: "note\nTower …"); only the tower = "Prime tower …" (capital).
+        public static string PurgeNoteJoin(string note, string tower, bool twoLines)
+        {
+            note = note ?? ""; tower = tower ?? "";
+            if (tower.Length == 0) return note;
+            string up = char.ToUpper(tower[0]) + tower.Substring(1);
+            if (note.Length == 0) return up;
+            return twoLines ? note + "\n" + up : note + " · " + tower;
+        }
+
         /// paid-tick: "Paid 05-11-2026 – thank you" (History.PaidText, the latest paid date) when every job is paid, else "".
         public static string PaidLine(IList<QuoteRecord> jobs)
         {
