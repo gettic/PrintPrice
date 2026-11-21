@@ -65,9 +65,9 @@ namespace PrintPrice
         public static string BedErrorText(string model)
         {
             var p = FindPrinter(model);
-            return L.F("The model doesn't fit on the {0}'s build plate ({1} × {2} × {3} mm), or a plate in the file is empty. " +
-                       "Choose a bigger printer, or use Scale… to make it smaller.",
-                       "Modellen passer ikke på byggepladen i {0} ({1} × {2} × {3} mm), eller en plade i filen er tom. " +
+            return L.F("The model doesn't fit on the {0}'s build plate ({1} × {2} × {3} mm), or one of the file's plates has nothing on it. " +
+                       "Pick a bigger printer, or use Scale… to make it smaller.",
+                       "Modellen passer ikke på byggepladen i {0} ({1} × {2} × {3} mm), eller en af filens plader er tom. " +
                        "Vælg en større printer, eller brug Skalér… til at gøre den mindre.",
                        p.MachineName, p.BedX, p.BedY, p.BedZ);
         }
@@ -1350,10 +1350,10 @@ namespace PrintPrice
             return p.EndsWith(".stl") || p.EndsWith(".obj") || p.EndsWith(".3mf");
         }
 
-        /// "<name> can only be scaled evenly. To scale X, Y and Z separately, …" (both languages).
+        /// "<name> can only be scaled the same in every direction. For X, Y and Z separately, …" (both languages).
         public static string ScaleXyzFormatText(string name)
         {
-            return L.F("{0} can only be scaled evenly. To scale X, Y and Z separately, use an STL, OBJ or 3MF file.",
+            return L.F("{0} can only be scaled the same in every direction. For X, Y and Z separately, use an STL, OBJ or 3MF file.",
                        "{0} kan kun skaleres ens i alle retninger. Brug en STL-, OBJ- eller 3MF-fil for at skalere X, Y og Z hver for sig.",
                        string.IsNullOrEmpty(name) ? L.S("This file", "Denne fil") : name);
         }
@@ -1393,8 +1393,9 @@ namespace PrintPrice
             catch (SliceException) { throw; }
             catch (Exception ex)
             {
-                throw new SliceException(L.F("Could not make the scaled copy of {0}: {1}", "Kunne ikke lave den skalerede kopi af {0}: {1}",
-                                             name, ex.Message));
+                throw new SliceException(L.F("Could not make the scaled copy of {0}: {1}. Try scaling it in Bambu Studio and load the saved file.",
+                                             "Kunne ikke lave den skalerede kopi af {0}: {1}. Prøv at skalere den i Bambu Studio og indlæs den gemte fil.",
+                                             name, (ex.Message ?? "").Trim().TrimEnd('.')));
             }
             return target;
         }
@@ -1558,7 +1559,8 @@ namespace PrintPrice
                 int end = tag.EndsWith("/>") ? tag.Length - 2 : tag.Length - 1;
                 return tag.Substring(0, end).TrimEnd() + " transform=\"" + scaled + "\"" + tag.Substring(end);
             });
-            if (items == 0 || bad) throw new SliceException(L.S("The 3MF file's objects could not be scaled.", "3MF-filens objekter kunne ikke skaleres."));
+            if (items == 0 || bad) throw new SliceException(L.S("The 3MF file's objects could not be scaled. Try scaling it in Bambu Studio and load the saved file.",
+                                                                "3MF-filens objekter kunne ikke skaleres. Prøv at skalere den i Bambu Studio og indlæs den gemte fil."));
             return modelXml.Substring(0, b.Index) + build + modelXml.Substring(b.Index + b.Length);
         }
 
@@ -1591,8 +1593,8 @@ namespace PrintPrice
                 var root = src.Entries.FirstOrDefault(e => string.Equals(e.FullName, rootName, StringComparison.OrdinalIgnoreCase));
                 if (root == null) throw new SliceException(L.S("The 3MF file has no model part.", "3MF-filen har ingen modeldel."));
                 if (root.Length > MaxRootModelBytes)
-                    throw new SliceException(L.S("The 3MF file is too big to scale X, Y and Z separately. Use the same % for all three.",
-                                                 "3MF-filen er for stor til at skalere X, Y og Z hver for sig. Brug samme % for alle tre."));
+                    throw new SliceException(L.S("The 3MF file is too big to scale X, Y and Z separately. Tick Same in every direction instead.",
+                                                 "3MF-filen er for stor til at skalere X, Y og Z hver for sig. Sæt flueben i Ens i alle retninger i stedet."));
                 string xml;
                 using (var r = new StreamReader(root.Open(), System.Text.Encoding.UTF8, true)) xml = r.ReadToEnd();
                 string scaled = ScaleBuildItems(xml, s);
@@ -1740,17 +1742,16 @@ namespace PrintPrice
 
         /// Pure: the result-line text for IsTooSmallFailure. x100/y100/z100 = the model's size at 100 % (mm; any <= 0 /
         /// NaN = unknown, then no size in the text). The size shown is at the job's scale (per axis).
-        /// "Too small to print at 20 %: the model would be only 12,0 × 6,2 × 9,6 mm, and its thinnest parts vanish when
-        /// sliced. Try a bigger size."
+        /// "Too small at 20 % (12,0 × 6,2 × 9,6 mm): the thinnest parts disappear when sliced. Try a bigger size."
         public static string TooSmallText(ScaleXyz scale, double x100, double y100, double z100)
         {
             var s = scale ?? ScaleXyz.None;
             if (Known(x100) && Known(y100) && Known(z100))
-                return L.F("Too small to print at {0}: the model would be only {1}, and its thinnest parts vanish when sliced. Try a bigger size.",
-                           "For lille til at printe ved {0}: modellen ville kun være {1}, og de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.",
+                return L.F("Too small at {0} ({1}): the thinnest parts disappear when sliced. Try a bigger size.",
+                           "For lille ved {0} ({1}): de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.",
                            s.Text, SizeText(x100 * s.X / 100, y100 * s.Y / 100, z100 * s.Z / 100));
-            return L.F("Too small to print at {0}: the thinnest parts vanish when sliced. Try a bigger size.",
-                       "For lille til at printe ved {0}: de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.", s.Text);
+            return L.F("Too small at {0}: the thinnest parts disappear when sliced. Try a bigger size.",
+                       "For lille ved {0}: de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.", s.Text);
         }
 
         static bool Known(double mm) { return !double.IsNaN(mm) && !double.IsInfinity(mm) && mm > 0; }

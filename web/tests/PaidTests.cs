@@ -52,7 +52,8 @@ static class PaidTests
         bool paid = WebHistory.TogglePaid(list, list[1], now);
         True("tick: the whole number paid (both jobs), today's date", paid && list[0].PaidAt == "2026-11-20" && list[1].PaidAt == "2026-11-20" && list[3].PaidAt == "");
         True("filter after the tick: none unpaid", WebHistory.Apply(list, f, null).Count == 0);
-        True("done line: " + WebHistory.PaidDoneText("2026-48213", true, 2), WebHistory.PaidDoneText("2026-48213", true, 2) == "✓ Invoice 2026-48213 marked as paid (2 prints).");
+        True("done line: " + WebHistory.PaidDoneText("2026-48213", true, 2), WebHistory.PaidDoneText("2026-48213", true, 2) == "✓ Invoice 2026-48213 marked as paid."
+             && WebHistory.PaidDoneText("2026-48213", false, 1) == "✓ Invoice 2026-48213 marked as unpaid.");
         paid = WebHistory.TogglePaid(list, list[0], now);
         True("untick: both unpaid again", !paid && list[0].PaidAt == "" && list[1].PaidAt == "");
         True("sheet button", WebHistory.PaidButton(list[0]) == "Mark as paid" && WebHistory.PaidButton(list[2]) == "Mark as unpaid");

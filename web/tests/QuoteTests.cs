@@ -35,6 +35,31 @@ static class QuoteTests
         return string.Join("|", all.ToArray());
     }
 
+    /// The quote window by keyboard (release-test-6): Esc = Close except a changed name in the name box (one Esc only
+    /// leaves the box), and the side panel before the page in QuoteView.razor so Tab follows the phone's screen.
+    static void Keyboard(Action<string, bool> True)
+    {
+        True("Esc outside the name box closes", WebQuote.EscCloses(false, "Bo Jensen changed", "Bo Jensen"));
+        True("Esc in the name box, name unchanged, closes", WebQuote.EscCloses(true, "Bo Jensen", "Bo Jensen"));
+        True("Esc in the name box, empty and unchanged, closes", WebQuote.EscCloses(true, "", null));
+        True("Esc in the name box, name changed, stays open", !WebQuote.EscCloses(true, "Bo Jens", "Bo Jensen"));
+        True("Esc in the name box, name typed on a new quote, stays open", !WebQuote.EscCloses(true, "Lene", ""));
+        True("Esc in the name box, changed back, closes", WebQuote.EscCloses(true, " Bo Jensen ", "Bo Jensen"));
+
+        string web = null;
+        for (var d = new System.IO.DirectoryInfo(AppContext.BaseDirectory); d != null && web == null; d = d.Parent)
+            if (System.IO.File.Exists(System.IO.Path.Combine(d.FullName, "Pages", "QuoteView.razor"))) web = d.FullName;
+        True("web folder found", web != null);
+        if (web == null) return;
+        string view = System.IO.File.ReadAllText(System.IO.Path.Combine(web, "Pages", "QuoteView.razor"));
+        int side = view.IndexOf("class=\"qv-side\""), preview = view.IndexOf("\"qv-preview\"");
+        True("side panel before the page (Tab order on phones)", side > 0 && preview > side);
+        True("Esc module used", view.Contains("QuoteView.razor.js") && System.IO.File.Exists(System.IO.Path.Combine(web, "Pages", "QuoteView.razor.js")));
+        string css = System.IO.File.ReadAllText(System.IO.Path.Combine(web, "wwwroot", "css", "quote.css"));
+        True("side panel on the right on wide screens", css.Contains(".qv-side { order: 1;"));
+        True("no reordering on phones (screen = Tab order)", !css.Contains("order: -1"));
+    }
+
     public static void Run(Action<string, bool> True, Action<string, double, double> Eq)
     {
         bool wasDanish = L.Danish;
@@ -42,6 +67,7 @@ static class QuoteTests
         var s = new AppSettings { QuoteName = AppSettings.LegacyQuoteName };   // quote_light.png's "Gettic" (new installs: empty)
         WebCalc.ApplyAutoWear(s, "PLA");
         var when = new DateTime(2026, 11, 4, 17, 45, 0);
+        Keyboard(True);
 
         // ---- the job's quote = quote_light.png ----
         var d = WebQuote.FromJob(Benchy(), s, false, when, History.QuoteNumber(when), "");
@@ -85,7 +111,8 @@ static class QuoteTests
                                   "Please write invoice no. 2026-73096 with the payment." })
             True("invoice page has \"" + w + "\"", it.Contains(w));
         True("invoice: no Printer row, no validity", !it.Contains("Printer|Bambu") && !it.Contains("Valid until") && !it.Contains("For: "));
-        True("invoice taller than A4, as the desktop's (its rows end at 1412, footer line at 1440): " + il.Height, Math.Abs(il.Height - 1502) < 1);
+        // web-look qol 7: no empty picture room under the name (the desktop's page is 1502)
+        True("invoice taller than A4, details right under the name: " + il.Height, Math.Abs(il.Height - 1487.24) < 1);
 
         // ---- a saved quote (History's Quote… / Invoice…) ----
         var list = new List<QuoteRecord>();

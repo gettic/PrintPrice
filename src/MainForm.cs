@@ -6911,7 +6911,7 @@ namespace PrintPrice
             repeatLine = null;
             repeatWhy = null;
             ClearJobNumbers();
-            SetAutoError(L.F("↻ Repeat print of {0}: not possible on this printer. {1}", "↻ Print igen af {0}: kan ikke lade sig gøre på denne printer. {1}",
+            SetAutoError(L.F("↻ Repeat print of {0}: doesn't fit this printer. {1}", "↻ Print igen af {0}: passer ikke til denne printer. {1}",
                              RecordName(r), why));
         }
 

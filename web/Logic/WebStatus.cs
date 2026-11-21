@@ -37,7 +37,11 @@ namespace PrintPrice.Web
         public static string Heading { get { return L.S("Print status", "Printstatus"); } }
 
         /// A combined window's heading: "Print status (all 3 prints)".
-        public static string GroupHeading(int n) { return L.F("Print status (all {0} prints)", "Printstatus (alle {0} print)", n); }
+        public static string GroupHeading(int n)
+        {
+            if (n == 2) return L.S("Print status (both prints)", "Printstatus (begge print)");   // qol 11: not "all 2 prints"
+            return L.F("Print status (all {0} prints)", "Printstatus (alle {0} print)", n);
+        }
 
         public static string Mixed { get { return L.S("Mixed", "Blandet"); } }
 

@@ -567,3 +567,36 @@ table.hist td.stcol { position: relative; white-space: nowrap; }
 .paidbtn.on, .chip.paidchip.on { color: var(--friends); border-color: color-mix(in srgb, var(--friends) 45%, var(--back)); }
 .paidsheet.on { color: var(--friends); }
 .sheet .paidsheet { grid-column: 1 / -1; }
+
+/* ---- website look check (plans\web-look, qol 2026-11-21) ---- */
+/* qol 3: a scaled job's name: the name is cut with …, the scale stays whole after it */
+.mwrap { display: flex; min-width: 0; max-width: 100%; }
+.mwrap .mn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.mwrap .ms { flex: none; white-space: pre; }
+/* qol 4: the list fits the page column (EN): a slimmer Paid tick, Note gives way first */
+.paidbtn { margin-left: 4px; padding: 1px 6px; }
+table.hist td.invcell { padding-right: 6px; white-space: nowrap; }
+table.hist td.notecell { min-width: 56px; }
+/* qol 6: the selected (red) row: invoice number and tick in near-white */
+table.hist tr.picked td.invcell .muted, table.hist tr.picked .paidbtn, table.hist tr.picked .paidbtn.on { color: #f2f2f2; border-color: rgba(255, 255, 255, .55); }
+table.hist tr.picked .paidbtn:hover { background: rgba(255, 255, 255, .12); }
+/* qol 10: the "Unpaid invoices" line (amber overdue part = Theme.Warning) */
+.unpaidline { margin: -2px 0 10px; font-size: 14px; }
+.unpaidline .overdue { color: var(--warning); }
+@media (max-width: 720px) {
+    /* qol 5: the opened card: the same padding on both sides; the four print statuses as a 2 × 2 grid */
+    .qrow.open { padding-right: 12px; }
+    .sheet .stchoices { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .sheet .stchoices > .muted { grid-column: 1 / -1; }
+    .sheet .stchoices button { justify-content: center; }
+    /* qol 11: the backup warning gets the whole width, its buttons go under it */
+    .lastbackup { flex-wrap: wrap; }
+    .lastbackup span { flex: 1 1 100%; }
+    .lastbackup button { flex: 1 1 auto; }
+}
+@media (max-width: 520px) {
+    /* qol 8: Settings' tabs in one row that scrolls sideways, not two uneven rows */
+    .tabs { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding: 8px 8px 0; }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tabs button { flex: none; white-space: nowrap; padding-left: 7px; padding-right: 7px; font-size: 13px; }
+}

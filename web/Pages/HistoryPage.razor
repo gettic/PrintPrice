@@ -98,6 +98,17 @@
     }
 </div>
 
+@if (filter.Show == WebHistory.ShowUnpaidInvoices)
+{
+    @* qol 10: what is still owed, over all made invoices (the cards above stay the month's sums), as the desktop's Invoices window *@
+    string overdue;
+    string unpaid = WebHistory.UnpaidLine(Quotes, Settings, DateTime.Now, out overdue);
+    @if (unpaid != null)
+    {
+        <div class="unpaidline" role="status"><span>@unpaid</span>@if (overdue.Length > 0) { <span class="overdue">@(" " + overdue)</span> }</div>
+    }
+}
+
 @if (DoneText != null)
 {
     <div class="@(DoneError ? "hinfo done error" : "hinfo done ok")" role="status">
@@ -190,7 +201,7 @@ else
                                @onchange="() => Tick(rec)" @onkeydown:stopPropagation="true" /></td>
                     <td class="piccol">@Pic(rec, "s")</td>
                     <td>@WebHistory.DateText(rec)</td>
-                    <td class="model" title="@WebHistory.ModelText(rec)">@WebHistory.ModelText(rec)</td>
+                    <td class="model" title="@WebHistory.ModelText(rec)">@NameParts(rec)</td>
                     <td class="n">@WebHistory.TimeText(rec)</td>
                     <td class="n">@WebHistory.GramsText(rec)</td>
                     <td class="n"><b class="@(friends ? "green" : "red")">@WebHistory.PriceText(rec)</b></td>
@@ -237,7 +248,7 @@ else
                                @onclick:stopPropagation="true" @onchange="() => Tick(rec)" />
                     }
                 </div>
-                <div class="m">@WebHistory.ModelText(rec)</div>
+                <div class="m">@NameParts(rec)</div>
                 <div class="p @(friends ? "green" : "red")">@Num.Kr(History.PriceFor(rec))</div>
                 <div class="d">@WebHistory.ShortDate(rec) · @WebHistory.TimeText(rec) · @WebHistory.GramsText(rec) g</div>
                 <div class="d r @(friends ? "green" : "red")">@WebHistory.ForText(rec.For)</div>
@@ -289,7 +300,7 @@ else
                             </span>
                         }
                     </div>
-                    <div class="m" title="@WebHistory.ModelText(rec)">@WebHistory.ModelText(rec)</div>
+                    <div class="m" title="@WebHistory.ModelText(rec)">@NameParts(rec)</div>
                     @if (large)
                     {
                         string extra = Joined(printerMode ? WebHistory.PrinterText(rec, names) : "", WebHistory.CustomerText(rec), rec.Note,
@@ -315,7 +326,7 @@ else
                 @if (tileIndex == sheetAfter)
                 {
                     <div class="tile-sheet" @key="@("sheet")">
-                        <div class="tsname">@WebHistory.ModelText(opened)</div>
+                        <div class="tsname">@NameParts(opened)</div>
                         @Sheet(opened, rows)
                     </div>
                 }
@@ -714,6 +725,15 @@ else if (Quotes.Count > 0)
                                            @* the desktop's placeholder (HistoryViews.DrawWell): an isometric cube outline, half the box *@
                                            <svg class="cube" viewBox="0 0 100 100" role="img" aria-label="@L.S("No picture", "Intet billede")"><path vector-effect="non-scaling-stroke" d="M50 25 L71.65 37.5 L71.65 62.5 L50 75 L28.35 62.5 L28.35 37.5 Z M28.35 37.5 L50 50 L71.65 37.5 M50 50 L50 75" /></svg>
                                        }</span>;
+
+    /// The name in the list / cards: the name is cut with … and a scale (" (150 × 100 × 50 %)") stays whole after it
+    /// (issue #8 / qol 3, as the desktop's HistoryViews).
+    RenderFragment NameParts(QuoteRecord rec)
+    {
+        string scale = WebHistory.ScalePart(rec);
+        if (scale.Length == 0) return @<span class="mn">@WebHistory.BaseModelText(rec)</span>;
+        return @<span class="mwrap"><span class="mn">@WebHistory.BaseModelText(rec)</span><span class="ms">@scale</span></span>;
+    }
 
     /// A quote's actions on a phone (list row or card tapped).
     RenderFragment Sheet(QuoteRecord rec, List<QuoteRecord> rows)

@@ -1089,7 +1089,7 @@ else
 
     string QuoteModelName
     {
-        get { return quoteJobs != null ? QuoteRows.PrintsText(quoteJobs.Count) : QuoteRows.ModelName(quoteRecord != null ? quoteRecord.Model : jobModel); }
+        get { return quoteJobs != null ? QuoteRows.PrintsText(quoteJobs.Count) : quoteRecord != null ? WebQuote.RecordModelName(quoteRecord) : QuoteRows.ModelName(jobModel); }
     }
 
     // ---------- combined bill: several History jobs on one quote / invoice (MainForm's combined-bill section) ----------

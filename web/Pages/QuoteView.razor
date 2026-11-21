@@ -2,17 +2,18 @@
    customer's name (recent names offered), which price goes on it, Light / Dark, and Print / PDF…, Copy text and Save to
    history. What an export saves is the Calculator's job (Export); the page only shows and prints. *@
 @inject Store Store
+@inject IJSRuntime JS
+@implements IAsyncDisposable
 
-<div class="qv" role="dialog" aria-modal="true" aria-labelledby="qv-title" @onkeydown="Key">
+<div class="qv" role="dialog" aria-modal="true" aria-labelledby="qv-title" @ref="viewRef">
     <div class="qv-bar">
         <img src="icon-192.png" alt="" />
         <span id="qv-title">@WebQuote.WindowTitle(Invoice, Model)</span>
-        <button @onclick="Close" aria-label="@L.S("Close", "Luk")">✕ @L.S("Close", "Luk")</button>
+        <button @ref="closeButton" @onclick="Close" aria-label="@L.S("Close", "Luk")">✕ @L.S("Close", "Luk")</button>
     </div>
+    @* The side panel comes first in the page so Tab follows the phone's screen (choices on top, the page under them);
+       quote.css puts it on the right on wider screens (order: 1). Esc = Close: QuoteView.razor.js. *@
     <div class="qv-body">
-        <div class="@(zoomed ? "qv-preview zoomed" : "qv-preview")" title="@L.S("Click to zoom in or out", "Klik for at zoome ind eller ud")" @onclick="() => zoomed = !zoomed">
-            <QuoteSheet Data="sheet" Dark="dark" />
-        </div>
         <div class="qv-side">
             <label class="qv-head" for="qv-name">@(Invoice ? L.S("Customer (required)", "Kunde (skal udfyldes)") : L.S("Customer (optional)", "Kunde (valgfrit)"))</label>
             <input id="qv-name" type="text" class="left" list="qv-recent" maxlength="80" value="@customer" autocomplete="off"
@@ -55,7 +56,7 @@
             </div>
             @if (status != null)
             {
-                <div class="@(statusError ? "hinfo error" : "hinfo ok")" style="white-space:pre-wrap" role="status">@status</div>
+                <div class="@(statusError ? "hinfo error" : "hinfo ok")" style="white-space:pre-wrap" role="status">@NoBreak(status)</div>
             }
             @if (!string.IsNullOrEmpty(Warning))
             {
@@ -63,9 +64,15 @@
             }
             @if (!string.IsNullOrEmpty(Note))
             {
-                <div class="hinfo note" style="white-space:pre-wrap">@Note</div>
+                <div class="hinfo note" style="white-space:pre-wrap">@NoBreak(Note)</div>
             }
-            <div class="hinfo">@(Help ?? WebQuote.HelpText(IsRecord, Invoice, PriceLocked ? MadeNo : null))</div>
+            <div class="hinfo">@NoBreak(Help ?? WebQuote.HelpText(IsRecord, Invoice, PriceLocked ? MadeNo : null))</div>
+        </div>
+        <div class="@("qv-preview" + (zoomed ? " zoomed" : "") + (a4 ? " a4" : ""))" title="@L.S("Click to zoom in or out", "Klik for at zoome ind eller ud")" @onclick="() => zoomed = !zoomed">
+            @* qol 1: phones (< 600 px, quote.css) read the page as one column; the A4 page is what prints *@
+            <button class="qv-a4" @onclick="() => a4 = !a4" @onclick:stopPropagation="true">@(a4 ? L.S("Show for reading", "Vis til læsning") : L.S("Show the A4 page", "Vis A4-siden"))</button>
+            <QuoteFlow Data="sheet" Dark="dark" />
+            <QuoteSheet Data="sheet" Dark="dark" />
         </div>
     </div>
 </div>
@@ -114,7 +121,7 @@
 
     WebQuote.Sheet sheet;
     string customer = "", status, printTitle;
-    bool friends, dark, busy, statusError, zoomed, mixed, statusBusy;
+    bool friends, dark, busy, statusError, zoomed, mixed, statusBusy, a4;
     int status_;   // the Print status box (PrintState as int; "status" is the message line)
 
     bool NeedsName { get { return Invoice && customer.Trim().Length == 0; } }
@@ -188,6 +195,7 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (firstRender) await HoldEsc();
         await Store.FitSheet();
         if (printTitle != null)
         {
@@ -226,8 +234,70 @@
 
     Task Close() { return OnClose.InvokeAsync(); }
 
-    async Task Key(KeyboardEventArgs e)
+    static readonly System.Text.RegularExpressions.Regex InvoiceCode = new System.Text.RegularExpressions.Regex(@"\b\d{4}-\d{4,6}\b");
+
+    /// qol 11: invoice numbers ("2026-48213") never break at their hyphen in the side notes.
+    static RenderFragment NoBreak(string text) => b =>
     {
-        if (e.Key == "Escape") await Close();
+        int seq = 0, at = 0;
+        text = text ?? "";
+        foreach (System.Text.RegularExpressions.Match m in InvoiceCode.Matches(text))
+        {
+            if (m.Index > at) b.AddContent(seq++, text.Substring(at, m.Index - at));
+            b.OpenElement(seq++, "span");
+            b.AddAttribute(seq++, "class", "nw");
+            b.AddContent(seq++, m.Value);
+            b.CloseElement();
+            at = m.Index + m.Length;
+        }
+        if (at < text.Length) b.AddContent(seq++, text.Substring(at));
+    };
+
+    // ---------- Esc = Close (QuoteForm's CancelButton), QuoteView.razor.js ----------
+
+    ElementReference viewRef, closeButton;
+    IJSObjectReference escModule;
+    DotNetObjectReference<QuoteView> self;
+    bool disposed;
+    static int lastEscKey;
+    readonly int escKey = ++lastEscKey;   // one listener per window (a reopened window can start before the old one let go)
+
+    /// On open: focus on Close (keyboard users start inside the window) and Esc anywhere on the page closes it.
+    async Task HoldEsc()
+    {
+        try { await closeButton.FocusAsync(); } catch (Exception) { }
+        try
+        {
+            self = DotNetObjectReference.Create(this);
+            escModule = await JS.InvokeAsync<IJSObjectReference>("import", "./Pages/QuoteView.razor.js");
+            if (disposed) { await escModule.DisposeAsync(); escModule = null; return; }   // closed meanwhile
+            await escModule.InvokeVoidAsync("holdEsc", escKey, viewRef, self);
+        }
+        catch (Exception) { }
+    }
+
+    /// Esc from QuoteView.razor.js (no dialog on top): close, except that a changed name isn't lost by one Esc in the
+    /// name box (WebQuote.EscCloses): that Esc only leaves the box, to Close.
+    [JSInvokable]
+    public async Task Esc(bool inNameBox)
+    {
+        if (disposed) return;
+        if (WebQuote.EscCloses(inNameBox, customer, StartCustomer)) { await Close(); return; }
+        try { await closeButton.FocusAsync(); } catch (Exception) { }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        disposed = true;
+        try
+        {
+            if (escModule != null)
+            {
+                await escModule.InvokeVoidAsync("releaseEsc", escKey);
+                await escModule.DisposeAsync();
+            }
+        }
+        catch (Exception) { }
+        if (self != null) self.Dispose();
     }
 }

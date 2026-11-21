@@ -2206,7 +2206,7 @@ namespace PrintPrice.Tests
             True("ParseProjectPrinter bad XML -> no throw", !ppThrew);
 
             // 7. error texts
-            True("BedErrorText A1M", Has(BambuSlicer.BedErrorText("A1M"), "Bambu Lab A1 mini", "180 × 180 × 180 mm", "plate in the file is empty"));
+            True("BedErrorText A1M", Has(BambuSlicer.BedErrorText("A1M"), "Bambu Lab A1 mini", "180 × 180 × 180 mm", "plates has nothing on it"));
             True("BedErrorText P1S", Has(BambuSlicer.BedErrorText("P1S"), "256 × 256 × 250 mm"));
             True("BedErrorText A1 points to Scale…", Has(BambuSlicer.BedErrorText("A1"), "Scale…"));
             True("SliceException.IsBedError: -50 yes; -100 / 0 / message only no", new SliceException("m", -50, null).IsBedError
@@ -5520,8 +5520,8 @@ namespace PrintPrice.Tests
                 // 60 × 31 × 48 mm at 20 % = 12,0 × 6,2 × 9,6 mm
                 L.Danish = false;
                 True("TooSmallText EN with size", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 60, 31, 48) ==
-                     "Too small to print at 20 %: the model would be only 12,0 × 6,2 × 9,6 mm, and its thinnest parts vanish when sliced. Try a bigger size.");
-                const string noSizeEn = "Too small to print at 20 %: the thinnest parts vanish when sliced. Try a bigger size.";
+                     "Too small at 20 % (12,0 × 6,2 × 9,6 mm): the thinnest parts disappear when sliced. Try a bigger size.");
+                const string noSizeEn = "Too small at 20 %: the thinnest parts disappear when sliced. Try a bigger size.";
                 True("TooSmallText EN unknown size (0 / NaN)", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 0, 31, 48) == noSizeEn
                      && BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), double.NaN, 31, 48) == noSizeEn);
                 // 20 × 20 × 10 at 100 × 100 × 50 % = 20,0 × 20,0 × 5,0 mm
@@ -5531,8 +5531,8 @@ namespace PrintPrice.Tests
                      == "Bambu Studio could not slice a.stl: parts of the model are too thin to print, or the model is damaged.");
                 L.Danish = true;
                 True("TooSmallText DA with size", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 60, 31, 48) ==
-                     "For lille til at printe ved 20 %: modellen ville kun være 12,0 × 6,2 × 9,6 mm, og de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.");
-                const string noSizeDa = "For lille til at printe ved 20 %: de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.";
+                     "For lille ved 20 % (12,0 × 6,2 × 9,6 mm): de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.");
+                const string noSizeDa = "For lille ved 20 %: de tyndeste dele forsvinder ved slicing. Prøv en større størrelse.";
                 True("TooSmallText DA unknown size (0 / NaN)", BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), 0, 31, 48) == noSizeDa
                      && BambuSlicer.TooSmallText(ScaleXyz.Uniform(20), double.NaN, 31, 48) == noSizeDa);
                 True("SliceErrorText -100 DA = plain too-thin text", BambuSlicer.SliceErrorText(-100, "a.stl", failed, "A1")

@@ -115,6 +115,9 @@ static class WebTests
         // 15. paid-tick: History's paid tick, Unpaid invoices filter, paid line on invoices
         PaidTests.Run(True, Eq);
 
+        // 16. web-look (qol 2026-11-21): scale in names, combined bill grouped per job, unpaid line, texts
+        LookTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

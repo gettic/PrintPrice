@@ -223,10 +223,10 @@ namespace PrintPrice
             tip.SetToolTip(chkMainInvoice, L.S("On: the main window's button makes an invoice with a number.\nQuotes are still made from History.",
                                                "Til: knappen i hovedvinduet laver en faktura med nummer.\nTilbud kan stadig laves fra Historik."));
             // issue #8 step 3 (tip exists from here on)
-            tip.SetToolTip(cmbTower, L.S("Bambu Studio prints a small tower to clean the nozzle when the colour changes.\nOff saves filament and time but can leave colour smudges.\nFor every printer; a job with 2+ colours can switch it under its result.",
-                                         "Bambu Studio printer et lille tårn, der renser dysen, når farven skifter.\nFra sparer filament og tid, men kan give farvepletter.\nGælder alle printere; et job med 2+ farver kan skifte under resultatet."));
-            tip.SetToolTip(chkQuoteTower, L.S("On: quotes and invoices get the line \"incl. 1,7 g for the prime tower\" under Material\n(no price; the grams are already in the material). The main window always shows it.",
-                                              "Til: tilbud og fakturaer får linjen \"inkl. 1,7 g til primetårnet\" under Materiale\n(uden pris; grammene er allerede med i materialet). Hovedvinduet viser den altid."));
+            tip.SetToolTip(cmbTower, L.S("Bambu Studio prints a small tower to clean the nozzle when the colour changes.\nOff saves filament and time but can leave colour smudges.\nApplies to all printers. Change it per job under the result.",
+                                         "Bambu Studio printer et lille tårn, der renser dysen, når farven skifter.\nFra sparer filament og tid, men kan give farvepletter.\nGælder alle printere. Kan ændres pr. job under resultatet."));
+            tip.SetToolTip(chkQuoteTower, L.S("Adds \"incl. 1,7 g for the prime tower\" under Material.\nNo extra price: the grams are already counted.",
+                                              "Tilføjer \"inkl. 1,7 g til primetårnet\" under Materiale.\nIngen ekstra pris: grammene er allerede talt med."));
             // issue #6: a copy of every saved invoice PDF in <settings folder>\Invoices + a button that opens that folder
             int ic = t.RowCount++;
             var copyFlow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, Margin = Padding.Empty, Padding = Padding.Empty };

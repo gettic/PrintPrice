@@ -16,6 +16,7 @@ namespace PrintPrice.Web
             public string Name = "", Detail = "", Sub = "", Amount = "", Weight = "", Picture;
             public long Ore;
             public int Hours, Minutes;
+            public double TowerGrams = -1;   // qol 2: this job's prime tower for its own note (-1 = none / setting off)
         }
 
         /// A combined bill (2+ cards).
@@ -51,9 +52,9 @@ namespace PrintPrice.Web
                 jobs = group;
                 o.Notes.Add(group.Count == 2
                     ? L.F("\"{0}\" is on combined invoice {1} with 1 other print: the whole invoice is shown.",
-                          "\"{0}\" er på samlet faktura {1} med 1 andet print: hele fakturaen vises.", QuoteRows.ModelName(r.Model), r.InvoiceNo.Trim())
+                          "\"{0}\" er på samlet faktura {1} med 1 andet print: hele fakturaen vises.", RecordModelName(r), r.InvoiceNo.Trim())
                     : L.F("\"{0}\" is on combined invoice {1} with {2} other prints: the whole invoice is shown.",
-                          "\"{0}\" er på samlet faktura {1} med {2} andre print: hele fakturaen vises.", QuoteRows.ModelName(r.Model), r.InvoiceNo.Trim(), group.Count - 1));
+                          "\"{0}\" er på samlet faktura {1} med {2} andre print: hele fakturaen vises.", RecordModelName(r), r.InvoiceNo.Trim(), group.Count - 1));
             }
             else
             {
@@ -62,7 +63,7 @@ namespace PrintPrice.Web
                 {
                     o.Problem = L.F("\"{0}\" is already on invoice {1}. Pick only unbilled prints, or only that invoice's prints.",
                                     "\"{0}\" er allerede på faktura {1}. Vælg kun print uden faktura, eller kun den fakturas print.",
-                                    QuoteRows.ModelName(check.Clash.Model), check.ClashCode);
+                                    RecordModelName(check.Clash), check.ClashCode);
                     return o;
                 }
                 if (check.Jobs.Count == 0)
@@ -152,6 +153,9 @@ namespace PrintPrice.Web
             string print = L.S(" Print / PDF opens the browser's print window: choose \"Save as PDF\" for a file.",
                                " Print / PDF åbner browserens printvindue: vælg \"Gem som PDF\" for en fil.");
             if (made) return L.F("Invoice {0} ({1} prints) is already made and stays as it is.", "Faktura {0} ({1} print) er allerede lavet og forbliver uændret.", code, n) + print;
+            if (invoice && n == 2)   // qol 11: "both", not "all 2"
+                return L.S("Making the invoice (Print / PDF or Copy text) gives both prints one number and marks them as printed in the history.",
+                           "Når fakturaen laves (Print / PDF eller Kopiér tekst), får begge print ét nummer og markeres som printet i historikken.") + print;
             if (invoice)
                 return L.F("Making the invoice (Print / PDF or Copy text) gives all {0} prints one number and marks them as printed in the history.",
                            "Når fakturaen laves (Print / PDF eller Kopiér tekst), får alle {0} print ét nummer og markeres som printet i historikken.", n) + print;
@@ -192,14 +196,15 @@ namespace PrintPrice.Web
                 if (pictures != null && r.Id != null) pictures.TryGetValue(r.Id, out pic);
                 d.Jobs.Add(new Card
                 {
-                    Name = QuoteRows.ModelName(r.Model),
+                    Name = RecordModelName(r),
                     Detail = QuoteRows.JobDetail(r, md.Material),
                     Sub = QuoteRows.JobSub(r),
                     Amount = Num.Kr(ore / 100.0),
                     Ore = ore,
                     Picture = pic,
                     Hours = r.Hours, Minutes = r.Minutes,
-                    Weight = Num.Fmt(r.Grams) + " g"
+                    Weight = Num.Fmt(r.Grams) + " g",
+                    TowerGrams = RecordTower(s, r)
                 });
                 string pt = PrinterText(s, r);
                 if (printer == null) printer = pt;
@@ -217,6 +222,7 @@ namespace PrintPrice.Web
                 d.MaterialColours.Add(ColourCss(m.Colour));
             }
             NameByColour(d.MaterialNames, d.MaterialColours);
+            d.MaterialJob = MaterialOwners(jobs, gb.Materials);
             int minutes = 0;
             string bed = null;
             bool sameBed = true;
@@ -266,6 +272,112 @@ namespace PrintPrice.Web
             return latest;
         }
 
+        /// qol 2: which job each of the bill's materials (History.GroupBreakdown's Materials, keyed as it keys them: the
+        /// filament's name, else the record's MaterialName, + upper-case colour) comes from; -1 = more than one job (or none).
+        public static List<int> MaterialOwners(IList<QuoteRecord> jobs, IList<HistoryFilament> materials)
+        {
+            var owners = new List<int>();
+            if (materials == null) return owners;
+            var keys = new List<HashSet<string>>();
+            foreach (var r in jobs)
+            {
+                var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                string own = (r.MaterialName ?? "").Trim();
+                if (r.Filaments == null || r.Filaments.Count == 0) set.Add(own + "\n");
+                else
+                    foreach (var f in r.Filaments)
+                    {
+                        if (f == null) { set.Add(own + "\n"); continue; }
+                        string name = !string.IsNullOrWhiteSpace(f.Name) ? f.Name.Trim() : own;
+                        set.Add(name + "\n" + (f.Colour ?? "").Trim().ToUpperInvariant());
+                    }
+                keys.Add(set);
+            }
+            foreach (var m in materials)
+            {
+                string k = (m.Name ?? "") + "\n" + (m.Colour ?? "");
+                int owner = -1, hits = 0;
+                for (int j = 0; j < keys.Count; j++) if (keys[j].Contains(k)) { owner = j; hits++; }
+                owners.Add(hits == 1 ? owner : -1);
+            }
+            return owners;
+        }
+
+        /// The combined bill's breakdown rows (QuoteRows.BuildGroup). qol 2: when every material line belongs to one job and
+        /// each job's lines are together, the lines are grouped under the job's name (a "label" row in marks) and each job's
+        /// own tower note ("note" in marks) follows its lines; otherwise one list with the summed tower note
+        /// (QuoteRows.AddTowerNote) as before. marks: row -> "label" / "note" (may be null).
+        internal static List<QuoteRow> GroupRows(Sheet d, bool shortRows, IDictionary<QuoteRow, string> marks)
+        {
+            var rows = QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
+                                            shortRows ? 4 : MaxGroupColours, shortRows);
+            int firstRule = rows.FindIndex(r => r.Kind == QuoteRowKind.Rule);
+            if (firstRule < 0) firstRule = rows.Count;
+            var subs = new List<QuoteRow>();
+            for (int i = 1; i < firstRule; i++) subs.Add(rows[i]);
+            bool group = d.MaterialJob != null && d.Jobs != null && marks != null && firstRule > 1 && rows[0].Kind == QuoteRowKind.Head
+                         && subs.Count == d.MaterialJob.Count;
+            var owners = new List<int>();
+            if (group)
+                foreach (var r in subs)
+                {
+                    if (r.Kind != QuoteRowKind.Sub || r.ColourIndex < 0 || r.ColourIndex >= d.MaterialJob.Count || d.MaterialJob[r.ColourIndex] < 0
+                        || d.MaterialJob[r.ColourIndex] >= d.Jobs.Count) { group = false; break; }
+                    int o = d.MaterialJob[r.ColourIndex];
+                    if (owners.Count > 0 && owners[owners.Count - 1] != o && owners.Contains(o)) { group = false; break; }   // a job's lines apart
+                    owners.Add(o);
+                }
+            if (group)
+            {
+                int distinct = 0;
+                for (int i = 0; i < owners.Count; i++) if (i == 0 || owners[i] != owners[i - 1]) distinct++;
+                group = distinct >= 2;
+            }
+            if (!group) return QuoteRows.AddTowerNote(rows, d.TowerGrams);
+            var res = new List<QuoteRow> { rows[0] };
+            bool towers = d.TowerGrams > 0.005;   // the setting is on and a job has a tower
+            for (int i = 0; i < subs.Count; i++)
+            {
+                int o = owners[i];
+                if (i == 0 || owners[i - 1] != o)
+                {
+                    var label = new QuoteRow { Kind = QuoteRowKind.Note, Label = d.Jobs[o].Name };
+                    marks[label] = "label";
+                    res.Add(label);
+                }
+                res.Add(subs[i]);
+                bool last = i == subs.Count - 1 || owners[i + 1] != o;
+                if (last && towers && d.Jobs[o].TowerGrams > 0.005)
+                {
+                    var note = new QuoteRow { Kind = QuoteRowKind.Note, Label = QuoteRows.TowerNote(d.Jobs[o].TowerGrams) };
+                    marks[note] = "note";
+                    res.Add(note);
+                }
+            }
+            for (int i = firstRule; i < rows.Count; i++) res.Add(rows[i]);
+            return res;
+        }
+
+        /// The shared printer / plate beside "Price breakdown" ("Bambu Lab A1, 0.4 mm nozzle  ·  Smooth PEI build plate").
+        internal static string GroupSetupText(Sheet d)
+        {
+            var setup = new List<string>();
+            if (!string.IsNullOrEmpty(d.Printer)) setup.Add(d.Printer);
+            if (!string.IsNullOrEmpty(d.PlateName)) setup.Add(L.F("{0} build plate", "Byggeplade {0}", d.PlateName));
+            return string.Join("  ·  ", setup.ToArray());
+        }
+
+        /// The total box's small line with the job prices: "50,00 + 50,00 · please pay by …" / "… · Paid … – thank you".
+        internal static string GroupTotalNoteWithSums(Sheet d)
+        {
+            string small = TotalNote(d);
+            var sums = new List<string>();
+            foreach (var j in d.Jobs) sums.Add(Num.N2(j.Ore / 100.0));
+            // "· please pay by …" lower-case; the paid line keeps its capital ("· Paid 12 November 2026 – thank you", qol 8)
+            bool lower = small.Length > 0 && d.PaidAt == DateTime.MinValue;
+            return string.Join(" + ", sums.ToArray()) + " · " + (lower ? char.ToLower(small[0]) + small.Substring(1) : small);
+        }
+
         // ---------- exports (MainForm.ExportGroup without the file part) ----------
 
         /// One export's changes to the jobs (the caller saves, then the settings for a new number): every job gets the name
@@ -288,7 +400,7 @@ namespace PrintPrice.Web
                     if (!check.Ok)
                         return check.Clash != null
                             ? L.F("\"{0}\" is already on invoice {1}: no invoice was made.", "\"{0}\" er allerede på faktura {1}: der blev ikke lavet en faktura.",
-                                  QuoteRows.ModelName(check.Clash.Model), check.ClashCode)
+                                  RecordModelName(check.Clash), check.ClashCode)
                             : L.S("No prints to invoice.", "Ingen print at fakturere.");
                 }
             }
@@ -507,10 +619,7 @@ namespace PrintPrice.Web
             if (!tail) return y;
 
             // the whole bill's breakdown (minimum and payback folded into Work & handling by QuoteRows.BuildGroup)
-            var setup = new List<string>();
-            if (!string.IsNullOrEmpty(d.Printer)) setup.Add(d.Printer);
-            if (!string.IsNullOrEmpty(d.PlateName)) setup.Add(L.F("{0} build plate", "Byggeplade {0}", d.PlateName));
-            string setupText = string.Join("  ·  ", setup.ToArray());
+            string setupText = GroupSetupText(d);
             if (d.Breakdown != null && d.Breakdown.Lines != null && d.Breakdown.Lines.Count > 0)
             {
                 string heading = L.S("Price breakdown", "Prisoversigt");
@@ -529,8 +638,8 @@ namespace PrintPrice.Web
                 Ln(it, GL0, GR0, y, "line", 2);
                 y += 12;
                 bool shortRows = d.GroupLevel == 1 || d.GroupLevel == 3;
-                y = DrawRows(it, d, QuoteRows.AddTowerNote(QuoteRows.BuildGroup(d.Breakdown, d.MaterialNames, d.Hours, d.Minutes, d.PlateName, d.GroupSameRates,
-                                                         shortRows ? 4 : MaxGroupColours, shortRows), d.TowerGrams), y, true);
+                var marks = new Dictionary<QuoteRow, string>();
+                y = DrawRows(it, d, GroupRows(d, shortRows, marks), y, true, marks);
                 y += 4;
                 Ln(it, GL0, GR0, y, "line", 2);
                 y += 20;
@@ -548,11 +657,7 @@ namespace PrintPrice.Web
             string small = TotalNote(d);
             string total = Num.Kr(d.GroupTotal);
             double smallW = 900 - 80 - 30 - TextW(total, 56, true);
-            var sums = new List<string>();
-            foreach (var j in d.Jobs) sums.Add(Num.N2(j.Ore / 100.0));
-            // "· please pay by …" lower-case; the paid line keeps its capital ("· Paid 12 November 2026 – thank you", qol 8)
-            bool lower = small.Length > 0 && d.PaidAt == DateTime.MinValue;
-            string withSums = string.Join(" + ", sums.ToArray()) + " · " + (lower ? char.ToLower(small[0]) + small.Substring(1) : small);
+            string withSums = GroupTotalNoteWithSums(d);
             if (TextW(withSums, 16, false) <= smallW) small = withSums;
             Tx(it, small, 16, false, "muted", 80, y + 62, 0, "l");
             Tx(it, total, 56, true, "total", 420, y + 14, 510, "r");
@@ -649,10 +754,39 @@ namespace PrintPrice.Web
         /// colour dot, notes faint 15, rules 1 px. compact (combined bill): tighter steps. Returns y under the last row.
         static double DrawRows(List<Item> it, Sheet d, List<QuoteRow> rows, double y, bool compact)
         {
+            return DrawRows(it, d, rows, y, compact, null);
+        }
+
+        /// As above; marks (GroupRows, may be null): "label" = a job's name over its material lines (muted bold 14),
+        /// "note" = that job's tower note, in line with the material names. qol 2: material lines without a colour start
+        /// where the dotted ones' names start when any material has a dot (one indent).
+        static double DrawRows(List<Item> it, Sheet d, List<QuoteRow> rows, double y, bool compact, IDictionary<QuoteRow, string> marks)
+        {
             double subEnd = compact ? 6 : 10;
             QuoteRowKind prev = QuoteRowKind.Rule;
+            bool anyDot = false;
+            foreach (var c in d.MaterialColours) if (!string.IsNullOrEmpty(c)) anyDot = true;
+            bool inMaterial = true;   // before the first rule
             foreach (var r in rows)
             {
+                string mark = null;
+                if (marks != null) marks.TryGetValue(r, out mark);
+                if (r.Kind == QuoteRowKind.Rule) inMaterial = false;
+                if (mark == "label")
+                {
+                    if (prev == QuoteRowKind.Sub) y += compact ? 2 : 4;
+                    Tx(it, r.Label, 14, true, "muted", 70, y + 2, GR0 - 70, "l");
+                    y += compact ? 22 : 26;
+                    prev = QuoteRowKind.Note;
+                    continue;
+                }
+                if (mark == "note")
+                {
+                    Tx(it, r.Label, 15, false, "faint", anyDot ? 94 : 70, y, GR0 - 94, "l");
+                    y += compact ? 26 : 30;
+                    prev = QuoteRowKind.Note;
+                    continue;
+                }
                 switch (r.Kind)
                 {
                     case QuoteRowKind.Rule:
@@ -674,6 +808,7 @@ namespace PrintPrice.Web
                             it.Add(new Item { Kind = "dot", X = 70, Y = y + 5, W = 15, H = 15, Colour = dot, Role = "dotring" });
                             lx = 94;
                         }
+                        else if (inMaterial && anyDot && r.ColourIndex >= 0) lx = 94;   // qol 2: one indent for all material lines
                         Tx(it, r.Label, 17, false, "ink", lx, y, 465 - lx, "l");
                         Tx(it, r.Detail, 16, false, "muted", 470, y + 1, 240, "l");
                         Tx(it, r.Amount, 17, false, "ink", 700, y, GR0 - 30 - 700, "r");

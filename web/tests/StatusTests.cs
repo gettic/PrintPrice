@@ -58,7 +58,7 @@ static class StatusTests
         L.Danish = true;
         True("DA saved", WebStatus.SavedText(PrintState.Failed) == "✓ Printstatus gemt: Fejlet.");
         True("DA list", WebStatus.ListText(2, PrintState.NotPrinted, true) == "✓ 2 tilbud sat til Ikke printet endnu. De ligger nu under deres nye status i Vis.");
-        True("DA mixed / heading", WebStatus.Mixed == "Blandet" && WebStatus.GroupHeading(2) == "Printstatus (alle 2 print)" && WebStatus.FailedQuestion(2) == "Markér 2 print som fejlet?");
+        True("DA mixed / heading", WebStatus.Mixed == "Blandet" && WebStatus.GroupHeading(2) == "Printstatus (begge print)" && WebStatus.GroupHeading(3) == "Printstatus (alle 3 print)" && WebStatus.FailedQuestion(2) == "Markér 2 print som fejlet?");
         True("DA reset", WebStatus.ResetButton == "Nulstil til standard" && WebStatus.ResetYes == "Nulstil");
         L.Danish = false;
 

@@ -146,7 +146,7 @@ namespace PrintPrice
                 cmbPeriod = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 150, Anchor = AnchorStyles.Left | AnchorStyles.Top, Margin = new Padding(0, 3, 24, 3) };
                 cmbPeriod.Items.AddRange(new object[]
                 {
-                    L.S("All time", "Al tid"), L.S("This month", "Denne måned"), L.S("Last 30 days", "Sidste 30 dage"), L.S("This year", "I år")
+                    L.S("All time", "Hele perioden"), L.S("This month", "Denne måned"), L.S("Last 30 days", "Sidste 30 dage"), L.S("This year", "I år")
                 });
                 cmbPeriod.SelectedIndex = 0;
                 cmbPeriod.SelectedIndexChanged += delegate { Fill(); };
@@ -189,7 +189,7 @@ namespace PrintPrice
                 grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI", 10f, FontStyle.Bold);
                 grid.ColumnHeadersDefaultCellStyle.Padding = new Padding(6, 0, 6, 0);
                 grid.ColumnHeadersDefaultCellStyle.WrapMode = DataGridViewTriState.False;   // "Invoice date" on one line
-                colNo = TextColumn(L.S("Invoice no.", "Faktura nr."), false);
+                colNo = TextColumn(L.S("Invoice no.", "Fakturanr."), false);
                 colTo = TextColumn(L.S("Customer", "Kunde"), false);
                 colPrints = TextColumn(L.S("Prints", "Print"), false);
                 colPrints.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
@@ -373,7 +373,7 @@ namespace PrintPrice
                 var bold = colTotal.DefaultCellStyle.Font;
                 Func<Font, string[], int> widest = (font, texts) => texts.Max(t => TextRenderer.MeasureText(t, font).Width);
                 int pad = Px(20);   // cell padding 6 + 6, plus room so bold headers never wrap
-                colNo.Width = Math.Max(widest(head, new[] { "Invoice no.", "Faktura nr." }), widest(grid.Font, new[] { "2026-00000", "2026-WWWW" })) + pad;
+                colNo.Width = Math.Max(widest(head, new[] { "Invoice no.", "Fakturanr." }), widest(grid.Font, new[] { "2026-00000", "2026-WWWW" })) + pad;
                 colTo.Width = Px(160);
                 colDate.Width = Math.Max(widest(head, new[] { "Invoice date", "Fakturadato" }), widest(grid.Font, new[] { "00-00-0000" })) + pad;
                 // qol 3: this language only; it may shrink to the ages really shown (before Prints gives way)
@@ -563,13 +563,13 @@ namespace PrintPrice
                 if (column == colPrints.Index && r.Jobs.Count > 1)
                     return string.Join("\n", r.Jobs.Select(j => ModelText(j) + "   " + KrNb(History.PriceFor(j))));
                 if (column == colDue.Index && r.Overdue(DateTime.Now))
-                    return L.S("The due date has passed and it isn't marked as paid.", "Forfaldsdatoen er overskredet, og den er ikke markeret som betalt.");
+                    return L.S("Overdue: past its due date.", "Forfalden: forfaldsdatoen er overskredet.");
                 if (column == colPaid.Index)
                 {
                     if (r.Paid)
                         return (r.PaidAt != DateTime.MinValue ? L.F("Paid on {0}", "Betalt {0}", r.PaidAt.ToString("dd-MM-yyyy", Num.Dk)) + "\n" : "") +
                                L.S("Click to mark it as unpaid", "Klik for at markere den som ubetalt");
-                    return (r.Overdue(DateTime.Now) ? L.S("Past its due date.", "Forfaldsdatoen er overskredet.") + "\n" : "") +
+                    return (r.Overdue(DateTime.Now) ? L.S("Overdue: past its due date.", "Forfalden: forfaldsdatoen er overskredet.") + "\n" : "") +
                            L.S("Click to mark it as paid", "Klik for at markere den som betalt");
                 }
                 if (column == colTo.Index || column == colPrints.Index)
@@ -678,14 +678,13 @@ namespace PrintPrice
                 info.Kind = InfoKind.Info;
                 if (rows.Count == 0)
                 {
-                    info.Text = L.S("No invoices yet. An invoice is made with Invoice… in History or Show invoice… in the main window.",
-                                    "Ingen fakturaer endnu. En faktura laves med Faktura… i historikken eller Vis faktura… i hovedvinduet.");
+                    info.Text = L.S("No invoices yet. Make one with Invoice… in History.", "Ingen fakturaer endnu. Lav en med Faktura… i historikken.");
                     return;
                 }
                 info.Text = L.S("Double-click or Enter opens an invoice. Click Status to change the print status of all its prints (saved at once).\n" +
-                                "Click Paid (or Space) to mark an invoice paid or unpaid. Unpaid invoices past their due date are in amber.",
+                                "Click Paid (or Space) to mark it paid or unpaid. Overdue invoices are in amber.",
                                 "Dobbeltklik eller Enter åbner en faktura. Klik på Status for at ændre printstatus for alle dens print (gemmes med det samme).\n" +
-                                "Klik på Betalt (eller mellemrumstasten) for at markere en faktura som betalt eller ubetalt. Ubetalte fakturaer, der har overskredet forfaldsdatoen, står med gult.");
+                                "Klik på Betalt (eller mellemrumstasten) for at markere den betalt eller ubetalt. Forfaldne fakturaer står med gult.");
             }
 
             void ShowDone(string text, InfoKind kind)
@@ -711,8 +710,8 @@ namespace PrintPrice
                 if (save != null) save();
                 Build(row.No);
                 bool gone = !shown.Any(r => string.Equals(r.No, row.No, StringComparison.OrdinalIgnoreCase));
-                string text = paid ? L.F("✓ Invoice {0}: paid {1}.", "✓ Faktura {0}: betalt {1}.", row.No, now.ToString("dd-MM-yyyy", Num.Dk))
-                                   : L.F("✓ Invoice {0}: marked as unpaid.", "✓ Faktura {0}: markeret som ubetalt.", row.No);
+                string text = paid ? L.F("✓ Invoice {0} marked as paid ({1}).", "✓ Faktura {0} markeret som betalt ({1}).", row.No, now.ToString("dd-MM-yyyy", Num.Dk))
+                                   : L.F("✓ Invoice {0} marked as unpaid.", "✓ Faktura {0} markeret som ubetalt.", row.No);
                 if (gone) text += " " + L.S("It no longer shows with this filter.", "Den vises ikke længere med dette filter.");
                 ShowDone(text, InfoKind.Success);
                 undoPaid = () =>

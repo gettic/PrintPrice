@@ -213,8 +213,19 @@ namespace PrintPrice.Web
 
         // ---------- the list's texts (HistoryForm) ----------
 
-        /// The model's name, else the file name of the link/file, else "(no name)".
-        public static string ModelText(QuoteRecord r) { return History.ModelText(r); }
+        /// The model's name, else the file name of the link/file, else "(no name)"; a scaled job gets " (150 %)" /
+        /// " (150 × 100 × 50 %)" (issue #8, = HistoryForm.ModelText: History.WithScale).
+        public static string ModelText(QuoteRecord r) { return History.WithScale(History.ModelText(r), r); }
+
+        /// The name without the scale (the list cuts this part with … and keeps ScalePart whole, as HistoryViews).
+        public static string BaseModelText(QuoteRecord r) { return History.ModelText(r); }
+
+        /// " (150 %)" / " (150 × 100 × 50 %)", "" when not scaled.
+        public static string ScalePart(QuoteRecord r)
+        {
+            string t = History.ScaleText(r);
+            return t.Length == 0 ? "" : " (" + t + ")";
+        }
 
         /// "30-10-2026 10:05".
         public static string DateText(QuoteRecord r)
@@ -348,13 +359,28 @@ namespace PrintPrice.Web
             return paid;
         }
 
-        /// The line after a toggle: "✓ Invoice 2026-48213 marked as paid." / "… as unpaid." (+ " (3 prints)").
+        /// The line after a toggle: "✓ Invoice 2026-48213 marked as paid." / "… as unpaid." (ui-text 5: the desktop's
+        /// wording without its date; jobs is no longer shown).
         public static string PaidDoneText(string no, bool paid, int jobs)
         {
             string n = (no ?? "").Trim();
-            string s = paid ? L.F("✓ Invoice {0} marked as paid", "✓ Faktura {0} markeret som betalt", n)
-                            : L.F("✓ Invoice {0} marked as unpaid", "✓ Faktura {0} markeret som ubetalt", n);
-            return s + (jobs >= 2 ? " (" + QuoteRows.PrintsText(jobs) + ")" : "") + ".";
+            return paid ? L.F("✓ Invoice {0} marked as paid.", "✓ Faktura {0} markeret som betalt.", n)
+                        : L.F("✓ Invoice {0} marked as unpaid.", "✓ Faktura {0} markeret som ubetalt.", n);
+        }
+
+        /// The "Unpaid invoices" filter's line (qol 10, = the desktop Invoices window): "Unpaid: 3 invoices · 150,00 kr."
+        /// over all made invoices (not only the month shown), overdue = " · 1 overdue" (amber, separate); "Everything is
+        /// paid." when none; null with no invoices at all.
+        public static string UnpaidLine(List<QuoteRecord> list, AppSettings s, DateTime now, out string overdue)
+        {
+            overdue = "";
+            var rows = History.Invoices(list, now, s);
+            if (rows.Count == 0) return null;
+            var u = History.UnpaidSummary(rows, now);
+            if (u.Count == 0) return L.S("Everything is paid.", "Alt er betalt.");
+            if (u.Overdue > 0) overdue = "· " + (u.Overdue == 1 ? L.S("1 overdue", "1 forfalden") : L.F("{0} overdue", "{0} forfaldne", u.Overdue));
+            return L.S("Unpaid: ", "Ubetalt: ") + (u.Count == 1 ? L.S("1 invoice", "1 faktura") : L.F("{0} invoices", "{0} fakturaer", u.Count))
+                   + " · " + Num.Kr(u.Total);
         }
 
         public static List<QuoteRecord> Apply(List<QuoteRecord> list, Filter f, Dictionary<string, string> printerNames)
@@ -555,7 +581,7 @@ namespace PrintPrice.Web
         public static string NamesText(IList<QuoteRecord> records)
         {
             var names = new List<string>();
-            if (records != null) foreach (var r in records) if (r != null) names.Add(History.ModelText(r));
+            if (records != null) foreach (var r in records) if (r != null) names.Add(ModelText(r));
             if (names.Count == 0) return "";
             string and = L.S(" and ", " og ");
             if (names.Count == 1) return names[0];

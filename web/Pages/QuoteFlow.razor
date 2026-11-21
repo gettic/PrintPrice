@@ -1,0 +1,129 @@
+@* qol 1: the quote / invoice for reading on a phone (shown under 600 px instead of the shrunk A4 page, quote.css): the
+   same texts and rows as WebQuote.Draw / the combined bill's pages, in one full-width column; job cards stacked. The A4
+   page (QuoteSheet) stays what Print / PDF prints. *@
+
+@{
+    var d = Data;
+    bool group = WebQuote.IsGroup(d);
+    var marks = new Dictionary<QuoteRow, string>();
+    var rows = group ? WebQuote.GroupRows(d, false, marks) : WebQuote.Rows(d);
+    bool anyDot = false;
+    foreach (var c in d.MaterialColours) if (!string.IsNullOrEmpty(c)) anyDot = true;
+    bool inMaterial = true;
+}
+<div class="qflow @(Dark ? "dark" : "light") @(d.Breakdown.Friends ? "friends" : "customers")">
+    <div class="qf-head">
+        <img src="icon-192.png" alt="" />
+        <div class="qf-titles">
+            <div class="qf-title">@WebQuote.Title(d.Invoice)</div>
+            @if (WebQuote.NameLine(d).Length > 0) { <div class="qf-hm">@WebQuote.NameLine(d)</div> }
+        </div>
+    </div>
+    <div class="qf-meta">
+        @if (!d.Invoice && WebQuote.ForLine(d).Length > 0) { <div class="qf-for">@WebQuote.ForLine(d)</div> }
+        @{ var head = WebQuote.HeaderLines(d); }
+        @for (int i = 0; i < head.Count; i++) { <div class="@(i == 0 ? "" : "qf-hm")">@head[i]</div> }
+    </div>
+    <div class="qf-stripe"></div>
+
+    <div class="qf-body">
+        @if (group)
+        {
+            <table class="qf-details">
+                @if (d.Invoice) { <tr><th>@L.S("Bill to", "Kunde")</th><td>@d.Customer</td></tr> }
+                <tr><th>@L.S("Prints", "Print")</th><td>@d.Summary</td></tr>
+            </table>
+            @foreach (var j in d.Jobs)
+            {
+                <div class="qf-card">
+                    <div class="qf-cardtop">
+                        <span class="qf-pic">@if (j.Picture != null) { <img src="@j.Picture" alt="" /> } else { <svg viewBox="0 0 100 100" aria-hidden="true"><path d="M50 24 L72.6 37 L72.6 63 L50 76 L27.4 63 L27.4 37 Z M27.4 37 L50 50 L72.6 37 M50 50 L50 76" /></svg> }</span>
+                        <span class="qf-cardname"><b>@j.Name</b>
+                            @foreach (var part in (j.Sub ?? "").Split(new[] { " · " }, StringSplitOptions.RemoveEmptyEntries)) { <span class="qf-faint">@part</span> }
+                        </span>
+                    </div>
+                    <div class="qf-fact"><span>@L.S("Print time", "Printtid")</span><b>@QuoteRows.Time(j.Hours, j.Minutes)</b></div>
+                    <div class="qf-fact"><span>@L.S("Weight", "Vægt")</span><b>@j.Weight</b></div>
+                    <div class="qf-cardprice"><b>@L.S("Print price", "Printpris")</b><b class="qf-total">@j.Amount</b></div>
+                </div>
+            }
+        }
+        else
+        {
+            @if (d.Picture != null) { <div class="qf-picture"><img src="@d.Picture" alt="" /></div> }
+            <h2 class="qf-model">@d.Model</h2>
+            @if (d.Link.Length > 0) { <div class="qf-muted">@d.Link</div> }
+            <table class="qf-details">
+                @foreach (var r in WebQuote.Details(d)) { <tr><th>@r[0]</th><td>@r[1]</td></tr> }
+            </table>
+        }
+
+        @if (d.Breakdown.Lines != null && d.Breakdown.Lines.Count > 0)
+        {
+            <h3 class="qf-h">@L.S("Price breakdown", "Prisoversigt")</h3>
+            @if (group && WebQuote.GroupSetupText(d).Length > 0) { <div class="qf-muted qf-setup">@WebQuote.GroupSetupText(d)</div> }
+            <div class="qf-rows">
+                @foreach (var r in rows)
+                {
+                    string mark = null;
+                    marks.TryGetValue(r, out mark);
+                    if (r.Kind == QuoteRowKind.Rule) { inMaterial = false; <div class="qf-rule"></div> continue; }
+                    if (mark == "label") { <div class="qf-label">@r.Label</div> continue; }
+                    switch (r.Kind)
+                    {
+                        case QuoteRowKind.Head:
+                            <div class="qf-row qf-headrow"><span>@r.Label</span><b>@r.Amount</b></div>
+                            @if (r.Detail.Length > 0) { <div class="qf-detail">@r.Detail</div> }
+                            break;
+                        case QuoteRowKind.Sub:
+                            string dot = r.ColourIndex >= 0 && r.ColourIndex < d.MaterialColours.Count ? d.MaterialColours[r.ColourIndex] : "";
+                            bool indent = dot.Length > 0 || (inMaterial && anyDot && r.ColourIndex >= 0);
+                            <div class="@(indent ? "qf-row qf-sub dotted" : "qf-row qf-sub")">
+                                <span>@if (dot.Length > 0) { <i class="qf-dot" style="background:@dot"></i> }@r.Label</span><span>@r.Amount</span></div>
+                            @if (r.Detail.Length > 0) { <div class="@(indent ? "qf-detail sub dotted" : "qf-detail sub")">@r.Detail</div> }
+                            break;
+                        default:
+                            <div class="@(mark == "note" && anyDot ? "qf-note dotted" : "qf-note")">@r.Label</div>
+                            break;
+                    }
+                }
+            </div>
+        }
+        else if (group && WebQuote.GroupSetupText(d).Length > 0)
+        {
+            <div class="qf-muted qf-setup">@WebQuote.GroupSetupText(d)</div>
+        }
+
+        <div class="qf-totalbox">
+            <div><b class="qf-tl">@(group ? L.S("Total", "I alt") + " · " + QuoteRows.PrintsText(d.Jobs.Count) : L.S("Total", "I alt"))</b>
+                <div class="qf-muted">@(group ? WebQuote.GroupTotalNoteWithSums(d) : WebQuote.TotalNote(d))</div></div>
+            <b class="qf-total qf-big">@Num.Kr(group ? d.GroupTotal : d.Breakdown.Total)</b>
+        </div>
+
+        @if (d.Invoice)
+        {
+            var pay = WebQuote.PayLines(d);
+            if (pay.Count > 0)
+            {
+                <h4 class="qf-pay">@L.S("Payment", "Betaling")</h4>
+                @foreach (var line in pay) { <div>@line</div> }
+                <div class="qf-muted">@WebQuote.PayNote(d)</div>
+            }
+        }
+        else
+        {
+            <div>@WebQuote.ValidLine(d)</div>
+            bool pictures = group ? d.Jobs.Exists(j => j.Picture != null) : d.Picture != null;
+            @if (pictures)
+            {
+                <div class="qf-muted">@(group ? L.S("Colours and finish may differ slightly from the pictures.", "Farver og overflade kan afvige lidt fra billederne.") : WebQuote.PictureNote)</div>
+            }
+        }
+        <div class="qf-footer">@WebQuote.Footer</div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public WebQuote.Sheet Data { get; set; }
+    [Parameter] public bool Dark { get; set; }
+}

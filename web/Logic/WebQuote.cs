@@ -36,6 +36,9 @@ namespace PrintPrice.Web
             public bool GroupSameRates, GroupFriends;
             public double GroupTotal;
             public int GroupLevel;   // set by Draw (QuotePage.ChooseGroupLevel)
+            // qol 2: per Breakdown material (MaterialNames index) the job (Jobs index) it belongs to; -1 = several jobs use
+            // it (then the material rows stay one list). null = not a combined bill.
+            public List<int> MaterialJob;
         }
 
         /// The job on the calculator (MainForm.BuildQuote's inputs on the web).
@@ -116,7 +119,7 @@ namespace PrintPrice.Web
             {
                 Name = quote.FromName,
                 Customer = (customer ?? "").Trim(),
-                Model = QuoteRows.ModelName(r.Model),
+                Model = RecordModelName(r),
                 Link = ShortLink(r.Source),
                 Picture = picture,
                 Hours = r.Hours, Minutes = r.Minutes,
@@ -148,6 +151,13 @@ namespace PrintPrice.Web
                 if (made && History.PaidOn(r, out paid)) d.PaidAt = paid;   // paid-tick: "Paid 05-11-2026 – thank you"
             }
             return d;
+        }
+
+        /// A saved record's name on quotes, invoices, cards, window titles and notes: "3D Benchy (150 %)" /
+        /// "3D Benchy (150 × 100 × 50 %)" when scaled (issue #8, = MainForm.RecordModelName).
+        public static string RecordModelName(QuoteRecord r)
+        {
+            return r == null ? "" : History.WithScale(QuoteRows.ModelName(r.Model), r);
         }
 
         /// A saved quote's material names / colour dots / Material line (MainForm.FillRecordMaterial; shared by the single
@@ -487,7 +497,9 @@ namespace PrintPrice.Web
             it.Add(new Item { Kind = "wrap", Text = d.Model, Size = 28, Bold = true, Role = "ink", X = x, Y = y0 - 4, W = nameW, H = nameH + 2 });
             double y = y0 - 4 + nameH + 8;
             if (d.Link.Length > 0) { T(d.Link, 16, false, "muted", x + 3, y, nameW - 3, "l"); y += 28; }
-            y = Math.Max(y + 10, y0 + 110);
+            // qol 7: without a picture the details follow the name (26 units, as the combined bill); with one they still
+            // start beside it as the desktop's page
+            y = d.Picture != null ? Math.Max(y + 10, y0 + 110) : y + 26;
             double valueX = x + (L.Danish ? 140 : 130);
             foreach (var r in Details(d))
             {
@@ -497,7 +509,7 @@ namespace PrintPrice.Web
                 y += 46;
             }
             HLine(x, R0, y, "line", 1);
-            y = Math.Max(y + 58, y0 + pic + 52);
+            y = d.Picture != null ? Math.Max(y + 58, y0 + pic + 52) : y + 58;   // qol 7: no empty picture room
 
             // price breakdown
             T(L.S("Price breakdown", "Prisoversigt"), 24, true, "ink", L0, y, 0, "l");
@@ -592,6 +604,14 @@ namespace PrintPrice.Web
         }
 
         public static string NeedName { get { return L.S("Type the customer's name first: it goes on the invoice.", "Skriv kundens navn først: det kommer på fakturaen."); } }
+
+        /// Esc in the quote window (QuoteView.razor.js): true = close, as Close. In the name box with a name changed since
+        /// the window opened, false: that Esc only leaves the box (a typed name isn't lost by one key), the next closes.
+        public static bool EscCloses(bool inNameBox, string typed, string startName)
+        {
+            if (!inNameBox) return true;
+            return (typed ?? "").Trim() == (startName ?? "").Trim();
+        }
 
         /// A quote export of the job: Add, then For and the typed name (MainForm.SaveToHistory(forWho, customer)).
         public static QuoteRecord SaveExport(List<QuoteRecord> list, QuoteRecord r, bool friends, string customer)

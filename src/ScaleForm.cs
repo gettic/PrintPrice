@@ -118,7 +118,7 @@ namespace PrintPrice
             bottom.Controls.Add(right, 1, 0);
 
             root.Controls.Add(chkSame);
-            // qol: a file that can only be scaled evenly: its note on its own muted line under the (muted, locked) tick
+            // qol: a file that can only be scaled the same in every direction: its note on its own muted line under the (muted, locked) tick
             if (uniformOnly != null)
             {
                 formatNote = new Theme.PlainLabel { Text = uniformOnly, AutoSize = true, Tag = "muted", UseMnemonic = false,
@@ -146,11 +146,7 @@ namespace PrintPrice
             if (uniformOnly != null)
             {
                 chkSame.ForeColor = Theme.Muted;   // locked: it can't be changed (after Apply, which sets Text)
-                formatNote.ForeColor = Theme.Muted;
-                tip = new ToolTip { OwnerDraw = true, InitialDelay = 300, AutoPopDelay = 15000 };
-                tip.Draw += MainForm.DrawDarkTip;
-                tip.SetToolTip(chkSame, L.S("Only STL, OBJ and 3MF can be scaled per direction", "Kun STL, OBJ og 3MF kan skaleres pr. retning"));
-                Disposed += delegate { tip.Dispose(); };
+                formatNote.ForeColor = Theme.Muted;   // (ui-text 10: no tooltip repeating the note under the tick)
             }
             ResumeLayout(true);
             UpdateState();
@@ -185,19 +181,18 @@ namespace PrintPrice
         /// The InfoBox help (the file-format note is on its own muted line under the tick, not in here).
         string HelpText()
         {
-            string help = L.S("The whole job gets this size and is sliced again; time, weight and prices follow.",
-                              "Hele jobbet får denne størrelse og slices igen; tid, vægt og priser følger med.");
+            string help = L.S("The whole job is resized and sliced again, with new time, weight and price.",
+                              "Hele jobbet får den nye størrelse og slices igen, med ny tid, vægt og pris.");
             if (!SizeKnown)
                 help += "\n" + L.S("The size in mm is shown after slicing.", "Størrelsen i mm vises efter slicing.");
             else if (objects >= 2)
-                help += "\n" + L.S("Several objects: the size is the biggest one's.", "Flere objekter: størrelsen er for det største.");
+                help += "\n" + L.S("Several objects: the size shown is the biggest one.", "Flere objekter: størrelsen gælder det største.");
             return help;
         }
 
         const int NoteIndent = 18;   // the tick's text start (box 13 + gap), so the note lines up under "Same in every direction"
         Label formatNote;            // the uniformOnly note (null = none)
         Label smallNote;             // too small: BambuSlicer.SmallScaleNote() when IsSmallSize, else "" (its line always kept)
-        ToolTip tip;                 // the locked tick's dark tooltip
 
         static Label Caption(string text)
         {
@@ -327,7 +322,7 @@ namespace PrintPrice
             bool fits = FitsAt(printer, size, current, pct);
             if (!fits)
             {
-                info.Text = BambuSlicer.TooBigText(printer);
+                info.Text = BambuSlicer.TooBigText(printer) + L.S(" Try a smaller size.", " Prøv en mindre størrelse.");
                 info.Kind = InfoKind.Warning;
             }
             else

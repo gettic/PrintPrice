@@ -116,13 +116,13 @@
                 <div class="field"><input type="text" inputmode="numeric" class="mid @BadDays(validDays, 3650)" @bind="validDays" @bind:event="oninput" /><span>@L.S("days", "dage")</span></div>
                 <label></label>
                 <label><input type="checkbox" @bind="quoteTower" /> @L.S("Show prime tower grams on quotes and invoices", "Vis primetårnets gram på tilbud og fakturaer")</label>
-                <div class="help">@L.S("On: quotes and invoices get a line \"incl. 1,7 g for the prime tower\" under Material (no price; the grams are already in the material). The calculator always shows it.",
-                                       "Til: tilbud og fakturaer får en linje \"inkl. 1,7 g til primetårnet\" under Materiale (uden pris; grammene er allerede med i materialet). Beregneren viser den altid.")</div>
+                <div class="help">@L.S("Adds \"incl. 1,7 g for the prime tower\" under Material. No extra price: the grams are already counted.",
+                                       "Tilføjer \"inkl. 1,7 g til primetårnet\" under Materiale. Ingen ekstra pris: grammene er allerede talt med.")</div>
                 <h3>@L.S("Invoice", "Faktura")</h3>
                 <label></label>
                 <label><input type="checkbox" @bind="mainInvoice" /> @L.S("Calculator makes invoices, not quotes", "Beregneren laver fakturaer, ikke tilbud")</label>
                 <div class="help">@L.S("On: the calculator's button makes an invoice with a number. Quotes are still made from History.",
-                                       "Til: knappen i beregneren laver en faktura med nummer. Tilbud kan stadig laves fra Historik.")</div>
+                                       "Slået til: knappen i beregneren laver en faktura med nummer. Tilbud kan stadig laves fra Historik.")</div>
                 <label>@L.S("Pay within", "Betalingsfrist")</label>
                 <div class="field"><input type="text" inputmode="numeric" class="mid @BadDays(dueDays, 365)" @bind="dueDays" @bind:event="oninput" /><span>@L.S("days", "dage")</span></div>
                 <label>@L.S("MobilePay number", "MobilePay-nummer")</label>
