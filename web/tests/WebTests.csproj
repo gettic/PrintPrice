@@ -35,6 +35,8 @@
     <Compile Include="..\Logic\WebQuoteGroup.cs" Link="Web\WebQuoteGroup.cs" />
     <Compile Include="..\Logic\WebStatus.cs" Link="Web\WebStatus.cs" />
     <Compile Include="..\Logic\WebSetup.cs" Link="Web\WebSetup.cs" />
+    <Compile Include="..\Logic\WebBatch.cs" Link="Web\WebBatch.cs" />
+    <Compile Include="..\Logic\GcodeFootprint.cs" Link="Web\GcodeFootprint.cs" />
     <Compile Include="..\..\src\OnlineBackup.cs" Link="Linked\OnlineBackup.cs" />
     <Compile Include="..\..\src\Printables.cs" Link="Linked\Printables.cs" />
   </ItemGroup>

@@ -38,6 +38,11 @@ namespace PrintPrice
         public List<string> MaterialNames = new List<string>();   // by QuoteLine.Index
         public List<Color> MaterialColours = new List<Color>();   // by QuoteLine.Index (Color.Empty = no dot)
         public QuoteBreakdown Breakdown;
+        // batch & plates (issue #9/#10): Quantity 2+ = a "Quantity" details row ("4 pcs"), Print time "… on 2 plates"
+        // (Plates), and EachLine ("4 pcs · 18,18 kr. each", "" = off) before the total box's small line. 1 = as before.
+        public int Quantity = 1;
+        public int Plates = 1;
+        public string EachLine = "";
         // invoice (History's Invoice…): title "Invoice", number / invoice date / due date in the header, "Bill to" row
         // instead of Printer, "Please pay by" under the total and a Payment block (only the lines that are set)
         public bool Invoice;
@@ -53,6 +58,7 @@ namespace PrintPrice
         // QuoteRows.BuildGroup; GroupFriends / GroupTotal for colour and total
         public List<QuoteJob> Jobs;
         public string Summary = "";       // "3 prints · 7 h 40 m · 182 g" (QuoteRows.GroupSummary)
+        public string GroupPlates = "";   // batch & plates: "5" = a "Plates" summary row (QuoteRows.GroupPlates; "" = none)
         public bool GroupSameRates;       // GroupBreakdownInfo.SameRates: "g × kr/kg" etc. in the details
         public string TopUpLabel = "";    // "Minimum price (50,00 kr.)" ("" = none; data for the checks only, never drawn)
         public string TopUpAmount = "";   // its amount ("18,00 kr.")
@@ -75,6 +81,7 @@ namespace PrintPrice
         public Image Picture;             // not owned; null = a drawn cube
         public int Hours, Minutes;
         public string Weight = "";        // "30 g"
+        public string Copies = "";        // batch & plates: "4 pcs · 2 plates" = a third card row "Quantity" ("" = none)
     }
 
     /// The customer quote page (idea 5): one A4 page with logo, model, details and the full price breakdown.
@@ -545,6 +552,27 @@ namespace PrintPrice
                         new[] { L.S("Printer", "Printer"), d.Printer },
                         new[] { L.S("Material", "Materiale"), d.Material },
                     };
+                // batch & plates: the price per piece goes before the total box's small line ("4 pcs · 18,18 kr. each ·
+                // shipping not included") when that fits left of the total; else it is the Quantity row's value
+                string eachTotal = null;
+                if (!string.IsNullOrEmpty(d.EachLine))
+                {
+                    string small0 = d.Invoice ? PayLine(d) : L.S("Shipping not included", "Fragt er ikke inkluderet");
+                    bool lower0 = small0.Length > 0 && string.IsNullOrEmpty(d.PaidLine);
+                    string withEach = d.EachLine + (small0.Length > 0 ? " · " + (lower0 ? char.ToLower(small0[0]) + small0.Substring(1) : small0) : "");
+                    float room = 900 - 80 - 30 - g.MeasureString(Num.Kr(d.Breakdown.Total), F(56, true)).Width;
+                    if (g.MeasureString(withEach, F(16, false)).Width <= room) eachTotal = withEach;
+                }
+                if (d.Quantity > 1)
+                {
+                    // batch & plates: "Quantity  4 pcs" first (after "Bill to" on an invoice), Print time "… on 2 plates"
+                    var list = new List<string[]>(details);
+                    int timeAt = d.Invoice ? 1 : 0;
+                    list[timeAt] = new[] { list[timeAt][0], QuoteRows.TimeOnPlates(d.Hours, d.Minutes, d.Plates) };
+                    string qty = eachTotal == null && !string.IsNullOrEmpty(d.EachLine) ? d.EachLine : History.PiecesText(d.Quantity);
+                    list.Insert(timeAt, new[] { History.QuantityLabel(), qty });
+                    details = list.ToArray();
+                }
                 float valueX = x + (L.Danish ? 140 : 130);
                 foreach (var r in details)
                 {
@@ -578,7 +606,7 @@ namespace PrintPrice
                     using (var br = new SolidBrush(p.Stripe)) g.FillRectangle(br, L0, y + 12, 8, 86);
                 }
                 T(L.S("Total", "I alt"), F(26, true), p.Ink, 80, y + 22, 0, near);
-                T(d.Invoice ? PayLine(d) : L.S("Shipping not included", "Fragt er ikke inkluderet"),
+                T(eachTotal ?? (d.Invoice ? PayLine(d) : L.S("Shipping not included", "Fragt er ikke inkluderet")),
                   F(16, false), p.Muted, 80, y + 62, 0, near);
                 T(Num.Kr(d.Breakdown.Total), F(56, true), p.Total, 420, y + 14, 510, far);
                 y += compact ? 128 : 140;
@@ -643,7 +671,21 @@ namespace PrintPrice
                 // Prints; the shared printer / build plate are beside the "Price breakdown" heading (the user's wish)
                 var rows = new List<string[]>();
                 if (d.Invoice) rows.Add(new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" });
-                rows.Add(new[] { L.S("Prints", "Print"), d.Summary ?? "" });
+                string summary = d.Summary ?? "";
+                int cut = summary.IndexOf(" · ", StringComparison.Ordinal);
+                if (!string.IsNullOrEmpty(d.GroupPlates) && cut > 0)
+                {
+                    // batch & plates (qol #2): "3 models, 45 pcs" | "Plates 4" | "In all 6 h 10 m · 52,6 g" - the one long
+                    // Prints line was cut off in Danish and "Plates" sat alone on its row
+                    rows.Add(new[] { L.S("Prints", "Print"), summary.Substring(0, cut) });
+                    rows.Add(new[] { L.S("Plates", "Plader"), d.GroupPlates });
+                    rows.Add(new[] { L.S("In all", "I alt"), summary.Substring(cut + 3) });
+                }
+                else
+                {
+                    rows.Add(new[] { L.S("Prints", "Print"), summary });
+                    if (!string.IsNullOrEmpty(d.GroupPlates)) rows.Add(new[] { L.S("Plates", "Plader"), d.GroupPlates });
+                }
                 float vx = L.Danish ? 140 : 130, mid = 500;
                 y = 214;
                 for (int k = 0; k < rows.Count; k += 2)
@@ -856,12 +898,20 @@ namespace PrintPrice
             y = Math.Max(factsTop, ny + 10);
 
             // print time and weight, as before
-            var facts = new[]
+            var facts = new List<string[]>
             {
                 new[] { L.S("Print time", "Printtid"), QuoteRows.Time(job.Hours, job.Minutes) },
                 new[] { L.S("Weight", "Vægt"), job.Weight },
             };
             float valueX = x + Pad + (L.Danish ? 82 : 78);
+            if (!string.IsNullOrEmpty(job.Copies))
+            {
+                // batch & plates: "Quantity  4 pcs · 2 plates" ("4 pcs" alone when the card is too narrow for both)
+                string c = job.Copies;
+                int cut = c.IndexOf(" · ", StringComparison.Ordinal);
+                if (cut > 0 && g.MeasureString(c, F(14, true)).Width > R - Pad - valueX) c = c.Substring(0, cut);
+                facts.Add(new[] { History.QuantityLabel(), c });
+            }
             foreach (var r in facts)
             {
                 hl(x + 10, R - 10, y, p.Line, 1);

@@ -37,6 +37,9 @@ namespace PrintPrice
         public string Colour = "";     // "#RRGGBB", "" = the profile's own colour
         public int Slot = 1;           // filament slot (1-based); files with the same slot share one colour line;
                                        // 0 = a .3mf project that keeps the file's own colours (no colour line of its own)
+        // batch-plates: copies of this file (BatchItem.Copies); missing / bad = 1 (CleanParts). Older versions and older
+        // website copies ignore the key (they repeat 1 each); a backup merge brings it back (FillFrom).
+        public int Copies = 1;
     }
 
     /// Idea 21: the files of a several-files job (QuoteRecord.Parts; null = a normal job, old records).
@@ -52,7 +55,7 @@ namespace PrintPrice
             {
                 c.Files = new List<HistoryPart>(Files.Count);
                 foreach (var f in Files)
-                    c.Files.Add(f == null ? null : new HistoryPart { File = f.File, Filament = f.Filament, Colour = f.Colour, Slot = f.Slot });
+                    c.Files.Add(f == null ? null : new HistoryPart { File = f.File, Filament = f.Filament, Colour = f.Colour, Slot = f.Slot, Copies = f.Copies });
             }
             return c;
         }
@@ -139,6 +142,19 @@ namespace PrintPrice
         public int PrimeTower = -1;
         public double TowerGrams = -1;
         public double TowerSeconds = -1;
+
+        // Batch & plates (issue #9/#10). Hours/Minutes, Grams, Filaments, tower and all prices stay the TOTALS of the
+        // whole job, so older app versions (which ignore and on re-save drop these keys) keep the right price.
+        // Quantity = copies (missing / bad = 1); Plates = build plates used (0 = unknown: old records, History.PlatesOf
+        // = 1); PerPlate = most copies on one plate (0 = unknown); CopiesEstimated 1 = the totals are an estimate
+        // (one copy x N with per-plate parts, Pricing.ForCopies), 0 = sliced / exact. OrderId groups the model lines of
+        // one customer order ("" = none; History.OrderJobs). PlateChangeFee = AppSettings.PlateChangeFee then (snapshot).
+        public int Quantity = 1;
+        public int Plates;
+        public int PerPlate;
+        public int CopiesEstimated;
+        public string OrderId = "";
+        public double PlateChangeFee;
 
         // ideas 24 + 11: the printer the quote was made for (AppSettings.ActivePrinterId when saved) and a snapshot of
         // its name and model. "" in records saved before several printers = printer "1" (History.PrinterOf).
@@ -383,6 +399,14 @@ namespace PrintPrice
         public bool Ok { get { return Clash == null && Jobs.Count > 0; } }
     }
 
+    /// Batch & plates: the counts of a bill / order (History.CountPrints) for "Prints: 3 models, 9 pcs" / "Plates: 5".
+    public class PrintCount
+    {
+        public int Models;             // jobs (model lines)
+        public int Pieces;             // Σ copies
+        public int Plates;             // Σ build plates (unknown = 1 each)
+    }
+
     /// The lines and total of a bill for several History jobs (History.GroupBill). kr., whole øre.
     public class GroupBillInfo
     {
@@ -478,8 +502,11 @@ namespace PrintPrice
                 r.Filaments = new List<HistoryFilament> {
                     new HistoryFilament { Grams = input.FilamentGrams, PricePerKg = input.FilamentDkkPerKg } };
             r.ElectricityDkkPerKwh = input.ElectricityDkkPerKwh;
+            r.Quantity = CleanQuantity(input.Quantity);
+            r.Plates = CleanPlates(input.Plates);
+            r.PlateChangeFee = GoodRate(s.PlateChangeFee) && s.PlateChangeFee < Num.MaxValue ? s.PlateChangeFee : 0;
 
-            r.PrinterId = AppSettings.ValidPrinterId(s.ActivePrinterId) ? s.ActivePrinterId : FirstPrinterId;
+            r.PrinterId =AppSettings.ValidPrinterId(s.ActivePrinterId) ? s.ActivePrinterId : FirstPrinterId;
             r.PrinterName = AppSettings.CleanPrinterName(s.PrinterName);
             r.PrinterModel = Wear.FindModel(s.PrinterModel).Key;
             r.PrinterWatts = s.PrinterWatts;
@@ -579,7 +606,7 @@ namespace PrintPrice
             {
                 Hours = r.Hours, Minutes = r.Minutes, FilamentGrams = r.Grams,
                 FilamentDkkPerKg = r.FilamentDkkPerKg, ElectricityDkkPerKwh = r.ElectricityDkkPerKwh,
-                PaybackDebt = r.PaybackCost
+                PaybackDebt = r.PaybackCost, Quantity = QuantityOf(r), Plates = CleanPlates(r.Plates)
             };
             if (r.Filaments != null && r.Filaments.Count >= 2)
             {
@@ -614,6 +641,7 @@ namespace PrintPrice
             s.FailedPayback = r.PaybackCost > 0 ? 1 : 0;
             s.FailedPaybackPct = r.FailedPaybackPct;
             s.FailedPaybackWho = r.FailedPaybackWho == 1 ? 1 : 2;
+            s.PlateChangeFee = GoodRate(r.PlateChangeFee) ? r.PlateChangeFee : 0;   // 0 in older records = none
             return s;
         }
 
@@ -641,6 +669,9 @@ namespace PrintPrice
             if ((a.Model ?? "") != (b.Model ?? "") || (a.Source ?? "") != (b.Source ?? "")) return false;
             if (!SameScale(a, b)) return false;   // issue #8: another size (also per axis) is another quote
             if (a.PrimeTower != b.PrimeTower) return false;   // issue #8 step 3: tower on / off is another slice
+            // batch & plates: other copies / plates / order = another quote
+            if (QuantityOf(a) != QuantityOf(b) || CleanPlates(a.Plates) != CleanPlates(b.Plates)
+                || (a.OrderId ?? "").Trim() != (b.OrderId ?? "").Trim()) return false;
             if (a.Hours != b.Hours || a.Minutes != b.Minutes || !Same(a.Grams, b.Grams)
                 || !Same(a.FilamentDkkPerKg, b.FilamentDkkPerKg) || !Same(a.ElectricityDkkPerKwh, b.ElectricityDkkPerKwh)
                 || !Same(a.FriendsPrice, b.FriendsPrice) || !Same(a.OthersPrice, b.OthersPrice)) return false;
@@ -847,7 +878,7 @@ namespace PrintPrice
             if (files == null) { r.Parts = null; return; }
             var p = new HistoryParts { Together = together, Files = new List<HistoryPart>(files.Count) };
             foreach (var f in files)
-                if (f != null) p.Files.Add(new HistoryPart { File = f.File, Filament = f.Filament, Colour = f.Colour, Slot = f.Slot });
+                if (f != null) p.Files.Add(new HistoryPart { File = f.File, Filament = f.Filament, Colour = f.Colour, Slot = f.Slot, Copies = f.Copies });
             r.Parts = CleanParts(p);
         }
 
@@ -887,6 +918,49 @@ namespace PrintPrice
             return res;
         }
 
+        /// batch-plates: copies per file in picker order (each 1..MaxStoredCount, missing = 1), or null for a normal job.
+        public static List<int> PartCopies(QuoteRecord r)
+        {
+            var files = PartsOf(r);
+            if (files == null) return null;
+            var res = new List<int>(files.Count);
+            foreach (var f in files) res.Add(CleanQuantity(f.Copies));
+            return res;
+        }
+
+        /// batch-plates: the files of a several-files job as BambuSlicer.SliceBatch items (picker order): Path = File,
+        /// Name = the file name after the last \ or /, Copies (missing = 1), Slot. null for a normal job. Only the files
+        /// with a project slot 0 keep Slot 0 (the caller decides how to slice those).
+        public static List<BatchItem> BatchItems(QuoteRecord r)
+        {
+            var files = PartsOf(r);
+            if (files == null) return null;
+            var res = new List<BatchItem>(files.Count);
+            foreach (var f in files)
+            {
+                string path = (f.File ?? "").Trim();
+                int cut = Math.Max(path.LastIndexOf('\\'), path.LastIndexOf('/'));
+                res.Add(new BatchItem { Path = path, Name = cut >= 0 ? path.Substring(cut + 1) : path,
+                                        Copies = CleanQuantity(f.Copies), Slot = f.Slot });
+            }
+            return res;
+        }
+
+        // FillFrom: same files (name + slot, same order), all 1 here and some above 1 there (an older version dropped them)
+        static bool PartCopiesLost(HistoryParts keep, HistoryParts other)
+        {
+            if (keep == null || other == null || keep.Files == null || other.Files == null || keep.Files.Count != other.Files.Count) return false;
+            bool more = false;
+            for (int i = 0; i < keep.Files.Count; i++)
+            {
+                var a = keep.Files[i]; var b = other.Files[i];
+                if (a == null || b == null || !string.Equals((a.File ?? "").Trim(), (b.File ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) return false;
+                if (CleanQuantity(a.Copies) != 1) return false;
+                if (CleanQuantity(b.Copies) > 1) more = true;
+            }
+            return more;
+        }
+
         // a read or set Parts: null, no Files or no file with a name left -> null
         static HistoryParts CleanParts(HistoryParts p)
         {
@@ -901,6 +975,7 @@ namespace PrintPrice
                 // Negative = damaged -> 1; a stored part without "Slot" reads as the field's default 1.
                 if (f.Slot < 0) f.Slot = 1;
                 if (f.Slot > MaxPartSlot) f.Slot = MaxPartSlot;
+                f.Copies = CleanQuantity(f.Copies);   // batch-plates: missing (0 in the website's reader) / bad -> 1
                 files.Add(f);
             }
             if (files.Count == 0) return null;
@@ -1526,7 +1601,7 @@ namespace PrintPrice
                     }
                     var sr = row(l.Key);
                     sr.Line.Ore += l.Ore;
-                    if (l.Key == QuoteLine.Power || l.Key == QuoteLine.Wear)
+                    if (l.Key == QuoteLine.Power || l.Key == QuoteLine.Wear || l.Key == QuoteLine.Plates)
                     {
                         sr.Line.Quantity += l.Quantity;
                         if (l.Ore > 0 || l.Quantity > 0) sr.AddUnit(l.UnitPrice);   // a job without power / wear doesn't count
@@ -1565,7 +1640,7 @@ namespace PrintPrice
                 m.Line.Exact = m.Line.Ore / 100.0;
                 res.Lines.Add(m.Line);
             }
-            string[] order = { QuoteLine.Power, QuoteLine.Wear, QuoteLine.Failed, QuoteLine.Payback, QuoteLine.Work,
+            string[] order = { QuoteLine.Power, QuoteLine.Wear, QuoteLine.Plates, QuoteLine.Failed, QuoteLine.Payback, QuoteLine.Work,
                                QuoteLine.Other, QuoteLine.Minimum, QuoteLine.Rounding };
             foreach (var k in order)
             {
@@ -1579,7 +1654,7 @@ namespace PrintPrice
                 if (sr.Line.Ore == 0 && !keep) continue;
                 var l = sr.Line;
                 l.Exact = l.Ore / 100.0;
-                if (k == QuoteLine.Power || k == QuoteLine.Wear)
+                if (k == QuoteLine.Power || k == QuoteLine.Wear || k == QuoteLine.Plates)
                 {
                     l.UnitPrice = sr.MixedUnit ? 0 : sr.Unit;
                     if (sr.MixedUnit) res.SameRates = false;
@@ -2019,6 +2094,178 @@ namespace PrintPrice
                     sum += g; any = true;
                 }
             return any ? sum : -1;
+        }
+
+        // ---------- batch & plates (issue #9/#10): copies, plates, orders and their shared texts ----------
+
+        /// Reading range of QuoteRecord.Quantity / Plates / PerPlate (the ui allows 1..Pricing.MaxCopies copies).
+        public const int MaxStoredCount = 100000;
+        /// Longest OrderId kept.
+        public const int MaxOrderId = 40;
+
+        /// Copies as stored: 1..MaxStoredCount kept, anything else (0 = missing, negative, too big) = 1.
+        public static int CleanQuantity(int n) { return n >= 1 && n <= MaxStoredCount ? n : 1; }
+
+        /// Plates / per plate as stored: 0..MaxStoredCount kept (0 = unknown), anything else = 0.
+        public static int CleanPlates(int n) { return n >= 0 && n <= MaxStoredCount ? n : 0; }
+
+        /// OrderId trimmed, cut to MaxOrderId; null = "".
+        public static string CleanOrderId(string id)
+        {
+            string t = (id ?? "").Trim();
+            return t.Length > MaxOrderId ? t.Substring(0, MaxOrderId) : t;
+        }
+
+        /// r's copies (1 for null / old records).
+        public static int QuantityOf(QuoteRecord r) { return r == null ? 1 : CleanQuantity(r.Quantity); }
+
+        /// r's build plates; unknown (0, old records) = 1.
+        public static int PlatesOf(QuoteRecord r) { int p = r == null ? 0 : CleanPlates(r.Plates); return p > 0 ? p : 1; }
+
+        /// Puts a batch on r (after FromQuote, which already takes Quantity / Plates from the QuoteInput): copies, plates
+        /// (0 = unknown), most copies on one plate (0 = unknown), estimated = totals are one copy x N (Pricing.ForCopies).
+        /// All cleaned. Does not change the prices (they come from the QuoteInput the ui priced).
+        public static void SetCopies(QuoteRecord r, int quantity, int plates, int perPlate, bool estimated)
+        {
+            if (r == null) return;
+            r.Quantity = CleanQuantity(quantity);
+            r.Plates = CleanPlates(plates);
+            r.PerPlate = CleanPlates(perPlate);
+            r.CopiesEstimated = estimated ? 1 : 0;
+        }
+
+        /// "4 × Name" for 2+ copies, else name unchanged (null = "").
+        public static string CopiesName(string name, int quantity)
+        {
+            return quantity > 1 ? quantity.ToString(Inv) + " × " + (name ?? "") : (name ?? "");
+        }
+
+        /// The name with r's copies: History.WithCopies(History.WithScale(ModelText(r), r), r).
+        /// One file / normal job: CopiesName = "4 × Benchy (150 %)". Several files (Parts, 2+): when the name starts with
+        /// the files' names joined by ", " (as the main window names such a job) and a file has 2+ copies, each file gets
+        /// its own count: "30 × red_block.stl, blue_block.stl" -> "30 × red_block.stl, 30 × blue_block.stl" (1 copy = no
+        /// "1 ×"; the rest of the name, e.g. " (150 %)", kept). Another name, or more pieces than the per-file counts show
+        /// (an older version dropped them): "Name (60 pcs)". All 1 = name unchanged. null name = "".
+        public static string WithCopies(string name, QuoteRecord r)
+        {
+            name = name ?? "";
+            var files = PartsOf(r);
+            if (files == null || files.Count < 2) return CopiesName(name, QuantityOf(r));
+            var names = new List<string>(files.Count);
+            var counted = new List<string>(files.Count);
+            int sum = 0;
+            bool many = false;
+            foreach (var f in files)
+            {
+                string path = (f.File ?? "").Trim();
+                int cut = Math.Max(path.LastIndexOf('\\'), path.LastIndexOf('/'));
+                string fn = cut >= 0 ? path.Substring(cut + 1) : path;
+                int c = CleanQuantity(f.Copies);
+                if (c > 1) many = true;
+                sum += c;
+                names.Add(fn);
+                counted.Add(CopiesName(fn, c));
+            }
+            string joined = string.Join(", ", names.ToArray());
+            int q = QuantityOf(r);
+            if (many && (q == 1 || q == sum) && joined.Length > 0 && name.StartsWith(joined, StringComparison.OrdinalIgnoreCase))
+                return string.Join(", ", counted.ToArray()) + name.Substring(joined.Length);
+            if (q > 1 && (many || q > files.Count)) return name + " (" + PiecesText(q) + ")";
+            return name;
+        }
+
+        /// "4 pcs" / "4 stk.".
+        public static string PiecesText(int n) { return L.F("{0} pcs", "{0} stk.", n); }
+
+        /// "Quantity" / "Antal" (row label).
+        public static string QuantityLabel() { return L.S("Quantity", "Antal"); }
+
+        /// "Quantity: 4 pcs" / "Antal: 4 stk.".
+        public static string QuantityText(int n) { return QuantityLabel() + ": " + PiecesText(n); }
+
+        /// "18,18 kr. each" / "18,18 kr. pr. stk." (unit = Pricing.UnitPrice(total, quantity)); "" for 1 copy.
+        public static string EachPriceText(double total, int quantity)
+        {
+            if (quantity <= 1) return "";
+            return L.F("{0} each", "{0} pr. stk.", Num.Kr(Pricing.UnitPrice(total, quantity)));
+        }
+
+        /// "4 pcs · 18,18 kr. each" / "4 stk. · 18,18 kr. pr. stk."; "" for 1 copy.
+        public static string EachText(double total, int quantity)
+        {
+            if (quantity <= 1) return "";
+            return PiecesText(quantity) + " · " + EachPriceText(total, quantity);
+        }
+
+        /// "on 3 plates" / "på 3 plader" for 2+ plates, else "".
+        public static string OnPlatesText(int plates)
+        {
+            return plates > 1 ? L.F("on {0} plates", "på {0} plader", plates) : "";
+        }
+
+        /// "Plates: 5" / "Plader: 5".
+        public static string PlatesCountText(int plates) { return L.F("Plates: {0}", "Plader: {0}", plates); }
+
+        /// "Prints: 3 models, 9 pcs" / "Print: 3 modeller, 9 stk." (1 model: "1 model" in both).
+        public static string PrintsText(int models, int pieces)
+        {
+            string m = models == 1 ? L.S("1 model", "1 model") : L.F("{0} models", "{0} modeller", models);
+            return L.S("Prints: ", "Print: ") + m + ", " + PiecesText(pieces);
+        }
+
+        /// Counts for a bill / order summary: Models = jobs, Pieces = Σ copies, Plates = Σ plates (unknown = 1 each).
+        public static PrintCount CountPrints(IEnumerable<QuoteRecord> jobs)
+        {
+            var c = new PrintCount();
+            if (jobs != null)
+                foreach (var r in jobs)
+                {
+                    if (r == null) continue;
+                    c.Models++;
+                    c.Pieces += QuantityOf(r);
+                    c.Plates += PlatesOf(r);
+                }
+            return c;
+        }
+
+        /// The model lines of order id (CleanOrderId, case-insensitive), oldest first (OldestFirst). Empty id = empty list.
+        public static List<QuoteRecord> OrderJobs(List<QuoteRecord> list, string orderId)
+        {
+            var res = new List<QuoteRecord>();
+            string want = CleanOrderId(orderId);
+            if (list == null || want.Length == 0) return res;
+            foreach (var r in list)
+                if (r != null && string.Equals(CleanOrderId(r.OrderId), want, StringComparison.OrdinalIgnoreCase)) res.Add(r);
+            return OldestFirst(res);
+        }
+
+        /// Puts records into one order: OrderId = the oldest record's Id (its SavedAt stamp if it has no Id) on all of them.
+        /// Returns the id ("" = no records). Does not save.
+        public static string SetOrder(IList<QuoteRecord> records)
+        {
+            var jobs = OldestFirst(records == null ? null : new List<QuoteRecord>(records));
+            if (jobs.Count == 0) return "";
+            string id = CleanOrderId(jobs[0].Id);
+            if (id.Length == 0) id = CleanOrderId("order-" + (jobs[0].SavedAt ?? "").Trim());
+            foreach (var r in jobs) r.OrderId = id;
+            return id;
+        }
+
+        /// Takes records out of their order (OrderId ""). Returns how many changed.
+        public static int ClearOrder(IEnumerable<QuoteRecord> records)
+        {
+            int n = 0;
+            if (records != null)
+                foreach (var r in records)
+                    if (r != null && CleanOrderId(r.OrderId).Length > 0) { r.OrderId = ""; n++; }
+            return n;
+        }
+
+        /// An order's bill = the combined bill (GroupBill) of its jobs: the minimum price once on the whole order, so a
+        /// quote of the order and its later invoice (group MakeInvoice) have the same total.
+        public static GroupBillInfo OrderBill(IList<QuoteRecord> jobs, AppSettings s, bool friends)
+        {
+            return GroupBill(jobs, s, friends);
         }
 
         // ---------- the History list's name and filter (HistoryForm and the website's History page) ----------
@@ -2482,6 +2729,13 @@ namespace PrintPrice
                 if (r.PrimeTower != 0 && r.PrimeTower != 1) r.PrimeTower = -1;   // issue #8 step 3: other values = unknown
                 r.TowerGrams = CleanTower(r.TowerGrams);
                 r.TowerSeconds = CleanTower(r.TowerSeconds);
+                // batch & plates: missing / bad copies = 1, plates / per plate = 0 (unknown), estimate flag 0/1
+                r.Quantity = CleanQuantity(r.Quantity);
+                r.Plates = CleanPlates(r.Plates);
+                r.PerPlate = CleanPlates(r.PerPlate);
+                if (r.CopiesEstimated != 1) r.CopiesEstimated = 0;
+                r.OrderId = CleanOrderId(r.OrderId);
+                if (!GoodRate(r.PlateChangeFee) || r.PlateChangeFee >= Num.MaxValue) r.PlateChangeFee = 0;
                 if (r.PrinterId == null) r.PrinterId = "";
                 if (r.PrinterName == null) r.PrinterName = "";
                 if (r.PrinterModel == null) r.PrinterModel = "";
@@ -3154,6 +3408,21 @@ namespace PrintPrice
             if (keep.Note.Trim().Length == 0 && other.Note.Trim().Length > 0) { keep.Note = other.Note; changed = true; }
             if (keep.Customer.Trim().Length == 0 && other.Customer.Trim().Length > 0) { keep.Customer = other.Customer; changed = true; }
             if (keep.Parts == null && other.Parts != null) { keep.Parts = other.Parts.Copy(); changed = true; }   // idea 21
+            else if (PartCopiesLost(keep.Parts, other.Parts))   // batch-plates: per-file copies dropped here by an older version
+            {
+                for (int i = 0; i < keep.Parts.Files.Count; i++) keep.Parts.Files[i].Copies = CleanQuantity(other.Parts.Files[i].Copies);
+                changed = true;
+            }
+            // batch & plates: copies / plates lost here (e.g. resaved by an older app version) come back from the other copy
+            if (QuantityOf(keep) == 1 && keep.Plates == 0 && (QuantityOf(other) > 1 || other.Plates > 0))
+            {
+                keep.Quantity = QuantityOf(other); keep.Plates = CleanPlates(other.Plates); keep.PerPlate = CleanPlates(other.PerPlate);
+                keep.CopiesEstimated = other.CopiesEstimated == 1 ? 1 : 0;
+                if (!(keep.PlateChangeFee > 0) && GoodRate(other.PlateChangeFee)) keep.PlateChangeFee = other.PlateChangeFee;
+                changed = true;
+            }
+            if (CleanOrderId(keep.OrderId).Length == 0 && CleanOrderId(other.OrderId).Length > 0)
+            { keep.OrderId = CleanOrderId(other.OrderId); changed = true; }
             // issue #8 step 3: the tower switch / grams when unknown here (e.g. resaved by an older app version)
             if (keep.PrimeTower == -1 && (other.PrimeTower == 0 || other.PrimeTower == 1)) { keep.PrimeTower = other.PrimeTower; changed = true; }
             if (keep.TowerGrams < 0 && other.TowerGrams >= 0)

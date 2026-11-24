@@ -31,7 +31,7 @@
         {
             <table class="qf-details">
                 @if (d.Invoice) { <tr><th>@L.S("Bill to", "Kunde")</th><td>@d.Customer</td></tr> }
-                <tr><th>@L.S("Prints", "Print")</th><td>@d.Summary</td></tr>
+                @foreach (var sr in WebQuote.SummaryRows(d)) { <tr><th>@sr[0]</th><td>@sr[1]</td></tr> }
             </table>
             @foreach (var j in d.Jobs)
             {
@@ -44,6 +44,7 @@
                     </div>
                     <div class="qf-fact"><span>@L.S("Print time", "Printtid")</span><b>@QuoteRows.Time(j.Hours, j.Minutes)</b></div>
                     <div class="qf-fact"><span>@L.S("Weight", "Vægt")</span><b>@j.Weight</b></div>
+                    @if (!string.IsNullOrEmpty(j.Copies)) { <div class="qf-fact"><span>@History.QuantityLabel()</span><b>@j.Copies</b></div> }
                     <div class="qf-cardprice"><b>@L.S("Print price", "Printpris")</b><b class="qf-total">@j.Amount</b></div>
                 </div>
             }
@@ -96,7 +97,7 @@
 
         <div class="qf-totalbox">
             <div><b class="qf-tl">@(group ? L.S("Total", "I alt") + " · " + QuoteRows.PrintsText(d.Jobs.Count) : L.S("Total", "I alt"))</b>
-                <div class="qf-muted">@(group ? WebQuote.GroupTotalNoteWithSums(d) : WebQuote.TotalNote(d))</div></div>
+                <div class="qf-muted">@(group ? WebQuote.GroupTotalNoteWithSums(d) : WebQuote.TotalSmallLine(d))</div></div>
             <b class="qf-total qf-big">@Num.Kr(group ? d.GroupTotal : d.Breakdown.Total)</b>
         </div>
 

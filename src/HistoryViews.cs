@@ -600,7 +600,7 @@ namespace PrintPrice
                 string full = ModelText(r), scale = History.ScaleText(r);
                 if (scale.Length == 0 || TextW(g, full, NameFont) <= rc.Width) { DrawText(g, r, full, NameFont, rc, c, false); return; }
                 // the scale whole and compact ("150×100×50 %"), the name cut as late as possible with "…", one space between
-                string name = History.ModelText(r), tail = " (" + scale.Replace(" × ", "×") + ")";
+                string name = History.WithCopies(History.ModelText(r), r), tail = " (" + scale.Replace(" × ", "×") + ")";   // batch & plates: "4 × …"
                 Func<string, int> width = s => TextW(g, s, NameFont);
                 int tw = width(tail);
                 if (tw > rc.Width - P(40)) { DrawText(g, r, full, NameFont, rc, c, false); return; }

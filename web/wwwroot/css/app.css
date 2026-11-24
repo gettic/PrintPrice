@@ -121,6 +121,14 @@ input[readonly] { color: var(--muted); }
 
 /* live electricity price line (under the electricity price, spans the inputs) */
 .power { grid-column: 1 / -1; display: flex; gap: 12px; align-items: stretch; }
+/* batch-plates: the Copies row (after the power row, so the printer card's rows stay as they were) */
+.copies { grid-column: 2 / -1; min-width: 0; }
+.copies .field { flex-wrap: wrap; }
+.copies .pp { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.inputs label[for=copies] { align-self: start; padding-top: 6px; }
+.copies .auto { font-size: 13px; }
+.copies .fixed { min-height: 30px; display: flex; align-items: center; }
+.copies-total { margin-top: 4px; }
 .power button { width: 118px; flex: none; }
 .power-line { flex: 1; min-width: 0; min-height: 34px; background: var(--info); border-left: 4px solid var(--accent); padding: 6px 10px; }
 .power-line.error { color: var(--error); }

@@ -28,6 +28,10 @@
                 <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(minimum)" @bind="minimum" @bind:event="oninput" /><span>@L.S("kr. (0 = off)", "kr. (0 = fra)")</span></div>
                 <label>@L.S("Round up to nearest", "Rund op til nærmeste")</label>
                 <div class="field"><input type="text" inputmode="decimal" class="mid @Bad(round)" @bind="round" @bind:event="oninput" /><span>@L.S("kr. (0 = off)", "kr. (0 = fra)")</span></div>
+                <label for="set-platefee">@L.S("Plate change fee", "Gebyr for pladeskift")</label>
+                <div class="field"><input id="set-platefee" type="text" inputmode="decimal" class="mid @Bad(plateFee)" @bind="plateFee" @bind:event="oninput" /><span>@L.S("kr. per extra plate (0 = off)", "kr. pr. ekstra plade (0 = fra)")</span></div>
+                <div class="help">@L.S("For jobs that need several build plates: added once for each plate after the first, on both prices.",
+                                       "For opgaver, der skal bruge flere byggeplader: lægges til én gang for hver plade efter den første, på begge priser.")</div>
 
                 <h3>@L.S("Failed prints", "Fejlprint")</h3>
                 <label>@L.S("Extra for failed prints", "Tillæg for fejlprint")</label>
@@ -118,6 +122,8 @@
                 <label><input type="checkbox" @bind="quoteTower" /> @L.S("Show prime tower grams on quotes and invoices", "Vis primetårnets gram på tilbud og fakturaer")</label>
                 <div class="help">@L.S("Adds \"incl. 1,7 g for the prime tower\" under Material. No extra price: the grams are already counted.",
                                        "Tilføjer \"inkl. 1,7 g til primetårnet\" under Materiale. Ingen ekstra pris: grammene er allerede talt med.")</div>
+                <label></label>
+                <label><input type="checkbox" @bind="unitPrice" /> @L.S("Show the price per piece", "Vis pris pr. stk.")</label>
                 <h3>@L.S("Invoice", "Faktura")</h3>
                 <label></label>
                 <label><input type="checkbox" @bind="mainInvoice" /> @L.S("Calculator makes invoices, not quotes", "Beregneren laver fakturaer, ikke tilbud")</label>
@@ -187,8 +193,8 @@
 
     AppSettings work;
     int tab;
-    bool auto, reset, vat, autoPower, mainInvoice, quoteTower, asking, resetNote;
-    string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays;
+    bool auto, reset, vat, autoPower, mainInvoice, quoteTower, unitPrice, asking, resetNote;
+    string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays, plateFee;
 
     string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), L.S("App", "Program") }; } }
 
@@ -222,6 +228,7 @@
         validDays = Num.Fmt(s.QuoteValidDays); dueDays = Num.Fmt(s.InvoiceDueDays);
         mainInvoice = s.MainInvoice == 1;
         quoteTower = s.QuoteShowTower == 1;   // issue #8 step 3
+        plateFee = Num.Fmt(s.PlateChangeFee); unitPrice = s.QuoteShowUnitPrice != 0;   // batch-plates
         problem = null;
     }
 
@@ -261,8 +268,8 @@
 
     async Task Save()
     {
-        double f, o, mi, ro, fa, wa, ra, ad, vd, dd;
-        if (!Ok(friends, out f) || !Ok(others, out o) || !Ok(minimum, out mi) || !Ok(round, out ro) || !Ok(failed, out fa)
+        double f, o, mi, ro, fa, wa, ra, ad, vd, dd, pf;
+        if (!Ok(friends, out f) || !Ok(others, out o) || !Ok(minimum, out mi) || !Ok(round, out ro) || !Ok(failed, out fa) || !Ok(plateFee, out pf)
             || !Ok(watts, out wa) || (!auto && !Ok(rate, out ra)) || !Ok(addOn, out ad) || !Days(validDays, 3650, out vd) || !Days(dueDays, 365, out dd))
         {
             problem = L.S("Use numbers of 0 or more.", "Brug tal på 0 eller mere.");
@@ -273,6 +280,7 @@
         work.PrinterWatts = wa; work.MachineRatePerHour = ra; work.AutoWearRate = auto ? 1 : 0;
         work.PowerAddOn = ad; work.PowerIncludeVat = vat ? 1 : 0; work.AutoPowerPrice = autoPower ? 1 : 0;
         work.QuoteValidDays = vd; work.InvoiceDueDays = dd; work.MainInvoice = mainInvoice ? 1 : 0; work.QuoteShowTower = quoteTower ? 1 : 0;
+        work.PlateChangeFee = pf; work.QuoteShowUnitPrice = unitPrice ? 1 : 0;
         work.QuoteName = (work.QuoteName ?? "").Trim(); work.PayMobilePay = (work.PayMobilePay ?? "").Trim(); work.PayBank = (work.PayBank ?? "").Trim();
         work.PrinterName = AppSettings.CleanPrinterName(name.Trim().Length == 0 ? Model.Label : name);
         await OnClose.InvokeAsync(new Result { Settings = work, FilamentType = type, Reset = reset });

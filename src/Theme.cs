@@ -823,8 +823,9 @@ namespace PrintPrice
             if (texts.Length == 1) { SetLink(texts[0], clicks != null && clicks.Length > 0 ? clicks[0] : null); return; }
             SuspendLayout();
             RemoveLinks();
-            linkRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
-                                            Margin = new Padding(0, 3, 0, 0), Padding = Padding.Empty };
+            // batch-plates: links that don't fit the box's width wrap onto a second line (never past the frame)
+            linkRow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true,
+                                            MaximumSize = new Size(InnerWidth, 0), Margin = new Padding(0, 3, 0, 0), Padding = Padding.Empty };
             int gap = (int)Math.Round(16 * DeviceDpi / 96f);
             for (int i = 0; i < texts.Length; i++)
             {

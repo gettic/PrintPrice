@@ -3689,6 +3689,7 @@ namespace PrintPrice.Tests
             ReviewFixTests();
             SettingsSafeTests();
             OnlineHelperTests();
+            BatchTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
@@ -4930,6 +4931,445 @@ namespace PrintPrice.Tests
         }
 
         // ---------- issue #8 step 3: prime tower setting + History fields ----------
+
+        // ---------- batch & plates (issue #9/#10): copies, plates, plate change fee, orders, texts ----------
+        static AppSettings BatchSettings()
+        {
+            var s = new AppSettings();
+            s.PrinterWatts = 100; s.FriendsMarkupPct = 25; s.OthersMarkupPct = 75; s.MachineRatePerHour = 1.71; s.AutoWearRate = 0;
+            s.FailedPrintPct = 0; s.FailedPayback = 0; s.MinimumPrice = 50; s.RoundTo = 0; s.PlateChangeFee = 0;
+            return s;
+        }
+
+        // 12 copies, 4 per plate = 3 plates, 240 g, 12 h 00 m in total (180 kr./kg, 2,00 kr./kWh)
+        static QuoteInput BatchInput(int plates)
+        {
+            return new QuoteInput { Hours = 12, Minutes = 0, FilamentGrams = 240, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00,
+                                    Quantity = 12, Plates = plates };
+        }
+
+        static QuoteRecord BatchRec(QuoteInput q, AppSettings s, DateTime t, string name)
+        {
+            return History.FromQuote(q, Pricing.Calculate(q, s), s, name, "", t);
+        }
+
+        static List<HistoryPart> PartsOf3(int a, int b, int c)
+        {
+            return new List<HistoryPart> { new HistoryPart { File = "stand.stl", Slot = 1, Copies = a },
+                new HistoryPart { File = "hook.stl", Slot = 2, Copies = b }, new HistoryPart { File = "clip.stl", Slot = 2, Copies = c } };
+        }
+
+        static void BatchTests()
+        {
+            var s = BatchSettings();
+            // totals: material 0,240 x 180 = 43,20; power 12 x 0,1 x 2,00 = 2,40; base 45,60
+            // customer 45,60 x 1,75 = 79,80 + 12 x 1,71 = 20,52 -> 100,32; friends 45,60 x 1,25 = 57,00 + 20,52 = 77,52
+            var r0 = Pricing.Calculate(BatchInput(3), s);
+            Eq("Batch: 12 copies / 3 plates, fee 0: customer 100,32", 100.32, r0.OthersPrice);
+            Eq("Batch: fee 0: friends 77,52", 77.52, r0.FriendsPrice);
+            Eq("Batch: fee 0 -> PlateFee 0", 0, r0.PlateFee);
+            var noPlates = BatchInput(0); noPlates.Quantity = 0;
+            True("Batch: Quantity / Plates 0 = the same price as before (no new inputs)",
+                 Pricing.Calculate(noPlates, s).OthersPrice == r0.OthersPrice && Pricing.Calculate(Example(), s).OthersPrice == Pricing.Calculate(Example(), BatchSettings()).OthersPrice);
+            // fee 5 kr. per extra plate: (3 - 1) x 5 = 10 -> 110,32 / 87,52
+            s.PlateChangeFee = 5;
+            var r5 = Pricing.Calculate(BatchInput(3), s);
+            Eq("Batch: fee 5 x 2 extra plates = 10", 10, r5.PlateFee);
+            Eq("Batch: fee 5: customer 100,32 + 10 = 110,32", 110.32, r5.OthersPrice);
+            Eq("Batch: fee 5: friends 77,52 + 10 = 87,52", 87.52, r5.FriendsPrice);
+            Eq("Batch: fee with 1 plate = none: 100,32", 100.32, Pricing.Calculate(BatchInput(1), s).OthersPrice);
+            Eq("Batch: fee with plates 0 (unknown) = none: 100,32", 100.32, Pricing.Calculate(BatchInput(0), s).OthersPrice);
+            Eq("PlateFee(3, 5) = 10", 10, Pricing.PlateFee(3, 5));
+            True("PlateFee: 1 / 0 plates, fee -5 / NaN / inf / 1e7 -> 0", Pricing.PlateFee(1, 5) == 0 && Pricing.PlateFee(0, 5) == 0
+                 && Pricing.PlateFee(3, -5) == 0 && Pricing.PlateFee(3, double.NaN) == 0 && Pricing.PlateFee(3, double.PositiveInfinity) == 0
+                 && Pricing.PlateFee(3, 1e7) == 0);
+            // the fee is below the minimum: 1 copy 20 g 1 h 30 m on 2 plates: 3,90 x 1,75 = 6,825 + 2,565 + 5 = 14,39 -> 50,00
+            var small = new QuoteInput { Hours = 1, Minutes = 30, FilamentGrams = 20, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00, Plates = 2 };
+            Eq("Batch: small job + fee 5 still lifted to the minimum 50,00", 50, Pricing.Calculate(small, s).OthersPrice);
+            var sb = Pricing.Breakdown(small, s, false, null);
+            True("Batch breakdown: small job: plates 5,00 + minimum 50 - 14,39 = 35,61", Line(sb, QuoteLine.Plates, -1) == "5.00"
+                 && Line(sb, QuoteLine.Minimum, -1) == "35.61" && sb.TotalOre == 5000);
+
+            // breakdown: material 43,20 + power 2,40 + wear 20,52 + plates 10,00 + work 45,60 x 0,75 = 34,20 = 110,32
+            var b = Pricing.Breakdown(BatchInput(3), s, false, null);
+            var pl = Find(b, QuoteLine.Plates);
+            True("Batch breakdown: plates line 10,00 (2 extra x 5,00), after wear", pl != null && pl.Ore == 1000 && pl.Quantity == 2 && pl.UnitPrice == 5
+                 && b.Lines.IndexOf(pl) == b.Lines.IndexOf(Find(b, QuoteLine.Wear)) + 1);
+            True("Batch breakdown: 43,20 / 2,40 / 20,52 / 34,20, total 110,32", Line(b, QuoteLine.Material, 0) == "43.20" && Line(b, QuoteLine.Power, -1) == "2.40"
+                 && Line(b, QuoteLine.Wear, -1) == "20.52" && Line(b, QuoteLine.Work, -1) == "34.20" && b.TotalOre == 11032);
+            Adds("Batch breakdown adds up", b);
+            var bf = Pricing.Breakdown(BatchInput(3), s, true, null);
+            True("Batch breakdown friends: plates 10,00, work 45,60 x 0,25 = 11,40, total 87,52", Line(bf, QuoteLine.Plates, -1) == "10.00"
+                 && Line(bf, QuoteLine.Work, -1) == "11.40" && bf.TotalOre == 8752);
+            True("Batch breakdown: fee 0 -> no plates line", Find(Pricing.Breakdown(BatchInput(3), BatchSettings(), false, null), QuoteLine.Plates) == null);
+            // round to 5 kr.: 110,32 -> 115,00, rounding line 4,68
+            var s5 = s.Clone(); s5.RoundTo = 5;
+            var br = Pricing.Breakdown(BatchInput(3), s5, false, null);
+            True("Batch: RoundTo 5: 110,32 -> 115,00, rounding 4,68", br.TotalOre == 11500 && Line(br, QuoteLine.Rounding, -1) == "4.68");
+            Adds("Batch breakdown with rounding adds up", br);
+
+            // unit price = shown total / N, not rounded up: 110,32 / 12 = 9,1933 -> "9,19 kr."; 72,72 / 4 = 18,18
+            Eq("UnitPrice 110,32 / 12 = 9,1933", 9.19333, Pricing.UnitPrice(110.32, 12));
+            True("UnitPrice shown 9,19 kr.", Num.Kr(Pricing.UnitPrice(110.32, 12)) == "9,19 kr.");
+            True("UnitPrice: quantity 0 = 1, total NaN / -1 = 0", Pricing.UnitPrice(50, 0) == 50 && Pricing.UnitPrice(double.NaN, 3) == 0 && Pricing.UnitPrice(-1, 3) == 0);
+
+            // plates needed
+            True("PlatesNeeded: 40 / 28 = 2, 28 / 28 = 1, 5 / 0 = 5, 0 / 4 = 1, 12 / 4 = 3", Pricing.PlatesNeeded(40, 28) == 2 && Pricing.PlatesNeeded(28, 28) == 1
+                 && Pricing.PlatesNeeded(5, 0) == 5 && Pricing.PlatesNeeded(0, 4) == 1 && Pricing.PlatesNeeded(12, 4) == 3);
+            True("PlatesNeeded agrees with online's BatchPlates (40/28, 56/28, 12/4, 1/1)", Pricing.PlatesNeeded(40, 28) == BambuSlicer.BatchPlates(40, 28)
+                 && Pricing.PlatesNeeded(56, 28) == BambuSlicer.BatchPlates(56, 28) && Pricing.PlatesNeeded(12, 4) == BambuSlicer.BatchPlates(12, 4)
+                 && Pricing.PlatesNeeded(1, 1) == BambuSlicer.BatchPlates(1, 1));
+            BatchSlicerTests();
+
+            // per plate, not per copy: one two-colour copy 8,99 g of which 5,00 g tower + flush, 10 copies on 1 plate:
+            // (8,99 - 5,00) x 10 + 5,00 x 1 = 39,90 + 5,00 = 44,90 (x 10 would be 89,90)
+            Eq("CopiesTotal: tower + flush once per plate: 44,90", 44.90, Pricing.CopiesTotal(8.99, 5.00, 10, 1));
+            Eq("CopiesTotal: same on 2 plates: 39,90 + 10,00 = 49,90", 49.90, Pricing.CopiesTotal(8.99, 5.00, 10, 2));
+            Eq("CopiesTotal: per plate above one copy is held to it: 2 x 1 = 2", 2, Pricing.CopiesTotal(2, 5, 10, 1));
+            True("CopiesTotal: NaN / negative -> 0; copies / plates 0 -> 1", Pricing.CopiesTotal(double.NaN, 1, 3, 1) == 0 && Pricing.CopiesTotal(-4, 0, 3, 1) == 0
+                 && Pricing.CopiesTotal(7, double.NaN, 3, 1) == 21 && Pricing.CopiesTotal(7, 2, 0, 0) == 7);
+            // ForCopies: 20 g / 1 h 30 m x 12 on 3 plates (nothing per plate) = 240 g / 18 h 00 m
+            var one = new QuoteInput { Hours = 1, Minutes = 30, FilamentGrams = 20, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00, PaybackDebt = 3 };
+            var fc = Pricing.ForCopies(one, 12, 3, 0, 0, null);
+            True("ForCopies: 12 x 20 g / 1 h 30 m = 240 g / 18 h 00 m, prices copied, Quantity 12 / Plates 3", fc.FilamentGrams == 240 && fc.Hours == 18 && fc.Minutes == 0
+                 && fc.FilamentDkkPerKg == 180 && fc.ElectricityDkkPerKwh == 2.00 && fc.PaybackDebt == 3 && fc.Quantity == 12 && fc.Plates == 3);
+            True("ForCopies: one copy not changed", one.FilamentGrams == 20 && one.Hours == 1 && one.Minutes == 30 && one.Quantity == 0);
+            var m45 = Pricing.ForCopies(new QuoteInput { Minutes = 45 }, 3, 1, 0, 0, null);
+            True("ForCopies: 3 x 45 m = 2 h 15 m (minute carry)", m45.Hours == 2 && m45.Minutes == 15);
+            // time per plate: one copy 45 m = 2700 s with 900 s tower / colour changes, 10 on 1 plate:
+            // (2700 - 900) x 10 + 900 = 18900 s = 315 m = 5 h 15 m
+            var tp = Pricing.ForCopies(new QuoteInput { Minutes = 45, FilamentGrams = 8.99 }, 10, 1, 5.00, 900, null);
+            True("ForCopies: tower time once per plate: 5 h 15 m, 44,90 g", tp.Hours == 5 && tp.Minutes == 15 && Math.Abs(tp.FilamentGrams - 44.90) < 1e-9);
+            True("ForCopies: 90 s -> 2 m (half up), 75 s -> 1 m", Pricing.ForCopies(new QuoteInput { Minutes = 1 }, 2, 1, 0, 30, null).Minutes == 2
+                 && Pricing.ForCopies(new QuoteInput { Minutes = 1 }, 2, 1, 0, 45, null).Minutes == 1);
+            // colour lines: A 5,00 g (2,00 per plate), B 3,99 g (3,00 per plate), 10 copies on 2 plates:
+            // A 3,00 x 10 + 2,00 x 2 = 34,00; B 0,99 x 10 + 3,00 x 2 = 15,90
+            var mc = new QuoteInput { Minutes = 30, FilamentGrams = 8.99, Filaments = new List<FilamentLine> {
+                new FilamentLine { Grams = 5.00, PricePerKg = 200 }, new FilamentLine { Grams = 3.99, PricePerKg = 250 } } };
+            var mcb = Pricing.ForCopies(mc, 10, 2, 5.00, 0, new List<double> { 2.00, 3.00 });
+            True("ForCopies: colour lines per plate: 34,00 g / 15,90 g, prices kept", Math.Abs(mcb.Filaments[0].Grams - 34) < 1e-9
+                 && Math.Abs(mcb.Filaments[1].Grams - 15.9) < 1e-9 && mcb.Filaments[1].PricePerKg == 250 && !ReferenceEquals(mcb.Filaments[0], mc.Filaments[0]));
+            True("ForCopies: missing line per-plate grams = 0 (x copies)", Math.Abs(Pricing.ForCopies(mc, 10, 2, 0, 0, new List<double> { 2.00 }).Filaments[1].Grams - 39.9) < 1e-9);
+
+            // History: FromQuote takes Quantity / Plates / the fee snapshot; SetCopies; JSON round trip; RecordBreakdown
+            var t = new DateTime(2026, 11, 24, 12, 0, 0);
+            var rec = BatchRec(BatchInput(3), s, t, "Benchy");
+            True("Batch record: Quantity 12, Plates 3, fee 5 snapshot, totals 240 g / 12 h / 110,32", rec.Quantity == 12 && rec.Plates == 3 && rec.PlateChangeFee == 5
+                 && rec.Grams == 240 && rec.Hours == 12 && Math.Abs(rec.OthersPrice - 110.32) < 1e-9);
+            History.SetCopies(rec, 12, 3, 4, true);
+            var back = History.ParseJson(History.ToJson(new List<QuoteRecord> { rec }))[0];
+            True("Batch record JSON round trip: 12 / 3 / 4 / estimated / fee 5", back.Quantity == 12 && back.Plates == 3 && back.PerPlate == 4
+                 && back.CopiesEstimated == 1 && back.PlateChangeFee == 5 && back.OrderId == "");
+            var cp = History.CopyQuotes(new List<QuoteRecord> { rec })[0];
+            True("Batch record: CopyQuotes keeps it", cp.Quantity == 12 && cp.Plates == 3 && cp.PerPlate == 4 && cp.CopiesEstimated == 1);
+            var rb = History.RecordBreakdown(back, new AppSettings(), false);
+            True("Batch record: RecordBreakdown has the plates line 10,00 and total 110,32 (fee from the record, not today's 0)",
+                 rb.TotalOre == 11032 && Line(rb, QuoteLine.Plates, -1) == "10.00");
+            True("Batch record: ToInput gives Quantity 12 / Plates 3", History.ToInput(back).Quantity == 12 && History.ToInput(back).Plates == 3);
+            // old record: 1 copy, plates unknown (PlatesOf = 1), no fee
+            var old = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Hours\":1,\"OthersPrice\":50}]}")[0];
+            True("Batch: old record -> Quantity 1, Plates 0 (PlatesOf 1), PerPlate 0, not estimated, OrderId \"\", fee 0",
+                 old.Quantity == 1 && old.Plates == 0 && History.PlatesOf(old) == 1 && old.PerPlate == 0 && old.CopiesEstimated == 0 && old.OrderId == ""
+                 && old.PlateChangeFee == 0 && History.QuantityOf(old) == 1);
+            var bad = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Quantity\":0,\"Plates\":-2,\"PerPlate\":200000,\"CopiesEstimated\":5,"
+                                        + "\"OrderId\":\"  o1  \",\"PlateChangeFee\":-3},{\"Id\":\"b\",\"Quantity\":-3},{\"Id\":\"c\",\"Quantity\":200000,"
+                                        + "\"OrderId\":\"" + new string('x', 60) + "\"}]}");
+            True("Batch: bad values cleaned (0 / -3 / 200000 copies -> 1, plates -2 -> 0, per plate 200000 -> 0, flag 5 -> 0, fee -3 -> 0)",
+                 bad[0].Quantity == 1 && bad[0].Plates == 0 && bad[0].PerPlate == 0 && bad[0].CopiesEstimated == 0 && bad[0].PlateChangeFee == 0
+                 && bad[1].Quantity == 1 && bad[2].Quantity == 1);
+            True("Batch: OrderId trimmed, cut to 40", bad[0].OrderId == "o1" && bad[2].OrderId.Length == 40);
+            History.SetCopies(old, 600, -1, 7, false);
+            True("SetCopies cleans: 600 kept (reading range), plates -1 -> 0, per plate 7", old.Quantity == 600 && old.Plates == 0 && old.PerPlate == 7);
+            // an older app version re-saves the file without the keys: the total price stays (totals stored)
+            string json = History.ToJson(new List<QuoteRecord> { rec });
+            string stripped = System.Text.RegularExpressions.Regex.Replace(json, "\"(Quantity|Plates|PerPlate|CopiesEstimated|OrderId|PlateChangeFee)\":(\"[^\"]*\"|[^,}]*),?", "");
+            var older = History.ParseJson(stripped);
+            True("Batch: older version's re-save: still 110,32 / 240 g / 12 h, copies 1", older != null && older.Count == 1
+                 && Math.Abs(older[0].OthersPrice - 110.32) < 1e-9 && older[0].Grams == 240 && older[0].Hours == 12 && older[0].Quantity == 1);
+            True("Batch: older version's re-save: bill total still 110,32 (scaled)", History.RecordBreakdown(older[0], new AppSettings(), false).TotalOre == 11032);
+            // merge: lost here -> back from the backup copy; OrderId too
+            var theirs = BRec("B", "2026-11-24 12:00:00"); History.SetCopies(theirs, 12, 3, 4, false); theirs.PlateChangeFee = 5; theirs.OrderId = "o7";
+            var mine = BRec("B", "2026-11-24 12:00:00");
+            var res = History.Combine(new List<QuoteRecord> { mine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Batch merge: copies / plates / per plate / fee / order filled from the backup", res.Updated == 1 && res.Quotes[0].Quantity == 12
+                 && res.Quotes[0].Plates == 3 && res.Quotes[0].PerPlate == 4 && res.Quotes[0].PlateChangeFee == 5 && res.Quotes[0].OrderId == "o7");
+            var mine2 = BRec("B", "2026-11-24 12:00:00"); History.SetCopies(mine2, 2, 1, 2, false);
+            res = History.Combine(new List<QuoteRecord> { mine2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { theirs } }, false, false);
+            True("Batch merge: known copies here stay", res.Quotes[0].Quantity == 2 && res.Quotes[0].Plates == 1);
+            // other copies / plates / order = another quote
+            var q1 = HistRecord(t); var q2 = HistRecord(t.AddMinutes(2));
+            bool same = History.SameQuote(q1, q2);
+            q2.Quantity = 2; bool sameQty = History.SameQuote(q1, q2); q2.Quantity = 1;
+            q2.Plates = 2; bool samePlates = History.SameQuote(q1, q2); q2.Plates = 0;
+            q2.OrderId = "o1"; bool sameOrder = History.SameQuote(q1, q2);
+            True("Batch: same = same quote; other copies / plates / order = not", same && !sameQty && !samePlates && !sameOrder);
+
+            // texts EN + DA
+            bool wasDanish = L.Danish;
+            try
+            {
+                L.Danish = false;
+                True("Text: 4 × Name, 1 copy = name", History.CopiesName("Benchy", 4) == "4 × Benchy" && History.CopiesName("Benchy", 1) == "Benchy"
+                     && History.CopiesName(null, 1) == "");
+                var named = HistRecord(t); History.SetCopies(named, 4, 2, 2, false); History.SetScale(named, 150);
+                True("Text: WithCopies(WithScale) = 4 × Benchy (150 %)", History.WithCopies(History.WithScale(History.ModelText(named), named), named) == "4 × Benchy (150 %)");
+                True("Text EN: 4 pcs · 18,18 kr. each", History.EachText(72.72, 4) == "4 pcs · 18,18 kr. each" && History.EachText(72.72, 1) == "");
+                True("Text EN: 12 pcs · 9,19 kr. each", History.EachText(110.32, 12) == "12 pcs · 9,19 kr. each");
+                True("Text EN: 18,18 kr. each", History.EachPriceText(72.72, 4) == "18,18 kr. each");
+                True("Text EN: on 3 plates / 1 plate = \"\"", History.OnPlatesText(3) == "on 3 plates" && History.OnPlatesText(1) == "");
+                True("Text EN: Quantity: 4 pcs", History.QuantityLabel() == "Quantity" && History.QuantityText(4) == "Quantity: 4 pcs");
+                True("Text EN: Prints: 3 models, 9 pcs / 1 model", History.PrintsText(3, 9) == "Prints: 3 models, 9 pcs" && History.PrintsText(1, 4) == "Prints: 1 model, 4 pcs");
+                True("Text EN: Plates: 5", History.PlatesCountText(5) == "Plates: 5");
+                L.Danish = true;
+                True("Text DA: 4 stk. · 18,18 kr. pr. stk.", History.EachText(72.72, 4) == "4 stk. · 18,18 kr. pr. stk.");
+                True("Text DA: på 3 plader", History.OnPlatesText(3) == "på 3 plader");
+                True("Text DA: Antal: 4 stk.", History.QuantityLabel() == "Antal" && History.QuantityText(4) == "Antal: 4 stk.");
+                True("Text DA: Print: 3 modeller, 9 stk. / 1 model", History.PrintsText(3, 9) == "Print: 3 modeller, 9 stk." && History.PrintsText(1, 4) == "Print: 1 model, 4 stk.");
+                True("Text DA: Plader: 5", History.PlatesCountText(5) == "Plader: 5");
+            }
+            finally { L.Danish = wasDanish; }
+
+            // orders: minimum once per order (= combined bill), counts, order id
+            var so = BatchSettings();
+            var a = BatchRec(BatchInput(3), so, t, "Benchy");                     // 100,32
+            var oneIn = new QuoteInput { Hours = 1, Minutes = 30, FilamentGrams = 20, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00 };
+            var bRec = BatchRec(oneIn, so, t.AddMinutes(1), "Clip");               // 9,39 -> 50 alone
+            var cIn = new QuoteInput { Hours = 1, FilamentGrams = 10, FilamentDkkPerKg = 180, ElectricityDkkPerKwh = 2.00 };
+            var cRec = BatchRec(cIn, so, t.AddMinutes(2), "Hook");                 // 2,00 x 1,75 = 3,50 + 1,71 = 5,21 -> 50 alone
+            Eq("Order: Clip alone = 50 (minimum)", 50, bRec.OthersPrice);
+            var list = new List<QuoteRecord> { cRec, bRec, a };                   // newest first
+            string oid = History.SetOrder(new List<QuoteRecord> { bRec, a });
+            True("SetOrder: id = the oldest record's Id, on both", oid == a.Id && a.OrderId == oid && bRec.OrderId == oid && cRec.OrderId == "");
+            var jobs = History.OrderJobs(list, " " + oid.ToUpperInvariant() + " ");
+            True("OrderJobs: 2 jobs oldest first (trim, any case)", jobs.Count == 2 && jobs[0] == a && jobs[1] == bRec);
+            True("OrderJobs: empty id = none", History.OrderJobs(list, "  ").Count == 0 && History.OrderJobs(null, oid).Count == 0);
+            // 100,32 + 9,39 = 109,71 >= 50: no top-up (per model it would be 100,32 + 50 = 150,32)
+            var ob = History.OrderBill(jobs, so, false);
+            True("OrderBill: 100,32 + 9,39 = 109,71, no minimum top-up", Math.Abs(ob.Total - 109.71) < 1e-9 && ob.TopUp == 0);
+            // two small lines: 9,39 + 5,21 = 14,60 -> top-up 35,40 -> 50,00 once
+            var ob2 = History.OrderBill(new List<QuoteRecord> { bRec, cRec }, so, false);
+            True("OrderBill: 9,39 + 5,21 = 14,60, top-up 35,40 -> 50,00", Math.Abs(ob2.Sum - 14.60) < 1e-9 && Math.Abs(ob2.TopUp - 35.40) < 1e-9
+                 && Math.Abs(ob2.Total - 50) < 1e-9);
+            var pc = History.CountPrints(jobs);
+            True("CountPrints: 2 models, 12 + 1 = 13 pcs, 3 + 1 = 4 plates", pc.Models == 2 && pc.Pieces == 13 && pc.Plates == 4);
+            True("CountPrints: null = 0", History.CountPrints(null).Models == 0);
+            // the order's invoice (group MakeInvoice) has the quote's total
+            var inv = so.Clone();
+            History.MakeInvoice(list, jobs, t.AddHours(1), inv, false);
+            Eq("Order invoice total = order quote total 109,71", 109.71, a.OthersPrice + bRec.OthersPrice);
+            True("ClearOrder: 2 changed, then none", History.ClearOrder(jobs) == 2 && a.OrderId == "" && History.ClearOrder(jobs) == 0);
+            True("SetOrder: none = \"\"", History.SetOrder(null) == "" && History.SetOrder(new List<QuoteRecord>()) == "");
+            // combined bill breakdown sums the plates lines: 12 copies on 3 plates + on 2 plates, fee 5: 10 + 5 = 15,00 (3 extra plates x 5)
+            var g1 = BatchRec(BatchInput(3), s, t, "A"); var g2 = BatchRec(BatchInput(2), s, t.AddMinutes(1), "B");
+            var gb = History.GroupBreakdown(History.GroupBill(new List<QuoteRecord> { g1, g2 }, s, false), s);
+            QuoteLine gpl = null; foreach (var l in gb.Lines) if (l.Key == QuoteLine.Plates) gpl = l;
+            True("GroupBreakdown: plates 15,00, 3 extra plates x 5,00; total 110,32 + 105,32 = 215,64", gpl != null && gpl.Ore == 1500 && gpl.Quantity == 3
+                 && gpl.UnitPrice == 5 && gb.TotalOre == 21564);
+
+            // copies per file of a several-files job (HistoryPart.Copies)
+            var pr = HistRecord(t);
+            History.SetParts(pr, new List<HistoryPart> {
+                new HistoryPart { File = @"C:\m\stand.stl", Slot = 1, Copies = 4 },
+                new HistoryPart { File = "hook.stl", Slot = 2, Copies = 0 },
+                new HistoryPart { File = "clip.stl", Slot = 2, Copies = 30 } }, false);
+            var pcs = History.PartCopies(pr);
+            True("PartCopies: 4, 0 -> 1, 30", pcs != null && pcs.Count == 3 && pcs[0] == 4 && pcs[1] == 1 && pcs[2] == 30);
+            var items = History.BatchItems(pr);
+            True("BatchItems: path, file name, copies, slot", items != null && items.Count == 3 && items[0].Path == @"C:\m\stand.stl" && items[0].Name == "stand.stl"
+                 && items[0].Copies == 4 && items[0].Slot == 1 && items[2].Name == "clip.stl" && items[2].Copies == 30 && items[2].Slot == 2);
+            True("PartCopies / BatchItems: normal job = null", History.PartCopies(HistRecord(t)) == null && History.BatchItems(HistRecord(t)) == null
+                 && History.PartCopies(null) == null);
+            var prBack = History.ParseJson(History.ToJson(new List<QuoteRecord> { pr }))[0];
+            True("Part copies: JSON round trip 4 / 1 / 30; CopyQuotes keeps them", History.PartCopies(prBack)[0] == 4 && History.PartCopies(prBack)[2] == 30
+                 && History.CopyQuotes(new List<QuoteRecord> { pr })[0].Parts.Files[2].Copies == 30);
+            var oldParts = History.ParseJson("{\"Version\":1,\"Quotes\":[{\"Id\":\"a\",\"Parts\":{\"Together\":false,\"Files\":[{\"File\":\"a.stl\",\"Slot\":1},"
+                                             + "{\"File\":\"b.stl\",\"Slot\":2,\"Copies\":0},{\"File\":\"c.stl\",\"Slot\":2,\"Copies\":-4}]}}]}")[0];
+            var oc = History.PartCopies(oldParts);
+            True("Part copies: missing / 0 / -4 -> 1", oc[0] == 1 && oc[1] == 1 && oc[2] == 1);
+            // an older version dropped the copies (all 1): the backup's copy brings them back; known copies here stay
+            var pTheirs = BRec("P", "2026-11-24 12:00:00"); History.SetParts(pTheirs, PartsOf3(4, 1, 30), false);
+            var pMine = BRec("P", "2026-11-24 12:00:00"); History.SetParts(pMine, PartsOf3(1, 1, 1), false);
+            res = History.Combine(new List<QuoteRecord> { pMine }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { pTheirs } }, false, false);
+            var mc3 = History.PartCopies(res.Quotes[0]);
+            True("Part copies merge: lost here -> 4 / 1 / 30 from the backup", mc3[0] == 4 && mc3[1] == 1 && mc3[2] == 30);
+            var pMine2 = BRec("P", "2026-11-24 12:00:00"); History.SetParts(pMine2, PartsOf3(2, 1, 1), false);
+            res = History.Combine(new List<QuoteRecord> { pMine2 }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { pTheirs } }, false, false);
+            True("Part copies merge: copies known here stay (2 / 1 / 1)", History.PartCopies(res.Quotes[0])[0] == 2 && History.PartCopies(res.Quotes[0])[2] == 1);
+            var pOther = BRec("P", "2026-11-24 12:00:00"); History.SetParts(pOther, new List<HistoryPart> { new HistoryPart { File = "x.stl" } }, false);
+            res = History.Combine(new List<QuoteRecord> { pOther }, new AppSettings(), new BackupData { Quotes = new List<QuoteRecord> { pTheirs } }, false, false);
+            True("Part copies merge: other files = not touched", res.Quotes[0].Parts.Files.Count == 1 && res.Quotes[0].Parts.Files[0].File == "x.stl");
+
+            // names of several-files jobs with copies (tester T2): per file, not "60 × a, b"
+            bool wasDa2 = L.Danish;
+            try
+            {
+                L.Danish = false;
+                var two = HistRecord(t); two.Model = "red_block.stl, blue_block.stl";
+                History.SetParts(two, new List<HistoryPart> { new HistoryPart { File = @"C:\m\red_block.stl", Copies = 30 },
+                    new HistoryPart { File = "blue_block.stl", Slot = 2, Copies = 30 } }, false);
+                History.SetCopies(two, 60, 2, 30, false);
+                True("WithCopies 2 files x 30: 30 × red_block.stl, 30 × blue_block.stl",
+                     History.WithCopies(History.ModelText(two), two) == "30 × red_block.stl, 30 × blue_block.stl");
+                History.SetScale(two, 150);
+                True("WithCopies 2 files x 30 + scale: (150 %) kept at the end",
+                     History.WithCopies(History.WithScale(History.ModelText(two), two), two) == "30 × red_block.stl, 30 × blue_block.stl (150 %)");
+                History.SetScale(two, 100);
+                History.SetParts(two, new List<HistoryPart> { new HistoryPart { File = "red_block.stl", Copies = 4 },
+                    new HistoryPart { File = "blue_block.stl", Slot = 2, Copies = 1 } }, false);
+                History.SetCopies(two, 5, 1, 5, false);
+                True("WithCopies 4 + 1: 4 × red_block.stl, blue_block.stl (no 1 ×)", History.WithCopies(History.ModelText(two), two) == "4 × red_block.stl, blue_block.stl");
+                True("WithCopies: another name with per-file copies -> Name (5 pcs)", History.WithCopies("Desk set", two) == "Desk set (5 pcs)");
+                History.SetParts(two, new List<HistoryPart> { new HistoryPart { File = "red_block.stl" }, new HistoryPart { File = "blue_block.stl", Slot = 2 } }, false);
+                History.SetCopies(two, 2, 1, 2, false);
+                True("WithCopies: 2 files, 1 each = name unchanged", History.WithCopies(History.ModelText(two), two) == "red_block.stl, blue_block.stl");
+                History.SetCopies(two, 60, 2, 30, false);   // an older version dropped the per-file copies
+                True("WithCopies: per-file copies lost, 60 pcs -> red_block.stl, blue_block.stl (60 pcs)",
+                     History.WithCopies(History.ModelText(two), two) == "red_block.stl, blue_block.stl (60 pcs)");
+                var single = HistRecord(t); History.SetCopies(single, 40, 2, 28, false);
+                True("WithCopies single file unchanged: 40 × Benchy; null name = \"\"", History.WithCopies("Benchy", single) == "40 × Benchy"
+                     && History.WithCopies(null, HistRecord(t)) == "");
+                L.Danish = true;
+                History.SetParts(two, new List<HistoryPart> { new HistoryPart { File = "red_block.stl", Copies = 30 },
+                    new HistoryPart { File = "blue_block.stl", Slot = 2, Copies = 30 } }, false);
+                True("WithCopies DA: another name -> Navn (60 stk.)", History.WithCopies("Navn", two) == "Navn (60 stk.)");
+            }
+            finally { L.Danish = wasDa2; }
+
+            // settings: PlateChangeFee default 0, QuoteShowUnitPrice default 1
+            True("PlateChangeFee 0 / QuoteShowUnitPrice 1 by default (new / new install)", new AppSettings().PlateChangeFee == 0 && AppSettings.FromIni(null).PlateChangeFee == 0
+                 && new AppSettings().QuoteShowUnitPrice == 1 && AppSettings.FromIni(null).QuoteShowUnitPrice == 1);
+            var ps = new AppSettings(); ps.PlateChangeFee = 7.5; ps.QuoteShowUnitPrice = 0;
+            var psBack = AppSettings.FromIni(ps.ToIni());
+            True("PlateChangeFee 7,5 / QuoteShowUnitPrice 0 survive the ini", psBack.PlateChangeFee == 7.5 && psBack.QuoteShowUnitPrice == 0);
+            var psBad = AppSettings.FromIni(new[] { "PlateChangeFee=-3", "QuoteShowUnitPrice=7" });
+            True("PlateChangeFee -3 -> 0, QuoteShowUnitPrice 7 -> 1, missing -> defaults", psBad.PlateChangeFee == 0 && psBad.QuoteShowUnitPrice == 1
+                 && AppSettings.FromIni(new[] { "SetupDone=1" }).PlateChangeFee == 0 && AppSettings.FromIni(new[] { "SetupDone=1" }).QuoteShowUnitPrice == 1);
+            True("PlateChangeFee: Clone keeps, Reset to defaults -> 0 / 1", ps.Clone().PlateChangeFee == 7.5 && ps.DefaultsKeepingPersonal().PlateChangeFee == 0
+                 && ps.DefaultsKeepingPersonal().QuoteShowUnitPrice == 1);
+        }
+
+        // online's pure batch helpers (SliceInfo.cs, batch-plates)
+        static void BatchSlicerTests()
+        {
+            True("Copy limits: MaxCopies 500, WarnCopies 200, 1..500 in range", BambuSlicer.MaxCopies == 500 && BambuSlicer.WarnCopies == 200
+                 && BambuSlicer.CopiesInRange(1) && BambuSlicer.CopiesInRange(500) && !BambuSlicer.CopiesInRange(0) && !BambuSlicer.CopiesInRange(501));
+            var ca = BambuSlicer.CloneArgs(new List<int> { 4, 30 });
+            True("CloneArgs 4, 30 -> --clone-objects 4,30", ca.Count == 2 && ca[0] == "--clone-objects" && ca[1] == "4,30");
+            bool t0 = false, tSum = false, tNull = false;
+            try { BambuSlicer.CloneArgs(new List<int> { 0 }); } catch (SliceException) { t0 = true; }
+            try { BambuSlicer.CloneArgs(new List<int> { 300, 201 }); } catch (SliceException) { tSum = true; }
+            try { BambuSlicer.CloneArgs(null); } catch (ArgumentException) { tNull = true; }
+            True("CloneArgs: 0 / sum 501 -> SliceException, null -> ArgumentException", t0 && tSum && tNull);
+            var ra = BambuSlicer.RepetitionArgs(40);
+            bool r1 = false, r501 = false;
+            try { BambuSlicer.RepetitionArgs(1); } catch (SliceException) { r1 = true; }
+            try { BambuSlicer.RepetitionArgs(501); } catch (SliceException) { r501 = true; }
+            True("RepetitionArgs 40 -> --repetitions 40; 1 / 501 refused", ra.Count == 2 && ra[0] == "--repetitions" && ra[1] == "40" && r1 && r501);
+            int full, last;
+            int p40 = BambuSlicer.BatchPlates(40, 28, out full, out last);
+            True("BatchPlates 40 / 28 = 2 plates (1 full + 12)", p40 == 2 && full == 1 && last == 12);
+            int p56 = BambuSlicer.BatchPlates(56, 28, out full, out last);
+            True("BatchPlates 56 / 28 = 2 plates (2 full + 0); 0 copies = 0", p56 == 2 && full == 2 && last == 0 && BambuSlicer.BatchPlates(0, 28) == 0);
+            bool perZero = false;
+            try { BambuSlicer.BatchPlates(5, 0); } catch (ArgumentOutOfRangeException) { perZero = true; }
+            True("BatchPlates per plate 0 -> ArgumentOutOfRangeException", perZero);
+            True("CopiesPerPlate objects: 294 / 2 = 147, 5 / 0 = 5, 0 = 0, 1 / 2 = 1", BambuSlicer.CopiesPerPlate(294, 2) == 147
+                 && BambuSlicer.CopiesPerPlate(5, 0) == 5 && BambuSlicer.CopiesPerPlate(0, 3) == 0 && BambuSlicer.CopiesPerPlate(1, 2) == 1);
+            // footprint grid, gap 2 on 256: 60 x 31 -> floor(258/62) = 4 x floor(258/33) = 7 = 28 (turned: 7 x 4 = 28)
+            True("CopiesPerPlate footprint: Benchy 60 x 31 on 256 = 28", BambuSlicer.CopiesPerPlate(60, 31, 256, 256, 2, 0, 0) == 28);
+            // tower 30 x 30 takes ceil(32/62) = 1 x ceil(32/33) = 1 cell: 27
+            True("CopiesPerPlate footprint: with a 30 x 30 tower = 27", BambuSlicer.CopiesPerPlate(60, 31, 256, 256, 2, 30, 30) == 27);
+            True("CopiesPerPlate footprint: 300 x 10 doesn't fit = 0; 256 x 256 = 1; bad size = 0", BambuSlicer.CopiesPerPlate(300, 10, 256, 256, 2, 0, 0) == 0
+                 && BambuSlicer.CopiesPerPlate(256, 256, 256, 256, 2, 0, 0) == 1 && BambuSlicer.CopiesPerPlate(double.NaN, 31, 256, 256, 2, 0, 0) == 0);
+            // A1 mini 180: floor(182/62) = 2 x floor(182/33) = 5 = 10; unknown printer = A1 = 28
+            True("CopiesPerPlate by printer: A1 mini 10, A1 28, unknown = A1", BambuSlicer.CopiesPerPlate("A1M", 60, 31, 0, 0) == 10
+                 && BambuSlicer.CopiesPerPlate("A1", 60, 31, 0, 0) == 28 && BambuSlicer.CopiesPerPlate("??", 60, 31, 0, 0) == 28);
+            True("CopyBaseName: 3dbenchy.stl_12 -> 3dbenchy.stl; a_b kept; null = \"\"", BambuSlicer.CopyBaseName("3dbenchy.stl_12") == "3dbenchy.stl"
+                 && BambuSlicer.CopyBaseName("a_b") == "a_b" && BambuSlicer.CopyBaseName(null) == "");
+            // 2 objects 10..140 x 20..51 = 130 x 31, tower 200..230 x 200..235 = 30 x 35
+            var fp = BambuSlicer.ParsePlateFootprint("{\"bbox_objects\":[{\"bbox\":[10,20,70,51],\"name\":\"3dbenchy.stl_1\"},"
+                + "{\"bbox\":[80,20,140,51],\"name\":\"3dbenchy.stl_2\"},{\"bbox\":[200,200,230,235],\"name\":\"wipe_tower\"}]}");
+            True("ParsePlateFootprint: 130 x 31, 2 objects, tower 30 x 35", fp != null && fp.Width == 130 && fp.Depth == 31 && fp.Objects == 2
+                 && fp.TowerWidth == 30 && fp.TowerDepth == 35);
+            True("ParsePlateFootprint: bad / empty / only a tower -> null", BambuSlicer.ParsePlateFootprint("x") == null && BambuSlicer.ParsePlateFootprint(null) == null
+                 && BambuSlicer.ParsePlateFootprint("{\"bbox_objects\":[{\"bbox\":[1,1,2,2],\"name\":\"wipe_tower\"}]}") == null);
+            var po = BambuSlicer.ProjectPlateObjects("<config><plate><model_instance/><model_instance/></plate><plate><model_instance/></plate></config>");
+            True("ProjectPlateObjects: 2 plates with 2 and 1 objects; bad xml = none", po.Count == 2 && po[0] == 2 && po[1] == 1
+                 && BambuSlicer.ProjectPlateObjects("<config").Count == 0 && BambuSlicer.ProjectPlateObjects(null).Count == 0);
+            var nb = new SliceResult();
+            foreach (var f in new[] { "a", "a", "b", "a" }) nb.PlateList.Add(new PlateInfo { File = f });
+            BambuSlicer.NumberBatchPlates(nb);
+            True("NumberBatchPlates: a 1, a 2, b 1, a 3; FilePlates 3, 3, 1, 3", nb.PlateList[0].Index == 1 && nb.PlateList[1].Index == 2 && nb.PlateList[2].Index == 1
+                 && nb.PlateList[3].Index == 3 && nb.PlateList[0].FilePlates == 3 && nb.PlateList[2].FilePlates == 1 && nb.PlateList[3].FilePlates == 3);
+            BambuSlicer.NumberBatchPlates(null);
+
+            // more cases from plans\batch-plates\online-names.md
+            bool wasDanish = L.Danish;
+            try
+            {
+                L.Danish = false; string en = BambuSlicer.CopiesRangeText();
+                L.Danish = true; string da = BambuSlicer.CopiesRangeText();
+                True("CopiesRangeText EN / DA", en == "Copies must be 1 to 500." && da == "Antal skal være 1 til 500.");
+            }
+            finally { L.Danish = wasDanish; }
+            True("CopiesInRange -3 false", !BambuSlicer.CopiesInRange(-3));
+            bool c501 = false, cEmpty = false, r0 = false;
+            try { BambuSlicer.CloneArgs(new List<int> { 501 }); } catch (SliceException) { c501 = true; }
+            try { BambuSlicer.CloneArgs(new List<int>()); } catch (ArgumentException) { cEmpty = true; }
+            try { BambuSlicer.RepetitionArgs(0); } catch (SliceException) { r0 = true; }
+            True("CloneArgs {1} -> 1; {501} refused; empty -> ArgumentException; RepetitionArgs 0 refused",
+                 BambuSlicer.CloneArgs(new List<int> { 1 })[1] == "1" && c501 && cEmpty && r0);
+            int p100 = BambuSlicer.BatchPlates(100, 28, out full, out last);
+            int int5Full, int5Last;
+            int p5 = BambuSlicer.BatchPlates(5, 28, out int5Full, out int5Last);
+            True("BatchPlates 100 / 28 = 4 (3 full + 16); 5 / 28 = 1 (0 + 5)", p100 == 4 && full == 3 && last == 16 && p5 == 1 && int5Full == 0 && int5Last == 5);
+            True("CopiesPerPlate objects: 28 / 1 = 28, 28 / 0 = 28", BambuSlicer.CopiesPerPlate(28, 1) == 28 && BambuSlicer.CopiesPerPlate(28, 0) == 28);
+            // clip 41,22 x 25,24: floor(258/43,22) = 5 x floor(258/27,24) = 9 = 45; 250 x 250 = 1;
+            // 10 x 10 with a 35 x 35 tower: 21 x 21 = 441 - ceil(37/12) = 4 x 4 = 16 -> 425; negative size = 0
+            True("CopiesPerPlate footprint: clip 45, 250 x 250 = 1, 10 x 10 + tower 35 = 425, negative = 0",
+                 BambuSlicer.CopiesPerPlate(41.22, 25.24, 256, 256, 2, 0, 0) == 45 && BambuSlicer.CopiesPerPlate(250, 250, 256, 256, 2, 0, 0) == 1
+                 && BambuSlicer.CopiesPerPlate(10, 10, 256, 256, 2, 35, 35) == 425 && BambuSlicer.CopiesPerPlate(-5, 10, 256, 256, 2, 0, 0) == 0
+                 && BambuSlicer.CopiesPerPlate(0, 10, 256, 256, 2, 0, 0) == 0);
+            True("CopyBaseName: c4.stl / part_a kept", BambuSlicer.CopyBaseName("c4.stl") == "c4.stl" && BambuSlicer.CopyBaseName("part_a") == "part_a");
+            True("ParsePlateFootprint: \"\" / {} / no bbox_objects -> null", BambuSlicer.ParsePlateFootprint("") == null && BambuSlicer.ParsePlateFootprint("{}") == null
+                 && BambuSlicer.ParsePlateFootprint("{\"other\":1}") == null && BambuSlicer.ParsePlateFootprint("not json") == null);
+            True("ProjectPlateObjects \"\" = none", BambuSlicer.ProjectPlateObjects("").Count == 0);
+
+            // RepeatResult: one plate 2270 s / 11,76 g / tower 1,7 x 3 = 6810 s, 35,28 g, 3 plates, tower 5,1
+            var one = new SliceResult { Seconds = 2270, Grams = 11.76, Plates = 1, TowerGrams = 1.7 };
+            one.PlateList.Add(new PlateInfo { Index = 1, Seconds = 2270, Grams = 11.76 });
+            var rep = BambuSlicer.RepeatResult(one, 3);
+            True("RepeatResult x 3: 6810 s, 3 plates (1, 2, 3, 1 copy each), Copies 3, PerPlate 1, multiplied", rep.Seconds == 6810 && rep.Plates == 3
+                 && rep.PlateList.Count == 3 && rep.PlateList[0].Index == 1 && rep.PlateList[2].Index == 3 && rep.PlateList[1].Copies == 1
+                 && rep.Copies == 3 && rep.PerPlate == 1 && rep.CopiesMultiplied);
+            Eq("RepeatResult x 3: 11,76 x 3 = 35,28 g", 35.28, rep.Grams);
+            Eq("RepeatResult x 3: tower 1,7 x 3 = 5,1 g", 5.1, rep.TowerGrams);
+            True("RepeatResult: one unchanged; x 1 not multiplied; null -> null", one.PlateList.Count == 1 && one.Seconds == 2270
+                 && !BambuSlicer.RepeatResult(one, 1).CopiesMultiplied && BambuSlicer.RepeatResult(null, 3) == null);
+            var two = new SliceResult { Seconds = 100, Grams = 2, Plates = 2 };
+            two.PlateList.Add(new PlateInfo { Index = 1 }); two.PlateList.Add(new PlateInfo { Index = 2 });
+            var rep2 = BambuSlicer.RepeatResult(two, 2);
+            True("RepeatResult: two-plate file x 2 = 4 plates, plate Copies 0, PerPlate 0", rep2.Plates == 4 && rep2.PlateList.Count == 4
+                 && rep2.PlateList[0].Copies == 0 && rep2.PerPlate == 0);
+            bool rr0 = false, rr501 = false;
+            try { BambuSlicer.RepeatResult(one, 0); } catch (SliceException) { rr0 = true; }
+            try { BambuSlicer.RepeatResult(one, 501); } catch (SliceException) { rr501 = true; }
+            True("RepeatResult: 0 / 501 times refused", rr0 && rr501);
+            // AddResult: 28 + 12 copies = 40, PerPlate max 28
+            var tot = new SliceResult();
+            BambuSlicer.AddResult(tot, new SliceResult { Copies = 28, PerPlate = 28, Plates = 1 }, "a");
+            BambuSlicer.AddResult(tot, new SliceResult { Copies = 12, PerPlate = 12, Plates = 1 }, "a");
+            True("AddResult: Copies 28 + 12 = 40, PerPlate 28", tot.Copies == 40 && tot.PerPlate == 28);
+            // ApplyPlateTowers: plate 2 gets 1,25 + 0,5 = 1,75; plate 1 (not in the map) stays unknown
+            var at = new SliceResult();
+            at.PlateList.Add(new PlateInfo { Index = 1 }); at.PlateList.Add(new PlateInfo { Index = 2 });
+            double before1 = at.PlateList[0].TowerGrams;
+            var tw = new GcodeTower(); tw.Grams.Add(1.25); tw.Grams.Add(0.5);
+            BambuSlicer.ApplyPlateTowers(at, new Dictionary<int, GcodeTower> { { 2, tw } });
+            True("ApplyPlateTowers: plate 2 = 1,75 g, plate 1 unchanged (-1)", Math.Abs(at.PlateList[1].TowerGrams - 1.75) < 1e-9
+                 && at.PlateList[0].TowerGrams == before1 && before1 == -1);
+            BambuSlicer.ApplyPlateTowers(null, null);
+        }
 
         static void TowerHistoryTests()
         {

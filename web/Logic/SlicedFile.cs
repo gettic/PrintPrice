@@ -17,6 +17,7 @@ namespace PrintPrice.Web
         public bool Unsliced;          // a model file that still needs slicing in Bambu Studio
         public string PictureType;     // "image/png" / "image/jpeg", null = no picture
         public bool IsGcode;
+        public PlateFootprint Footprint;   // batch-plates: a one-plate .gcode.3mf's footprint (Metadata/plate_N.json), null = none
     }
 
     /// Reads a sliced .gcode.3mf or G-code (Bambu Studio, OrcaSlicer, PrusaSlicer, Cura) in the browser, by ranges only. The parsing itself is the desktop's
@@ -41,7 +42,7 @@ namespace PrintPrice.Web
                 {
                     job.IsGcode = true;
                     await ReadGcode(src, job);
-                    if (tower && job.Result != null) await CountGcodeTower(src, job.Result);
+                    if (tower && job.Result != null) job.Footprint = await CountGcodeTower(src, job.Result);
                 }
                 else if (lower.EndsWith(".3mf")) await Read3mf(src, job, tower);
                 else if (ModelExtensions.Any(lower.EndsWith)) job.Unsliced = true;
@@ -83,10 +84,27 @@ namespace PrintPrice.Web
             var profiles = BambuSlicer.SlotStrings(parsed, "filament_settings_id");   // = ParseFilamentSlots
             foreach (var f in res.Filaments)
                 if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = BambuSlicer.StripSlotTag(profiles[f.Slot - 1]);   // the desktop's " #2" (issue #8 step 3)
-            if (tower) BambuSlicer.ApplyTower(res, await PlateTower(zip));   // issue #8 step 3; null (no plate G-code read) = unknown
+            var gfp = tower && res.PlateList.Count == 1 ? new GcodeFootprint() : null;   // batch-plates: one plate = its real footprint
+            if (tower)
+            {
+                var counted = await PlateTower(zip, gfp);
+                BambuSlicer.ApplyTower(res, counted);   // issue #8 step 3; null (no plate G-code read) = unknown
+                if (counted == null) gfp = null;          // a read that broke off: no half footprint
+            }
             SetPrinter(res, BambuSlicer.ProjectPrinterFrom(parsed, xml));
             // plate names (idea 21): missing / unreadable file = no names, never an error
             BambuSlicer.ApplyPlateNames(res, await zip.ReadText("Metadata/model_settings.config", MaxSettingsBytes));
+            // batch-plates: one plate = its footprint for the copies-per-plate estimate (missing / bad = none, never an error)
+            if (res.PlateList.Count == 1)
+            {
+                try
+                {
+                    string name = "Metadata/plate_" + Math.Max(1, res.PlateList[0].Index).ToString(CultureInfo.InvariantCulture) + ".json";
+                    if (zip.Find(name) != null) job.Footprint = BambuSlicer.ParsePlateFootprint(await zip.ReadText(name, MaxPictureBytes));
+                }
+                catch (Exception) { job.Footprint = null; }
+                job.Footprint = GcodeFootprint.Combine(job.Footprint, gfp == null ? null : gfp.Result());   // the JSON box is the first layer only
+            }
             string pic = BambuSlicer.PickPictureEntry(zip.Names);
             if (pic != null)
             {
@@ -135,18 +153,22 @@ namespace PrintPrice.Web
         /// Biggest G-code (or compressed plate G-code) read for the count; bigger = unknown (keeps the read time sane).
         public const long MaxTowerBytes = 512L * 1048576;
 
-        static async Task CountGcodeTower(IRangeSource src, SliceResult res)
+        /// Also the print's footprint (batch-plates, GcodeFootprint; null = none / couldn't read).
+        static async Task<PlateFootprint> CountGcodeTower(IRangeSource src, SliceResult res)
         {
             try
             {
-                if (src.Length > MaxTowerBytes) return;
-                BambuSlicer.ApplyTower(res, await CountLines(new ChunkStream(src, 0, src.Length)));
+                if (src.Length > MaxTowerBytes) return null;
+                var fp = new GcodeFootprint();
+                BambuSlicer.ApplyTower(res, await CountLines(new ChunkStream(src, 0, src.Length), fp));
+                return fp.Result();
             }
-            catch (Exception) { }
+            catch (Exception) { return null; }
         }
 
-        /// Every Metadata/plate_N.gcode's tower, summed; null = no plate G-code, or one couldn't be read.
-        static async Task<GcodeTower> PlateTower(ZipRanges zip)
+        /// Every Metadata/plate_N.gcode's tower, summed; null = no plate G-code, or one couldn't be read. footprint (one-plate
+        /// files) is fed the plate's lines in the same pass.
+        static async Task<GcodeTower> PlateTower(ZipRanges zip, GcodeFootprint footprint = null)
         {
             try
             {
@@ -157,7 +179,7 @@ namespace PrintPrice.Web
                         || !e.Name.EndsWith(".gcode", StringComparison.OrdinalIgnoreCase)) continue;
                     var s = await zip.OpenStream(e.Name, MaxTowerBytes);
                     if (s == null) return null;
-                    var plate = await CountLines(s);
+                    var plate = await CountLines(s, footprint);
                     if (total == null) total = new GcodeTower();
                     BambuSlicer.AddTower(total, plate);
                 }
@@ -168,13 +190,14 @@ namespace PrintPrice.Web
 
         /// A stream's lines (UTF-8, BOM skipped; read with ReadLineAsync so each piece is fetched when needed) fed to one
         /// TowerCounter; disposes the stream. Throws when the stream can't be read (callers: unknown).
-        static async Task<GcodeTower> CountLines(System.IO.Stream s)
+        static async Task<GcodeTower> CountLines(System.IO.Stream s, GcodeFootprint footprint = null)
         {
             var c = new BambuSlicer.TowerCounter();
             using (var sr = new System.IO.StreamReader(s, Encoding.UTF8, true, 65536))
             {
                 string line;
-                while ((line = await sr.ReadLineAsync()) != null) c.Feed(line);
+                if (footprint == null) while ((line = await sr.ReadLineAsync()) != null) c.Feed(line);
+                else while ((line = await sr.ReadLineAsync()) != null) { c.Feed(line); footprint.Feed(line); }   // batch-plates: same pass
             }
             return c.Result();
         }

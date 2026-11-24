@@ -62,6 +62,15 @@ namespace PrintPrice
         // (default; the app's own breakdown always shows it), 1 = on. Any other value reads as 0.
         public double QuoteShowTower = 0;
 
+        // Batch & plates (issue #9/#10): kr. added for every EXTRA build plate of a job (plates - 1; INI "PlateChangeFee"):
+        // taking the prints off, cleaning, starting again. Not marked up, both prices, before minimum and rounding
+        // (Pricing.Calculate). 0 = off (default: today's prices). Negative / unreadable reads as 0.
+        public double PlateChangeFee = 0;
+
+        // Batch & plates: show the price per piece ("4 pcs · 18,18 kr. each") on quotes / invoices / Copy text
+        // (INI "QuoteShowUnitPrice"): 1 = on (default), 0 = off. Any other value reads as 1.
+        public double QuoteShowUnitPrice = 1;
+
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
         public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
@@ -521,6 +530,8 @@ namespace PrintPrice
             d["InvoiceCopies"] = InvoiceCopies;
             d["PrimeTower"] = PrimeTower;
             d["QuoteShowTower"] = QuoteShowTower;
+            d["PlateChangeFee"] = PlateChangeFee;
+            d["QuoteShowUnitPrice"] = QuoteShowUnitPrice;
             return d;
         }
 
@@ -579,6 +590,8 @@ namespace PrintPrice
                 case "InvoiceCopies": InvoiceCopies = v == 0 ? 0 : 1; break;
                 case "PrimeTower": PrimeTower = v == 0 ? 0 : 1; break;
                 case "QuoteShowTower": QuoteShowTower = v == 1 ? 1 : 0; break;
+                case "PlateChangeFee": PlateChangeFee = v >= 0 && v < Num.MaxValue ? v : 0; break;
+                case "QuoteShowUnitPrice": QuoteShowUnitPrice = v == 0 ? 0 : 1; break;
             }
         }
 

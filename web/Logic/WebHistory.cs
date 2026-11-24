@@ -215,7 +215,18 @@ namespace PrintPrice.Web
 
         /// The model's name, else the file name of the link/file, else "(no name)"; a scaled job gets " (150 %)" /
         /// " (150 × 100 × 50 %)" (issue #8, = HistoryForm.ModelText: History.WithScale).
-        public static string ModelText(QuoteRecord r) { return History.WithScale(History.ModelText(r), r); }
+        /// Batch-plates: 2+ copies get "12 × " in front (History.WithCopies).
+        public static string ModelText(QuoteRecord r) { return History.WithCopies(History.WithScale(History.ModelText(r), r), r); }
+
+        /// "12 × " for 2+ copies of one file, else "" (the list keeps it whole in front of the name, as the scale part behind it).
+        /// A job of several files counts per file inside the name (NameText), so no prefix.
+        public static string CopiesPart(QuoteRecord r) { return SeveralFiles(r) ? "" : History.CopiesName("", History.QuantityOf(r)); }
+
+        /// The list's name part without the scale: several files = History.WithCopies' per-file counts ("30 × a.stl, 30 ×
+        /// b.stl"), else the plain name (CopiesPart goes in front).
+        public static string NameText(QuoteRecord r) { return SeveralFiles(r) ? History.WithCopies(History.ModelText(r), r) : History.ModelText(r); }
+
+        static bool SeveralFiles(QuoteRecord r) { var p = History.PartsOf(r); return p != null && p.Count >= 2; }
 
         /// The name without the scale (the list cuts this part with … and keeps ScalePart whole, as HistoryViews).
         public static string BaseModelText(QuoteRecord r) { return History.ModelText(r); }

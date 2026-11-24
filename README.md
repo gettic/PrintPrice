@@ -62,6 +62,15 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 - A file sliced for another of your printers shows a warning and a button to switch printer. Unsupported printers are refused, like in the app.
 - The prime tower grams of a file are shown under the colour rows ("Prime tower 1,7 g"), and the colour-change grams then leave the tower out. **Settings → Quote & invoice** has the same **Show prime tower grams on quotes and invoices** tick (off by default) for quotes, invoices and combined bills. The site can't slice, so it has no Prime tower On/Off choice. Big G-code files use much less memory for the tower count and are read faster.
 
+**Copies:** the **Copies** row under the inputs prices several copies of the same print. The site can't slice, so it works out the plates itself.
+- Type how many copies and how many fit **per plate**. For a one-plate Bambu Studio file the site estimates this from the model's size on the plate ("≈ 28 fit (from the file)").
+- Time and grams in the boxes are then for one copy, marked "(1 copy)". The line under the row shows the totals, for example "In all: ≈ 18 h 0 m · 240 g on 3 plates". Totals with more than one copy on a plate are an estimate, marked "≈". For exact numbers, arrange the copies in Bambu Studio and load the sliced file.
+- A sliced file that already holds the copies is read as it is, for example "100 pcs on 4 plates (from the file)".
+- A file with 2 or more plates is printed once per copy.
+- The prime tower and colour changes count once per plate, not per copy.
+- The price boxes show the price per piece, for example "12 pcs · 8,36 kr. each". History shows "12 × Name".
+- **Settings → Prices** has the **Plate change fee** and **Settings → Quote & invoice** has **Show the price per piece**, as in the app (see [Copies](#copies)).
+
 **Live electricity price:** under **Electricity price**, the **Update** button fetches the current Danish price, with a line that shows what it is made of. **Settings → Electricity** has the price area (DK1 or DK2), tariffs and fees, 25 % VAT, and **Fetch the live price when the page opens**. If the price service is busy or can't be reached, the page keeps the price you typed.
 - It always uses the price for the current time slot, for example "Live DK1 15:00".
 - If only a saved copy is available, or the prices were fetched over about a day ago, the line adds "(price from <time or date>)".
@@ -88,6 +97,7 @@ There is also a calculator in the browser: [gettic.github.io/PrintPrice](https:/
 **Quote and invoice:** **Show quote…** on the calculator, and **Quote…** and **Invoice…** on the History tab, open the A4 page, like the app's. A saved quote shows the same rows as when it was saved.
 - **On a phone** the quote or invoice opens as an easy-to-read page, one column. **Show the A4 page** switches to the printed page, and **Show for reading** switches back.
 - A scaled job shows its scale in History and on quotes and invoices, for example "3D Benchy (150 × 100 × 50 %)".
+- A job with copies shows "12 × Name", a **Quantity** row and "on 3 plates". A combined bill gets **Prints**, **Plates** and **In all** rows.
 - Type the customer's name, choose the **Customers** or **Friends & family** price, and choose a **Dark** or **Light** look.
 - **Print / PDF…** opens the browser's print window. Choose "Save as PDF" there. It is always one light A4 page. **Copy text** copies the quote as text. **Save to history** saves it.
 - An invoice needs the customer's name. It gets its random invoice number (for example 2026-48213) when it is made, and ticks **Printed**. After that it keeps its number and the customer's name (the name box is then read-only). A made invoice's price is locked ("Price on the invoice (locked)"), and saving its quote from History doesn't change it. In History, **For** can't be changed on invoiced rows. A single-print invoice shows "Bill to" as its top details line.
@@ -114,10 +124,11 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Other sites** (Thingiverse, Cults3D…) block automatic downloads. Download the STL/3MF yourself and drop it on the window instead.
   - **Several files and colours:** pick 2 or more files on a Printables model, or drop or load 2 or more model files, and the **Choose files and colours** window opens.
     - Tick the files to print. Each plain model file gets a filament and a colour: click the colour swatch for a menu of 13 filament colours. By default every file gets the filament chosen in Settings.
+    - The **×** box beside each file sets how many copies of it to print (1 by default). As many as fit go on each build plate. Up to 500 copies in all; above that the window shows the total and won't go on.
     - Files with the same filament and colour count as one colour row. A `.3mf` or G-code keeps the colours in the file ("colours from the file").
-    - **Print together on one plate (AMS lite)** is off by default. It needs 2–4 different colours. It is much slower and uses more filament for colour changes: in tests about 4× the time and 3.7× the filament.
+    - **Print together on one plate (AMS lite)** is off by default. It needs 2–4 different colours. It is much slower and uses more filament for colour changes: in tests about 4× the time and 3.7× the filament. It can't be used with more than 1 copy of a file.
     - If the files don't fit on one plate together, or slicing them together fails, each file is sliced on its own plate instead. A yellow note says "Sliced one by one instead.", with the reason in its tooltip.
-  - **Plates:** when the price covers 2 or more plates (a file with several plates, or several files sliced one by one), a link under the result says "The price is for both plates – show them" (or "all N plates" for 3 or more). It opens a list with one line per plate: name, time in h and m, grams and the number of objects. Point at a line to see the object names.
+  - **Plates:** when the price covers 2 or more plates (a file with several plates, or several files sliced one by one), a link under the result says "The price is for both plates – show them" (or "all N plates" for 3 or more). It opens a list with one line per plate: name, time in h and m, grams and the number of objects. Point at a line to see the object names. With copies, each line shows how many copies are on that plate (for example "28 copies").
   - **Already-sliced `.gcode.3mf` files** are read instantly, without slicing again. A file sliced for another of the supported printers is priced, with a warning.
   - **G-code from other slicers:** drop a `.gcode` on the window, or pick it with **Load file…** (one G-code at a time). Files from Bambu Studio, OrcaSlicer, PrusaSlicer (and SuperSlicer) and Cura are read for print time, grams, and colours and filament types where the file has them. Cura gives no colours.
     - A file from another slicer than Bambu Studio shows a grey note that the time is that slicer's estimate. Grams worked out from the filament length show as an estimate, for example "≈ 11,7 g".
@@ -144,6 +155,22 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
 
 <p align="center"><img src="assets/screenshot-scale.png" width="360" alt="Screenshot of the Scale model window"></p>
 
+<a id="copies"></a>
+- **Copies:** after **Get time & weight**, a **1 copy…** link under the result (beside **Scale…**) opens the **Copies** window. Type how many copies you want.
+  - A model file is sliced again in Bambu Studio, with as many copies as fit on each build plate. For example 40 Benchys on an A1 are 2 plates (28 + 12). With several files the number is for each file (set different numbers in the file picker's **×** boxes).
+  - A sliced `.gcode.3mf` or G-code can't be re-arranged: it is printed that many times, one after the other.
+  - Up to 500 copies in all. Above 200, the app asks first, because Bambu Studio may take several minutes. You can cancel while it slices.
+  - A job typed by hand shows "Typed by hand: time and weight are for one copy." with the **1 copy…** link. Its window also asks for the number of build plates. The link then says, for example, "4 copies on 2 plates…".
+  - Time, weight and prices are for all copies together. The prime tower and colour changes count once per plate.
+  - After **Apply** the link shows the number, for example "40 copies…". The result line shows `40 × "3D Benchy"`, and the price boxes show "40 pcs · 5,31 kr. each" (the markup text moves to their tooltip).
+  - History, quotes and invoices show "40 × 3D Benchy" (several files: "30 × a.stl, 30 × b.stl").
+  - Quotes and invoices get a **Quantity** row, "on 2 plates" after the print time and the price per piece next to the total. A combined bill gets **Prints** ("3 models, 45 pcs"), **Plates** and **In all** rows.
+  - **Plate change fee** (Settings → Prices, 0 = off) adds that many kr. for every plate after the first, to both prices. It is not marked up. When it is used, quotes and invoices show a **Plate changes** row, for example "2 changes".
+  - **Show the price per piece** (Settings → Quote & invoice, on by default) adds the "each" price to quotes, invoices and **Copy text**.
+  - **Open again** and **Repeat print** keep the copies.
+
+<p align="center"><img src="assets/screenshot-copies.png" width="360" alt="Screenshot of the Copies window"></p>
+
 - **Open in Studio:** after a successful slice, the **Get time & weight** button becomes **Open in Studio**. It opens the sliced file in Bambu Studio's Prepare tab with the same printer profiles. Click **Slice plate** there before you print. If you used several model files, the first one opens, or the one shared plate when they were printed together. An already-sliced `.gcode.3mf` opens your own file. In a multi-colour job Bambu Studio shows the filament names with a " #2" tag (for example "Bambu PLA Basic @BBL A1 #2"). The prime tower is kept. Editing the link, **Clear**, **Load file…**, opening a quote from History or changing the slicing settings turns the button back into **Get time & weight**. Enter in the link box does what the button shows.
 - **Material rows with remembered prices:** the Cost breakdown starts with one material row per colour (one row for a one-colour print). Each row has a colour swatch, a drop-down with the full filament name (Bambu Studio's filament profiles for the printer in use), the grams, and a kr/kg box. Picking another material changes only that row and fills in its last kr/kg, with no new slicing. The app remembers one kr/kg price per filament (for example Bambu PLA Matte = 200). A filament you have never priced uses the last filament price. The filament chosen in Settings is the default for new slices.
 - **Several printers:** add a Bambu Lab A1, A1 mini or P1S, as many as you like. Each printer has its own name, nozzle, print profile, build plate, power and wear rate. Markups, minimum price, failed prints, electricity and filament prices are the same for all printers.
@@ -159,7 +186,7 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
   - **Abrasive filaments:** the app knows which filaments are abrasive (CF, GF, Glow…) and warns if one is used on a stainless steel nozzle.
 - **Failed prints:** optional. Set a % in Settings and material and power are raised by it for failed prints and reprints, before the markup. The default is 0 % (off). When it is above 0, the Cost breakdown shows a "Failed prints" line.
 - **Failed prints payback:** on by default. In the price history, tick **Failed** on a saved quote. With **Earn back failed prints** on in Settings, new quotes get a payback of 10 % (**% per quote**) of material + power until the failed print's material, power and wear are made back. It never adds more than what is left. It is shown as **Failed prints payback** in the Cost breakdown, is not marked up, and is added after the minimum price and before rounding. **Paid by** is **Customers only** (default; only quotes saved For = Customer count) or **Both prices**. Settings shows **Not made back yet**. A saved quote counts as sold, so delete quotes you didn't sell.
-- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, **Slicing**: prime tower and its grams on quotes, invoice due days, MobilePay, bank, "Main window makes invoices, not quotes", keep a copy of every invoice PDF) and **App** (language, update check, Bambu Studio path, backup, and **Run setup again…**).
+- **Configurable:** Settings has five tabs: **Prices** (markups, minimum price, rounding, plate change fee, failed prints), **Printer** (which printer, name, nozzle, print profile, filament, build plate, power, wear rate), **Electricity** (price area, tariffs and fees, VAT, live price at start), **Quote & invoice** (name on the quote, valid days, price per piece, **Slicing**: prime tower and its grams on quotes, invoice due days, MobilePay, bank, "Main window makes invoices, not quotes", keep a copy of every invoice PDF) and **App** (language, update check, Bambu Studio path, backup, and **Run setup again…**).
   - On the **Printer** tab, the **Printer** drop-down picks which printer you edit; the one in use is marked "(in use)". **Add…** adds an A1, A1 mini or P1S with that model's defaults. **Remove** removes the printer shown (only when you have 2 or more).
   - Each printer's **Name** is shown on the printer card and the quote. Left empty, the model name is used. The filament profile is the same for all printers.
 - **English or Danish:** under **Sprog / Language** in Settings choose Automatic (Danish if Windows is Danish, otherwise English), English or Dansk. It takes effect after a restart; **Restart now** does it at once. The whole program and the copied quote are translated.
@@ -218,7 +245,7 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
 - The prints are shown side by side, up to 3 per row (4 prints are always 4 cards in a row), each with its picture, print time, weight and price. Then comes one price breakdown for the whole bill, and the total.
 - **Bill to** and **Prints** are at the top. The printer and plate, when all the prints share them, sit beside the **Price breakdown** heading.
 - The print status box covers all the prints ("Mixed" when they differ).
-- The minimum price counts once for the whole bill. If the prints together cost less, the difference is shared over the prints' prices and is part of "Work & handling". The saved prices of the prints then add up to the bill's total.
+- The minimum price counts once for the whole bill. If the prints together cost less, the difference is shared over the prints' prices and is part of "Work & handling". The saved prices of the prints then add up to the bill's total. A job with copies is one print here, and its minimum price also counts once for all its copies.
 - An invoice gets one invoice number for all the prints, and ticks **Printed** on all of them. **Invoice…** on one print of it opens the whole invoice.
 - Failed prints are left off, with a line that says so. Prints already on another invoice are refused, with a line that says which invoice.
 - A long bill goes onto several A4 pages ("Page 1 of 2"). Later pages say whose bill they are. The breakdown, total and payment stay together on the last page. When they don't fit under the prints, a line says "Breakdown and total: next page →". Bills of 3–4 prints fit one A4 page.
@@ -240,10 +267,10 @@ The Windows app isn't tested under Wine or Proton. Use the website instead, in a
 Material   = grams / 1000 × filament DKK/kg
 Power      = hours × printer kW × electricity DKK/kWh
 Base       = (Material + Power) × (1 + failed prints %)
-Friends    = Base × (1 + friends markup) + hours × machine-time rate
-Customers  = Base × (1 + customer markup) + hours × machine-time rate   (at least the minimum price)
+Friends    = Base × (1 + friends markup) + hours × machine-time rate + plate change fee
+Customers  = Base × (1 + customer markup) + hours × machine-time rate + plate change fee   (at least the minimum price)
 ```
-The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr. Failed prints are 0 % by default and do not affect the machine-time rate. The failed prints payback (on by default) is added to the price after the minimum price and before rounding.
+The machine-time rate is added to both prices and is not marked up. The minimum price is for customers only. Both prices can optionally be rounded up to the nearest N kr. Failed prints are 0 % by default and do not affect the machine-time rate. The failed prints payback (on by default) is added to the price after the minimum price and before rounding. The plate change fee is (plates − 1) × the fee from Settings (0 by default), in both prices and not marked up. For several copies, the hours and grams are for all copies, so the minimum price counts once for the whole job.
 
 **Machine-time rate** (kr per print hour, for the printer in use):
 
@@ -273,6 +300,7 @@ The default setup is a 0.4 stainless nozzle, PLA and the smooth PEI plate. All o
 | Markups | 25 % friends & family, 75 % customers |
 | Failed prints | 0 % (off; % of material + power) |
 | Minimum price | 50 kr. (customers only) |
+| Plate change fee | 0 kr. (off) |
 | Failed prints payback | On; 10 % per quote; paid by customers only |
 | Quote | No name on a new install (set it in the setup or Settings), valid 14 days, customer price, dark picture |
 | Invoice | Due after 14 days; MobilePay and bank empty; keep a copy of every invoice PDF on |
@@ -281,6 +309,7 @@ The default setup is a 0.4 stainless nozzle, PLA and the smooth PEI plate. All o
 | Slicing | 0.4 mm nozzle, 0.16mm Optimal, Bambu PLA Matte, Smooth PEI plate |
 | Prime tower | On (2+ colours) |
 | Prime tower grams on quotes and invoices | Off |
+| Price per piece on quotes and invoices | On |
 | Electricity | DK1, 0,55 kr/kWh fees on top of spot, 25 % VAT |
 
 Settings, including your printers and the remembered kr/kg price per filament, are saved in `%APPDATA%\PrintPrice\settings.ini`.
@@ -343,6 +372,7 @@ For testing, `PrintPrice.exe --settings "<folder>" [--hidden | --minimized]` run
 | `src/History.cs` | Saved quotes (price history) |
 | `src/HistoryForm.cs`, `src/HistoryViews.cs`, `src/HistoryCustomer.cs`, `src/HistoryInvoices.cs` | The History window; its pictures, List / Medium / Large views, Customer column and Invoices window |
 | `src/ScaleForm.cs` | The Scale model window |
+| `src/CopiesForm.cs` | The Copies window |
 | `src/Backup.cs`, `src/BackupForm.cs` | Backup codes and the Backup window |
 | `src/OnlineBackup.cs` | Online backup: encrypt, upload, download, delete |
 | `worker/` | The Cloudflare relay: online backup and the website's live electricity price |

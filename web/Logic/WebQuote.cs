@@ -26,6 +26,11 @@ namespace PrintPrice.Web
             public List<string> MaterialNames = new List<string>();
             public List<string> MaterialColours = new List<string>();
             public QuoteBreakdown Breakdown;
+            // batch-plates (= QuoteData): Quantity 2+ = a "Quantity" details row, Print time "… on 2 plates", EachLine
+            // ("4 pcs · 18,18 kr. each", "" = off) before the total box's small line when it fits
+            public int Quantity = 1, Plates = 1;
+            public string EachLine = "";
+            public string GroupPlates = "";   // a combined bill's "Plates  5" summary row ("" = none; QuoteRows.GroupPlates)
             public bool Invoice;
             public string InvoiceNo = "", PayMobilePay = "", PayBank = "";
             public DateTime PaidAt = DateTime.MinValue;   // paid-tick: a made invoice marked paid (MinValue = not paid)
@@ -76,6 +81,8 @@ namespace PrintPrice.Web
                 TowerGrams = j.Colours != null && s.QuoteShowTower == 1 ? j.TowerGrams : -1,   // issue #8 step 3
                 Breakdown = Pricing.Breakdown(j.Input, s, friends, wear)
             };
+            SetCopies(d, j.Input.Quantity, j.Input.Plates, s);
+            d.Model = History.CopiesName(d.Model, d.Quantity);   // "4 × 3D Benchy" (= MainForm.QuoteModelName)
             var used = j.Colours ?? (j.Single != null ? new List<FilamentUse> { j.Single } : null);
             if (used != null)
                 foreach (var f in used)
@@ -132,6 +139,7 @@ namespace PrintPrice.Web
                 // the saved price, with the saved wear split as sub-rows (older records: one wear line)
                 Breakdown = History.RecordBreakdown(r, s, friends)
             };
+            SetCopies(d, History.QuantityOf(r), History.PlatesOf(r), s);
             FillRecordMaterial(d, r, s);
             if (invoice)
             {
@@ -157,7 +165,15 @@ namespace PrintPrice.Web
         /// "3D Benchy (150 × 100 × 50 %)" when scaled (issue #8, = MainForm.RecordModelName).
         public static string RecordModelName(QuoteRecord r)
         {
-            return r == null ? "" : History.WithScale(QuoteRows.ModelName(r.Model), r);
+            return r == null ? "" : History.WithCopies(History.WithScale(QuoteRows.ModelName(r.Model), r), r);   // batch-plates: "4 × …"
+        }
+
+        /// Batch-plates (= MainForm.BuildQuote / BuildRecordQuote): copies, plates and the price-per-piece line.
+        static void SetCopies(Sheet d, int quantity, int plates, AppSettings s)
+        {
+            d.Quantity = Math.Max(1, quantity);
+            d.Plates = Math.Max(1, plates);
+            d.EachLine = QuoteRows.EachLine(d.Breakdown.Total, d.Quantity, s == null || s.QuoteShowUnitPrice != 0);
         }
 
         /// A saved quote's material names / colour dots / Material line (MainForm.FillRecordMaterial; shared by the single
@@ -358,22 +374,47 @@ namespace PrintPrice.Web
         /// then Print time, Weight, Material.
         public static List<string[]> Details(Sheet d)
         {
-            if (d.Invoice)
-                return new List<string[]>
+            var list = d.Invoice
+                ? new List<string[]>
                 {
                     new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" },
                     new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
                     new[] { L.S("Weight", "Vægt"), d.Weight },
                     new[] { L.S("Material", "Materiale"), d.Material },
+                }
+                : new List<string[]>
+                {
+                    new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
+                    new[] { L.S("Weight", "Vægt"), d.Weight },
+                    new[] { L.S("Printer", "Printer"), d.Printer },
+                    new[] { L.S("Material", "Materiale"), d.Material },
                 };
-            return new List<string[]>
+            if (d.Quantity > 1)
             {
-                new[] { L.S("Print time", "Printtid"), QuoteRows.Time(d.Hours, d.Minutes) },
-                new[] { L.S("Weight", "Vægt"), d.Weight },
-                new[] { L.S("Printer", "Printer"), d.Printer },
-                new[] { L.S("Material", "Materiale"), d.Material },
-            };
+                // batch-plates (= QuotePage): "Quantity  4 pcs" first (after "Bill to"), Print time "… on 2 plates"; the price
+                // per piece is the Quantity value when it doesn't fit on the total box's small line
+                int timeAt = d.Invoice ? 1 : 0;
+                list[timeAt] = new[] { list[timeAt][0], QuoteRows.TimeOnPlates(d.Hours, d.Minutes, d.Plates) };
+                string qty = EachTotalNote(d) == null && !string.IsNullOrEmpty(d.EachLine) ? d.EachLine : History.PiecesText(d.Quantity);
+                list.Insert(timeAt, new[] { History.QuantityLabel(), qty });
+            }
+            return list;
         }
+
+        /// Batch-plates (= QuotePage): the total box's small line with the price per piece in front ("4 pcs · 18,18 kr. each
+        /// · shipping not included") when that fits left of the total (estimated widths); null = it doesn't / no EachLine.
+        public static string EachTotalNote(Sheet d)
+        {
+            if (d == null || string.IsNullOrEmpty(d.EachLine) || IsGroup(d)) return null;
+            string small = TotalNote(d);
+            bool lower = small.Length > 0 && d.PaidAt == DateTime.MinValue;
+            string with = d.EachLine + (small.Length > 0 ? " · " + (lower ? char.ToLower(small[0]) + small.Substring(1) : small) : "");
+            double room = 900 - 80 - 30 - Num.Kr(d.Breakdown.Total).Length * 56 * 0.6;
+            return with.Length * 16 * 0.52 <= room ? with : null;
+        }
+
+        /// The total box's small line: EachTotalNote, else TotalNote.
+        public static string TotalSmallLine(Sheet d) { return EachTotalNote(d) ?? TotalNote(d); }
 
         public static string TotalNote(Sheet d)
         {
@@ -525,7 +566,7 @@ namespace PrintPrice.Web
             it.Add(new Item { Kind = "round", X = L0, Y = y, W = R0 - L0, H = 110, R = 14, Role = "totalback", Role2 = "totalline" });
             it.Add(new Item { Kind = "rect", X = L0, Y = y + 12, W = 8, H = 86, Role = "stripe" });
             T(L.S("Total", "I alt"), 26, true, "ink", 80, y + 22, 0, "l");
-            T(TotalNote(d), 16, false, "muted", 80, y + 62, 0, "l");
+            T(TotalSmallLine(d), 16, false, "muted", 80, y + 62, 0, "l");
             T(Num.Kr(d.Breakdown.Total), 56, true, "total", 420, y + 14, 510, "r");
             y += 140;
 

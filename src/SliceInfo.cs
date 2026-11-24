@@ -55,6 +55,32 @@ namespace PrintPrice
         // and its print time (inside Seconds; only from our own slicing's result.json). -1 = unknown, 0 = no tower.
         public double TowerGrams = -1;
         public double TowerSeconds = -1;
+        // batch-plates (issue #9/#10): Copies = pieces in this result (0 = not a batch slice = 1 piece), PerPlate = most
+        // copies on one plate (0 = unknown). CopiesMultiplied = a pre-sliced file / G-code (or a multi-plate project) that
+        // can't be re-arranged: its numbers are the file's x Copies (BambuSlicer.RepeatResult), exact as printed.
+        public int Copies;
+        public int PerPlate;
+        public bool CopiesMultiplied;
+    }
+
+    /// Batch-plates: one model file of a batch (BambuSlicer.SliceBatch). Slot = 1-based colour (index into the colours
+    /// list; plain files only, ignored for .3mf / G-code). Copies 1..BambuSlicer.MaxCopies.
+    public sealed class BatchItem
+    {
+        public string Name = "";   // display name
+        public string Path = "";   // file on disk
+        public int Copies = 1;
+        public int Slot = 1;
+    }
+
+    /// Batch-plates: one copy's footprint on a plate: the box around every object (the wipe tower left out) and the
+    /// tower's box (0 = no tower). From BambuSlicer.ParsePlateFootprint = FIRST LAYER only (see there) or the website's
+    /// GcodeFootprint (whole height).
+    public sealed class PlateFootprint
+    {
+        public double Width, Depth;             // mm, X / Y of all objects together
+        public double TowerWidth, TowerDepth;   // mm, 0 = none
+        public int Objects;                     // objects counted (tower left out)
     }
 
     /// Issue #8 step 2: one job's scale per axis, in percent (100 = as the file is). Uniform (X = Y = Z) slices with
@@ -136,6 +162,11 @@ namespace PrintPrice
         public double Grams;              // plate "weight" (else the sum of its filaments)
         public List<string> Objects = new List<string>();   // <object name=…> in file order, skipped="true" left out
         public List<FilamentUse> Filaments = new List<FilamentUse>();   // this plate's slots (Slot, Colour, Type, Grams, Metres)
+        // batch-plates: copies of the batch on this plate (0 = not a batch); this plate's prime tower (inside Grams /
+        // Seconds; -1 = unknown, 0 = none; from plate_N.gcode / result.json of our own slices)
+        public int Copies;
+        public double TowerGrams = -1;
+        public double TowerSeconds = -1;
     }
 
     /// The user's choice for one colour (idea 21; item i of the list = filament slot i+1).
@@ -569,13 +600,18 @@ namespace PrintPrice
             if (r.ColourChangeHours >= 0) total.ColourChangeHours = Math.Max(0, total.ColourChangeHours) + r.ColourChangeHours;
             if (r.TowerGrams >= 0) total.TowerGrams = Math.Max(0, total.TowerGrams) + r.TowerGrams;
             if (r.TowerSeconds >= 0) total.TowerSeconds = Math.Max(0, total.TowerSeconds) + r.TowerSeconds;
+            // batch-plates: pieces add up (SliceBatch sets Copies on every part), most per plate kept
+            if (r.Copies > 0) total.Copies += r.Copies;
+            if (r.PerPlate > total.PerPlate) total.PerPlate = r.PerPlate;
+            if (r.CopiesMultiplied) total.CopiesMultiplied = true;
             if (r.PlateList == null) return;
             foreach (var p in r.PlateList)
             {
                 if (p == null) continue;
                 var c = new PlateInfo { Index = p.Index, Name = p.Name ?? "", File = string.IsNullOrEmpty(p.File) ? (fileName ?? "") : p.File,
                                         FilePlates = p.FilePlates > 0 ? p.FilePlates : r.PlateList.Count,
-                                        Seconds = p.Seconds, Grams = p.Grams, Objects = new List<string>(p.Objects ?? new List<string>()) };
+                                        Seconds = p.Seconds, Grams = p.Grams, Objects = new List<string>(p.Objects ?? new List<string>()),
+                                        Copies = p.Copies, TowerGrams = p.TowerGrams, TowerSeconds = p.TowerSeconds };
                 if (p.Filaments != null)
                     foreach (var f in p.Filaments)
                         if (f != null)
@@ -590,6 +626,278 @@ namespace PrintPrice
         public static void AddResult(SliceResult total, SliceResult r, string fileName)
         {
             AddResult(total, r, fileName, 0);
+        }
+
+        // ---------- batch plates (issue #9 / #10, plans\batch-plates) ----------
+        // Bambu Studio's CLI: plain files take "--clone-objects n1,n2" (total copies per file; with --arrange 1 they
+        // spill onto extra plates by themselves); a .3mf can't be cloned ("can not load 3mf when set ... clone_objects")
+        // but takes "--repetitions N --slice <plate>", which fills that ONE plate with up to N copies of the plate's
+        // contents. Copies are named "<name>_1", "<name>_2"... in slice_info / plate_N.json. Arrange leaves ~2 mm between
+        // objects (measured: 28 Benchys = the 4 x 7 grid below on the A1).
+
+        /// Most copies of one model (and of one SliceBatch call, all files together).
+        public const int MaxCopies = 500;
+        /// Above this many copies the window asks first (slicing takes minutes: ~1 s per Benchy-sized copy).
+        public const int WarnCopies = 200;
+        /// Gap Bambu Studio's arrange leaves between objects, mm (used by the footprint estimate).
+        public const double ArrangeGapMm = 2;
+
+        /// 1..MaxCopies.
+        public static bool CopiesInRange(int copies)
+        {
+            return copies >= 1 && copies <= MaxCopies;
+        }
+
+        /// "Copies must be 1 to 500." (DA "Antal skal være 1 til 500.")
+        public static string CopiesRangeText()
+        {
+            return L.F("Copies must be 1 to {0}.", "Antal skal være 1 til {0}.", MaxCopies);
+        }
+
+        /// Pure: "--clone-objects", "4,30" (one total count per plain model file, invariant digits). Any count outside
+        /// 1..MaxCopies, or their sum over MaxCopies -> SliceException(CopiesRangeText); null / empty -> ArgumentException.
+        internal static List<string> CloneArgs(IList<int> counts)
+        {
+            if (counts == null || counts.Count == 0) throw new ArgumentException("counts");
+            long sum = 0;
+            foreach (int c in counts)
+            {
+                if (!CopiesInRange(c)) throw new SliceException(CopiesRangeText());
+                sum += c;
+            }
+            if (sum > MaxCopies) throw new SliceException(CopiesRangeText());
+            return new List<string> { "--clone-objects", string.Join(",", counts.Select(x => x.ToString(CultureInfo.InvariantCulture))) };
+        }
+
+        /// Pure: "--repetitions", "N" for a project's plate (the run also needs "--slice <plate>", not 0). N outside
+        /// 2..MaxCopies -> SliceException(CopiesRangeText) (1 copy is a normal slice).
+        internal static List<string> RepetitionArgs(int copies)
+        {
+            if (copies < 2 || copies > MaxCopies) throw new SliceException(CopiesRangeText());
+            return new List<string> { "--repetitions", copies.ToString(CultureInfo.InvariantCulture) };
+        }
+
+        /// Pure: plates for `copies` when `perPlate` fit on one: returns the plate count; fullPlates = plates holding
+        /// perPlate, lastPlate = copies on the last part-full plate (0 = every plate is full). copies <= 0 -> 0 plates.
+        /// perPlate <= 0 -> ArgumentOutOfRangeException. (40, 28) -> 2 (1 full + 12); (56, 28) -> 2 (2 + 0).
+        public static int BatchPlates(int copies, int perPlate, out int fullPlates, out int lastPlate)
+        {
+            if (perPlate <= 0) throw new ArgumentOutOfRangeException("perPlate");
+            fullPlates = 0; lastPlate = 0;
+            if (copies <= 0) return 0;
+            fullPlates = copies / perPlate;
+            lastPlate = copies % perPlate;
+            return fullPlates + (lastPlate > 0 ? 1 : 0);
+        }
+
+        /// BatchPlates without the split.
+        public static int BatchPlates(int copies, int perPlate)
+        {
+            int full, last;
+            return BatchPlates(copies, perPlate, out full, out last);
+        }
+
+        /// Pure: copies on a sliced plate from its object count and the objects one copy has (a project's plate can hold
+        /// several parts that are repeated as a set): 294 objects / 2 = 147. objectsPerCopy <= 0 counts as 1; 0 objects = 0.
+        public static int CopiesPerPlate(int objectsOnPlate, int objectsPerCopy)
+        {
+            if (objectsOnPlate <= 0) return 0;
+            return Math.Max(1, objectsOnPlate / Math.Max(1, objectsPerCopy));
+        }
+
+        /// Pure estimate (no slicer: website, G-code): how many copies of a width x depth footprint fit on a bedX x bedY
+        /// plate in a straight grid with `gap` mm between them, the better of the two turns (0° / 90°). A prime tower
+        /// (towerWidth x towerDepth, 0 = none) takes the grid cells it covers in one corner. 0 = doesn't fit at all; else
+        /// at least 1. Under-counts odd shapes (Bambu's arrange nests and turns them: clips 45 here vs 53 sliced), right for
+        /// boxes and the Benchy (28 = sliced). width x depth must be the whole-height box (result.json bbox 60 x 31 for a
+        /// Benchy), not plate_N.json's first-layer box (39 x 16 -> 84, 3x too many).
+        public static int CopiesPerPlate(double width, double depth, double bedX, double bedY, double gap, double towerWidth, double towerDepth)
+        {
+            if (!(width > 0) || !(depth > 0) || !(bedX > 0) || !(bedY > 0) || double.IsInfinity(width) || double.IsInfinity(depth)) return 0;
+            if (!(gap >= 0) || double.IsInfinity(gap)) gap = 0;
+            if (!(towerWidth > 0) || !(towerDepth > 0) || double.IsInfinity(towerWidth) || double.IsInfinity(towerDepth)) { towerWidth = 0; towerDepth = 0; }
+            int best = Math.Max(Grid(width, depth, bedX, bedY, gap, towerWidth, towerDepth), Grid(depth, width, bedX, bedY, gap, towerWidth, towerDepth));
+            bool fits = (width <= bedX + 1e-6 && depth <= bedY + 1e-6) || (depth <= bedX + 1e-6 && width <= bedY + 1e-6);
+            return fits ? Math.Max(1, best) : 0;
+        }
+
+        static int Grid(double w, double d, double bedX, double bedY, double gap, double towerW, double towerD)
+        {
+            long nx = (long)Math.Floor((bedX + gap) / (w + gap) + 1e-9), ny = (long)Math.Floor((bedY + gap) / (d + gap) + 1e-9);
+            if (nx <= 0 || ny <= 0) return 0;
+            long n = nx * ny;
+            if (towerW > 0 && towerD > 0)
+            {
+                long bx = Math.Min(nx, (long)Math.Ceiling((towerW + gap) / (w + gap) - 1e-9));
+                long by = Math.Min(ny, (long)Math.Ceiling((towerD + gap) / (d + gap) - 1e-9));
+                n -= bx * by;
+            }
+            return (int)Math.Max(0, Math.Min(n, int.MaxValue));
+        }
+
+        /// The estimate on a printer's bed (FindPrinter(printerKey): A1 / P1S 256 x 256, A1 mini 180 x 180; unknown = A1)
+        /// with ArrangeGapMm.
+        public static int CopiesPerPlate(string printerKey, double width, double depth, double towerWidth, double towerDepth)
+        {
+            var p = FindPrinter(printerKey);
+            return CopiesPerPlate(width, depth, p.BedX, p.BedY, ArrangeGapMm, towerWidth, towerDepth);
+        }
+
+        /// Pure: what a sliced file's Metadata/plate_N.json says ("bbox_objects": [{bbox: [minX, minY, maxX, maxY], name}],
+        /// the tower is the object named "wipe_tower"): the box around all other objects + the tower's box + the object
+        /// count. CAUTION: Bambu writes each object's FIRST-LAYER box there (a Benchy: 39 x 16 mm, its real footprint is
+        /// 60 x 31 = result.json's bbox), so Width / Depth alone over-count copies about 3x. Use it for the tower box and
+        /// the object count, and widen Width / Depth with the whole-height box (website: GcodeFootprint.Combine; our own
+        /// slices: SliceResult.SizeX / SizeY) before CopiesPerPlate. Null on bad / empty JSON or no object with a box.
+        /// Never throws.
+        public static PlateFootprint ParsePlateFootprint(string plateJson)
+        {
+            if (string.IsNullOrEmpty(plateJson)) return null;
+            try
+            {
+                var d = Json.Deserialize<Dictionary<string, object>>(plateJson);
+                object list;
+                if (d == null || !d.TryGetValue("bbox_objects", out list) || list == null || list is string) return null;
+                var items = list as System.Collections.IEnumerable;
+                if (items == null) return null;
+                double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+                var fp = new PlateFootprint();
+                foreach (var o in items)
+                {
+                    var ob = o as Dictionary<string, object>;
+                    object bo, no;
+                    if (ob == null || !ob.TryGetValue("bbox", out bo) || bo == null || bo is string) continue;
+                    var box = new List<double>();
+                    var bl = bo as System.Collections.IEnumerable;
+                    if (bl == null) continue;
+                    foreach (var v in bl) box.Add(JsonNumber(v));
+                    if (box.Count < 4 || box.Any(x => double.IsNaN(x)) || box[2] < box[0] || box[3] < box[1]) continue;
+                    string name = ob.TryGetValue("name", out no) && no != null ? no.ToString() : "";
+                    if (string.Equals(name.Trim(), "wipe_tower", StringComparison.OrdinalIgnoreCase))
+                    {
+                        fp.TowerWidth = box[2] - box[0];
+                        fp.TowerDepth = box[3] - box[1];
+                        continue;
+                    }
+                    minX = Math.Min(minX, box[0]); minY = Math.Min(minY, box[1]);
+                    maxX = Math.Max(maxX, box[2]); maxY = Math.Max(maxY, box[3]);
+                    fp.Objects++;
+                }
+                if (fp.Objects == 0) return null;
+                fp.Width = Math.Round(maxX - minX, 3);
+                fp.Depth = Math.Round(maxY - minY, 3);
+                fp.TowerWidth = Math.Round(fp.TowerWidth, 3);
+                fp.TowerDepth = Math.Round(fp.TowerDepth, 3);
+                return fp;
+            }
+            catch (Exception) { return null; }
+        }
+
+        // a JSON number (int / long / decimal / double / numeric string, invariant); NaN when it isn't one
+        static double JsonNumber(object v)
+        {
+            if (v == null) return double.NaN;
+            try
+            {
+                double x = v is string ? double.Parse((string)v, NumberStyles.Float, CultureInfo.InvariantCulture)
+                                       : Convert.ToDouble(v, CultureInfo.InvariantCulture);
+                return double.IsInfinity(x) ? double.NaN : x;
+            }
+            catch (Exception) { return double.NaN; }
+        }
+
+        /// Pure: the object name without the copy number Bambu adds ("3dbenchy.stl_12" -> "3dbenchy.stl"); null = "".
+        public static string CopyBaseName(string objectName)
+        {
+            return Regex.Replace(objectName ?? "", @"_\d+$", "");
+        }
+
+        /// Pure: objects per plate of a project from Metadata/model_settings.config (`<plate>` -> `<model_instance>`
+        /// count), in file order. The count = how many plates the project has. Bad / empty xml = empty list; never throws.
+        public static List<int> ProjectPlateObjects(string modelSettingsXml)
+        {
+            var list = new List<int>();
+            if (string.IsNullOrEmpty(modelSettingsXml)) return list;
+            try
+            {
+                var root = SliceXml.Parse(modelSettingsXml);
+                foreach (var plate in Plates(root)) list.Add(plate.Children("model_instance").Count());
+            }
+            catch (Exception) { list.Clear(); }
+            return list;
+        }
+
+        /// Pure: a sliced file printed `times` times (pre-sliced .3mf / G-code, multi-plate project): every number x times,
+        /// its plates repeated, Copies = times, CopiesMultiplied (times > 1). A one-plate file: each plate Copies 1, PerPlate 1;
+        /// several plates: Copies 0 per plate (one copy = all of them), PerPlate 0. one isn't changed; null -> null;
+        /// times outside 1..MaxCopies -> SliceException(CopiesRangeText).
+        public static SliceResult RepeatResult(SliceResult one, int times)
+        {
+            if (one == null) return null;
+            if (!CopiesInRange(times)) throw new SliceException(CopiesRangeText());
+            var total = new SliceResult();
+            var plain = CopyWithoutCopies(one);
+            for (int i = 0; i < times; i++) AddResult(total, plain, "");
+            bool onePlate = one.PlateList != null && one.PlateList.Count == 1;
+            foreach (var p in total.PlateList) p.Copies = onePlate ? 1 : 0;
+            total.Copies = times;
+            total.PerPlate = onePlate ? 1 : 0;
+            total.CopiesMultiplied = times > 1;
+            total.FromSlicedFile = one.FromSlicedFile;
+            total.PrinterModel = one.PrinterModel; total.PrinterName = one.PrinterName ?? ""; total.PrinterNozzle = one.PrinterNozzle ?? "";
+            total.UnsupportedPrinter = one.UnsupportedPrinter;
+            total.SlicerName = one.SlicerName ?? ""; total.GramsEstimated = one.GramsEstimated; total.OtherPrinter = one.OtherPrinter;
+            total.MissingTime = one.MissingTime; total.MissingGrams = one.MissingGrams;
+            total.SizeObjects = one.SizeObjects;
+            if (one.PurgeGrams < 0) total.PurgeGrams = -1;
+            if (one.ColourChangeHours < 0) total.ColourChangeHours = -1;
+            NumberBatchPlates(total);
+            return total;
+        }
+
+        // a shallow copy of r's totals and plates without Copies / PerPlate (so AddResult doesn't count them)
+        static SliceResult CopyWithoutCopies(SliceResult r)
+        {
+            var c = new SliceResult { Seconds = r.Seconds, Grams = r.Grams, Plates = r.Plates, Picture = r.Picture, StudioFile = r.StudioFile,
+                                      Filaments = r.Filaments ?? new List<FilamentUse>(), PurgeGrams = r.PurgeGrams,
+                                      ColourChangeHours = r.ColourChangeHours, PlateList = r.PlateList ?? new List<PlateInfo>(),
+                                      SizeX = r.SizeX, SizeY = r.SizeY, SizeZ = r.SizeZ, SizeObjects = r.SizeObjects,
+                                      TowerGrams = r.TowerGrams, TowerSeconds = r.TowerSeconds };
+            return c;
+        }
+
+        /// Pure: numbers a batch's plates 1, 2, 3... per File (in list order) and sets FilePlates = that file's count, so
+        /// repeated plates read "Plate 1..4" instead of four "Plate 1". Null = nothing.
+        public static void NumberBatchPlates(SliceResult res)
+        {
+            if (res == null || res.PlateList == null) return;
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var p in res.PlateList)
+            {
+                if (p == null) continue;
+                string f = p.File ?? "";
+                int n;
+                counts.TryGetValue(f, out n);
+                counts[f] = n + 1;
+                p.Index = n + 1;
+            }
+            foreach (var p in res.PlateList)
+                if (p != null) p.FilePlates = counts[p.File ?? ""];
+        }
+
+        /// Pure: per-plate prime tower grams (plate index -> that plate's G-code count) into res.PlateList (TowerGrams and
+        /// each plate filament's TowerGrams; plates not in the map keep -1). Null = nothing.
+        public static void ApplyPlateTowers(SliceResult res, IDictionary<int, GcodeTower> perPlate)
+        {
+            if (res == null || res.PlateList == null || perPlate == null) return;
+            foreach (var p in res.PlateList)
+            {
+                GcodeTower t;
+                if (p == null || !perPlate.TryGetValue(p.Index, out t) || t == null) continue;
+                p.TowerGrams = Math.Round(t.Total, 3);
+                foreach (var f in p.Filaments)
+                    if (f != null) f.TowerGrams = f.Slot >= 1 && f.Slot <= t.Grams.Count ? t.Grams[f.Slot - 1] : 0;
+            }
         }
 
         public const int MaxPlateNameChars = 40;

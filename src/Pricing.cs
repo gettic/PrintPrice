@@ -23,6 +23,11 @@ namespace PrintPrice
         public List<FilamentLine> Filaments;
         // Failed prints not made back yet (History.FailedDebt), DKK. 0 = none. Used only when AppSettings.FailedPayback is on.
         public double PaybackDebt;
+        // Batch & plates: all the numbers above are the TOTALS of the whole job (every copy, every plate).
+        // Quantity = copies (0 = 1; information only: the unit price, History.Quantity). Plates = build plates used
+        // (0 = 1 / unknown); every plate after the first adds AppSettings.PlateChangeFee.
+        public int Quantity;
+        public int Plates;
     }
 
     public class QuoteResult
@@ -41,6 +46,8 @@ namespace PrintPrice
         public double PaybackCost;
         public double PaybackLeft;       // debt still left after this quote (debt - PaybackCost); 0 when payback is off
         public bool PaybackBothPrices;   // true = also in FriendsPrice (FailedPaybackWho = 1)
+        // Batch & plates: (Plates - 1) x PlateChangeFee, in both prices (not marked up, before minimum and rounding). 0 = none.
+        public double PlateFee;
     }
 
     /// One line of a quote breakdown (Pricing.QuoteBreakdown). Amount is whole øre; texts belong to the ui (by Key).
@@ -50,6 +57,8 @@ namespace PrintPrice
             Work = "work", Minimum = "minimum", Rounding = "rounding";
         // combined bill (History.GroupBreakdown): a job's price that can't be split (no usable saved inputs)
         public const string Other = "other";
+        // batch & plates: the plate change fee (Quantity = extra plates, UnitPrice = kr. per extra plate)
+        public const string Plates = "plates";
         // wear split (QuoteLine.Parts of the wear line)
         public const string WearPrinter = "wear.printer", WearParts = "wear.parts", WearHotend = "wear.hotend", WearPlate = "wear.plate";
 
@@ -63,6 +72,7 @@ namespace PrintPrice
         //   wear: Quantity = hours, UnitPrice = kr./h (MachineRatePerHour)      failed: Quantity = FailedPrintPct
         //   work: Quantity = markup %      payback: Quantity = FailedPaybackPct
         //   minimum: Quantity = MinimumPrice      rounding: Quantity = RoundTo
+        //   plates: Quantity = extra plates (Plates - 1), UnitPrice = PlateChangeFee
         public double Quantity;
         public double UnitPrice;
         public List<QuoteLine> Parts;     // wear only (AutoWearRate on + a Wear.Breakdown given): printer, parts, hotend,
@@ -258,13 +268,16 @@ namespace PrintPrice
             r.FailedPrintCost = (r.MaterialCost + r.PowerCost) * (Math.Max(0, s.FailedPrintPct) / 100.0);
             r.BaseCost = r.MaterialCost + r.PowerCost + r.FailedPrintCost;
 
+            // Batch & plates: a fee for every plate after the first (not marked up, like wear), in both prices.
+            r.PlateFee = PlateFee(input.Plates, s.PlateChangeFee);
+
             // Both prices: markup + machine-time rate (wear, not marked up). Minimum price is customers only.
             r.FriendsPrice = r.BaseCost * (1 + s.FriendsMarkupPct / 100.0)
-                             + r.PrintHours * s.MachineRatePerHour;
+                             + r.PrintHours * s.MachineRatePerHour + r.PlateFee;
 
             // Customer price: markup + machine-time rate + optional minimum price.
             double others = r.BaseCost * (1 + s.OthersMarkupPct / 100.0)
-                            + r.PrintHours * s.MachineRatePerHour;
+                            + r.PrintHours * s.MachineRatePerHour + r.PlateFee;
             if (r.BaseCost > 0 && others < s.MinimumPrice) others = s.MinimumPrice;
             r.OthersPrice = others;
 
@@ -285,6 +298,84 @@ namespace PrintPrice
         }
 
         const string TooBigText = "Values must be finite numbers below 10.000.000.";
+
+        // ---------- batch & plates (issue #9/#10) ----------
+
+        // The copy limits (500 max, ask above 200) are BambuSlicer.MaxCopies / WarnCopies (SliceInfo.cs, also on the website).
+
+        /// (plates - 1) x fee: plates 0 / 1 = 0; a negative / NaN / infinite / too big fee = 0.
+        public static double PlateFee(int plates, double fee)
+        {
+            if (plates <= 1 || double.IsNaN(fee) || fee <= 0 || fee >= Num.MaxValue) return 0;
+            return (plates - 1) * fee;
+        }
+
+        /// Build plates for copies with perPlate on each (rounded up); perPlate <= 0 = one plate per copy; copies < 1 = 1.
+        public static int PlatesNeeded(int copies, int perPlate)
+        {
+            if (copies < 1) copies = 1;
+            if (perPlate <= 0) return copies;
+            return (copies + perPlate - 1) / perPlate;
+        }
+
+        /// The price per piece as shown: the shown (whole øre) total / quantity, not rounded up again (quantity < 1 = 1).
+        /// Shown with Num.Kr, so 110,32 / 12 = 9,1933 shows "9,19 kr.".
+        public static double UnitPrice(double total, int quantity)
+        {
+            if (quantity < 1) quantity = 1;
+            if (double.IsNaN(total) || double.IsInfinity(total) || total <= 0) return 0;
+            return ShownOre(total) / 100.0 / quantity;
+        }
+
+        /// One value of a batch from one copy's value: the part that happens once per PLATE (prime tower, colour-change
+        /// waste or time: perPlate, already inside oneCopy) counts plates times, the rest copies times:
+        /// (oneCopy - perPlate) x copies + perPlate x plates. perPlate is held to 0..oneCopy; copies / plates < 1 = 1;
+        /// NaN / infinity / negative = 0.
+        public static double CopiesTotal(double oneCopy, double perPlate, int copies, int plates)
+        {
+            if (double.IsNaN(oneCopy) || double.IsInfinity(oneCopy) || oneCopy < 0) oneCopy = 0;
+            if (double.IsNaN(perPlate) || double.IsInfinity(perPlate) || perPlate < 0) perPlate = 0;
+            if (perPlate > oneCopy) perPlate = oneCopy;
+            if (copies < 1) copies = 1;
+            if (plates < 1) plates = 1;
+            return (oneCopy - perPlate) * copies + perPlate * plates;
+        }
+
+        /// A job of copies on plates from ONE copy's input (typed jobs, G-code, the website's estimate): grams, time and
+        /// each colour line via CopiesTotal, with the once-per-plate parts given apart: plateGrams (tower + colour-change
+        /// waste in one copy's FilamentGrams), plateSeconds (tower + colour-change time in one copy's time) and
+        /// plateLineGrams (the same per colour line, index = one.Filaments; null / missing = 0). Time is rounded to the
+        /// nearest minute. Prices / electricity / payback are copied; Quantity and Plates set. one is not changed.
+        public static QuoteInput ForCopies(QuoteInput one, int copies, int plates, double plateGrams, double plateSeconds,
+                                          IList<double> plateLineGrams)
+        {
+            if (one == null) throw new ArgumentNullException("one");
+            if (copies < 1) copies = 1;
+            if (plates < 1) plates = 1;
+            double seconds = (Math.Max(0, one.Hours) * 60.0 + Math.Max(0, one.Minutes)) * 60.0;
+            double total = CopiesTotal(seconds, plateSeconds, copies, plates);
+            long minutes = (long)Math.Round(total / 60.0, MidpointRounding.AwayFromZero);
+            if (minutes > int.MaxValue / 2) minutes = int.MaxValue / 2;
+            var q = new QuoteInput
+            {
+                Hours = (int)(minutes / 60), Minutes = (int)(minutes % 60),
+                FilamentGrams = CopiesTotal(one.FilamentGrams, plateGrams, copies, plates),
+                FilamentDkkPerKg = one.FilamentDkkPerKg, ElectricityDkkPerKwh = one.ElectricityDkkPerKwh,
+                PaybackDebt = one.PaybackDebt, Quantity = copies, Plates = plates
+            };
+            if (one.Filaments != null)
+            {
+                q.Filaments = new List<FilamentLine>(one.Filaments.Count);
+                for (int i = 0; i < one.Filaments.Count; i++)
+                {
+                    var f = one.Filaments[i];
+                    if (f == null) { q.Filaments.Add(null); continue; }
+                    double pg = plateLineGrams != null && i < plateLineGrams.Count ? plateLineGrams[i] : 0;
+                    q.Filaments.Add(new FilamentLine { Grams = CopiesTotal(f.Grams, pg, copies, plates), PricePerKg = f.PricePerKg });
+                }
+            }
+            return q;
+        }
 
         // NaN, infinity or Num.MaxValue (1e7) and up: an input Calculate refuses (Num.TryParse refuses it too)
         static bool TooBig(double v)
@@ -309,7 +400,7 @@ namespace PrintPrice
         /// Line-by-line breakdown of one price (friends = friends & family price, else the customer price). The lines'
         /// whole-øre amounts add up exactly to the shown price (largest remainder split). wear = the auto rate's split
         /// (Wear.Calculate for the chosen nozzle/filament/plate); null or AutoWearRate off = one wear line without Parts.
-        /// Lines: material (one per colour), power, wear, failed (FailedPrintPct > 0), payback (when it is in this price),
+        /// Lines: material (one per colour), power, wear, plates (plate change fee, when > 0), failed (FailedPrintPct > 0), payback (when it is in this price),
         /// work (markup), minimum (customer top-up), rounding; lines that are 0 are left out, except material/power/work.
         public static QuoteBreakdown Breakdown(QuoteInput input, AppSettings s, bool friends, Wear.Breakdown wear)
         {
@@ -332,12 +423,15 @@ namespace PrintPrice
             var wearLine = new QuoteLine { Key = QuoteLine.Wear, Exact = wearExact, Quantity = r.PrintHours,
                 UnitPrice = s.MachineRatePerHour };
             if (wearExact > 0) lines.Add(wearLine);
+            if (r.PlateFee > 0)
+                lines.Add(new QuoteLine { Key = QuoteLine.Plates, Exact = r.PlateFee, Quantity = input.Plates - 1,
+                    UnitPrice = s.PlateChangeFee });
             if (s.FailedPrintPct > 0)
                 lines.Add(new QuoteLine { Key = QuoteLine.Failed, Exact = r.FailedPrintCost, Quantity = s.FailedPrintPct });
 
             double pct = friends ? s.FriendsMarkupPct : s.OthersMarkupPct;
             double work = r.BaseCost * (pct / 100.0);
-            double before = r.BaseCost + work + wearExact;   // the price before minimum, payback and rounding
+            double before = r.BaseCost + work + wearExact + r.PlateFee;   // the price before minimum, payback and rounding
             bool paid = r.PaybackCost > 0 && (!friends || r.PaybackBothPrices);
             if (paid)
                 lines.Add(new QuoteLine { Key = QuoteLine.Payback, Exact = r.PaybackCost, Quantity = s.FailedPaybackPct });

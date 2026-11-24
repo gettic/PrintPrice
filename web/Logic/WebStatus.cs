@@ -143,6 +143,7 @@ namespace PrintPrice.Web
             s.LastFilamentPrice = d.LastFilamentPrice; s.LastElectricityPrice = d.LastElectricityPrice;
             s.AutoPowerPrice = d.AutoPowerPrice; s.PowerAddOn = d.PowerAddOn; s.PowerIncludeVat = d.PowerIncludeVat; s.PriceArea = d.PriceArea;
             s.QuoteValidDays = d.QuoteValidDays; s.InvoiceDueDays = d.InvoiceDueDays; s.MainInvoice = d.MainInvoice; s.QuoteShowTower = d.QuoteShowTower;
+            s.PlateChangeFee = d.PlateChangeFee; s.QuoteShowUnitPrice = d.QuoteShowUnitPrice;   // batch-plates
             s.FilamentPreset = d.FilamentPreset;
             // the active printer: its name and model stay, the rest = that model's defaults
             var m = Wear.FindModel(s.PrinterModel);

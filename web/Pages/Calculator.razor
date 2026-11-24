@@ -115,7 +115,7 @@ else
         </div>
 
         <div class="inputs">
-            <label for="hours">@L.S("Print time", "Printtid")</label>
+            <label for="hours">@L.S("Print time", "Printtid")@OneCopy</label>
             <div class="field">
                 <input id="hours" type="text" inputmode="numeric" class="small @Bad(hoursState)" value="@hours"
                        @oninput='e => { hours = (string)e.Value; Changed(); }' aria-label="@L.S("Hours", "Timer")" />
@@ -131,7 +131,7 @@ else
                 <div>@L.F("{0} kr/h wear", "{0} kr/t slid", Num.Fmt(settings.MachineRatePerHour))</div>
             </div>
 
-            <label for="grams">@L.S("Filament used", "Filamentforbrug")</label>
+            <label for="grams">@L.S("Filament used", "Filamentforbrug")@OneCopy</label>
             <div class="field">
                 <input id="grams" type="text" inputmode="decimal" class="mid @Bad(gramsState)" value="@grams" readonly="@Multi"
                        title="@(Multi ? L.S("The sum of the colours below", "Summen af farverne nedenfor") : null)"
@@ -165,6 +165,38 @@ else
                         <span class="power-credit">@powerCredit<a href="@LivePower.CreditUrl" target="_blank" rel="noopener noreferrer">@LivePower.CreditSource</a></span>
                     }</div>
             </div>
+
+            @* batch-plates (issue #9 / #10): copies of the job; the website can't slice, so per plate is typed or estimated *@
+            <label for="copies">@L.S("Copies", "Antal")</label>
+            <div class="copies">
+                @if (Fixed)
+                {
+                    <div class="fixed" id="copies" role="status">@WebBatch.FixedText(fixedCopies, fixedPlates, fixedFromFile, fixedEstimated)</div>
+                }
+                else
+                {
+                    int typed = TypedCopies;
+                    <div class="field">
+                        <input id="copies" type="text" inputmode="numeric" class="small @Bad(copiesState)" value="@copiesBox"
+                               @oninput='e => { copiesBox = (string)e.Value; Recalculate(); }' />
+                        <span>@L.S("copies", "stk.")</span>
+                        @if (typed > 1 && filePlates < 2)
+                        {
+                            <span class="pp"><input id="perplate" type="text" inputmode="numeric" class="small @Bad(perPlateState)" value="@perPlateBox"
+                                   aria-label="@L.S("Copies per plate", "Antal pr. plade")"
+                                   @oninput='e => { perPlateBox = (string)e.Value; Recalculate(); }' />
+                            <span>@L.S("per plate", "pr. plade")</span></span>
+                            @if (autoPerPlate > 0) { <span class="muted auto">@WebBatch.AutoText(autoPerPlate)</span> }
+                        }
+                    </div>
+                    @if (OneOfMany && last != null)
+                    {
+                        <div class="copies-total" role="status">@WebBatch.TotalsText(input, plan.Estimated)</div>
+                        @if (plan.Multiplied) { <div class="muted-line">@WebBatch.MultipliedHint(filePlates)</div> }
+                        else if (plan.Estimated) { <div class="muted-line">@WebBatch.EstimateHint()</div> }
+                    }
+                }
+            </div>
         </div>
 
         @if (problem != null)
@@ -183,7 +215,7 @@ else
                         var r = rows[n];
                         <span class="swatch" style="@Swatch(r.Use.Colour)" title="@r.Use.Colour"></span>
                         <span class="cname" title="@r.Use.Profile">@r.Name</span>
-                        <span class="num">@Grams2(r.Use.Grams) g</span>
+                        <span class="num">@Grams2(RowGrams(n)) g</span>
                         <span class="x">×</span>
                         <input type="text" inputmode="decimal" class="@Bad(r.State)" value="@r.PerKg" aria-label="@L.F("{0}, kr/kg", "{0}, kr/kg", r.Name)"
                                @oninput='e => { rows[n].PerKg = (string)e.Value; RowPriceChanged(n); }' />
@@ -191,7 +223,7 @@ else
                         <span class="num">@(last != null && last.FilamentCosts != null && n < last.FilamentCosts.Length ? Num.Kr(last.FilamentCosts[n]) : "–")</span>
                     }
                 </div>
-                var noteParts = WebCalc.PurgeNoteParts(jobPurge, jobChangeHours, jobTower, jobTowerSeconds);
+                var noteParts = WebCalc.PurgeNoteParts(PlateTotal(jobPurge), PlateTotal(jobChangeHours), PlateTotal(jobTower), PlateTotal(jobTowerSeconds));
                 @if (noteParts.Count > 0)
                 {
                     @* = the desktop's note under the colour rows (issue #8 step 3: the prime tower apart, colour changes = flush only) *@
@@ -226,13 +258,13 @@ else
             <fieldset class="price friends">
                 <legend>@L.S("Friends & family", "Venner og familie")</legend>
                 <div class="big" aria-live="polite">@Kr(last?.FriendsPrice)</div>
-                <div class="info">@FriendsInfo</div>
+                <div class="info" title="@(EachOn ? FriendsInfo : null)">@(EachOn ? History.EachText(last.FriendsPrice, input.Quantity) : FriendsInfo)</div>
                 @if (last != null) { @Lines(true) }
             </fieldset>
             <fieldset class="price others">
                 <legend>@L.S("Customers", "Kunder")</legend>
                 <div class="big" aria-live="polite">@Kr(last?.OthersPrice)</div>
-                <div class="info">@OthersInfo</div>
+                <div class="info" title="@(EachOn ? OthersInfo : null)">@(EachOn ? History.EachText(last.OthersPrice, input.Quantity) : OthersInfo)</div>
                 @if (last != null) { @Lines(false) }
             </fieldset>
         </div>
@@ -333,6 +365,32 @@ else
     const int MaxPlateLines = 8;       // more plates: the first 8 + "+N more"
 
     bool Multi { get { return rows.Count >= 2; } }
+
+    // ---------- batch & plates (issue #9 / #10, WebBatch) ----------
+    string copiesBox = "1", perPlateBox = "1";
+    FieldState copiesState, perPlateState;
+    int autoPerPlate;                  // a one-plate file's footprint estimate (0 = none); fills Per plate until typed over
+    int filePlates;                    // the file's plates when it isn't a batch (2+ = the whole file x copies)
+    int fixedCopies, fixedPlates, fixedPerPlate;   // a file / saved record that already is a batch (2+ copies): read-only
+    bool fixedEstimated, fixedFromFile;
+    WebBatch.Plan plan;                // the one-copy case's plan (null = fixed or no price)
+    QuoteInput oneInput;               // the boxes as one copy (input = the totals)
+
+    bool Fixed { get { return fixedCopies > 1; } }
+    int Copies { get { return Fixed ? fixedCopies : plan != null ? plan.Copies : 1; } }
+    bool OneOfMany { get { return !Fixed && plan != null && plan.Copies > 1; } }
+    bool BatchEstimated { get { return Fixed ? fixedEstimated : plan != null && plan.Estimated; } }
+    double PlateTotal(double one) { return Fixed ? one : WebBatch.PerPlateTotal(one, plan); }
+    int TypedCopies { get { int n; return WebBatch.ReadCount(copiesBox, out n) == FieldState.Ok ? n : 1; } }
+    /// A colour row's grams: the batch's total for that colour while the boxes hold one copy of 2+.
+    double RowGrams(int n)
+    {
+        if (OneOfMany && input != null && input.Filaments != null && n < input.Filaments.Count && input.Filaments[n] != null) return input.Filaments[n].Grams;
+        return rows[n].Use.Grams;
+    }
+    /// The price boxes' sub-line is "4 pcs · 18,18 kr. each" (markup text in the tooltip, as the desktop).
+    bool EachOn { get { return last != null && input != null && input.Quantity > 1; } }
+    string OneCopy { get { return OneOfMany ? " " + WebBatch.OneCopyLabel() : ""; } }
 
     // ---------- live electricity price ----------
     bool fetchingPower, powerError, powerStarted;
@@ -513,7 +571,20 @@ else
         }
         problem = null;
         last = null;
-        if (hoursState == FieldState.Invalid || minutesState == FieldState.Invalid)
+        plan = null;
+        oneInput = null;
+        int copiesN = 1, perPlateN = 1;
+        copiesState = perPlateState = FieldState.Ok;
+        if (!Fixed)
+        {
+            copiesState = WebBatch.ReadCount(copiesBox, out copiesN);
+            perPlateState = copiesN > 1 && filePlates < 2 ? WebBatch.ReadCount(perPlateBox, out perPlateN) : FieldState.Ok;
+            if (copiesState != FieldState.Ok) copiesN = 1;
+            if (perPlateState != FieldState.Ok) perPlateN = 1;
+        }
+        if (copiesState == FieldState.Invalid) problem = BambuSlicer.CopiesRangeText();
+        else if (perPlateState == FieldState.Invalid) problem = WebBatch.PerPlateRangeText();
+        else if (hoursState == FieldState.Invalid || minutesState == FieldState.Invalid)
             problem = L.S("Print time: hours 0–999, minutes 0–59.", "Printtid: timer 0–999, minutter 0–59.");
         else if (gramsState == FieldState.Invalid || kgState == FieldState.Invalid || elecState == FieldState.Invalid || rowsBad)
         {
@@ -528,6 +599,19 @@ else
         input = new QuoteInput { Hours = h, Minutes = m, FilamentGrams = g, FilamentDkkPerKg = kg, ElectricityDkkPerKwh = el, Filaments = lines };
         // failed prints payback (MainForm.PaybackDebt): the history's unpaid failed prints, without the quote Save made
         input.PaybackDebt = settings.FailedPayback != 0 ? History.FailedDebt(history, savedId) : 0;
+        oneInput = input;
+        if (Fixed) { input.Quantity = fixedCopies; input.Plates = fixedPlates; }
+        else
+        {
+            plan = WebBatch.OneCopy(copiesN, perPlateN, filePlates);
+            if (plan.Copies > 1)
+            {
+                List<double> lineGrams = null;
+                if (Multi) { lineGrams = new List<double>(); foreach (var r in rows) lineGrams.Add(WebBatch.LinePlateGrams(r.Use)); }
+                input = WebBatch.Totals(input, plan, WebBatch.PlateGrams(jobPurge, jobTower), WebBatch.PlateSeconds(jobChangeHours, jobTowerSeconds), lineGrams);
+            }
+            else { input.Quantity = 1; input.Plates = Math.Max(1, filePlates); }
+        }
         last = Pricing.Calculate(input, settings);
     }
 
@@ -559,6 +643,10 @@ else
         reopened = repeatOf = null;   // the "Opened from history" lines go with the job
         repeatHint = false;
         savedId = null;
+        copiesBox = perPlateBox = "1";   // batch-plates: a new job starts as one copy
+        autoPerPlate = filePlates = 0;
+        fixedCopies = fixedPlates = fixedPerPlate = 0;
+        fixedEstimated = fixedFromFile = false;
         if (elecToday != null) { elec = elecToday; elecToday = null; }   // the saved electricity price was only for that quote
     }
 
@@ -728,6 +816,21 @@ else
                    + (multi ? " · " + L.F("{0} colours", "{0} farver", rows.Count) : "") + ")." + more;
         fileResult = res;
         plates = res.PlateList != null && res.PlateList.Count >= 2 ? res.PlateList : null;
+        // batch-plates: a file that already holds copies is read as they are; else one copy (its footprint fills Per plate)
+        int filePer;
+        int inFile = WebBatch.FileCopies(res, out filePer);
+        int platesInFile = res.PlateList != null ? res.PlateList.Count : 1;
+        if (inFile > 1)
+        {
+            fixedCopies = inFile; fixedPlates = Math.Max(1, platesInFile); fixedPerPlate = filePer;
+            fixedFromFile = true; fixedEstimated = false;
+        }
+        else
+        {
+            filePlates = platesInFile >= 2 ? platesInFile : 0;
+            autoPerPlate = filePlates == 0 ? WebBatch.AutoPerPlate(job.Footprint, string.IsNullOrEmpty(res.PrinterModel) ? settings.PrinterModel : res.PrinterModel) : 0;
+            if (autoPerPlate > 0) perPlateBox = autoPerPlate.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
         fileNote = BambuSlicer.OtherSlicerNote(res);
         CheckPrinter(res);
         Recalculate();
@@ -1070,17 +1173,20 @@ else
         if (Multi)
         {
             materials = new List<HistoryFilament>();
-            foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "", TowerGrams = r.Use.TowerGrams });
+            foreach (var r in rows) materials.Add(new HistoryFilament { Colour = r.Use.Colour ?? "", Type = r.Use.Type ?? "", Name = r.Use.Profile ?? "", TowerGrams = PlateTotal(r.Use.TowerGrams) });
         }
         else
         {
             materials = new List<HistoryFilament> { WebHistory.JobMaterial(single, materialName, settings, prefs.FilamentType) };
-            if (single != null) materials[0].TowerGrams = single.TowerGrams;   // issue #8 step 3
+            if (single != null) materials[0].TowerGrams = PlateTotal(single.TowerGrams);   // issue #8 step 3
         }
         // the wear split goes with the record (only with Auto wear on, as the desktop), so its bill keeps the detail
         var wear = settings.AutoWearRate != 0 ? WebCalc.WearBreakdown(settings, prefs.FilamentType) : null;
-        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, jobPurge, reopened, repeatOf, wear,
-                                        jobTower, jobTowerSeconds, jobTowerSwitch);
+        // batch-plates: the record keeps the TOTALS (tower / purge once per plate), plus copies / plates
+        var rec = WebHistory.MakeRecord(input, last, settings, jobModel, DateTime.Now, materials, PlateTotal(jobPurge), reopened, repeatOf, wear,
+                                        PlateTotal(jobTower), PlateTotal(jobTowerSeconds), jobTowerSwitch);
+        if (Fixed) History.SetCopies(rec, fixedCopies, fixedPlates, fixedPerPlate, fixedEstimated);
+        else if (plan != null) History.SetCopies(rec, plan.Copies, input.Plates, plan.Copies > 1 ? plan.PerPlate : 0, plan.Estimated);
         if (jobSource != null && jobSource.StartsWith("http", StringComparison.OrdinalIgnoreCase)) rec.Source = jobSource;
         return rec;
     }
@@ -1089,7 +1195,7 @@ else
 
     string QuoteModelName
     {
-        get { return quoteJobs != null ? QuoteRows.PrintsText(quoteJobs.Count) : quoteRecord != null ? WebQuote.RecordModelName(quoteRecord) : QuoteRows.ModelName(jobModel); }
+        get { return quoteJobs != null ? QuoteRows.PrintsText(quoteJobs.Count) : quoteRecord != null ? WebQuote.RecordModelName(quoteRecord) : History.CopiesName(QuoteRows.ModelName(jobModel), input != null ? input.Quantity : 1); }
     }
 
     // ---------- combined bill: several History jobs on one quote / invoice (MainForm's combined-bill section) ----------
@@ -1233,7 +1339,7 @@ else
     WebQuote.Job CurrentJob()
     {
         var j = new WebQuote.Job { Input = input, Model = jobModel, Source = jobSource, Picture = pictureUrl, Single = single,
-                                   SingleName = materialName, PurgeGrams = jobPurge, TowerGrams = jobTower, FilamentType = prefs.FilamentType };
+                                   SingleName = materialName, PurgeGrams = PlateTotal(jobPurge), TowerGrams = PlateTotal(jobTower), FilamentType = prefs.FilamentType };
         if (Multi) { j.Colours = new List<FilamentUse>(); foreach (var r in rows) j.Colours.Add(r.Use); }
         return j;
     }
@@ -1387,8 +1493,9 @@ else
                 friends = WebQuote.ExportFriends(saved, true, friends);
                 if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.RecordText(saved, friends, true, settings, WebQuote.ShortLink(saved.Source)), WebQuote.RecordTower(settings, saved));
             }
-            else if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, grams, Multi ? rows.Count : 0, last.FriendsPrice, last.OthersPrice),
-                                                                Multi && settings.QuoteShowTower == 1 ? jobTower : -1);   // issue #8 step 3
+            else if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, OneOfMany ? Num.Fmt(input.FilamentGrams) : grams, Multi ? rows.Count : 0,
+                                                                                   last.FriendsPrice, last.OthersPrice, input.Quantity, input.Plates, settings.QuoteShowUnitPrice != 0),
+                                                                Multi && settings.QuoteShowTower == 1 ? PlateTotal(jobTower) : -1);   // issue #8 step 3; batch-plates: totals
             err = await Histories.Save(history);
             if (err == null)
             {
@@ -1475,6 +1582,12 @@ else
         materialName = f.MaterialName;
         jobPurge = f.PurgeGrams;
         jobTower = f.TowerGrams; jobTowerSeconds = f.TowerSeconds; jobTowerSwitch = f.PrimeTower;   // issue #8 step 3: the saved tower
+        if (History.QuantityOf(r) > 1)   // batch-plates: a saved batch comes back as its totals, copies as saved
+        {
+            fixedCopies = History.QuantityOf(r); fixedPlates = History.PlatesOf(r); fixedPerPlate = History.CleanPlates(r.PerPlate);
+            fixedEstimated = r.CopiesEstimated != 0; fixedFromFile = false;
+        }
+        else if (History.PlatesOf(r) > 1) filePlates = History.PlatesOf(r);   // one copy on several plates (the plate fee stays)
         jobModel = string.IsNullOrEmpty(r.Model) ? null : r.Model;
         jobSource = string.IsNullOrEmpty(r.Source) ? null : r.Source;
         if (!repeat)
@@ -1776,6 +1889,7 @@ else
             case QuoteLine.WearParts: return L.S("Spare parts & upkeep", "Reservedele & vedligehold");
             case QuoteLine.WearHotend: return L.S("Nozzle / hotend", "Dyse / hotend");
             case QuoteLine.WearPlate: return L.S("Build plate", "Byggeplade");
+            case QuoteLine.Plates: return QuoteRows.PlatesRowLabel();   // batch-plates: the plate change fee
         }
         return l.Key;
     }
@@ -1791,6 +1905,7 @@ else
             case QuoteLine.Work: return "+" + Num.Fmt(l.Quantity) + " %";
             case QuoteLine.Minimum: return L.F("lowest price {0} kr.", "laveste pris {0} kr.", Num.Fmt(l.Quantity));
             case QuoteLine.Rounding: return L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity));
+            case QuoteLine.Plates: return QuoteRows.PlatesRowDetail(l, true).Replace("  ×  ", " × ");
         }
         return "";
     }

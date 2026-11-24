@@ -524,8 +524,38 @@ namespace PrintPrice
                                              new[] { "#000000", "#C12E1F", "#C12E1F", "#F4EE2A", null }, null, true);
                         Snap(picker, folder, "picker.png");
                         Snap(picker, folder, "picker_colour_menu.png", (g, o) => picker.SampleColourMenu(0, g, o));
+                        // batch & plates: copies per file (4 bodies, 8 wheels, ...)
+                        picker.SampleCopies(new[] { 4, 8, 8, 1, 2 });
+                        Snap(picker, folder, "picker_copies.png");
+                        picker.SampleCopies(new[] { 400, 200, 1, 1, 1 });   // over 500 in all: red boxes + error line
+                        Snap(picker, folder, "picker_copies_bad.png");
                         picker.Hide();
                     }
+
+                    // batch & plates (issue #9 / #10): the Benchy x 40 on 2 plates (28 + 12), its plates menu, the Copies
+                    // window (as it opens, 300 = the "several minutes" warning, 600 = out of range), its quote and invoice,
+                    // a job typed by hand with copies, and a combined bill with copies
+                    main.SetSampleJob();
+                    main.SetSamplePicture(sample, "sample0");
+                    main.SetSampleBatchJob();
+                    Snap(main, folder, "main_batch.png");
+                    Snap(main, folder, "main_batch_plates_menu.png", main.SamplePlatesMenu);
+                    using (var cw = main.SampleCopiesWindow(0, false)) if (cw != null) SnapForm(cw, folder, "copies.png");
+                    using (var cw = main.SampleCopiesWindow(300, false)) if (cw != null) SnapForm(cw, folder, "copies_big.png");
+                    using (var cw = main.SampleCopiesWindow(600, false)) if (cw != null) SnapForm(cw, folder, "copies_bad.png");
+                    using (var cw = main.SampleCopiesWindow(12, true)) if (cw != null) SnapForm(cw, folder, "copies_typed.png");
+                    using (var q = main.RenderSampleQuote(false, "Mette Hansen"))
+                        if (q != null) q.Save(Path.Combine(folder, "quote_batch.png"), ImageFormat.Png);
+                    using (var inv = main.RenderSampleInvoice())
+                        if (inv != null) inv.Save(Path.Combine(folder, "invoice_batch.png"), ImageFormat.Png);
+                    main.SetSampleTypedCopies();
+                    Snap(main, folder, "main_typed_copies.png");
+                    Image[] gb;
+                    var batchJobs = main.SampleGroupJobs(3, false, HistoryForm.SamplePictures(folder), out gb);
+                    History.SetCopies(batchJobs[0], 4, 1, 4, false);
+                    History.SetCopies(batchJobs[1], 40, 2, 28, false);
+                    using (var page = QuotePage.Render(main.SampleGroupData(batchJobs, gb, true), false))
+                        page.Save(Path.Combine(folder, "invoice_group_batch.png"), ImageFormat.Png);
                     main.Hide();
                 }
                 return 0;

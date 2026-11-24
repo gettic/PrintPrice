@@ -66,6 +66,9 @@ namespace PrintPrice
             // --test-history-read (test mode + --hidden only, alone): MainForm.TestHistoryReadFlow checks that history.json
             // is read once per run (the start-up read is reused while the file is unchanged); test_history_read.txt, exit 0 / 4.
             bool testHistoryRead = Array.IndexOf(args, "--test-history-read") >= 0;
+            // --test-batch (test mode + --hidden only, alone): MainForm.TestBatchFlow checks batch & plates without slicing
+            // (typed copies, Copies window, file picker copies, texts, plate fee, unit price setting); test_batch.txt, exit 0 / 4.
+            bool testBatch = Array.IndexOf(args, "--test-batch") >= 0;
             string testSlice = null, testHistory = null, testSetup = null;
             var rest = new System.Collections.Generic.List<string>();
             for (int i = 0; i < args.Length; i++)
@@ -89,7 +92,7 @@ namespace PrintPrice
                     continue;
                 }
                 if (args[i] != "--test-error" && args[i] != "--test-pictures" && args[i] != "--test-repeat" && args[i] != "--test-invoice" &&
-                    args[i] != "--test-bill" && args[i] != "--test-history-read") rest.Add(args[i]);
+                    args[i] != "--test-bill" && args[i] != "--test-history-read" && args[i] != "--test-batch") rest.Add(args[i]);
             }
             var opt = StartOptions.Parse(rest.ToArray());
             if (opt.Error != null) return Fail(opt.Error);
@@ -129,6 +132,12 @@ namespace PrintPrice
                 if (opt.SettingsFolder == null || !opt.Hidden) return Fail("--test-history-read needs --settings and --hidden");
                 if (testBill || testInvoice || testSlice != null || testRepeat || testPictures || testHistory != null || testSetup != null || testError)
                     return Fail("--test-history-read can't be used with another --test- hook");
+            }
+            if (testBatch)
+            {
+                if (opt.SettingsFolder == null || !opt.Hidden) return Fail("--test-batch needs --settings and --hidden");
+                if (testHistoryRead || testBill || testInvoice || testSlice != null || testRepeat || testPictures || testHistory != null || testSetup != null || testError)
+                    return Fail("--test-batch can't be used with another --test- hook");
             }
             if (opt.SettingsFolder != null)
             {
@@ -209,6 +218,8 @@ namespace PrintPrice
                 main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestBillFlow); };
             if (testHistoryRead)
                 main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestHistoryReadFlow); };
+            if (testBatch)
+                main.Shown += delegate { main.BeginInvoke((MethodInvoker)main.TestBatchFlow); };
             if (setupLater) main.ShowSetupHint();   // "Setup skipped – run it now" once, in the info box
             if (setupTest != null)
                 main.Shown += delegate { main.BeginInvoke((MethodInvoker)delegate { main.TestSetupFlow(setupTest); }); };

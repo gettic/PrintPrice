@@ -76,6 +76,9 @@ namespace PrintPrice
                             foreach (var part in l.Parts)
                                 rows.Add(Sub(PartName(part.Key, plateName), N2(part.UnitPrice) + PerHour, part.Ore, -1));
                         break;
+                    case QuoteLine.Plates:   // batch & plates: the plate change fee
+                        rows.Add(Head(PlatesRowLabel(), PlatesRowDetail(l, true), l.Ore, true));
+                        break;
                     case QuoteLine.Failed:
                         rows.Add(Head(L.S("Failed-print allowance", "Tillæg for fejlprint"),
                             L.F("{0} % of material + electricity", "{0} % af materiale + strøm", Num.Fmt(l.Quantity)), l.Ore, true));
@@ -180,6 +183,9 @@ namespace PrintPrice
                         else if (parts)
                             foreach (var part in l.Parts)
                                 rows.Add(Sub(PartName(part.Key, plateName), sameRates && part.UnitPrice > 0 ? N2(part.UnitPrice) + PerHour : "", part.Ore, -1));
+                        break;
+                    case QuoteLine.Plates:   // batch & plates: the plate change fee (the rate only when every job used the same)
+                        rows.Add(Head(PlatesRowLabel(), PlatesRowDetail(l, rate), l.Ore, true));
                         break;
                     case QuoteLine.Failed:
                         rows.Add(Head(L.S("Failed-print allowance", "Tillæg for fejlprint"), l.Quantity > 0
@@ -375,17 +381,75 @@ namespace PrintPrice
         public static string JobText(string customer, string source, int hours, int minutes, string grams, int colours,
                                      double friendsPrice, double customerPrice)
         {
+            return JobText(customer, source, hours, minutes, grams, colours, friendsPrice, customerPrice, 1, 1, false);
+        }
+
+        /// Batch & plates: as above for quantity copies on plates plates. 2+ copies: a "Quantity: 4 pcs" line after the
+        /// model, "Print time: 9 h 12 m on 2 plates, …" and, with showEach (AppSettings.QuoteShowUnitPrice), each price
+        /// followed by " (18,18 kr. each)". 1 copy = exactly the old text.
+        public static string JobText(string customer, string source, int hours, int minutes, string grams, int colours,
+                                     double friendsPrice, double customerPrice, int quantity, int plates, bool showEach)
+        {
             string nl = Environment.NewLine;
+            bool batch = quantity > 1;
             string text = L.S("3D print quote", "Tilbud på 3D-print") + nl;
             if (!string.IsNullOrEmpty(customer)) text += L.S("For: ", "Til: ") + customer + nl;
             string src = (source ?? "").Trim();
             if (src.Length > 0) text += "Model: " + src + nl;
-            text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g",
-                        hours, minutes, (grams ?? "").Trim()) +
+            if (batch) text += History.QuantityText(quantity) + nl;
+            text += PrintTimeText(hours, minutes, batch ? plates : 1) + L.F(", filament: {0} g", ", filament: {0} g", (grams ?? "").Trim()) +
                     (colours > 0 ? L.F(" ({0} colours)", " ({0} farver)", colours) : "") + nl;
-            text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(friendsPrice) + nl;
-            text += L.S("Customer: ", "Kunde: ") + Num.Kr(customerPrice);
+            text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(friendsPrice) + EachSuffix(friendsPrice, quantity, showEach) + nl;
+            text += L.S("Customer: ", "Kunde: ") + Num.Kr(customerPrice) + EachSuffix(customerPrice, quantity, showEach);
             return text;
+        }
+
+        // ---------- batch & plates (issue #9 / #10): shared texts (desktop and website) ----------
+
+        /// "Print time: 9 h 12 m" + " on 2 plates" for 2+ plates (DA "Printtid: 9 t 12 m på 2 plader").
+        public static string PrintTimeText(int hours, int minutes, int plates)
+        {
+            return L.F("Print time: {0} h {1} m", "Printtid: {0} t {1} m", hours, minutes) + OnPlates(plates);
+        }
+
+        /// " on 2 plates" (leading space) for 2+ plates, else "".
+        public static string OnPlates(int plates)
+        {
+            string s = History.OnPlatesText(plates);
+            return s.Length > 0 ? " " + s : "";
+        }
+
+        /// "9 h 12 m on 2 plates" (QuoteRows.Time + OnPlates): the quote page's Print time value of a batch.
+        public static string TimeOnPlates(int hours, int minutes, int plates)
+        {
+            return Time(hours, minutes) + OnPlates(plates);
+        }
+
+        /// " (18,18 kr. each)" after a price for 2+ copies when showEach, else "".
+        public static string EachSuffix(double total, int quantity, bool showEach)
+        {
+            if (!showEach || quantity <= 1) return "";
+            return " (" + History.EachPriceText(total, quantity) + ")";
+        }
+
+        /// The breakdown row of the plate change fee: "Plate changes" / "Pladeskift".
+        public static string PlatesRowLabel() { return L.S("Plate changes", "Pladeskift"); }
+
+        /// Its detail: "2 × 5,00 kr." (plate changes × fee; withRate false or no rate = "2 changes" / "2 skift", ui-text #1:
+        /// it counts the changes, not the plates).
+        public static string PlatesRowDetail(QuoteLine l, bool withRate)
+        {
+            if (l == null) return "";
+            int n = (int)Math.Round(l.Quantity);
+            if (withRate && l.UnitPrice > 0) return n + "  ×  " + Num.Kr(l.UnitPrice);
+            return n == 1 ? L.S("1 change", "1 skift") : L.F("{0} changes", "{0} skift", n);
+        }
+
+        /// The quote page / Copy text's total small line with the price per piece: "4 pcs · 18,18 kr. each" ("" for 1
+        /// copy or when showEach is off).
+        public static string EachLine(double total, int quantity, bool showEach)
+        {
+            return showEach ? History.EachText(total, quantity) : "";
         }
 
         /// A saved record as plain text: title, name, model, link (already short), time and grams, the chosen price;
@@ -397,10 +461,15 @@ namespace PrintPrice
             // invoice: the name it was made out to (History.InvoiceInfo: stored BilledTo, else Customer)
             string who = invoice ? History.InvoiceInfo(r, settings).BilledTo : (r.Customer ?? "").Trim();
             if (!string.IsNullOrEmpty(who)) text += (invoice ? L.S("Bill to: ", "Kunde: ") : L.S("For: ", "Til: ")) + who + nl;
-            text += "Model: " + ModelName(r.Model) + nl;
+            // batch & plates: "Model: 4 × Benchy", "Print time: … on 2 plates", "Price: … (18,18 kr. each)"; 1 copy as before
+            int qty = History.QuantityOf(r);
+            bool showEach = settings == null || settings.QuoteShowUnitPrice != 0;
+            text += "Model: " + History.CopiesName(ModelName(r.Model), qty) + nl;
             if (!string.IsNullOrEmpty(link)) text += link + nl;
-            text += L.F("Print time: {0} h {1} m, filament: {2} g", "Printtid: {0} t {1} m, filament: {2} g", r.Hours, r.Minutes, Num.Fmt(r.Grams)) + nl;
-            text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(friends ? r.FriendsPrice : r.OthersPrice);
+            text += PrintTimeText(r.Hours, r.Minutes, qty > 1 ? History.PlatesOf(r) : 1) +
+                    L.F(", filament: {0} g", ", filament: {0} g", Num.Fmt(r.Grams)) + nl;
+            double price = friends ? r.FriendsPrice : r.OthersPrice;
+            text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(price) + EachSuffix(price, qty, showEach);
             if (invoice)
             {
                 DateTime billed;
@@ -486,7 +555,9 @@ namespace PrintPrice
         public static string JobDetail(QuoteRecord r, string material)
         {
             string m = (material ?? "").Trim();
-            return Time(r.Hours, r.Minutes) + " · " + Num.Fmt(r.Grams) + " g" + (m.Length > 0 ? " · " + m : "");
+            // batch & plates: "9 h 12 m on 2 plates · 182 g · PLA" for 2+ copies
+            string time = History.QuantityOf(r) > 1 ? TimeOnPlates(r.Hours, r.Minutes, History.PlatesOf(r)) : Time(r.Hours, r.Minutes);
+            return time + " · " + Num.Fmt(r.Grams) + " g" + (m.Length > 0 ? " · " + m : "");
         }
 
         /// A job's faint line on a combined bill: "Quote no. 261103-1412 · 3 November 2026".
@@ -511,7 +582,19 @@ namespace PrintPrice
                     minutes += Math.Max(0, r.Hours) * 60 + Math.Max(0, r.Minutes);
                     grams += Math.Max(0, r.Grams);
                 }
-            return PrintsText(n) + " · " + Time(minutes / 60, minutes % 60) + " · " + Num.Fmt(Math.Round(grams, 2)) + " g";
+            // batch & plates: "3 models, 9 pcs · …" when any job has 2+ copies
+            var count = History.CountPrints(jobs);
+            string what = count.Pieces > count.Models
+                ? (count.Models == 1 ? L.S("1 model", "1 model") : L.F("{0} models", "{0} modeller", count.Models)) + ", " + History.PiecesText(count.Pieces)
+                : PrintsText(n);
+            return what + " · " + Time(minutes / 60, minutes % 60) + " · " + Num.Fmt(Math.Round(grams, 2)) + " g";
+        }
+
+        /// Batch & plates: the combined bill's "Plates" summary value ("5"), "" when no job has 2+ copies (no row then).
+        public static string GroupPlates(IList<QuoteRecord> jobs)
+        {
+            var count = History.CountPrints(jobs);
+            return count.Pieces > count.Models ? count.Plates.ToString(CultureInfo.InvariantCulture) : "";
         }
 
         /// The muted line before the total when a customer bill is below the minimum price: "Minimum price (50,00 kr.)".
@@ -531,6 +614,15 @@ namespace PrintPrice
         /// the first job: its snapshot when made). number = invoice code / quote number.
         public static string GroupText(GroupBillInfo bill, bool invoice, string number, string customer, DateTime date, InvoiceDetails inv)
         {
+            return GroupText(bill, invoice, number, customer, date, inv, true);
+        }
+
+        /// As above. Batch & plates: a job of 2+ copies reads "- 4 × Benchy: 9 h 12 m on 2 plates, 182 g: 72,72 kr. (18,18 kr.
+        /// each)" (each only with showEach), and a bill with any of them gets "Prints: 3 models, 9 pcs · Plates: 5" before the
+        /// total. Bills without copies: exactly the old text.
+        public static string GroupText(GroupBillInfo bill, bool invoice, string number, string customer, DateTime date, InvoiceDetails inv,
+                                       bool showEach)
+        {
             string nl = Environment.NewLine;
             string text = (invoice ? L.S("Invoice", "Faktura") : L.S("3D print quote", "Tilbud på 3D-print")) + " " + number + nl;
             string who = (customer ?? "").Trim();
@@ -540,10 +632,15 @@ namespace PrintPrice
             for (int i = 0; i < bill.Jobs.Count; i++)
             {
                 var r = bill.Jobs[i];
-                text += "- " + ModelName(r.Model) + ": " +
-                        L.F("{0} h {1} m, {2} g", "{0} t {1} m, {2} g", r.Hours, r.Minutes, Num.Fmt(r.Grams)) + ": " +
-                        Num.Kr(i < jobOre.Length ? jobOre[i] / 100.0 : 0) + nl;
+                int qty = History.QuantityOf(r);
+                double amount = i < jobOre.Length ? jobOre[i] / 100.0 : 0;
+                text += "- " + History.CopiesName(ModelName(r.Model), qty) + ": " +
+                        L.F("{0} h {1} m", "{0} t {1} m", r.Hours, r.Minutes) + (qty > 1 ? OnPlates(History.PlatesOf(r)) : "") +
+                        L.F(", {0} g", ", {0} g", Num.Fmt(r.Grams)) + ": " + Num.Kr(amount) + EachSuffix(amount, qty, showEach) + nl;
             }
+            var count = History.CountPrints(bill.Jobs);
+            if (count.Pieces > count.Models)
+                text += History.PrintsText(count.Models, count.Pieces) + " · " + History.PlatesCountText(count.Plates) + nl;
             text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(bill.Total);
             if (invoice && inv != null)
             {

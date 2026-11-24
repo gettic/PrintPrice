@@ -118,6 +118,9 @@ static class WebTests
         // 16. web-look (qol 2026-11-21): scale in names, combined bill grouped per job, unpaid line, texts
         LookTests.Run(True, Eq);
 
+        // 17. batch-plates (issue #9 / #10): copies and plates without slicing, History fields, settings
+        BatchTests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

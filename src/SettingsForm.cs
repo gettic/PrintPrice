@@ -17,6 +17,8 @@ namespace PrintPrice
         TextBox txtDueDays, txtMobilePay, txtBank, txtPrinterName;   // invoice: pay within N days, ways to pay; printer name
         CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate, chkPayback;
         CheckBox chkMainInvoice;   // Quote & invoice tab: the main window's button makes invoices (AppSettings.MainInvoice)
+        TextBox txtPlateFee;       // Prices tab: kr. per extra build plate (AppSettings.PlateChangeFee, batch & plates)
+        CheckBox chkUnitPrice;     // Quote & invoice tab: price per piece on quotes / invoices (AppSettings.QuoteShowUnitPrice)
         CheckBox chkQuoteTower;    // Quote & invoice tab: "incl. 1,7 g for the prime tower" note on quotes / invoices (AppSettings.QuoteShowTower, issue #8 step 3)
         ComboBox cmbTower;         // Quote & invoice tab: prime tower On / Off for 2+ colours (AppSettings.PrimeTower, all printers; issue #8 step 3)
         CheckBox chkInvoiceCopies; // Quote & invoice tab: copy of every invoice PDF (AppSettings.InvoiceCopies, issue #6)
@@ -130,6 +132,8 @@ namespace PrintPrice
             Section(t, L.S("Price rules", "Prisregler"));
             txtMin = Row(t, L.S("Minimum price (customers)", "Minimumspris (kunder)"), L.S("kr. (0 = off)", "kr. (0 = fra)"));
             txtRound = Row(t, L.S("Round up to nearest", "Rund op til nærmeste"), L.S("kr. (0 = off)", "kr. (0 = fra)"));
+            // batch & plates: kr. for every build plate after the first (both prices, not marked up)
+            txtPlateFee = Row(t, L.S("Plate change fee", "Gebyr for pladeskift"), L.S("kr. per extra plate (0 = off)", "kr. pr. ekstra plade (0 = fra)"));
 
             Section(t, L.S("Failed prints", "Fejlprint"));
             txtFailed = Row(t, L.S("Extra for failed prints", "Tillæg for fejlprint"), L.S("% (0 = off)", "% (0 = fra)"));
@@ -207,6 +211,8 @@ namespace PrintPrice
             Section(t, L.S("Quote", "Tilbud"));
             txtQuoteName = TextRow(t, L.S("Name on the quote", "Navn på tilbuddet"), null, 40);
             txtQuoteDays = Row(t, L.S("Valid for", "Gyldigt i"), L.S("days", "dage"));   // valid until = quote date + days
+            // batch & plates: "4 pcs · 18,18 kr. each" on quotes / invoices / Copy text of 2+ copies
+            chkUnitPrice = Check(t, L.S("Show the price per piece", "Vis pris pr. stk."));   // ui-text #10
             // issue #8 step 3: Bambu Studio's prime tower when slicing 2+ colours (one setting for every printer; a job can
             // switch it) here, next to its grams tick, so the Printer tab (the tallest) keeps Settings at 565 px; own heading (qol)
             Section(t, "Slicing");   // the same word in Danish
@@ -225,7 +231,10 @@ namespace PrintPrice
             // issue #8 step 3 (tip exists from here on)
             tip.SetToolTip(cmbTower, L.S("Bambu Studio prints a small tower to clean the nozzle when the colour changes.\nOff saves filament and time but can leave colour smudges.\nApplies to all printers. Change it per job under the result.",
                                          "Bambu Studio printer et lille tårn, der renser dysen, når farven skifter.\nFra sparer filament og tid, men kan give farvepletter.\nGælder alle printere. Kan ændres pr. job under resultatet."));
-            tip.SetToolTip(chkQuoteTower, L.S("Adds \"incl. 1,7 g for the prime tower\" under Material.\nNo extra price: the grams are already counted.",
+            // ui-text #12: what the plate change fee does
+            tip.SetToolTip(txtPlateFee, L.S("Added once for each plate after the first, on both prices.",
+                                            "Lægges til én gang for hver plade efter den første, på begge priser."));
+            tip.SetToolTip(chkQuoteTower,L.S("Adds \"incl. 1,7 g for the prime tower\" under Material.\nNo extra price: the grams are already counted.",
                                               "Tilføjer \"inkl. 1,7 g til primetårnet\" under Materiale.\nIngen ekstra pris: grammene er allerede talt med."));
             // issue #6: a copy of every saved invoice PDF in <settings folder>\Invoices + a button that opens that folder
             int ic = t.RowCount++;
@@ -373,7 +382,7 @@ namespace PrintPrice
             int cw = ClientSize.Width - 2 * Px(Edge);
             // one caption column for every tab: the longest caption (or the payback checkbox) + its right margin (LabelGap)
             // qol #13: tick boxes start where the captions' text starts (the box frame was 5 px left of it)
-            foreach (var cb in new[] { chkPayback, chkAutoWear, chkVat, chkAutoPower, chkMainInvoice, chkQuoteTower, chkInvoiceCopies, chkAutoUpdate })
+            foreach (var cb in new[] { chkPayback, chkAutoWear, chkVat, chkAutoPower, chkMainInvoice, chkUnitPrice, chkQuoteTower, chkInvoiceCopies, chkAutoUpdate })
                 cb.Margin = new Padding(Px(CheckIndent), cb.Margin.Top, cb.Margin.Right, cb.Margin.Bottom);
             // qol #12: measured to the end of the caption's TEXT (its preferred width ends with GDI's trailing text padding),
             // then a 30 px clear gap to the boxes, as in the main window (PreferredSize + LabelGap gave 27 / 26 px)
@@ -1000,6 +1009,8 @@ namespace PrintPrice
             chkInvoiceCopies.Checked = s.InvoiceCopies != 0;
             cmbTower.SelectedIndex = s.PrimeTower == 0 ? 1 : 0;            // issue #8 step 3
             chkQuoteTower.Checked = s.QuoteShowTower == 1;
+            txtPlateFee.Text = Num.Fmt(s.PlateChangeFee);                    // batch & plates
+            chkUnitPrice.Checked = s.QuoteShowUnitPrice != 0;
             filling = false;
         }
 
@@ -1230,6 +1241,8 @@ namespace PrintPrice
             ok &= ReadBox(txtRound, out round);
             ok &= ReadBox(txtFailed, out failed);
             ok &= ReadBox(txtAddOn, out addOn);
+            double plateFee;
+            ok &= ReadBox(txtPlateFee, out plateFee);         // batch & plates: kr. per extra plate, 0 or more
             ok &= ReadDays(txtQuoteDays, 3650, out days);   // quote validity: whole days, 1–3650
             ok &= ReadDays(txtDueDays, 365, out dueDays);   // invoice: whole days, 1–365
             // payback %: checked only while it is used (a greyed-out box can't be fixed); off = a valid number is kept, else the old one
@@ -1288,6 +1301,8 @@ namespace PrintPrice
             Result.InvoiceCopies = chkInvoiceCopies.Checked ? 1 : 0;
             Result.PrimeTower = cmbTower.SelectedIndex == 1 ? 0 : 1;      // issue #8 step 3
             Result.QuoteShowTower = chkQuoteTower.Checked ? 1 : 0;
+            Result.PlateChangeFee = plateFee;                           // batch & plates
+            Result.QuoteShowUnitPrice = chkUnitPrice.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
         }

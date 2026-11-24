@@ -731,8 +731,10 @@ else if (Quotes.Count > 0)
     RenderFragment NameParts(QuoteRecord rec)
     {
         string scale = WebHistory.ScalePart(rec);
-        if (scale.Length == 0) return @<span class="mn">@WebHistory.BaseModelText(rec)</span>;
-        return @<span class="mwrap"><span class="mn">@WebHistory.BaseModelText(rec)</span><span class="ms">@scale</span></span>;
+        string copies = WebHistory.CopiesPart(rec);   // batch-plates: "12 × " stays whole in front
+        string name = WebHistory.NameText(rec);       // several files: "30 × a.stl, 30 × b.stl" (History.WithCopies)
+        if (scale.Length == 0 && copies.Length == 0) return @<span class="mn">@name</span>;
+        return @<span class="mwrap">@if (copies.Length > 0) { <span class="ms">@copies</span> }<span class="mn">@name</span>@if (scale.Length > 0) { <span class="ms">@scale</span> }</span>;
     }
 
     /// A quote's actions on a phone (list row or card tapped).

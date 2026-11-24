@@ -20,7 +20,10 @@ namespace PrintPrice
         public double TotalSeconds;    // full print time
         public int ColourChanges;      // filament_change_times
         public double TowerSeconds;    // issue #8 step 3: feature_type_times "Prime tower", summed over plates
+        // batch-plates: the same per plate (sliced_plates[].id -> seconds; plates without an id left out)
+        public SortedDictionary<int, double> PlateTowerSeconds = new SortedDictionary<int, double>();
         public List<double[]> ObjectSizes = new List<double[]>();   // issue #8: per object {width X, depth Y, height Z} mm, as sliced (scaled)
+        public List<string> ObjectNames = new List<string>();       // batch-plates T1: objects[].name, same order as ObjectSizes
         // plans\too-small: per object {plate id (0 = missing), bbox x, bbox y, width, depth, height} as placed (SlicedOffBed)
         public List<double[]> ObjectBoxes = new List<double[]>();
     }
@@ -538,6 +541,13 @@ namespace PrintPrice
         public static SliceResult SliceFile(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament, CancellationToken ct,
                                             ScaleXyz scale)
         {
+            return SliceFileWith(exe, model, workDir, printer, nozzleSize, defaultFilament, ct, scale, null, 0);
+        }
+
+        /// SliceFile with more CLI options (batch-plates: RepetitionArgs) and the plate to slice (0 = all).
+        static SliceResult SliceFileWith(string exe, string model, string workDir, string printer, string nozzleSize, string defaultFilament,
+                                         CancellationToken ct, ScaleXyz scale, IList<string> more, int slicePlate)
+        {
             scale = scale ?? ScaleXyz.None;
             if (scale.IsScaled && IsGcodeFile(model)) throw new SliceException(ScaleGcodeText());
             var scaleArgs = ScaleArgs(scale);
@@ -548,19 +558,23 @@ namespace PrintPrice
             string filaments = null;
             if (!string.IsNullOrEmpty(nozzleSize) && !string.IsNullOrEmpty(defaultFilament))
                 filaments = SlotFilaments(exe, model, printer, nozzleSize, defaultFilament, outDir);
+            var extra = new List<string>(scaleArgs);
+            if (more != null) extra.AddRange(more);
             return RunSlice(exe, new[] { model }, workDir, printer, filaments, filaments ?? Path.Combine(workDir, "filament.json"),
-                            scaleArgs.Count > 0 ? scaleArgs : null, outDir, Path.GetFileName(model), ct);
+                            extra.Count > 0 ? extra : null, outDir, Path.GetFileName(model), ct, slicePlate, more != null);
         }
 
         /// Runs the slicer CLI on `models` (one call) with the given --load-filaments value and extra options, in outDir
         /// (working folder and --outputdir); reads out.3mf + result.json. slotFiles = the per-slot list for the
-        /// plate-clash check (null = filament.json). Errors as SliceFile's.
+        /// plate-clash check (null = filament.json). slicePlate = "--slice" value (0 = every plate; batch-plates'
+        /// repetitions run needs 1). Errors as SliceFile's.
         static SliceResult RunSlice(string exe, IList<string> models, string workDir, string printer, string slotFiles,
-                                    string loadFilaments, IList<string> extra, string outDir, string shownName, CancellationToken ct)
+                                    string loadFilaments, IList<string> extra, string outDir, string shownName, CancellationToken ct,
+                                    int slicePlate = 0, bool oneCopySize = false)
         {
             string filaments = slotFiles;
             var list = new List<string> {
-                "--slice", "0", "--arrange", "1", "--orient", "0",
+                "--slice", Math.Max(0, slicePlate).ToString(CultureInfo.InvariantCulture), "--arrange", "1", "--orient", "0",
                 "--load-settings", Path.Combine(workDir, "machine.json") + ";" + Path.Combine(workDir, "process.json"),
                 "--load-filaments", loadFilaments,
                 "--outputdir", outDir, "--export-3mf", "out.3mf" };
@@ -635,6 +649,8 @@ namespace PrintPrice
             // the plate is refused like the CLI's own -50
             if (SlicedOffBed(printer, stats)) throw new SliceException(BedErrorText(printer), BedErrorCode, null);
             ApplySliceStats(res, stats);
+            // batch-plates T1: copies (clones / repetitions) count once, with the size of an unturned copy
+            if (oneCopySize && stats != null) SetSize(res, OneCopySizes(stats.ObjectNames, stats.ObjectSizes));
             return res;
         }
 
@@ -736,13 +752,14 @@ namespace PrintPrice
             if (IsGcodeFile(path3mf)) return ReadGcodeFile(path3mf);
             string xml, settings, modelSettings;
             GcodeTower tower;
+            var plateTowers = new Dictionary<int, GcodeTower>();
             using (var zip = ZipFile.OpenRead(path3mf))
             {
                 xml = EntryText(zip, "Metadata/slice_info.config");   // null = missing, empty or over 64 MB
                 if (xml == null) return null;
                 settings = ProjectSettings(zip);
                 modelSettings = EntryText(zip, "Metadata/model_settings.config");
-                tower = PlateTower(zip);
+                tower = PlateTower(zip, plateTowers);
             }
             var res = ParseSliceInfo(xml);
             if (res != null)
@@ -755,6 +772,7 @@ namespace PrintPrice
                 foreach (var f in res.Filaments)
                     if (f.Slot >= 1 && f.Slot <= profiles.Count) f.Profile = StripSlotTag(profiles[f.Slot - 1]);   // our " #2" (SlotFilaments)
                 ApplyTower(res, tower);   // issue #8 step 3; null (no plate G-code) = unknown
+                if (tower != null) ApplyPlateTowers(res, plateTowers);   // batch-plates: each plate's own tower
                 var pp = ProjectPrinterFrom(parsed, xml);
                 if (pp != null)
                 {
@@ -787,7 +805,7 @@ namespace PrintPrice
 
         /// Issue #8 step 3: the prime tower of every Metadata/plate_N.gcode in an open 3MF, streamed line by line (no size
         /// cap: the G-code is never held in memory). Null = no plate G-code, or it couldn't be read.
-        static GcodeTower PlateTower(ZipArchive zip)
+        static GcodeTower PlateTower(ZipArchive zip, Dictionary<int, GcodeTower> perPlate)
         {
             try
             {
@@ -801,11 +819,16 @@ namespace PrintPrice
                         var plate = TowerFromGcode(Lines(sr));
                         if (total == null) total = new GcodeTower();
                         AddTower(total, plate);
+                        // batch-plates: "Metadata/plate_3.gcode" -> plate 3
+                        int index;
+                        string num = e.FullName.Substring("Metadata/plate_".Length, e.FullName.Length - "Metadata/plate_".Length - ".gcode".Length);
+                        if (perPlate != null && int.TryParse(num, NumberStyles.None, CultureInfo.InvariantCulture, out index) && index > 0)
+                            perPlate[index] = plate;
                     }
                 }
                 return total;
             }
-            catch { return null; }
+            catch { if (perPlate != null) perPlate.Clear(); return null; }
         }
 
         /// A reader's lines, one at a time.
@@ -1106,6 +1129,168 @@ namespace PrintPrice
         /// A together run that came back with 2+ plates (SliceColours falls back to separate).
         sealed class TogetherDoesNotFit : Exception { }
 
+        // ---------- batch plates (issue #9 / #10, plans\batch-plates) ----------
+        // The pure parts (CloneArgs, RepetitionArgs, BatchPlates, CopiesPerPlate, RepeatResult, NumberBatchPlates...) are
+        // in SliceInfo.cs.
+
+        /// Slices a batch: every item with its Copies (each 1..MaxCopies and all together <= MaxCopies, else
+        /// SliceException(CopiesRangeText) before anything runs). colours = one ColourChoice per slot as in SliceColours;
+        /// null / empty = every plain file with workDir's filament.json (PrepareProfiles). Call PrepareProfiles first.
+        /// - plain files (STL/OBJ/STEP/AMF): one CLI run per colour with all of that colour's files and "--clone-objects";
+        ///   each colour gets its own plates (the CLI puts a 2nd+ plate of a mixed run on filament 1), arrange spills the
+        ///   copies onto as many plates as needed. Copies per plate = objects on it.
+        /// - unsliced .3mf with one plate: 1 copy = SliceFile; more = "--repetitions N --slice 1" (K copies on a full
+        ///   plate), then that plate x (N div K) + one run for the rest (N mod K). Its colours go after the user's (as
+        ///   SliceColours).
+        /// - pre-sliced .3mf / G-code, or a project with 2+ plates: read / sliced once and x N (RepeatResult, CopiesMultiplied).
+        /// Result: totals over every plate (tower, purge, colour changes per plate as sliced), Copies = all pieces,
+        /// PerPlate = most on one plate, PlateList with File = the item's name (a colour run: its files' names joined),
+        /// Index 1.. per File, Copies / TowerGrams / TowerSeconds per plate. progress: one line per CLI run.
+        /// Cancel, timeout and slicing errors as SliceFile / SliceColours.
+        public static SliceResult SliceBatch(string exe, IList<BatchItem> items, IList<ColourChoice> colours, string workDir,
+                                             string printer, string nozzleSize, string defaultFilament, IProgress<string> progress,
+                                             CancellationToken ct, ScaleXyz scale)
+        {
+            if (items == null || items.Count == 0 || items.Any(x => x == null || string.IsNullOrEmpty(x.Path)))
+                throw new SliceException(L.S("No model file to slice.", "Ingen modelfil at slice."));
+            long sum = 0;
+            foreach (var item in items)
+            {
+                if (!CopiesInRange(item.Copies)) throw new SliceException(CopiesRangeText());
+                sum += item.Copies;
+            }
+            if (sum > MaxCopies) throw new SliceException(CopiesRangeText());
+            scale = scale ?? ScaleXyz.None;
+            if (scale.IsScaled && items.Any(x => IsGcodeFile(x.Path))) throw new SliceException(ScaleGcodeText());
+            if (scale.IsScaled && !scale.IsUniform)
+                foreach (var item in items)
+                    if (!CanScaleXyz(item.Path)) throw new SliceException(ScaleXyzFormatText(item.Name));
+            var scaleArgs = ScaleArgs(scale);
+            colours = colours ?? new List<ColourChoice>();
+            printer = string.IsNullOrEmpty(printer) ? WorkDirPrinter(workDir) : FindPrinter(printer).Key;
+            var colourFiles = PrepareColours(exe, printer, nozzleSize, colours, defaultFilament, workDir);
+            Func<int, int> slotOf = i =>
+            {
+                if (colourFiles.Count == 0) return 0;   // 0 = filament.json
+                int s = items[i].Slot;
+                return s >= 1 && s <= colourFiles.Count ? s : 1;
+            };
+            var plain = new List<int>();
+            var other = new List<int>();
+            for (int i = 0; i < items.Count; i++) (IsProjectOrSliced(items[i].Path) ? other : plain).Add(i);
+            var groups = plain.GroupBy(slotOf).OrderBy(x => x.Key).ToList();
+            int runs = groups.Count + other.Count, run = 0;
+            var total = new SliceResult();
+
+            foreach (var g in groups)
+            {
+                ct.ThrowIfCancellationRequested();
+                var idx = g.ToList();
+                var counts = idx.Select(i => items[i].Copies).ToList();
+                string names = string.Join(", ", idx.Select(i => items[i].Name ?? ""));
+                BatchReport(progress, names, counts.Sum(), ++run, runs);
+                string load = g.Key == 0 ? Path.Combine(workDir, "filament.json") : colourFiles[g.Key - 1];
+                var args = CloneArgs(counts).Concat(scaleArgs).ToList();
+                var paths = idx.Select(i => PrepareScaled(items[i].Path, scale, workDir)).ToList();
+                var r = RunSlice(exe, paths, workDir, printer, g.Key == 0 ? null : load, load, args, NewOutDir(workDir), names, ct, 0, true);
+                // T1: the model's own size, not a copy as arrange turned it (uniform scale = factor; X/Y/Z = in the copy)
+                SetBatchSize(r, paths.Select(ModelFileSize).ToList(), scale.IsScaled && scale.IsUniform ? scale.Pct / 100.0 : 1);
+                int placed = 0;
+                foreach (var p in r.PlateList) { p.Copies = p.Objects == null ? 0 : p.Objects.Count; placed += p.Copies; }
+                if (placed < counts.Sum()) throw new SliceException(MissingCopiesText(placed, counts.Sum()));
+                r.Copies = counts.Sum();
+                r.PerPlate = r.PlateList.Count == 0 ? 0 : r.PlateList.Max(x => x.Copies);
+                AddResult(total, r, names, g.Key == 0 ? 0 : g.Key - 1);   // the run's slot 1 = this colour
+            }
+
+            foreach (int i in other)
+            {
+                ct.ThrowIfCancellationRequested();
+                var it = items[i];
+                BatchReport(progress, it.Name ?? "", it.Copies, ++run, runs);
+                SliceResult r;
+                if (ReadAsSliced(it.Path, scale))
+                {
+                    var one = ReadSliceInfo(it.Path, defaultFilament);
+                    if (one == null) throw new SliceException(L.F("Bambu Studio returned no print estimate for {0}.",
+                        "Bambu Studio gav intet printestimat for {0}.", it.Name ?? ""));
+                    one.FromSlicedFile = true;
+                    r = RepeatResult(one, it.Copies);   // can't be re-arranged: the file printed N times
+                }
+                else r = SliceProjectBatch(exe, it, workDir, printer, nozzleSize, defaultFilament, ct, scale);
+                AddResult(total, r, it.Name ?? "", colourFiles.Count);
+            }
+            NumberBatchPlates(total);
+            return total;
+        }
+
+        /// One unsliced .3mf of a batch (SliceBatch): see there.
+        static SliceResult SliceProjectBatch(string exe, BatchItem it, string workDir, string printer, string nozzleSize,
+                                             string defaultFilament, CancellationToken ct, ScaleXyz scale)
+        {
+            int n = it.Copies;
+            List<int> plateObjects;
+            using (var zip = ZipFile.OpenRead(it.Path))
+                plateObjects = ProjectPlateObjects(EntryText(zip, "Metadata/model_settings.config"));
+            if (n == 1 || plateObjects.Count >= 2)
+            {
+                var one = SliceFile(exe, it.Path, workDir, printer, nozzleSize, defaultFilament, ct, scale);
+                return RepeatResult(one, n);   // 1 copy: the same numbers with Copies = 1; 2+ plates: the project x N
+            }
+            int perCopy = plateObjects.Count == 1 ? plateObjects[0] : 0;
+            if (perCopy <= 0)
+            {
+                // the file doesn't list its objects: count them on a normal slice first
+                var single = SliceFile(exe, it.Path, workDir, printer, nozzleSize, defaultFilament, ct, scale);
+                if (single.PlateList.Count >= 2) return RepeatResult(single, n);
+                perCopy = single.PlateList.Count == 1 ? Math.Max(1, single.PlateList[0].Objects.Count) : 1;
+            }
+            var full = RepeatedPlate(exe, it, workDir, printer, nozzleSize, defaultFilament, ct, scale, n, perCopy);
+            int perPlate = full.Copies;
+            int fullPlates, last;
+            BatchPlates(n, perPlate, out fullPlates, out last);
+            var total = new SliceResult();
+            for (int k = 0; k < fullPlates; k++) AddResult(total, full, "");
+            if (last > 0) AddResult(total, RepeatedPlate(exe, it, workDir, printer, nozzleSize, defaultFilament, ct, scale, last, perCopy), "");
+            total.SizeObjects = full.SizeObjects;   // T1: the project's objects once, not once per plate
+            return total;
+        }
+
+        /// A project's plate 1 filled with up to `copies` copies (1 = a normal slice). Copies / PerPlate / plate Copies
+        /// set from the objects on it; fewer than asked = what fits (SliceProjectBatch makes more plates).
+        static SliceResult RepeatedPlate(string exe, BatchItem it, string workDir, string printer, string nozzleSize, string defaultFilament,
+                                         CancellationToken ct, ScaleXyz scale, int copies, int perCopy)
+        {
+            var r = copies == 1 ? SliceFileWith(exe, it.Path, workDir, printer, nozzleSize, defaultFilament, ct, scale, null, 1)
+                                : SliceFileWith(exe, it.Path, workDir, printer, nozzleSize, defaultFilament, ct, scale, RepetitionArgs(copies), 1);
+            if (r.PlateList.Count != 1) throw new SliceException(MissingCopiesText(0, copies));
+            int k = Math.Min(copies, CopiesPerPlate(r.PlateList[0].Objects.Count, perCopy));
+            if (k <= 0) throw new SliceException(MissingCopiesText(0, copies));
+            r.PlateList[0].Copies = k;
+            r.Copies = k;
+            r.PerPlate = k;
+            return r;
+        }
+
+        /// A batch run that came back short: "Bambu Studio placed only 12 of 40 copies. Try fewer copies or make the model
+        /// smaller with Scale…."; none placed: "Bambu Studio couldn't place the copies. Try fewer copies."
+        internal static string MissingCopiesText(int placed, int asked)
+        {
+            if (placed <= 0) return L.S("Bambu Studio couldn't place the copies. Try fewer copies.",
+                                        "Bambu Studio kunne ikke placere stk. Prøv færre.");
+            return L.F("Bambu Studio placed only {0} of {1} copies. Try fewer copies or make the model smaller with Scale….",
+                       "Bambu Studio placerede kun {0} af {1} stk. Prøv færre stk., eller gør modellen mindre med Skalér….", placed, asked);
+        }
+
+        static void BatchReport(IProgress<string> progress, string name, int copies, int run, int runs)
+        {
+            if (progress == null) return;
+            string s = copies == 1 ? L.F("Slicing {0} in Bambu Studio…", "Slicer {0} i Bambu Studio…", name)
+                                   : L.F("Slicing {0} copies of {1} in Bambu Studio…", "Slicer {0} stk. af {1} i Bambu Studio…", copies, name);
+            if (runs > 1) s += " (" + run + "/" + runs + ")";
+            progress.Report(s);
+        }
+
         static void Report(IProgress<string> progress, string name, int i, int count)
         {
             if (progress == null) return;
@@ -1167,7 +1352,10 @@ namespace PrintPrice
                     st.ColourChanges += (int)JsonNum(p, "filament_change_times");
                     object fto;
                     var ft = p.TryGetValue("feature_type_times", out fto) ? fto as Dictionary<string, object> : null;
-                    if (ft != null) st.TowerSeconds += Math.Max(0, JsonNum(ft, "Prime tower"));
+                    double towerSeconds = ft != null ? Math.Max(0, JsonNum(ft, "Prime tower")) : 0;
+                    st.TowerSeconds += towerSeconds;
+                    int plateId = p.ContainsKey("id") ? (int)JsonNum(p, "id") : 0;
+                    if (plateId > 0) AddTo(st.PlateTowerSeconds, plateId, towerSeconds);
                     object oo;
                     var objs = p.TryGetValue("objects", out oo) ? oo as System.Collections.IEnumerable : null;
                     if (objs != null)
@@ -1181,6 +1369,8 @@ namespace PrintPrice
                             if (w > 0 && dp > 0 && h > 0)
                             {
                                 st.ObjectSizes.Add(new[] { w, dp, h });
+                                object nm;
+                                st.ObjectNames.Add(ob.TryGetValue("name", out nm) && nm != null ? nm.ToString() : "");
                                 object xo, yo;
                                 double bx = bb.TryGetValue("x", out xo) ? JsonNum(bb, "x") : double.NaN;
                                 double by = bb.TryGetValue("y", out yo) ? JsonNum(bb, "y") : double.NaN;
@@ -1230,6 +1420,12 @@ namespace PrintPrice
         {
             if (res != null && stats != null) SetSize(res, stats.ObjectSizes);
             if (res != null && stats != null) res.TowerSeconds = stats.TowerSeconds;   // 0 = no tower
+            if (res != null && stats != null && res.PlateList != null)   // batch-plates: per plate
+                foreach (var p in res.PlateList)
+                {
+                    double ts;
+                    if (p != null && stats.PlateTowerSeconds.TryGetValue(p.Index, out ts)) p.TowerSeconds = ts;
+                }
             if (res == null || stats == null || stats.TotalGrams.Count == 0) return;
             foreach (var f in res.Filaments)
             {
@@ -1630,6 +1826,156 @@ namespace PrintPrice
                 if (v > best) { best = v; res.SizeX = s[0]; res.SizeY = s[1]; res.SizeZ = s[2]; }
             }
             res.SizeObjects = sizes.Count(s => s != null && s.Length >= 3);
+        }
+
+        // ---------- one-copy model size (batch-plates T1) ----------
+        // After a multi-copy slice result.json's boxes are the copies as arrange placed them, often turned (a clip 41,2 x 25,2
+        // becomes 47 x 47 at 45°, a Benchy 60 x 31 becomes 31 x 60), so SliceBatch measures plain STL / OBJ files themselves.
+
+        /// The size {X, Y, Z} in mm of an STL (binary or ASCII) or OBJ file's points, as Bambu Studio loads it (no turn:
+        /// --orient 0). null = another format, no points, or unreadable. Never throws.
+        internal static double[] ModelFileSize(string path)
+        {
+            try
+            {
+                string ext = Path.GetExtension(path ?? "").ToLowerInvariant();
+                if (ext == ".stl") using (var fs = File.OpenRead(path)) return StlSize(fs);
+                if (ext == ".obj") using (var r = new StreamReader(path, System.Text.Encoding.UTF8, true)) return ObjSize(r);
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        /// Pure (stream, must be seekable): the size {X, Y, Z} of a binary or ASCII STL's vertices; null = none / broken.
+        internal static double[] StlSize(Stream input)
+        {
+            var box = new SizeBox();
+            var head = new byte[84];
+            int got = 0;
+            while (got < 84) { int n = input.Read(head, got, 84 - got); if (n <= 0) break; got += n; }
+            bool binary = got == 84 && IsBinaryStl(input.Length, head);
+            long count = got == 84 ? BitConverter.ToUInt32(head, 80) : 0;
+            if (!binary && got == 84 && !StartsWithSolid(head))
+            {
+                if ((input.Length - 84) % 50 != 0) return null;
+                count = (input.Length - 84) / 50;
+                binary = true;
+            }
+            if (!binary)
+            {
+                input.Seek(0, SeekOrigin.Begin);
+                var r = new StreamReader(input, new System.Text.UTF8Encoding(false), false, 65536, true);
+                string line;
+                while ((line = r.ReadLine()) != null)
+                {
+                    var m = StlVertexRx.Match(line);
+                    if (m.Success && m.Groups[2].Value.Equals("vertex", StringComparison.OrdinalIgnoreCase)) box.Add(m);
+                }
+                return box.Size();
+            }
+            var tri = new byte[50];
+            for (long t = 0; t < count; t++)
+            {
+                int k = 0;
+                while (k < 50) { int n = input.Read(tri, k, 50 - k); if (n <= 0) return null; k += n; }
+                for (int v = 0; v < 3; v++)
+                {
+                    int o = 12 + v * 12;
+                    box.Add(BitConverter.ToSingle(tri, o), BitConverter.ToSingle(tri, o + 4), BitConverter.ToSingle(tri, o + 8));
+                }
+            }
+            return box.Size();
+        }
+
+        /// Pure: the size {X, Y, Z} of an OBJ's "v x y z" points; null = none.
+        internal static double[] ObjSize(TextReader reader)
+        {
+            var box = new SizeBox();
+            string line;
+            while ((line = reader.ReadLine()) != null)
+            {
+                var m = ObjVertexRx.Match(line);
+                if (m.Success && m.Groups[2].Value == "v") box.Add(m);
+            }
+            return box.Size();
+        }
+
+        sealed class SizeBox
+        {
+            double minX = double.MaxValue, minY = double.MaxValue, minZ = double.MaxValue;
+            double maxX = double.MinValue, maxY = double.MinValue, maxZ = double.MinValue;
+
+            public void Add(double x, double y, double z)
+            {
+                if (double.IsNaN(x) || double.IsNaN(y) || double.IsNaN(z) || double.IsInfinity(x) || double.IsInfinity(y) || double.IsInfinity(z)) return;
+                minX = Math.Min(minX, x); minY = Math.Min(minY, y); minZ = Math.Min(minZ, z);
+                maxX = Math.Max(maxX, x); maxY = Math.Max(maxY, y); maxZ = Math.Max(maxZ, z);
+            }
+
+            public void Add(Match m)   // groups 4, 6, 8 of StlVertexRx / ObjVertexRx
+            {
+                double x, y, z;
+                var inv = CultureInfo.InvariantCulture;
+                if (double.TryParse(m.Groups[4].Value, NumberStyles.Float, inv, out x) &&
+                    double.TryParse(m.Groups[6].Value, NumberStyles.Float, inv, out y) &&
+                    double.TryParse(m.Groups[8].Value, NumberStyles.Float, inv, out z)) Add(x, y, z);
+            }
+
+            public double[] Size()
+            {
+                if (maxX < minX) return null;
+                return new[] { maxX - minX, maxY - minY, maxZ - minZ };
+            }
+        }
+
+        /// Pure: SliceBatch's one-copy size for a colour run: each file's measured size (null = couldn't measure) times
+        /// the uniform factor (non-uniform scales are already in the scaled copy) -> res.SizeX/Y/Z (biggest by volume, as
+        /// SetSize) and SizeObjects = files measured. Any file unmeasured (STEP, AMF) = res keeps the slice's one-copy
+        /// sizes (RunSlice oneCopySize: OneCopySizes).
+        internal static void SetBatchSize(SliceResult res, IList<double[]> fileSizes, double uniformFactor)
+        {
+            if (res == null || fileSizes == null || fileSizes.Count == 0) return;
+            if (!(uniformFactor > 0) || double.IsInfinity(uniformFactor)) uniformFactor = 1;
+            if (fileSizes.Any(s => s == null || s.Length < 3)) return;
+            SetSize(res, fileSizes.Select(s => new[] { s[0] * uniformFactor, s[1] * uniformFactor, s[2] * uniformFactor }).ToList());
+        }
+
+        /// Pure: one size per model from a multi-copy slice's objects (names[i] goes with sizes[i], result.json order).
+        /// Copies share CopyBaseName and height (0,1 mm); per group: the object named exactly the base (the project's own,
+        /// left where it was) when there is one, else the size most copies have (0,1 mm; tie = smaller footprint), so a
+        /// copy arrange turned (45°: 47 x 47, 90°: 31 x 60) doesn't count. names missing / not matching sizes = sizes as
+        /// they are.
+        internal static List<double[]> OneCopySizes(IList<string> names, IList<double[]> sizes)
+        {
+            var list = new List<double[]>();
+            if (sizes == null) return list;
+            if (names == null || names.Count != sizes.Count) return sizes.Where(s => s != null && s.Length >= 3).ToList();
+            var inv = CultureInfo.InvariantCulture;
+            var order = new List<string>();
+            var groups = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+            for (int i = 0; i < sizes.Count; i++)
+            {
+                var s = sizes[i];
+                if (s == null || s.Length < 3) continue;
+                string key = CopyBaseName(names[i]) + "|" + Math.Round(s[2], 1).ToString("0.0", inv);
+                List<int> g;
+                if (!groups.TryGetValue(key, out g)) { g = new List<int>(); groups[key] = g; order.Add(key); }
+                g.Add(i);
+            }
+            foreach (var key in order)
+            {
+                var g = groups[key];
+                string baseName = key.Substring(0, key.LastIndexOf('|'));
+                int own = -1;
+                foreach (int i in g) if (baseName.Length > 0 && (names[i] ?? "") == baseName) { own = i; break; }
+                if (own >= 0) { list.Add(sizes[own]); continue; }
+                var best = g.GroupBy(j => Math.Round(sizes[j][0], 1).ToString("0.0", inv) + "x" + Math.Round(sizes[j][1], 1).ToString("0.0", inv))
+                            .OrderByDescending(x => x.Count())
+                            .ThenBy(x => sizes[x.First()][0] * sizes[x.First()][1])
+                            .First();
+                list.Add(sizes[best.First()]);
+            }
+            return list;
         }
 
         /// Pure: a size measured at fromPct, at toPct (both > 0; else the size as it is). 48 mm at 100 % -> 72 at 150 %.

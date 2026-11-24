@@ -830,7 +830,8 @@ namespace PrintPrice
         }
 
         // ---------- list ----------
-        static string ModelText(QuoteRecord r) { return History.WithScale(History.ModelText(r), r); }   // issue #8: "… (150 %)"
+        // issue #8: "… (150 %)"; batch & plates: "4 × …"
+        static string ModelText(QuoteRecord r) { return History.WithCopies(History.WithScale(History.ModelText(r), r), r); }
 
         static string DateText(QuoteRecord r)
         {
@@ -1296,7 +1297,7 @@ namespace PrintPrice
             // 30 px of the name stays, else the normal "…" on the whole name
             // qol: the compact scale ("(150×100×50 %)") so the name is cut as late as possible; the cut name ends in "…"
             // and the scale follows after one space (the name part is measured as drawn, no gap)
-            string name = History.ModelText(rec);
+            string name = History.WithCopies(History.ModelText(rec), rec);   // batch & plates: "4 × " stays in front
             Func<string, int> width = s => TextRenderer.MeasureText(s, font, Size.Empty, flags).Width;
             string tail = " (" + scale.Replace(" × ", "×") + ")";
             int tw = width(tail), minName = (int)Math.Round(30 * CurrentAutoScaleDimensions.Width / 96f);

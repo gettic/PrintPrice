@@ -17,6 +17,36 @@ namespace PrintPrice.Web
             public long Ore;
             public int Hours, Minutes;
             public double TowerGrams = -1;   // qol 2: this job's prime tower for its own note (-1 = none / setting off)
+            public string Copies = "";       // batch-plates: "4 pcs · 2 plates" = a "Quantity" card row ("" = none)
+        }
+
+        /// The combined page's summary rows after "Bill to" (= QuotePage): with GroupPlates "Prints  3 models, 45 pcs",
+        /// "Plates  4", "In all  6 h 10 m · 52,6 g" (Summary split at its first " · "); without: "Prints  <Summary>".
+        public static List<string[]> SummaryRows(Sheet d)
+        {
+            var rows = new List<string[]>();
+            string summary = d.Summary ?? "";
+            int cut = summary.IndexOf(" · ", StringComparison.Ordinal);
+            if (!string.IsNullOrEmpty(d.GroupPlates) && cut > 0)
+            {
+                rows.Add(new[] { L.S("Prints", "Print"), summary.Substring(0, cut) });
+                rows.Add(new[] { L.S("Plates", "Plader"), d.GroupPlates });
+                rows.Add(new[] { L.S("In all", "I alt"), summary.Substring(cut + 3) });
+            }
+            else
+            {
+                rows.Add(new[] { L.S("Prints", "Print"), summary });
+                if (!string.IsNullOrEmpty(d.GroupPlates)) rows.Add(new[] { L.S("Plates", "Plader"), d.GroupPlates });
+            }
+            return rows;
+        }
+
+        /// Batch-plates (= MainForm's group cards): "4 pcs · 2 plates" for 2+ copies ("4 pcs" on one plate), else "".
+        public static string CardCopies(QuoteRecord r)
+        {
+            int q = History.QuantityOf(r), p = History.PlatesOf(r);
+            if (q <= 1) return "";
+            return History.PiecesText(q) + (p > 1 ? " · " + L.F("{0} plates", "{0} plader", p) : "");
         }
 
         /// A combined bill (2+ cards).
@@ -179,6 +209,7 @@ namespace PrintPrice.Web
                 Customer = (customer ?? "").Trim(),
                 Number = History.QuoteNumber(when), Date = when, ValidUntil = s.QuoteValidUntil(when),
                 Summary = QuoteRows.GroupSummary(jobs),
+                GroupPlates = QuoteRows.GroupPlates(jobs),   // batch-plates: "Plates  5" when any job has 2+ copies
                 GroupFriends = friends,
                 GroupTotal = bill.Total,
                 Jobs = new List<Card>()
@@ -204,7 +235,8 @@ namespace PrintPrice.Web
                     Picture = pic,
                     Hours = r.Hours, Minutes = r.Minutes,
                     Weight = Num.Fmt(r.Grams) + " g",
-                    TowerGrams = RecordTower(s, r)
+                    TowerGrams = RecordTower(s, r),
+                    Copies = CardCopies(r)
                 });
                 string pt = PrinterText(s, r);
                 if (printer == null) printer = pt;
@@ -414,7 +446,7 @@ namespace PrintPrice.Web
         {
             var bill = History.GroupBill(jobs, s, friends);
             return QuoteRows.GroupText(bill, d.Invoice, d.Invoice ? d.InvoiceNo : d.Number, d.Customer, d.Date,
-                                       d.Invoice ? History.InvoiceInfo(jobs[0], s, d.Date) : null);
+                                       d.Invoice ? History.InvoiceInfo(jobs[0], s, d.Date) : null, s.QuoteShowUnitPrice != 0);
         }
 
         /// The suggested PDF name: an invoice "2026-48213 - Name" (made), a quote "2026-11-19 3 prints - Name".
@@ -562,7 +594,7 @@ namespace PrintPrice.Web
                 // summary rows, two to a line: Bill to (invoice) and Prints; the shared printer / plate go beside "Price breakdown"
                 var rows = new List<string[]>();
                 if (d.Invoice) rows.Add(new[] { L.S("Bill to", "Kunde"), d.Customer ?? "" });
-                rows.Add(new[] { L.S("Prints", "Print"), d.Summary ?? "" });
+                rows.AddRange(SummaryRows(d));   // batch-plates: Prints | Plates | In all (= QuotePage)
                 double vx = L.Danish ? 140 : 130, mid = 500;
                 y = 214;
                 for (int k = 0; k < rows.Count; k += 2)
@@ -720,12 +752,20 @@ namespace PrintPrice.Web
                 ny += 17;
             }
             y = Math.Max(factsTop, ny + 10);
-            var facts = new[]
+            var facts = new List<string[]>
             {
                 new[] { L.S("Print time", "Printtid"), QuoteRows.Time(job.Hours, job.Minutes) },
                 new[] { L.S("Weight", "Vægt"), job.Weight },
             };
             double valueX = x + Pad + (L.Danish ? 82 : 78);
+            if (!string.IsNullOrEmpty(job.Copies))
+            {
+                // batch-plates (= QuotePage.DrawCard): "Quantity  4 pcs · 2 plates" ("4 pcs" alone when the card is too narrow)
+                string c = job.Copies;
+                int cut = c.IndexOf(" · ", StringComparison.Ordinal);
+                if (cut > 0 && TextW(c, 14, true) > R - Pad - valueX) c = c.Substring(0, cut);
+                facts.Add(new[] { History.QuantityLabel(), c });
+            }
             foreach (var r in facts)
             {
                 if (it != null)

@@ -18,6 +18,8 @@ namespace PrintPrice
         public List<int> Slots = new List<int>();
         public List<ColourChoice> Colours = new List<ColourChoice>();
         public bool Together;
+        /// Batch & plates: copies per file (same order as Parts; null = 1 each), from the picker's Copies boxes.
+        public List<int> Copies;
 
         /// A .3mf project or a G-code keeps its own colours (no colour of its own in the picker).
         public static bool OwnColours(string file)
@@ -35,7 +37,9 @@ namespace PrintPrice
             foreach (var p in parts)
             {
                 if (p == null) continue;
-                var c = new HistoryPart { File = p.File ?? "", Filament = (p.Filament ?? "").Trim(), Colour = (p.Colour ?? "").Trim().ToUpperInvariant(), Slot = 1 };
+                // batch & plates: the copies of each file go with it (saved in History, used by Repeat / Open again)
+                var c = new HistoryPart { File = p.File ?? "", Filament = (p.Filament ?? "").Trim(), Colour = (p.Colour ?? "").Trim().ToUpperInvariant(), Slot = 1,
+                                          Copies = Math.Max(1, p.Copies) };
                 if (OwnColours(c.File)) { c.Filament = ""; c.Colour = ""; c.Slot = 0; }   // saved as slot 0 = the file's own colours
                 else
                 {
@@ -52,6 +56,7 @@ namespace PrintPrice
                 plan.Slots.Add(Math.Max(1, c.Slot));   // the slicer still gets 1 for an own-colours file (SliceColours ignores it)
                 plan.Parts.Add(c);
             }
+            if (plan.Parts.Any(x => x.Copies > 1)) plan.Copies = plan.Parts.Select(x => x.Copies).ToList();
             return plan;
         }
     }
@@ -98,7 +103,12 @@ namespace PrintPrice
             public ComboBox Combo;
             public string Filament;   // short preset name
             public string Colour = "";
+            public TextBox Copies;    // batch & plates: copies of this file (1..MaxCopies)
         }
+
+        const int CopiesW = 44;   // the copies box (96 dpi units)
+        InfoBox helpBox;
+        string helpText;
 
         readonly List<Row> rows = new List<Row>();
         readonly string defaultFilament;
@@ -158,11 +168,17 @@ namespace PrintPrice
             if (printables)
                 help += L.S("\n\nModels often include the same part as both STL and 3MF, so pick just one of those.",
                             "\n\nModeller har tit den samme del som både STL og 3MF, så vælg kun én af dem.");
-            t.Controls.Add(new InfoBox(ContentW, 9.5f) { Text = help, Margin = new Padding(0, 2, 0, 10) });
+            help += L.S("\n× = copies of each file (as many as fit go on each plate).",   // ui-text #14
+                        "\n× = stk. af hver fil (så mange som muligt på hver plade).");
+            helpText = help;
+            helpBox = new InfoBox(ContentW, 9.5f) { Text = help, Margin = new Padding(0, 2, 0, 10) };
+            t.Controls.Add(helpBox);
 
-            // rows: tick + file name | colour swatch | filament drop-down (28 px each; more than 8 scroll)
-            grid = new TableLayoutPanel { ColumnCount = 3, RowCount = rows.Count, AutoSize = false, Margin = Padding.Empty, Location = Point.Empty };
+            // rows: tick + file name | colour swatch | filament drop-down | × copies (28 px each; more than 8 scroll)
+            grid = new TableLayoutPanel { ColumnCount = 5, RowCount = rows.Count, AutoSize = false, Margin = Padding.Empty, Location = Point.Empty };
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             for (int i = 0; i < rows.Count; i++)
@@ -173,7 +189,21 @@ namespace PrintPrice
                                                Checked = ticked == null || (i < ticked.Count && ticked[i]) };
                 r.Tick.AccessibleName = r.Name;
                 r.Tick.CheckedChanged += delegate { UpdateState(); };
+                r.Tick.TabIndex = i * 4;   // qol #10: Tab goes tick -> colour -> filament -> copies, row by row
                 grid.Controls.Add(r.Tick, 0, i);
+                // batch & plates: "× [1]" copies of this file (muted ×, a 44 px number box; dark tooltip says what it is);
+                // qol #7: grayscale text (no ClearType colour fringes on the thin ×)
+                var times = new Theme.PlainLabel { Text = "×", AutoSize = true, Tag = "muted", Anchor = AnchorStyles.Left, UseMnemonic = false,
+                                                   Margin = new Padding(10, 0, 4, 0) };
+                grid.Controls.Add(times, 3, i);
+                r.Copies = new TextBox { Width = CopiesW, Text = "1", TextAlign = HorizontalAlignment.Right, MaxLength = 3,
+                                         Anchor = AnchorStyles.Top | AnchorStyles.Left, Margin = Padding.Empty, TabIndex = i * 4 + 3,
+                                         AccessibleName = L.F("Copies of {0}", "Antal af {0}", r.Name) };
+                var box = r.Copies;
+                r.Copies.TextChanged += delegate { UpdateState(); };
+                r.Copies.Enter += delegate { BeginInvoke((MethodInvoker)box.SelectAll); };
+                grid.Controls.Add(r.Copies, 4, i);
+                tip.SetToolTip(r.Copies, L.S("How many copies of this file", "Hvor mange stk. af denne fil"));
                 if (r.Own)
                 {
                     var own = new Label { Text = L.S("colours from the file", "farver fra filen"), AutoSize = true, Tag = "muted",
@@ -184,12 +214,12 @@ namespace PrintPrice
                     continue;
                 }
                 var row = r;
-                r.Swatch = new Swatch { Size = new Size(18, 18), Clickable = true, Anchor = AnchorStyles.Left, Margin = new Padding(8, 0, 8, 0),
+                r.Swatch = new Swatch { Size = new Size(18, 18), Clickable = true, Anchor = AnchorStyles.Left, Margin = new Padding(8, 0, 8, 0), TabIndex = i * 4 + 1,
                                         AccessibleName = L.F("Colour of {0}", "Farve på {0}", r.Name) };
                 r.Swatch.Click += delegate { ShowColourMenu(row); };
                 grid.Controls.Add(r.Swatch, 1, i);
                 r.Combo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = ComboW, MaxDropDownItems = 12,
-                                         Anchor = AnchorStyles.Top | AnchorStyles.Left, Margin = Padding.Empty,
+                                         Anchor = AnchorStyles.Top | AnchorStyles.Left, Margin = Padding.Empty, TabIndex = i * 4 + 2,
                                          AccessibleName = L.F("Filament of {0}", "Filament til {0}", r.Name) };
                 r.Combo.Items.Add(r.Filament);
                 r.Combo.SelectedIndex = 0;
@@ -224,6 +254,7 @@ namespace PrintPrice
                 AutoSize = true, Tag = "muted", Font = new Font("Segoe UI", 9f), UseMnemonic = false,
                 MaximumSize = new Size(ContentW - BackupForm.Tick.TextX, 0), Margin = new Padding(BackupForm.Tick.TextX, 0, 0, 0), Visible = plain >= 2
             };
+            togetherText = togetherNote.Text;
             t.Controls.Add(togetherNote);
 
             // buttons 32 px high like the other windows, 6 px apart, Cancel's right edge = the drop-downs' right edge;
@@ -271,6 +302,9 @@ namespace PrintPrice
                 grid.RowStyles[i].SizeType = SizeType.Absolute;
                 grid.RowStyles[i].Height = rowH;
                 if (rows[i].Combo != null) rows[i].Combo.Margin = new Padding(0, Math.Max(0, (rowH - rows[i].Combo.Height) / 2), 0, 0);
+                // the copies box like the drop-down: Top-anchored, centred by its real height (drop-down height when there is one)
+                int boxH = rows[i].Combo != null ? rows[i].Combo.Height : rows[i].Copies.Height;
+                rows[i].Copies.Margin = new Padding(0, Math.Max(0, (rowH - boxH) / 2), 0, 0);
             }
             grid.Size = new Size(rowsPanel.Width - scroll, rowH * rows.Count);
             rowsPanel.Height = rowH * Math.Min(rows.Count, MaxRows);
@@ -283,6 +317,18 @@ namespace PrintPrice
                 r.Tick.Text = cut;
                 r.Tick.AccessibleName = r.Name;
                 if (cut != r.Name) tip.SetToolTip(r.Tick, r.Name);
+            }
+            // the help box never gets lower or narrower than its help text (a short error line doesn't move the rows;
+            // qol #1: it kept its height but shrank to the error's width)
+            helpBox.MinimumSize = new Size(helpBox.Width, helpBox.Height);
+            // qol #5: the note under "together" also fits its "Not with copies above 1." version, so nothing moves
+            if (togetherNote.Visible)
+            {
+                string shown = togetherNote.Text;
+                togetherNote.Text = NoTogetherText + " " + togetherText;
+                int h = togetherNote.GetPreferredSize(new Size(togetherNote.MaximumSize.Width, 0)).Height;
+                togetherNote.Text = shown;
+                togetherNote.MinimumSize = new Size(0, h);
             }
             base.OnLoad(e);
         }
@@ -444,30 +490,123 @@ namespace PrintPrice
         void UpdateState()
         {
             if (ok == null) return;
-            ok.Enabled = rows.Any(r => r.Tick.Checked);
+            // batch & plates: every ticked file 1..MaxCopies copies, all together at most MaxCopies (bad = red box + error)
+            bool copiesOk = true, anyBatch = false;
+            long sum = 0;
+            foreach (var r in rows)
+            {
+                int n;
+                bool good = TryCopies(r, out n);
+                r.Copies.BackColor = good || !r.Tick.Checked ? Theme.Input : Theme.InvalidBack;
+                if (!r.Tick.Checked) continue;
+                if (!good) copiesOk = false;
+                else { sum += n; if (n > 1) anyBatch = true; }
+            }
+            bool tooMany = sum > BambuSlicer.MaxCopies;
+            if (tooMany)
+            {
+                copiesOk = false;
+                // qol #3: over the total, the ticked boxes above 1 turn red (each alone is fine, together too many)
+                foreach (var r in rows)
+                {
+                    int n;
+                    if (r.Tick.Checked && TryCopies(r, out n) && n > 1) r.Copies.BackColor = Theme.InvalidBack;
+                }
+            }
+            if (helpBox != null)
+            {
+                // ui-text #6 (+ qol #3: the total now)
+                int ticked = rows.Count(r => r.Tick.Checked);
+                string text = copiesOk ? helpText
+                    : tooMany ? L.F("All {1} files together: 1 to {0} copies (now {2}).", "Alle {1} filer tilsammen: 1 til {0} stk. (nu {2}).", BambuSlicer.MaxCopies, ticked, sum)
+                    : BambuSlicer.CopiesRangeText();
+                if (helpBox.Text != text) { helpBox.Text = text; helpBox.Kind = copiesOk ? InfoKind.Info : InfoKind.Error; }
+            }
+            // qol #11: an unticked file's copies box is greyed out (not used)
+            foreach (var r in rows) r.Copies.Enabled = r.Tick.Checked;
+            ok.Enabled = rows.Any(r => r.Tick.Checked) && copiesOk;
             var plain = rows.Where(r => r.Tick.Checked && !r.Own).ToList();
             int colours = plain.Select(Key).Distinct().Count();
-            together.Enabled = plain.Count >= 2 && colours >= 2 && colours <= BambuSlicer.MaxTogetherColours;
+            // copies are placed by colour on their own plates: "together on one plate" is for one of each
+            together.Enabled = plain.Count >= 2 && colours >= 2 && colours <= BambuSlicer.MaxTogetherColours && !anyBatch;
             // greyed out = not used (Accept ignores it), so it doesn't keep showing a tick
             if (!together.Enabled && together.Checked) together.Checked = false;
+            // qol #5: say why it is greyed out when copies are the reason
+            if (togetherNote != null && togetherText != null)
+            {
+                string note = anyBatch ? NoTogetherText + " " + togetherText : togetherText;
+                if (togetherNote.Text != note) togetherNote.Text = note;
+            }
         }
 
+        string togetherText;   // the note under "together" as built
+        static string NoTogetherText { get { return L.S("Not with copies above 1.", "Ikke med mere end 1 stk."); } }
+
         static string Key(Row r) { return (r.Filament ?? "").ToLowerInvariant() + "|" + (r.Colour ?? "").ToUpperInvariant(); }
+
+        /// The row's copies box: a whole number 1..MaxCopies.
+        static bool TryCopies(Row r, out int n)
+        {
+            n = 1;
+            if (r.Copies == null) return true;
+            return int.TryParse((r.Copies.Text ?? "").Trim(), System.Globalization.NumberStyles.None,
+                                System.Globalization.CultureInfo.InvariantCulture, out n) && BambuSlicer.CopiesInRange(n);
+        }
+
+        /// Set by tests: the "may take several minutes" answer (null = the real question window).
+        internal bool? TestBigAnswer;
 
         void Accept()
         {
             SelectedIndexes = new List<int>();
             var parts = new List<HistoryPart>();
+            var copies = new List<int>();
             for (int i = 0; i < rows.Count; i++)
             {
                 if (!rows[i].Tick.Checked) continue;
+                int n;
+                if (!TryCopies(rows[i], out n)) return;
                 SelectedIndexes.Add(i);
-                parts.Add(new HistoryPart { File = rows[i].Name, Filament = rows[i].Own ? "" : rows[i].Filament, Colour = rows[i].Own ? "" : rows[i].Colour });
+                copies.Add(n);
+                parts.Add(new HistoryPart { File = rows[i].Name, Filament = rows[i].Own ? "" : rows[i].Filament, Colour = rows[i].Own ? "" : rows[i].Colour, Copies = n });
             }
             if (SelectedIndexes.Count == 0) return;
+            int total = copies.Sum();
+            if (total > BambuSlicer.MaxCopies) return;
+            if (copies.Any(c => c > 1) && total > BambuSlicer.WarnCopies)
+            {
+                // big batches: ask first ("may take several minutes, go on?")
+                bool go;
+                if (TestBigAnswer.HasValue) go = TestBigAnswer.Value;
+                else using (var ask = CopiesForm.NewBigAsk(total)) go = ask.ShowDialog(this) == DialogResult.Yes;
+                if (!go) return;
+            }
             Plan = ColourPlan.Build(parts, together.Visible && together.Enabled && together.Checked);
+            Plan.Copies = copies.Any(c => c > 1) ? copies : null;
             DialogResult = DialogResult.OK;
             Close();
+        }
+
+        /// Tests: the real "Slice selected" button (shown first); true = the window ended with OK and Plan.
+        internal bool TestPressOk(IWin32Window owner)
+        {
+            if (!Visible) Show(owner);
+            Application.DoEvents();
+            ok.PerformClick();
+            Application.DoEvents();
+            return DialogResult == DialogResult.OK;
+        }
+        internal bool TestOkOn { get { return ok.Enabled; } }
+        internal bool TestTogetherOn { get { return together.Enabled; } }
+        internal string TestInfoText { get { return helpBox != null ? helpBox.Text ?? "" : ""; } }
+        internal void TestTickTogether() { together.Checked = true; }
+
+        /// Picture mode / tests: the copies typed into each row's box (null entries = left as they are).
+        internal void SampleCopies(int[] copies)
+        {
+            for (int i = 0; i < rows.Count && copies != null && i < copies.Length; i++)
+                if (copies[i] > 0) rows[i].Copies.Text = copies[i].ToString();
+            UpdateState();
         }
     }
 }
