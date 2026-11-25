@@ -72,12 +72,15 @@ else
                 @if (plates != null)
                 {
                     <ul class="plates" aria-label="@L.S("Plates", "Plader")">
-                        <li>@(plates.Count == 2
-                            ? L.S("2 plates, the price is for both:", "2 plader, prisen gælder dem begge:")
-                            : L.F("{0} plates, the price is for all of them:", "{0} plader, prisen gælder dem alle:", plates.Count))</li>
+                        @* batch-2: a file whose plates mix colours says so ("4 plates, 1 with mixed colours"); each plate gets its colour dots *@
+                        <li>@WebBatch.PlatesHeading(plates.Count, WebBatch.MixedPlates(plates))</li>
                         @foreach (var p in plates.Take(MaxPlateLines))
                         {
-                            <li><span class="pn">@BambuSlicer.PlateTitle(p, false)</span> – @BambuSlicer.PlateNumbers(p)</li>
+                            var dots = Multi ? WebBatch.PlateColours(p) : null;
+                            <li><span class="pn">@BambuSlicer.PlateTitle(p, false)</span> – @BambuSlicer.PlateNumbers(p)@if (dots != null && dots.Count > 0)
+                                {
+                                    <span class="pdots" aria-hidden="true">@foreach (var c in dots) { <span class="swatch" style="@Swatch(c)"></span> }</span>
+                                }</li>
                         }
                         @if (plates.Count > MaxPlateLines)
                         {
@@ -258,13 +261,13 @@ else
             <fieldset class="price friends">
                 <legend>@L.S("Friends & family", "Venner og familie")</legend>
                 <div class="big" aria-live="polite">@Kr(last?.FriendsPrice)</div>
-                <div class="info" title="@(EachOn ? FriendsInfo : null)">@(EachOn ? History.EachText(last.FriendsPrice, input.Quantity) : FriendsInfo)</div>
+                <div class="info" title="@PriceTip(true)">@(EachOn ? WebCalc.DiscountMark(History.EachText(last.FriendsPrice, input.Quantity), last, true) : FriendsInfo)</div>
                 @if (last != null) { @Lines(true) }
             </fieldset>
             <fieldset class="price others">
                 <legend>@L.S("Customers", "Kunder")</legend>
                 <div class="big" aria-live="polite">@Kr(last?.OthersPrice)</div>
-                <div class="info" title="@(EachOn ? OthersInfo : null)">@(EachOn ? History.EachText(last.OthersPrice, input.Quantity) : OthersInfo)</div>
+                <div class="info" title="@PriceTip(false)">@(EachOn ? WebCalc.DiscountMark(History.EachText(last.OthersPrice, input.Quantity), last, false) : OthersInfo)</div>
                 @if (last != null) { @Lines(false) }
             </fieldset>
         </div>
@@ -1494,7 +1497,7 @@ else
                 if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.RecordText(saved, friends, true, settings, WebQuote.ShortLink(saved.Source)), WebQuote.RecordTower(settings, saved));
             }
             else if (kind == "text") d.Text = WebQuote.WithTowerLine(QuoteRows.JobText(customer, jobSource ?? "", input.Hours, input.Minutes, OneOfMany ? Num.Fmt(input.FilamentGrams) : grams, Multi ? rows.Count : 0,
-                                                                                   last.FriendsPrice, last.OthersPrice, input.Quantity, input.Plates, settings.QuoteShowUnitPrice != 0),
+                                                                                   last, input.Quantity, input.Plates, settings.QuoteShowUnitPrice != 0),   // batch-2 (T2)
                                                                 Multi && settings.QuoteShowTower == 1 ? PlateTotal(jobTower) : -1);   // issue #8 step 3; batch-plates: totals
             err = await Histories.Save(history);
             if (err == null)
@@ -1832,6 +1835,15 @@ else
     string Wear_ { get { return settings.MachineRatePerHour > 0 ? L.F(", {0} kr/h wear", ", {0} kr/t slid", Num.Fmt(settings.MachineRatePerHour)) : ""; } }
 
     // the same lines as the desktop's price boxes (MainForm.RefreshSettingsLabels)
+    /// The price line's tooltip: the markup text when the line shows "pcs · each" (batch-plates), plus the quantity
+    /// discount's "Before discount / Quantity discount 5 % (from 10 pcs)" lines (batch-2, = MainForm.DiscountTip); null = none.
+    string PriceTip(bool friends)
+    {
+        string info = friends ? FriendsInfo : OthersInfo;
+        string disc = WebCalc.DiscountTip(last, friends);
+        return EachOn || disc.Length > 0 ? info + disc : null;
+    }
+
     string FriendsInfo { get { return L.F("+{0} % markup", "+{0} % avance", Num.Fmt(settings.FriendsMarkupPct)) + Wear_; } }
 
     string OthersInfo
@@ -1856,7 +1868,7 @@ else
                 @foreach (var l in b.Lines)
                 {
                     <div>@LineName(l) <span class="detail">@LineDetail(l)</span></div>
-                    <div class="amount">@Num.Kr(l.Amount)</div>
+                    <div class="amount">@WebCalc.Amount(l.Amount)</div>
                     @if (l.Parts != null)
                     {
                         foreach (var p in l.Parts)
@@ -1890,6 +1902,7 @@ else
             case QuoteLine.WearHotend: return L.S("Nozzle / hotend", "Dyse / hotend");
             case QuoteLine.WearPlate: return L.S("Build plate", "Byggeplade");
             case QuoteLine.Plates: return QuoteRows.PlatesRowLabel();   // batch-plates: the plate change fee
+            case QuoteLine.Discount: return WebCalc.DiscountLineName(l);  // batch-2: "Quantity discount 5 %"
         }
         return l.Key;
     }
@@ -1906,6 +1919,7 @@ else
             case QuoteLine.Minimum: return L.F("lowest price {0} kr.", "laveste pris {0} kr.", Num.Fmt(l.Quantity));
             case QuoteLine.Rounding: return L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity));
             case QuoteLine.Plates: return QuoteRows.PlatesRowDetail(l, true).Replace("  ×  ", " × ");
+            case QuoteLine.Discount: return WebCalc.DiscountLineDetail(l);   // "from 10 pcs"
         }
         return "";
     }

@@ -71,6 +71,59 @@ namespace PrintPrice
         // (INI "QuoteShowUnitPrice"): 1 = on (default), 0 = off. Any other value reads as 1.
         public double QuoteShowUnitPrice = 1;
 
+        // batch-2 quantity discount (issue #10): up to 3 steps "from N pcs, X % off" (INI "QtyDiscountFrom1".."3" /
+        // "QtyDiscountPct1".."3"). A step needs both: From whole 2..History.MaxStoredCount, Pct 0 < p <= MaxQtyDiscountPct;
+        // anything else reads as 0 (step off). All off = no discount (default: today's prices). The highest step reached
+        // by a job's copies applies to the whole job (Pricing.Calculate). QtyDiscountWho: 2 = customers only (default),
+        // 1 = both prices; other values -> 2.
+        public double QtyDiscountFrom1 = 0, QtyDiscountPct1 = 0;
+        public double QtyDiscountFrom2 = 0, QtyDiscountPct2 = 0;
+        public double QtyDiscountFrom3 = 0, QtyDiscountPct3 = 0;
+        public double QtyDiscountWho = 2;
+        public const double MaxQtyDiscountPct = 90;
+
+        // batch-2: share the colours' part-full last plates on one plate (INI "ShareLastPlate"): 1 = on, 0 = off (default:
+        // each colour on its own plates, as v1.31). Any other value reads as 0. Per job: HistoryParts.ShareLastPlate.
+        public double ShareLastPlate = 0;
+
+        /// A quantity-discount step's From as kept: whole 2..MaxStoredCount, else 0 (off).
+        public static double CleanQtyFrom(double v)
+        {
+            return !double.IsNaN(v) && v >= 2 && v <= History.MaxStoredCount && v == Math.Floor(v) ? v : 0;
+        }
+
+        /// A quantity-discount step's % as kept: 0 < p <= MaxQtyDiscountPct, else 0 (off).
+        public static double CleanQtyPct(double v)
+        {
+            return !double.IsNaN(v) && v > 0 && v <= MaxQtyDiscountPct ? v : 0;
+        }
+
+        /// The % off for a job of quantity copies: the step with the highest From that quantity reaches (both From and Pct
+        /// set); 0 = none (from = 0). Steps need not be in order.
+        public double QtyDiscountFor(int quantity, out int from)
+        {
+            from = 0;
+            double pct = 0;
+            double[] f = { QtyDiscountFrom1, QtyDiscountFrom2, QtyDiscountFrom3 };
+            double[] p = { QtyDiscountPct1, QtyDiscountPct2, QtyDiscountPct3 };
+            for (int i = 0; i < 3; i++)
+            {
+                double fi = CleanQtyFrom(f[i]), pi = CleanQtyPct(p[i]);
+                if (fi <= 0 || pi <= 0 || quantity < fi || fi < from) continue;
+                if (fi == from && pi <= pct) continue;   // same From twice: the bigger %
+                from = (int)fi;
+                pct = pi;
+            }
+            return pct;
+        }
+
+        /// True when any quantity-discount step is set.
+        public bool HasQtyDiscount()
+        {
+            int from;
+            return QtyDiscountFor(History.MaxStoredCount, out from) > 0;
+        }
+
         // Live electricity price (Energi Data Service)
         public double AutoPowerPrice = 1;       // 1 = fetch the current spot price at startup
         public double AutoUpdateCheck = 1;      // 1 = look for a new version on GitHub at startup
@@ -532,6 +585,14 @@ namespace PrintPrice
             d["QuoteShowTower"] = QuoteShowTower;
             d["PlateChangeFee"] = PlateChangeFee;
             d["QuoteShowUnitPrice"] = QuoteShowUnitPrice;
+            d["QtyDiscountFrom1"] = QtyDiscountFrom1;
+            d["QtyDiscountPct1"] = QtyDiscountPct1;
+            d["QtyDiscountFrom2"] = QtyDiscountFrom2;
+            d["QtyDiscountPct2"] = QtyDiscountPct2;
+            d["QtyDiscountFrom3"] = QtyDiscountFrom3;
+            d["QtyDiscountPct3"] = QtyDiscountPct3;
+            d["QtyDiscountWho"] = QtyDiscountWho;
+            d["ShareLastPlate"] = ShareLastPlate;
             return d;
         }
 
@@ -592,6 +653,14 @@ namespace PrintPrice
                 case "QuoteShowTower": QuoteShowTower = v == 1 ? 1 : 0; break;
                 case "PlateChangeFee": PlateChangeFee = v >= 0 && v < Num.MaxValue ? v : 0; break;
                 case "QuoteShowUnitPrice": QuoteShowUnitPrice = v == 0 ? 0 : 1; break;
+                case "QtyDiscountFrom1": QtyDiscountFrom1 = CleanQtyFrom(v); break;
+                case "QtyDiscountPct1": QtyDiscountPct1 = CleanQtyPct(v); break;
+                case "QtyDiscountFrom2": QtyDiscountFrom2 = CleanQtyFrom(v); break;
+                case "QtyDiscountPct2": QtyDiscountPct2 = CleanQtyPct(v); break;
+                case "QtyDiscountFrom3": QtyDiscountFrom3 = CleanQtyFrom(v); break;
+                case "QtyDiscountPct3": QtyDiscountPct3 = CleanQtyPct(v); break;
+                case "QtyDiscountWho": QtyDiscountWho = v == 1 ? 1 : 2; break;
+                case "ShareLastPlate": ShareLastPlate = v == 1 ? 1 : 0; break;
             }
         }
 

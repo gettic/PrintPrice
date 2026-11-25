@@ -44,6 +44,83 @@ namespace PrintPrice.Web
             return Num.TryParse(text, out value) && !double.IsInfinity(value) ? FieldState.Ok : FieldState.Invalid;
         }
 
+        // ---------- batch-2: quantity discount (Settings boxes, price box line / tooltip) ----------
+
+        /// One quantity-discount step's two boxes (= SettingsForm.ReadQtyStep): both empty (or 0) = off (0, 0, true). Else
+        /// From must be whole pieces 2..History.MaxStoredCount and % above 0 up to AppSettings.MaxQtyDiscountPct; badFrom /
+        /// badPct say which box is red. Returns false when one is bad.
+        public static bool ReadQtyStep(string fromText, string pctText, out double from, out double pct, out bool badFrom, out bool badPct)
+        {
+            from = 0; pct = 0; badFrom = false; badPct = false;
+            string a = (fromText ?? "").Trim(), b = (pctText ?? "").Trim();
+            double fv = 0, pv = 0;
+            bool fEmpty = a.Length == 0 || (Num.TryParse(a, out fv) && fv == 0);
+            bool pEmpty = b.Length == 0 || (Num.TryParse(b, out pv) && pv == 0);
+            if (fEmpty && pEmpty) return true;
+            badFrom = fEmpty || !Num.TryParse(a, out fv) || AppSettings.CleanQtyFrom(fv) <= 0;
+            badPct = pEmpty || !Num.TryParse(b, out pv) || AppSettings.CleanQtyPct(pv) <= 0;
+            if (badFrom || badPct) return false;
+            from = fv; pct = pv;
+            return true;
+        }
+
+        /// A step's box text in Settings: the number when the step is on (both set), else "" (= SettingsForm.FillGeneral).
+        public static string QtyBoxText(double from, double pct, bool fromBox)
+        {
+            bool on = AppSettings.CleanQtyFrom(from) > 0 && AppSettings.CleanQtyPct(pct) > 0;
+            return on ? Num.Fmt(fromBox ? from : pct) : "";
+        }
+
+        /// The Settings line when only a discount step is bad (= SettingsForm.QtyBadText).
+        public static string QtyBadText()
+        {
+            return L.F("Quantity discount: from 2 pcs, up to {0} %, or both empty.", "Mængderabat: fra 2 stk., højst {0} %, eller begge tomme.",
+                       AppSettings.MaxQtyDiscountPct);
+        }
+
+        /// The price box's grey line with a discount: "40 pcs · 5,31 kr. each · –5 %" (= MainForm.WithDiscountMark; the web
+        /// line wraps, so the mark is always added). discount = kr. taken off this price (0 = none).
+        /// The mark only when the cut really is the step's % (Pricing.ShownDiscountPct: rounding / the minimum / the cost floor
+        /// changed nothing), as the desktop.
+        public static string DiscountMark(string line, QuoteResult r, bool friends)
+        {
+            double pct = Pricing.ShownDiscountPct(r, friends);
+            return pct > 0 ? line + " · " + History.DiscountShortText(pct) : line;
+        }
+
+        /// The price box tooltip's discount lines (= MainForm.DiscountTip): "\nBefore discount: 727,20 kr.\nQuantity discount
+        /// 5 % (from 10 pcs): –36,36 kr."; a cut that isn't the % (ShownDiscountPct 0): only "\nIncl. quantity discount (from
+        /// 10 pcs)"; "" without a discount.
+        public static string DiscountTip(QuoteResult r, bool friends)
+        {
+            if (!Pricing.HasDiscount(r, friends)) return "";
+            double pct = Pricing.ShownDiscountPct(r, friends);
+            double price = friends ? r.FriendsPrice : r.OthersPrice, discount = friends ? r.FriendsDiscount : r.OthersDiscount;
+            if (!(pct > 0))
+                return "\n" + L.F("Incl. quantity discount (from {0})", "Inkl. mængderabat (fra {0})", History.PiecesText(r.DiscountFrom));
+            return "\n" + L.F("Before discount: {0}", "Før rabat: {0}", Num.Kr(price + discount)) +
+                   "\n" + L.F("Quantity discount {0} (from {1}): {2}", "Mængderabat {0} (fra {1}): {2}", History.PctText(pct),
+                              History.PiecesText(r.DiscountFrom), "–" + Num.Kr(discount));
+        }
+
+        /// "How the price is made": the discount line's name and detail ("Quantity discount 5 %", "from 10 pcs").
+        public static string DiscountLineName(QuoteLine l)
+        {
+            return l != null && l.Quantity > 0 ? History.DiscountText(l.Quantity, 0) : L.S("Quantity discount", "Mængderabat");
+        }
+
+        public static string DiscountLineDetail(QuoteLine l)
+        {
+            int from = l == null ? 0 : (int)Math.Round(l.UnitPrice);
+            return from > 0 ? L.F("from {0}", "fra {0}", History.PiecesText(from)) : "";
+        }
+
+        /// A breakdown amount: "–36,36 kr." for a negative one (en dash, as on the quote), else Num.Kr.
+        public static string Amount(double v)
+        {
+            return v < 0 ? "–" + Num.Kr(-v) : Num.Kr(v);
+        }
+
         /// No price yet (as the desktop's MainForm): the grams box is empty, or both time boxes are empty.
         /// Save to history and Show quote are off then.
         public static bool Incomplete(FieldState hours, FieldState minutes, FieldState grams)

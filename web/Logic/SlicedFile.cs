@@ -80,6 +80,11 @@ namespace PrintPrice.Web
             }
             if (res == null) { job.Unsliced = true; return; }
             string settings = await zip.ReadText("Metadata/project_settings.config", MaxSettingsBytes);
+            string modelSettings = await zip.ReadText("Metadata/model_settings.config", MaxSettingsBytes);
+            // plate names (idea 21): missing / unreadable file = no names, never an error
+            BambuSlicer.ApplyPlateNames(res, modelSettings);
+            // batch-2 (= ReadSliceInfo): a one-filament plate in a multi-colour file that Bambu Studio reported under slot 1
+            try { BambuSlicer.FixSingleFilamentPlates(res, modelSettings, settings); } catch (Exception) { }
             var parsed = BambuSlicer.ParseSettings(settings);   // once for the slots and the printer (as ReadSliceInfo)
             var profiles = BambuSlicer.SlotStrings(parsed, "filament_settings_id");   // = ParseFilamentSlots
             foreach (var f in res.Filaments)
@@ -92,8 +97,6 @@ namespace PrintPrice.Web
                 if (counted == null) gfp = null;          // a read that broke off: no half footprint
             }
             SetPrinter(res, BambuSlicer.ProjectPrinterFrom(parsed, xml));
-            // plate names (idea 21): missing / unreadable file = no names, never an error
-            BambuSlicer.ApplyPlateNames(res, await zip.ReadText("Metadata/model_settings.config", MaxSettingsBytes));
             // batch-plates: one plate = its footprint for the copies-per-plate estimate (missing / bad = none, never an error)
             if (res.PlateList.Count == 1)
             {

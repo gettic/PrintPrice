@@ -47,10 +47,13 @@ namespace PrintPrice
     {
         public bool Together;                  // "together on one plate" was ticked
         public List<HistoryPart> Files;        // in the picker's order; never empty after History.CleanQuotes
+        // batch-2: the job's "share the colours' last plate" choice: 1 on, 0 off, -1 not set (old records: Settings'
+        // ShareLastPlate; History.ShareLastPlateFor). Older versions ignore the key.
+        public int ShareLastPlate = -1;
 
         internal HistoryParts Copy()
         {
-            var c = new HistoryParts { Together = Together };
+            var c = new HistoryParts { Together = Together, ShareLastPlate = ShareLastPlate };
             if (Files != null)
             {
                 c.Files = new List<HistoryPart>(Files.Count);
@@ -156,6 +159,17 @@ namespace PrintPrice
         public string OrderId = "";
         public double PlateChangeFee;
 
+        // batch-2 quantity discount snapshot (FromQuote from QuoteResult / AppSettings): the % the job's copies reached
+        // (0 = none: old records too), the step's From (pcs) and who got it (1 = both prices, 2 = customers only).
+        // SavedSettings puts them back as one step, so the saved price re-prices as it was. Older versions ignore them.
+        public double QtyDiscountPct;
+        public int QtyDiscountFrom;
+        public int QtyDiscountWho = 2;
+
+        // batch-2 progress: plates printed so far (History.PlatesDoneOf / SetPlatesDone / StepPlates). -1 = not tracked
+        // (old records, never counted): then Printed = all plates. Older versions ignore and on re-save drop the key.
+        public int PlatesDone = -1;
+
         // ideas 24 + 11: the printer the quote was made for (AppSettings.ActivePrinterId when saved) and a snapshot of
         // its name and model. "" in records saved before several printers = printer "1" (History.PrinterOf).
         public string PrinterId = "";
@@ -226,7 +240,9 @@ namespace PrintPrice
         public bool Friends;                       // the oldest job is For friends & family
         public double Total;                       // kr.: Σ shown saved prices (History.PriceFor), whole øre
         public PrintState? State;                  // the one status of all its jobs; null = mixed
-        public bool Paid;                          // paid-tick: every job has a PaidAt (History.SetPaid)
+        // batch-2: plates of its jobs that are not failed (History.Progress) and how many of them are printed ("7 of 12")
+        public int Plates, PlatesDone;
+        public bool Paid;                         // paid-tick: every job has a PaidAt (History.SetPaid)
         public DateTime PaidAt = DateTime.MinValue;   // the latest job's paid date when Paid; else MinValue
         /// Not paid and the due date has passed.
         public bool Overdue(DateTime today) { return !Paid && Due != DateTime.MinValue && Due.Date < today.Date; }
@@ -407,6 +423,23 @@ namespace PrintPrice
         public int Plates;             // Σ build plates (unknown = 1 each)
     }
 
+    /// batch-2: how far a set of jobs (an order, an invoice, a History selection) has got (History.Progress). Failed jobs
+    /// only count in Jobs / JobsFailed; plates and pieces are of the other jobs.
+    public class PrintProgress
+    {
+        public int Jobs;               // all jobs
+        public int JobsDone;           // PrintStateOf = Printed
+        public int JobsStarted;        // PrintStateOf = Printing (printing now, or some plates printed)
+        public int JobsFailed;
+        public int Plates;             // Σ PlatesOf of the jobs not failed
+        public int PlatesDone;         // Σ PlatesDoneOf of the jobs not failed
+        public int Pieces;             // Σ copies of the jobs not failed
+        public bool Printing;          // a job is printing now (IsPrinting)
+        public bool HasFailed { get { return JobsFailed > 0; } }
+        /// Printed = every job not failed is printed; Printing = one is started; Failed = all failed; else NotPrinted.
+        public PrintState State;
+    }
+
     /// The lines and total of a bill for several History jobs (History.GroupBill). kr., whole øre.
     public class GroupBillInfo
     {
@@ -505,6 +538,10 @@ namespace PrintPrice
             r.Quantity = CleanQuantity(input.Quantity);
             r.Plates = CleanPlates(input.Plates);
             r.PlateChangeFee = GoodRate(s.PlateChangeFee) && s.PlateChangeFee < Num.MaxValue ? s.PlateChangeFee : 0;
+            r.QtyDiscountPct = AppSettings.CleanQtyPct(result.DiscountPct);
+            r.QtyDiscountFrom = r.QtyDiscountPct > 0 ? (int)AppSettings.CleanQtyFrom(result.DiscountFrom) : 0;
+            if (r.QtyDiscountFrom == 0) r.QtyDiscountPct = 0;
+            r.QtyDiscountWho = s.QtyDiscountWho == 1 ? 1 : 2;
 
             r.PrinterId =AppSettings.ValidPrinterId(s.ActivePrinterId) ? s.ActivePrinterId : FirstPrinterId;
             r.PrinterName = AppSettings.CleanPrinterName(s.PrinterName);
@@ -642,6 +679,13 @@ namespace PrintPrice
             s.FailedPaybackPct = r.FailedPaybackPct;
             s.FailedPaybackWho = r.FailedPaybackWho == 1 ? 1 : 2;
             s.PlateChangeFee = GoodRate(r.PlateChangeFee) ? r.PlateChangeFee : 0;   // 0 in older records = none
+            // the discount the job got, as its only step (0 in older records = none, whatever today's steps are)
+            double pct = AppSettings.CleanQtyPct(r.QtyDiscountPct), from = AppSettings.CleanQtyFrom(r.QtyDiscountFrom);
+            bool disc = pct > 0 && from > 0;
+            s.QtyDiscountFrom1 = disc ? from : 0; s.QtyDiscountPct1 = disc ? pct : 0;
+            s.QtyDiscountFrom2 = 0; s.QtyDiscountPct2 = 0;
+            s.QtyDiscountFrom3 = 0; s.QtyDiscountPct3 = 0;
+            s.QtyDiscountWho = r.QtyDiscountWho == 1 ? 1 : 2;
             return s;
         }
 
@@ -705,6 +749,7 @@ namespace PrintPrice
                     r.Failed = old.Failed; r.FailedAt = old.FailedAt;
                     r.Printed = old.Printed || r.Printed;
                     if (string.IsNullOrEmpty(r.PrintingSince)) r.PrintingSince = old.PrintingSince ?? "";
+                    if (r.PlatesDone < 0) r.PlatesDone = CleanPlatesDone(old.PlatesDone);   // batch-2
                 }
                 r.PaidBack = old.PaidBack;
                 list[0] = r;
@@ -778,6 +823,7 @@ namespace PrintPrice
                 else { kept.Failed = false; kept.FailedAt = ""; }
                 kept.Printed = old.Printed;
                 kept.PrintingSince = old.PrintingSince ?? "";
+                kept.PlatesDone = CleanPlatesDone(old.PlatesDone);
             }
             SetPrintState(kept, state, now);
             return kept;
@@ -790,9 +836,13 @@ namespace PrintPrice
         /// when r is already printing); Printed = Printed on, Failed off, not printing; Failed = Printed off and
         /// MarkFailed(r, true, now) as ticking Failed in History (FailedAt kept when r is already failed), not printing.
         /// Unticking Failed works like History (MarkFailed off: FailedAt ""; PaidBack stays).
+        /// batch-2 plates printed (PlatesDone, 2+ plates or already counted): Printed = all plates, NotPrinted = 0, Failed
+        /// keeps the count, Printing keeps it (a job with all plates done starts again at 0; an uncounted one starts at 0).
         public static void SetPrintState(QuoteRecord r, PrintState state, DateTime now)
         {
             if (r == null) return;
+            int plates = PlatesOf(r);
+            bool count = plates > 1 || CleanPlatesDone(r.PlatesDone) >= 0;
             switch (state)
             {
                 case PrintState.Failed:
@@ -802,6 +852,11 @@ namespace PrintPrice
                     break;
                 case PrintState.Printing:
                     bool already = IsPrinting(r, now);   // a finished earlier print gets a new start
+                    if (count)
+                    {
+                        int k = CleanPlatesDone(r.PlatesDone);
+                        r.PlatesDone = k >= 0 && k < plates ? k : 0;
+                    }
                     if (r.Failed) MarkFailed(r, false, now);
                     r.Printed = true;
                     if (!already) r.PrintingSince = Stamp(now);
@@ -810,11 +865,13 @@ namespace PrintPrice
                     if (r.Failed) MarkFailed(r, false, now);
                     r.Printed = true;
                     r.PrintingSince = "";
+                    if (count) r.PlatesDone = plates;
                     break;
                 default:   // NotPrinted
                     if (r.Failed) MarkFailed(r, false, now);
                     r.Printed = false;
                     r.PrintingSince = "";
+                    if (count) r.PlatesDone = 0;
                     break;
             }
         }
@@ -825,15 +882,25 @@ namespace PrintPrice
             if (r == null) return;
             r.Printed = printed;
             if (!printed) r.PrintingSince = "";
+            if (CleanPlatesDone(r.PlatesDone) >= 0 || PlatesOf(r) > 1) r.PlatesDone = printed ? PlatesOf(r) : 0;   // batch-2
         }
 
-        /// r's state for the quote window's box: Failed > Printing (still running at now) > Printed > NotPrinted.
+        /// r's state for the quote window's box: Failed > Printing (still running at now) > batch-2: started, some plates
+        /// still to print (counted, Printed on, PlatesDone below the plates) = Printing > Printed > NotPrinted.
         public static PrintState PrintStateOf(QuoteRecord r, DateTime now)
         {
             if (r == null) return PrintState.NotPrinted;
             if (r.Failed) return PrintState.Failed;
             if (IsPrinting(r, now)) return PrintState.Printing;
+            if (r.Printed && PlatesLeft(r)) return PrintState.Printing;
             return r.Printed ? PrintState.Printed : PrintState.NotPrinted;
+        }
+
+        // batch-2: a job of 2+ plates, counted (PlatesDone >= 0) and fewer printed than its plates
+        static bool PlatesLeft(QuoteRecord r)
+        {
+            int k = CleanPlatesDone(r.PlatesDone), plates = PlatesOf(r);
+            return plates > 1 && k >= 0 && k < plates;
         }
 
         /// True while r is "Printing now": Printed, not Failed, a readable PrintingSince, and start + print time
@@ -844,7 +911,8 @@ namespace PrintPrice
             return PrintingEnds(r, out end) && end > now;
         }
 
-        /// When r's print is done (PrintingSince + Hours/Minutes; for the "done about 16:40" tooltip). false = r is not
+        /// When r's print is done (PrintingSince + Hours/Minutes; 2+ plates: one plate's time = the minutes / plates
+        /// rounded up; for the "done about 16:40" tooltip). false = r is not
         /// marked printing (not Printed, Failed, no / bad PrintingSince, print time 0).
         public static bool PrintingEnds(QuoteRecord r, out DateTime end)
         {
@@ -854,6 +922,8 @@ namespace PrintPrice
             if (start == null) return false;
             int minutes = Math.Max(0, r.Hours) * 60 + Math.Max(0, r.Minutes);
             if (minutes <= 0) return false;
+            int plates = PlatesOf(r);
+            if (plates > 1) minutes = (minutes + plates - 1) / plates;   // batch-2: one plate's time, rounded up
             end = start.Value.AddMinutes(minutes);
             return true;
         }
@@ -893,6 +963,21 @@ namespace PrintPrice
         public static bool PartsTogether(QuoteRecord r)
         {
             return PartsOf(r) != null && r.Parts.Together;
+        }
+
+        /// batch-2: the job's "share the colours' last plate" choice (several-files jobs: HistoryParts.ShareLastPlate 0/1),
+        /// else (normal job, not set, old record) Settings' ShareLastPlate (null s = off). For reopen / repeat / Copies window.
+        public static bool ShareLastPlateFor(QuoteRecord r, AppSettings s)
+        {
+            if (r != null && r.Parts != null && (r.Parts.ShareLastPlate == 0 || r.Parts.ShareLastPlate == 1))
+                return r.Parts.ShareLastPlate == 1;
+            return s != null && s.ShareLastPlate == 1;
+        }
+
+        /// batch-2: puts the job's sharing choice on its Parts (after SetParts; nothing for a normal job).
+        public static void SetShareLastPlate(QuoteRecord r, bool share)
+        {
+            if (r != null && r.Parts != null) r.Parts.ShareLastPlate = share ? 1 : 0;
         }
 
         /// The colour choice per slot: index i = slot i+1 (Filament / Colour of the first file with that slot, File "";
@@ -980,6 +1065,7 @@ namespace PrintPrice
             }
             if (files.Count == 0) return null;
             p.Files = files;
+            if (p.ShareLastPlate != 0 && p.ShareLastPlate != 1) p.ShareLastPlate = -1;   // batch-2: other values = not set
             return p;
         }
 
@@ -1223,6 +1309,8 @@ namespace PrintPrice
                     if (first) { row.State = st; first = false; }
                     else if (row.State != st) row.State = null;
                 }
+                var prog = Progress(jobs, now);   // batch-2: plates printed over the invoice's jobs
+                row.Plates = prog.Plates; row.PlatesDone = prog.PlatesDone;
                 // due: the first job with a snapshot (all jobs of a combined invoice share it), else the oldest's
                 InvoiceDetails due = null;
                 foreach (var j in jobs)
@@ -1558,6 +1646,7 @@ namespace PrintPrice
             var matKeys = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var parts = new Dictionary<string, SumRow>(StringComparer.Ordinal);
             string plateKey = null;   // the build plate every print with wear used; "" = they differ
+            bool discAll = true;      // every job has a discount line (else the summed row shows no %)
             Func<string, SumRow> row = delegate(string key)
             {
                 SumRow sr;
@@ -1573,7 +1662,10 @@ namespace PrintPrice
                 res.TotalOre += target;
                 bool scaled;
                 var b = JobBreakdown(r, s, friends, target, out scaled);
-                if (b == null) { row(QuoteLine.Other).Line.Ore += target; continue; }
+                if (b == null) { discAll = false; row(QuoteLine.Other).Line.Ore += target; continue; }
+                bool hasDisc = false;
+                foreach (var l in b.Lines) if (l.Key == QuoteLine.Discount && l.Ore != 0) hasDisc = true;
+                if (!hasDisc) discAll = false;
                 foreach (var l in b.Lines)
                 {
                     if (l.Key == QuoteLine.Material)
@@ -1607,7 +1699,8 @@ namespace PrintPrice
                         if (l.Ore > 0 || l.Quantity > 0) sr.AddUnit(l.UnitPrice);   // a job without power / wear doesn't count
                         if (scaled && l.Ore > 0) sr.MixedUnit = true;
                     }
-                    else if (l.Key != QuoteLine.Minimum && l.Ore > 0) sr.AddUnit(l.Quantity);   // %, rounding step: shown only when the same
+                    else if (l.Key != QuoteLine.Minimum && l.Ore != 0) sr.AddUnit(l.Quantity);   // %, rounding step: shown only when the same
+                                                                                                  // (discount: negative Ore, its %)
                     if (l.Key == QuoteLine.Wear)
                     {
                         string plate = PlateKeyOf(r, s);
@@ -1641,7 +1734,7 @@ namespace PrintPrice
                 res.Lines.Add(m.Line);
             }
             string[] order = { QuoteLine.Power, QuoteLine.Wear, QuoteLine.Plates, QuoteLine.Failed, QuoteLine.Payback, QuoteLine.Work,
-                               QuoteLine.Other, QuoteLine.Minimum, QuoteLine.Rounding };
+                               QuoteLine.Discount, QuoteLine.Other, QuoteLine.Minimum, QuoteLine.Rounding };
             foreach (var k in order)
             {
                 SumRow sr;
@@ -1661,6 +1754,11 @@ namespace PrintPrice
                 }
                 else if (k == QuoteLine.Minimum) l.Quantity = bill.Minimum;
                 else if (k != QuoteLine.Other) l.Quantity = sr.HasUnit && !sr.MixedUnit ? sr.Unit : 0;
+                if (k == QuoteLine.Discount)
+                {
+                    l.UnitPrice = 0;                  // the jobs' steps may differ: % only
+                    if (!discAll) l.Quantity = 0;     // only some jobs got it: no % (0 = "Quantity discount" without a number)
+                }
                 if (k == QuoteLine.Wear && parts.Count > 0)
                 {
                     res.PlateKey = plateKey ?? "";
@@ -2268,6 +2366,191 @@ namespace PrintPrice
             return GroupBill(jobs, s, friends);
         }
 
+        // ---------- batch-2: plates printed (order progress) ----------
+
+        /// PlatesDone as stored: 0..MaxStoredCount kept, anything else = -1 (not counted).
+        public static int CleanPlatesDone(int n) { return n >= 0 && n <= MaxStoredCount ? n : -1; }
+
+        /// Plates of r printed so far (0..PlatesOf(r)). Counted (PlatesDone >= 0): that number (held to the plates).
+        /// Not counted (old records): all plates when Printed, not Failed and not printing now, else 0.
+        public static int PlatesDoneOf(QuoteRecord r, DateTime now)
+        {
+            if (r == null) return 0;
+            int plates = PlatesOf(r), k = CleanPlatesDone(r.PlatesDone);
+            if (k >= 0) return Math.Min(k, plates);
+            return r.Printed && !r.Failed && !IsPrinting(r, now) ? plates : 0;
+        }
+
+        /// Sets how many plates of r are printed (held to 0..plates): all = SetPrintState Printed; 0 = NotPrinted; in
+        /// between = started: Failed off, Printed on (as "Printing now", so income and older versions see it started),
+        /// PrintingSince "" (the plate that was printing is done). A 1-plate job: 1 = Printed, 0 = NotPrinted.
+        public static void SetPlatesDone(QuoteRecord r, int done, DateTime now)
+        {
+            if (r == null) return;
+            int plates = PlatesOf(r);
+            if (done >= plates) { SetPrintState(r, PrintState.Printed, now); return; }      // also PlatesDone = plates (2+)
+            if (done <= 0) { SetPrintState(r, PrintState.NotPrinted, now); return; }        // also PlatesDone = 0 (2+)
+            if (r.Failed) MarkFailed(r, false, now);
+            r.Printed = true;
+            r.PrintingSince = "";
+            r.PlatesDone = done;
+        }
+
+        /// "+1 plate printed" / "-1": SetPlatesDone(PlatesDoneOf + delta). Returns the new count.
+        public static int StepPlates(QuoteRecord r, int delta, DateTime now)
+        {
+            if (r == null) return 0;
+            SetPlatesDone(r, PlatesDoneOf(r, now) + delta, now);
+            return PlatesDoneOf(r, now);
+        }
+
+        /// The plate printing now (PlatesDoneOf + 1, at most the plates) for "Printing plate 4 of 5"; 0 = not printing.
+        public static int PrintingPlate(QuoteRecord r, DateTime now)
+        {
+            if (!IsPrinting(r, now)) return 0;
+            return Math.Min(PlatesDoneOf(r, now) + 1, PlatesOf(r));
+        }
+
+        /// How far jobs have got (an order, an invoice, a History selection; nulls skipped). See PrintProgress.
+        public static PrintProgress Progress(IEnumerable<QuoteRecord> jobs, DateTime now)
+        {
+            var p = new PrintProgress();
+            int open = 0;
+            if (jobs != null)
+                foreach (var r in jobs)
+                {
+                    if (r == null) continue;
+                    p.Jobs++;
+                    var st = PrintStateOf(r, now);
+                    if (st == PrintState.Failed) { p.JobsFailed++; continue; }
+                    open++;
+                    if (st == PrintState.Printed) p.JobsDone++;
+                    else if (st == PrintState.Printing) p.JobsStarted++;
+                    if (IsPrinting(r, now)) p.Printing = true;
+                    p.Plates += PlatesOf(r);
+                    p.PlatesDone += PlatesDoneOf(r, now);
+                    p.Pieces += QuantityOf(r);
+                }
+            if (open == 0) p.State = p.JobsFailed > 0 ? PrintState.Failed : PrintState.NotPrinted;
+            else if (p.JobsDone == open) p.State = PrintState.Printed;
+            else if (p.JobsDone > 0 || p.JobsStarted > 0) p.State = PrintState.Printing;
+            else p.State = PrintState.NotPrinted;
+            return p;
+        }
+
+        /// Progress of an order's jobs (OrderJobs).
+        public static PrintProgress OrderProgress(List<QuoteRecord> list, string orderId, DateTime now)
+        {
+            return Progress(OrderJobs(list, orderId), now);
+        }
+
+        /// "3 of 5 plates" / "3 af 5 plader"; "" for 1 plate or less.
+        public static string PlatesProgressText(int done, int total)
+        {
+            if (total <= 1) return "";
+            return L.F("{0} of {1} plates", "{0} af {1} plader", done, total);
+        }
+
+        /// "Plates printed: 7 of 12" / "Plader printet: 7 af 12".
+        public static string PlatesPrintedText(int done, int total)
+        {
+            return L.F("Plates printed: {0} of {1}", "Plader printet: {0} af {1}", done, total);
+        }
+
+        /// "One more plate printed" / "Én plade mere printet" (History status menu).
+        public static string PlusPlateText() { return L.S("One more plate printed", "Én plade mere printet"); }
+
+        /// "One plate fewer printed" / "Én plade færre printet" (History status menu, undo a wrong count).
+        public static string MinusPlateText() { return L.S("One plate fewer printed", "Én plade færre printet"); }
+
+        /// "Printing plate 4 of 5" / "Printer plade 4 af 5".
+        public static string PrintingPlateText(int plate, int total)
+        {
+            return L.F("Printing plate {0} of {1}", "Printer plade {0} af {1}", plate, total);
+        }
+
+        /// "Selected: 2 prints · 4 of 6 plates printed" / "Valgt: 2 print · 4 af 6 plader printet" (1: "1 print").
+        public static string SelectedProgressText(int prints, int done, int total)
+        {
+            string n = prints == 1 ? L.S("1 print", "1 print") : L.F("{0} prints", "{0} print", prints);
+            return L.S("Selected: ", "Valgt: ") + n + " · " + L.F("{0} of {1} plates printed", "{0} af {1} plader printet", done, total);
+        }
+
+        /// "4 plates, 1 with mixed colours" / "4 plader, 1 med blandede farver"; mixed 0 = "4 plates" ("1 plate").
+        public static string MixedPlatesText(int plates, int mixed)
+        {
+            string p = plates == 1 ? L.S("1 plate", "1 plade") : L.F("{0} plates", "{0} plader", plates);
+            if (mixed <= 0) return p;
+            return p + ", " + L.F("{0} with mixed colours", "{0} med blandede farver", mixed);
+        }
+
+        // ---------- batch-2: quantity discount (record side and texts) ----------
+
+        // CleanQuotes: % / From kept only when both are good (AppSettings.CleanQtyPct / CleanQtyFrom), Who 1 or 2
+        static void CleanDiscount(QuoteRecord r)
+        {
+            double pct = AppSettings.CleanQtyPct(r.QtyDiscountPct), from = AppSettings.CleanQtyFrom(r.QtyDiscountFrom);
+            if (pct > 0 && from > 0) { r.QtyDiscountPct = pct; r.QtyDiscountFrom = (int)from; }
+            else { r.QtyDiscountPct = 0; r.QtyDiscountFrom = 0; }
+            if (r.QtyDiscountWho != 1) r.QtyDiscountWho = 2;
+        }
+
+        /// The discount % r's price got (friends = the friends & family price); 0 = none (old records, friends price
+        /// when the discount was for customers only).
+        public static double DiscountPctFor(QuoteRecord r, bool friends)
+        {
+            if (r == null) return 0;
+            double pct = AppSettings.CleanQtyPct(r.QtyDiscountPct);
+            if (pct <= 0 || AppSettings.CleanQtyFrom(r.QtyDiscountFrom) <= 0) return 0;
+            if (friends && r.QtyDiscountWho != 1) return 0;
+            return pct;
+        }
+
+        /// "5 %" / "7,5 %" (Num.Fmt).
+        public static string PctText(double pct) { return Num.Fmt(pct) + " %"; }
+
+        /// "Price before discount" / "Pris før rabat".
+        public static string PriceBeforeDiscountText() { return L.S("Price before discount", "Pris før rabat"); }
+
+        /// "Quantity discount 5 % (40 pcs)" / "Mængderabat 5 % (40 stk.)"; pieces <= 0 = without the brackets.
+        /// pct <= 0 (a combined bill where only some jobs got it, GroupBreakdown Quantity 0) = "Quantity discount" /
+        /// "Mængderabat" without a number.
+        public static string DiscountText(double pct, int pieces)
+        {
+            string t = pct > 0 ? L.S("Quantity discount ", "Mængderabat ") + PctText(pct) : L.S("Quantity discount", "Mængderabat");
+            return pieces > 0 ? t + " (" + PiecesText(pieces) + ")" : t;
+        }
+
+        /// "–5 %" (en dash; the price box's short note).
+        public static string DiscountShortText(double pct) { return "–" + PctText(pct); }
+
+        /// Copy text: "(17,27 kr. each, incl. 5 % quantity discount)" / "(17,27 kr. pr. stk., inkl. 5 % mængderabat)";
+        /// 1 copy: "(incl. 5 % quantity discount)"; no discount: the each part only ("(17,27 kr. each)"), "" for 1 copy.
+        public static string EachInclDiscountText(double total, int quantity, double pct)
+        {
+            return EachInclDiscountText(total, quantity, pct, pct > 0);
+        }
+
+        /// The same for a calculated price (use this one): the % only when it is the real cut (Pricing.ShownDiscountPct);
+        /// a discount that rounding / the minimum / the cost floor changed = "incl. quantity discount" / "inkl. mængderabat".
+        /// total = the shown price (friends or customer, as r's).
+        public static string EachInclDiscountText(double total, int quantity, QuoteResult r, bool friends)
+        {
+            return EachInclDiscountText(total, quantity, Pricing.ShownDiscountPct(r, friends), Pricing.HasDiscount(r, friends));
+        }
+
+        /// discounted with pct <= 0 = "incl. quantity discount" without a number; not discounted = the each part only.
+        public static string EachInclDiscountText(double total, int quantity, double pct, bool discounted)
+        {
+            string each = EachPriceText(total, quantity);
+            string disc = !discounted ? "" : pct > 0 ? L.F("incl. {0} quantity discount", "inkl. {0} mængderabat", PctText(pct))
+                                                      : L.S("incl. quantity discount", "inkl. mængderabat");
+            if (each.Length == 0 && disc.Length == 0) return "";
+            if (each.Length == 0) return "(" + disc + ")";
+            if (disc.Length == 0) return "(" + each + ")";
+            return "(" + each + ", " + disc + ")";
+        }
+
         // ---------- the History list's name and filter (HistoryForm and the website's History page) ----------
 
         /// "Show" choices: all quotes, friends & family, customers, failed, not printed.
@@ -2736,6 +3019,8 @@ namespace PrintPrice
                 if (r.CopiesEstimated != 1) r.CopiesEstimated = 0;
                 r.OrderId = CleanOrderId(r.OrderId);
                 if (!GoodRate(r.PlateChangeFee) || r.PlateChangeFee >= Num.MaxValue) r.PlateChangeFee = 0;
+                CleanDiscount(r);                      // batch-2: bad % / From = no discount, Who 1 or 2
+                r.PlatesDone = CleanPlatesDone(r.PlatesDone);
                 if (r.PrinterId == null) r.PrinterId = "";
                 if (r.PrinterName == null) r.PrinterName = "";
                 if (r.PrinterModel == null) r.PrinterModel = "";
@@ -3423,6 +3708,14 @@ namespace PrintPrice
             }
             if (CleanOrderId(keep.OrderId).Length == 0 && CleanOrderId(other.OrderId).Length > 0)
             { keep.OrderId = CleanOrderId(other.OrderId); changed = true; }
+            // batch-2: the discount snapshot / plate count lost here (resaved by an older app version) come from the other
+            if (!(keep.QtyDiscountPct > 0) && AppSettings.CleanQtyPct(other.QtyDiscountPct) > 0 && AppSettings.CleanQtyFrom(other.QtyDiscountFrom) > 0)
+            {
+                keep.QtyDiscountPct = other.QtyDiscountPct; keep.QtyDiscountFrom = other.QtyDiscountFrom;
+                keep.QtyDiscountWho = other.QtyDiscountWho == 1 ? 1 : 2;
+                changed = true;
+            }
+            if (keep.PlatesDone < 0 && CleanPlatesDone(other.PlatesDone) >= 0) { keep.PlatesDone = CleanPlatesDone(other.PlatesDone); changed = true; }
             // issue #8 step 3: the tower switch / grams when unknown here (e.g. resaved by an older app version)
             if (keep.PrimeTower == -1 && (other.PrimeTower == 0 || other.PrimeTower == 1)) { keep.PrimeTower = other.PrimeTower; changed = true; }
             if (keep.TowerGrams < 0 && other.TowerGrams >= 0)

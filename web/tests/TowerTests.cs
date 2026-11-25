@@ -196,7 +196,7 @@ static class TowerTests
         True("note: flush only + tower: " + note(9.37, -1, 1.70, -1), note(9.37, -1, 1.70, -1) == "incl. 7,7 g for colour changes · prime tower 1,7 g");
         True("note: with a known tower time", note(9.37, -1, 1.70, 314) == "incl. 7,7 g for colour changes · prime tower 1,7 g · 5 min");
         True("note: tower unknown = the whole purge, no tower part", note(9.37, -1, -1, -1) == "incl. 9,4 g for colour changes");
-        True("note: tower 0 = no tower part", note(9.37, 0.2, 0, -1) == "incl. 9,4 g and 0,2 h for colour changes");
+        True("note: tower 0 = no tower part (time as \"12 m\", batch-2 qol #6): " + note(9.37, 0.2, 0, -1), note(9.37, 0.2, 0, -1) == "incl. 9,4 g and 12 m for colour changes");
         True("note: tower alone starts with a capital", note(-1, -1, 1.70, -1) == "Prime tower 1,7 g" && note(1.9, -1, 1.70, -1) == "Prime tower 1,7 g");
         True("note: nothing = no note", WebCalc.PurgeNoteParts(-1, -1, -1, -1).Count == 0);
         L.Danish = true;

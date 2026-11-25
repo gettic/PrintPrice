@@ -61,6 +61,43 @@ namespace PrintPrice
         public int Copies;
         public int PerPlate;
         public bool CopiesMultiplied;
+        // batch-2 (issue #10): "share the last plate" (SliceBatch with shareLastPlate). null = not asked or nothing to share
+        // (fewer than 2 colours with a part-full last plate); see ShareInfo.
+        public ShareInfo Share;
+        // batch-2: plates BambuSlicer.FixSingleFilamentPlates corrected (the CLI's slot-1 report of a one-filament plate);
+        // > 0 = those slots' ModelGrams are unknown (-1)
+        public int SingleFilamentFixes;
+    }
+
+    /// Batch-2: what "share the last plate between colours" did (SliceResult.Share). Applied = the colours' part-full last
+    /// plates were replaced by one shared plate; else Problem says why not (own plates kept, numbers as without sharing).
+    /// The trade-off against own plates (only when Applied): PlatesSaved (>= 1), ExtraSeconds / ExtraGrams (shared plate
+    /// minus the own last plates it replaced; normally > 0: colour changes + tower), ColourChanges on the shared plate.
+    public sealed class ShareInfo
+    {
+        public bool Applied;
+        public string Problem;        // null when Applied
+        public int Colours;           // colours on the shared plate (Applied) or with a part-full last plate (not applied)
+        public int PlatesSaved;
+        public double ExtraSeconds;
+        public double ExtraGrams;
+        public int ColourChanges = -1;   // -1 unknown
+    }
+
+    /// Batch-2: one plate of a Bambu Studio assemble list (BambuSlicer.AssembleListJson).
+    public sealed class AssemblePlate
+    {
+        public string Name = "";
+        public List<AssembleObject> Objects = new List<AssembleObject>();
+    }
+
+    /// Batch-2: Count copies of the model file at Path (STL / OBJ only), all on filament Slot (1-based, in the run's
+    /// --load-filaments order).
+    public sealed class AssembleObject
+    {
+        public string Path = "";
+        public int Count = 1;
+        public int Slot = 1;
     }
 
     /// Batch-plates: one model file of a batch (BambuSlicer.SliceBatch). Slot = 1-based colour (index into the colours
@@ -167,6 +204,12 @@ namespace PrintPrice
         public int Copies;
         public double TowerGrams = -1;
         public double TowerSeconds = -1;
+        // batch-2: colour changes on this plate and their time (inside Seconds), from our own slice's result.json; -1 =
+        // unknown (pre-sliced / G-code). Shared = the colours' shared last plate (SliceBatch with shareLastPlate).
+        // Colours on the plate: Filaments (BambuSlicer.PlateColourCount / IsMixedPlate).
+        public int ColourChanges = -1;
+        public double ColourChangeSeconds = -1;
+        public bool Shared;
     }
 
     /// The user's choice for one colour (idea 21; item i of the list = filament slot i+1).
@@ -611,7 +654,8 @@ namespace PrintPrice
                 var c = new PlateInfo { Index = p.Index, Name = p.Name ?? "", File = string.IsNullOrEmpty(p.File) ? (fileName ?? "") : p.File,
                                         FilePlates = p.FilePlates > 0 ? p.FilePlates : r.PlateList.Count,
                                         Seconds = p.Seconds, Grams = p.Grams, Objects = new List<string>(p.Objects ?? new List<string>()),
-                                        Copies = p.Copies, TowerGrams = p.TowerGrams, TowerSeconds = p.TowerSeconds };
+                                        Copies = p.Copies, TowerGrams = p.TowerGrams, TowerSeconds = p.TowerSeconds,
+                                        ColourChanges = p.ColourChanges, ColourChangeSeconds = p.ColourChangeSeconds, Shared = p.Shared };
                 if (p.Filaments != null)
                     foreach (var f in p.Filaments)
                         if (f != null)
@@ -898,6 +942,344 @@ namespace PrintPrice
                 foreach (var f in p.Filaments)
                     if (f != null) f.TowerGrams = f.Slot >= 1 && f.Slot <= t.Grams.Count ? t.Grams[f.Slot - 1] : 0;
             }
+        }
+
+        // ---------- share the last plate (batch-2, issue #10, plans\batch-2) ----------
+        // Full plates stay one colour (one clone run per colour); the colours' part-full last plates can go on ONE shared
+        // plate with Bambu Studio's "--load-assemble-list <json>" (plates exactly as listed, each object on its own
+        // filament, arranged per plate; STL / OBJ only; an over-full plate fails with -21 instead of spilling; needs
+        // "--ensure-on-bed" or models sit half under the bed and the grams are halved). CLI bug (any multi-filament run):
+        // a plate that uses ONE filament other than 1 is reported as filament 1 with filament 1's density (the G-code and
+        // time are right): FixSingleFilamentPlates.
+
+        /// A filament under this many grams on a plate doesn't count as a colour there (a plate without filament 1 still
+        /// lists ~0,3 g of it: the start purge).
+        public const double MinColourGrams = 0.5;
+
+        /// Colours (slots) on a plate with at least MinColourGrams. Null = 0.
+        public static int PlateColourCount(PlateInfo p)
+        {
+            if (p == null || p.Filaments == null) return 0;
+            return p.Filaments.Where(f => f != null && f.Grams >= MinColourGrams).Select(f => f.Slot).Distinct().Count();
+        }
+
+        /// The plate prints 2+ colours (PlateColourCount >= 2): the plates menu's / website's "· 2 colours" mark.
+        public static bool IsMixedPlate(PlateInfo p)
+        {
+            return PlateColourCount(p) >= 2;
+        }
+
+        /// An assemble list can load it: .stl / .obj (not STEP / AMF / 3MF / G-code).
+        public static bool CanShareFile(string path)
+        {
+            string p = (path ?? "").Trim();
+            return p.EndsWith(".stl", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".obj", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// Pure: Bambu Studio's assemble list for `plates` (keys from BambuStudio.hpp: plates / plate_name / need_arrange /
+        /// plate_params / objects / path / count / filaments / assemble_index). Paths with forward slashes, JSON-escaped;
+        /// every plate need_arrange true. Null / empty plates, a plate without objects or an object with an empty path ->
+        /// ArgumentException; Count outside 1..MaxCopies or Slot < 1 -> ArgumentOutOfRangeException.
+        public static string AssembleListJson(IList<AssemblePlate> plates)
+        {
+            if (plates == null || plates.Count == 0) throw new ArgumentException("plates");
+            var sb = new System.Text.StringBuilder("{\"plates\":[");
+            for (int i = 0; i < plates.Count; i++)
+            {
+                var pl = plates[i];
+                if (pl == null || pl.Objects == null || pl.Objects.Count == 0) throw new ArgumentException("plates");
+                if (i > 0) sb.Append(',');
+                sb.Append("{\"plate_name\":").Append(JsonString(pl.Name ?? "")).Append(",\"need_arrange\":true,\"plate_params\":{},\"objects\":[");
+                for (int j = 0; j < pl.Objects.Count; j++)
+                {
+                    var o = pl.Objects[j];
+                    if (o == null || string.IsNullOrEmpty(o.Path)) throw new ArgumentException("plates");
+                    if (!CopiesInRange(o.Count)) throw new ArgumentOutOfRangeException("plates", "count");
+                    if (o.Slot < 1) throw new ArgumentOutOfRangeException("plates", "slot");
+                    if (j > 0) sb.Append(',');
+                    sb.Append("{\"path\":").Append(JsonString(o.Path.Replace('\\', '/')))
+                      .Append(",\"count\":").Append(o.Count.ToString(CultureInfo.InvariantCulture))
+                      .Append(",\"filaments\":[").Append(o.Slot.ToString(CultureInfo.InvariantCulture))
+                      .Append("],\"assemble_index\":[0]}");
+                }
+                sb.Append("]}");
+            }
+            return sb.Append("]}").ToString();
+        }
+
+        // a JSON string literal ("…" with \" \\ and control characters escaped)
+        static string JsonString(string s)
+        {
+            var sb = new System.Text.StringBuilder("\"");
+            foreach (char c in s ?? "")
+            {
+                if (c == '"') sb.Append("\\\"");
+                else if (c == '\\') sb.Append("\\\\");
+                else if (c < ' ') sb.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+                else sb.Append(c);
+            }
+            return sb.Append('"').ToString();
+        }
+
+        /// Pure: the CLI options for an assemble run: "--load-assemble-list", listPath, then scaleArgs (ScaleArgs: "--scale
+        /// f" works with it), and "--ensure-on-bed" exactly once (always: without it the grams are halved).
+        internal static List<string> AssembleArgs(string listPath, IList<string> scaleArgs)
+        {
+            var list = new List<string> { "--load-assemble-list", listPath ?? "" };
+            if (scaleArgs != null) list.AddRange(scaleArgs.Where(a => a != "--ensure-on-bed"));
+            list.Add("--ensure-on-bed");
+            return list;
+        }
+
+        /// Pure: copies per file on a clone run's plate. objects = the plate's object names ("cable_hook.stl_3": the file
+        /// name + Bambu's copy number), fileNames = the run's file names (no folder). Result[i] = copies of fileNames[i].
+        /// Null when an object matches no file or two files have the same name (can't tell them apart).
+        public static int[] LastPlateCounts(IList<string> objects, IList<string> fileNames)
+        {
+            if (objects == null || fileNames == null || fileNames.Count == 0) return null;
+            var names = fileNames.Select(n => (n ?? "").Trim()).ToList();
+            if (names.Distinct(StringComparer.OrdinalIgnoreCase).Count() != names.Count) return null;
+            var counts = new int[names.Count];
+            foreach (var o in objects)
+            {
+                string b = CopyBaseName((o ?? "").Trim());
+                int k = names.FindIndex(n => string.Equals(n, b, StringComparison.OrdinalIgnoreCase));
+                if (k < 0) return null;
+                counts[k]++;
+            }
+            return counts;
+        }
+
+        /// Pure: an assemble run's object name ("C:/jobs/cable_hook_2" = path without extension + copy number) as a clone
+        /// run writes it ("cable_hook.stl_2"), matched against the run's paths (either slash). No match = unchanged.
+        public static string AssembleObjectName(string objectName, IList<string> paths)
+        {
+            string name = objectName ?? "";
+            if (paths == null) return name;
+            string b = CopyBaseName(name), suffix = name.Substring(b.Length);
+            foreach (var path in paths)
+            {
+                string q = (path ?? "").Replace('\\', '/');
+                int slash = q.LastIndexOf('/'), dot = q.LastIndexOf('.');
+                string stem = dot > slash ? q.Substring(0, dot) : q;
+                if (q.Length > 0 && string.Equals(stem, b.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                    return q.Substring(slash + 1) + suffix;
+            }
+            return name;
+        }
+
+        /// Pure: index of the biggest leftover group (largest area; ties = the first), -1 for null / empty.
+        public static int BiggestGroup(IList<double> areas)
+        {
+            if (areas == null || areas.Count == 0) return -1;
+            int best = 0;
+            for (int i = 1; i < areas.Count; i++) if (areas[i] > areas[best]) best = i;
+            return best;
+        }
+
+        /// Pure: r without its last plate (the plate the shared plate takes over): Seconds / Grams / Plates and the
+        /// per-slot filaments (Grams, Metres, known ModelGrams / TowerGrams) less that plate's, Copies less its copies,
+        /// PerPlate = most on the plates left. Purge / colour-change / tower totals less the plate's known values.
+        /// r isn't changed; null or no plate -> a copy as it is.
+        public static SliceResult WithoutLastPlate(SliceResult r)
+        {
+            if (r == null) return null;
+            var c = new SliceResult();
+            AddResult(c, r, "");
+            c.Copies = r.Copies; c.PerPlate = r.PerPlate; c.CopiesMultiplied = r.CopiesMultiplied;
+            c.PurgeGrams = r.PurgeGrams; c.ColourChangeHours = r.ColourChangeHours; c.TowerGrams = r.TowerGrams; c.TowerSeconds = r.TowerSeconds;
+            c.SizeX = r.SizeX; c.SizeY = r.SizeY; c.SizeZ = r.SizeZ; c.SizeObjects = r.SizeObjects;
+            if (c.PlateList.Count == 0) return c;
+            var last = c.PlateList[c.PlateList.Count - 1];
+            c.PlateList.RemoveAt(c.PlateList.Count - 1);
+            foreach (var p in c.PlateList) p.FilePlates = c.PlateList.Count;
+            c.Seconds = Math.Max(0, c.Seconds - last.Seconds);
+            c.Grams = Math.Max(0, c.Grams - last.Grams);
+            c.Plates = Math.Max(0, c.Plates - 1);
+            c.Copies = Math.Max(0, c.Copies - last.Copies);
+            c.PerPlate = c.PlateList.Count == 0 ? 0 : c.PlateList.Max(x => x.Copies);
+            foreach (var f in last.Filaments)
+            {
+                var t = c.Filaments.FirstOrDefault(x => x.Slot == f.Slot);
+                if (t == null) continue;
+                t.Grams = Math.Max(0, t.Grams - f.Grams);
+                t.Metres = Math.Max(0, t.Metres - f.Metres);
+                // a one-colour plate has no purge: its model grams = its grams
+                if (t.ModelGrams >= 0) t.ModelGrams = Math.Max(0, t.ModelGrams - (f.ModelGrams >= 0 ? f.ModelGrams : f.Grams));
+                if (t.TowerGrams >= 0 && f.TowerGrams > 0) t.TowerGrams = Math.Max(0, t.TowerGrams - f.TowerGrams);
+            }
+            c.Filaments.RemoveAll(f => f.Grams <= 0.0005 && f.Metres <= 0.0005);
+            if (c.TowerGrams >= 0 && last.TowerGrams > 0) c.TowerGrams = Math.Max(0, c.TowerGrams - last.TowerGrams);
+            if (c.TowerSeconds >= 0 && last.TowerSeconds > 0) c.TowerSeconds = Math.Max(0, c.TowerSeconds - last.TowerSeconds);
+            if (c.ColourChangeHours >= 0 && last.ColourChangeSeconds > 0) c.ColourChangeHours = Math.Max(0, c.ColourChangeHours - last.ColourChangeSeconds / 3600.0);
+            return c;
+        }
+
+        /// Pure: an assemble run loaded only some colours: its slot j (1-based) is realSlots[j-1]. Renumbers r's
+        /// filaments and every plate's (slots outside the list stay). Null = nothing.
+        public static void RemapSlots(SliceResult r, IList<int> realSlots)
+        {
+            if (r == null || realSlots == null) return;
+            Func<int, int> map = s => s >= 1 && s <= realSlots.Count && realSlots[s - 1] >= 1 ? realSlots[s - 1] : s;
+            foreach (var f in r.Filaments) if (f != null) f.Slot = map(f.Slot);
+            r.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+            foreach (var p in r.PlateList)
+                if (p != null)
+                    foreach (var f in p.Filaments) if (f != null) f.Slot = map(f.Slot);
+        }
+
+        /// Pure: the extruders (filaments, 1-based) each plate's objects use, from Metadata/model_settings.config:
+        /// plater_id -> one entry per model_instance = its object's "extruder" (a part with another extruder > 0 -> 0 =
+        /// mixed / unknown; no extruder key = 1). Bad / empty xml = empty; never throws.
+        public static Dictionary<int, List<int>> ObjectExtruders(string modelSettingsXml)
+        {
+            var res = new Dictionary<int, List<int>>();
+            if (string.IsNullOrEmpty(modelSettingsXml)) return res;
+            try
+            {
+                var root = SliceXml.Parse(modelSettingsXml);
+                if (!root.Is("config")) return res;
+                var byId = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var ob in root.Children("object"))
+                {
+                    string id = AttrText(ob, "id");
+                    var em = ob.Children("metadata").FirstOrDefault(m => m.Attr("key") == "extruder");
+                    int e = em == null ? 1 : (int)Attr(em, "value");
+                    if (e <= 0) e = 1;
+                    foreach (var part in ob.Children("part"))
+                    {
+                        var pm = part.Children("metadata").FirstOrDefault(m => m.Attr("key") == "extruder");
+                        int pe = pm == null ? 0 : (int)Attr(pm, "value");
+                        if (pe > 0 && pe != e) e = 0;
+                    }
+                    if (id.Length > 0) byId[id] = e;
+                }
+                foreach (var plate in Plates(root))
+                {
+                    var idNode = PlateMeta(plate, "plater_id");
+                    int pid = idNode == null ? 0 : (int)Attr(idNode, "value");
+                    if (pid <= 0) continue;
+                    var list = new List<int>();
+                    foreach (var inst in plate.Children("model_instance"))
+                    {
+                        var om = inst.Children("metadata").FirstOrDefault(m => m.Attr("key") == "object_id");
+                        int e;
+                        list.Add(om != null && byId.TryGetValue(AttrText(om, "value"), out e) ? e : 0);
+                    }
+                    res[pid] = list;
+                }
+            }
+            catch (Exception) { res.Clear(); }
+            return res;
+        }
+
+        /// Pure: numbers from per-slot strings (invariant, "1.26"); unreadable / missing = 0.
+        public static List<double> SlotNumbers(IList<string> values)
+        {
+            var list = new List<double>();
+            if (values == null) return list;
+            foreach (var v in values)
+            {
+                double d;
+                list.Add(double.TryParse((v ?? "").Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out d) && d > 0 && !double.IsInfinity(d) ? d : 0);
+            }
+            return list;
+        }
+
+        /// Pure: the CLI bug fix for one plate. When every object on it uses the same filament n (extruders, from
+        /// ObjectExtruders) and n != 1, but the plate lists only filament 1: that one filament becomes slot n, its grams
+        /// (and known ModelGrams) x densities[n-1] / densities[0] (unknown density = x 1), colour / type / profile from
+        /// slot n's entries (null lists or missing = "" / unchanged profile), plate Grams adjusted. True when changed.
+        /// Example: 2 blue clips reported as slot 1, 5,86 g, densities 1,26 / 1,5 -> slot 2, 6,98 g.
+        public static bool FixSingleFilamentPlate(PlateInfo p, IList<int> extruders, IList<double> densities,
+                                                  IList<string> colours, IList<string> types, IList<string> profiles)
+        {
+            if (p == null || p.Filaments == null || extruders == null || extruders.Count == 0) return false;
+            if (extruders.Any(e => e <= 0)) return false;
+            var distinct = extruders.Distinct().ToList();
+            if (distinct.Count != 1 || distinct[0] == 1) return false;
+            int n = distinct[0];
+            var used = p.Filaments.Where(f => f != null && f.Grams > 0).ToList();
+            if (used.Count != 1 || used[0].Slot != 1) return false;
+            var f1 = used[0];
+            double d1 = densities != null && densities.Count >= 1 ? densities[0] : 0;
+            double dn = densities != null && densities.Count >= n ? densities[n - 1] : 0;
+            double factor = d1 > 0 && dn > 0 ? dn / d1 : 1;
+            double old = f1.Grams;
+            f1.Grams = Math.Round(old * factor, 2);
+            if (f1.ModelGrams >= 0) f1.ModelGrams = Math.Round(f1.ModelGrams * factor, 2);
+            f1.Slot = n;
+            f1.Colour = colours != null && colours.Count >= n ? NormColour(colours[n - 1]) : "";
+            f1.Type = types != null && types.Count >= n ? (types[n - 1] ?? "").Trim() : "";
+            if (profiles != null && profiles.Count >= n) f1.Profile = StripSlotTag(profiles[n - 1] ?? "");
+            p.Grams = Math.Round(Math.Max(0, p.Grams - old + f1.Grams), 2);
+            return true;
+        }
+
+        /// The fix on every plate of a sliced .3mf (desktop ReadSliceInfo and the website's sliced-file reader): plates
+        /// matched by Index = plater_id; res.Filaments / Grams moved and re-weighed to match (ModelGrams of the moved
+        /// slots become -1 = unknown). Densities, colours, types and profiles from project_settings.config. Returns the
+        /// plates fixed (0 = nothing; also on missing / bad xml or json). Sets res.SingleFilamentFixes.
+        public static int FixSingleFilamentPlates(SliceResult res, string modelSettingsXml, string projectSettingsJson)
+        {
+            if (res == null || res.PlateList == null || res.PlateList.Count == 0) return 0;
+            var extr = ObjectExtruders(modelSettingsXml);
+            if (extr.Count == 0) return 0;
+            var settings = ParseSettings(projectSettingsJson);
+            var densities = SlotNumbers(SlotStrings(settings, "filament_density"));
+            var colours = SlotStrings(settings, "filament_colour");
+            var types = SlotStrings(settings, "filament_type");
+            var profiles = SlotStrings(settings, "filament_settings_id");
+            int fixes = 0;
+            foreach (var p in res.PlateList)
+            {
+                List<int> e;
+                if (p == null || !extr.TryGetValue(p.Index, out e)) continue;
+                var before = p.Filaments.FirstOrDefault(f => f != null && f.Grams > 0);
+                double oldGrams = before == null ? 0 : before.Grams, metres = before == null ? 0 : before.Metres;
+                if (!FixSingleFilamentPlate(p, e, densities, colours, types, profiles)) continue;
+                fixes++;
+                res.Grams = Math.Max(0, res.Grams - oldGrams + before.Grams);
+                var t1 = res.Filaments.FirstOrDefault(x => x.Slot == 1);
+                if (t1 != null)
+                {
+                    t1.Grams = Math.Max(0, t1.Grams - oldGrams);
+                    t1.Metres = Math.Max(0, t1.Metres - metres);
+                    t1.ModelGrams = -1;
+                }
+                var tn = res.Filaments.FirstOrDefault(x => x.Slot == before.Slot);
+                if (tn == null)
+                {
+                    tn = new FilamentUse { Slot = before.Slot, Colour = before.Colour, Type = before.Type, Profile = before.Profile };
+                    res.Filaments.Add(tn);
+                }
+                tn.Grams += before.Grams;
+                tn.Metres += metres;
+                tn.ModelGrams = -1;
+            }
+            if (fixes == 0) return 0;
+            res.Filaments.RemoveAll(f => f.Grams <= 0.0005 && f.Metres <= 0.0005);
+            res.Filaments.Sort((a, b) => a.Slot.CompareTo(b.Slot));
+            res.SingleFilamentFixes += fixes;
+            return fixes;
+        }
+
+        /// Pure: the trade-off of a shared plate against the own last plates it replaced (ShareInfo, Applied):
+        /// PlatesSaved = replaced - 1, ExtraSeconds / ExtraGrams = shared minus the replaced plates' sums (rounded to 1 s /
+        /// 0,01 g), Colours = PlateColourCount(shared), ColourChanges = the shared plate's. Null shared / < 2 replaced -> null.
+        public static ShareInfo ShareTradeOff(IList<PlateInfo> replaced, PlateInfo shared)
+        {
+            if (shared == null || replaced == null || replaced.Count(x => x != null) < 2) return null;
+            var own = replaced.Where(x => x != null).ToList();
+            return new ShareInfo
+            {
+                Applied = true,
+                Colours = PlateColourCount(shared),
+                PlatesSaved = own.Count - 1,
+                ExtraSeconds = Math.Round(shared.Seconds - own.Sum(x => x.Seconds), 0),
+                ExtraGrams = Math.Round(shared.Grams - own.Sum(x => x.Grams), 2),
+                ColourChanges = shared.ColourChanges
+            };
         }
 
         public const int MaxPlateNameChars = 40;

@@ -29,10 +29,25 @@ namespace PrintPrice
         /// The question was asked on the last Apply (tests).
         internal bool TestBigAsked { get; private set; }
 
+        /// batch-2: the "Share the last plate between the colours" tick (null = not offered: one colour, typed, multiplied).
+        readonly BackupForm.Tick shareTick;
+        readonly bool currentShare;
+        /// A muted line under the help: what sharing did on the last slice (the trade-off or why it fell back); "" = none.
+        readonly string shareNote = "";
+        /// batch-2: the share choice (valid after OK; false when not offered).
+        public bool Share { get; private set; }
+
         /// copies / plates = the shown job's (plates 0 = unknown); files = files in the job (2+: every file gets this many).
-        public CopiesForm(Mode mode, int copies, int plates, int files)
+        public CopiesForm(Mode mode, int copies, int plates, int files) : this(mode, copies, plates, files, null, null) { }
+
+        /// batch-2: share = the job's "share the last plate" choice (null = not offered); shareLine = the last slice's
+        /// sharing line (MainForm.ShareNoteText; null / "" = none).
+        public CopiesForm(Mode mode, int copies, int plates, int files, bool? share, string shareLine)
         {
             this.mode = mode;
+            currentShare = share == true;
+            Share = currentShare;
+            this.shareNote = shareLine ?? "";
             currentCopies = Math.Max(1, copies);
             currentPlates = Math.Max(1, plates);
             this.files = Math.Max(1, files);
@@ -100,6 +115,18 @@ namespace PrintPrice
             bottom.Controls.Add(right, 1, 0);
 
             root.Controls.Add(grid);
+            if (share.HasValue && mode == Mode.Slice)
+            {
+                // batch-2: under the boxes, 8 px above the help box (the grid's bottom margin is the gap above it)
+                shareTick = new BackupForm.Tick
+                {
+                    Text = L.S("Share the last plate between the colours", "Del den sidste plade mellem farverne"),
+                    Size = new Size(ContentW, 26), Margin = new Padding(0, 0, 0, 8), Checked = currentShare,
+                    AccessibleName = L.S("Share the last plate between the colours", "Del den sidste plade mellem farverne")
+                };
+                shareTick.CheckedChanged += delegate { UpdateState(); };
+                root.Controls.Add(shareTick);
+            }
             root.Controls.Add(info);
             root.Controls.Add(bottom);
             AcceptButton = btnApply;
@@ -124,10 +151,10 @@ namespace PrintPrice
                 // the box is never shorter than the help text, so a warning / error line doesn't move the buttons
                 string shown = info.Text;
                 var kind = info.Kind;
-                info.Text = HelpText(Math.Max(2, currentCopies));
+                SetInfo(HelpText(Math.Max(2, currentCopies)));
                 int helpH = info.GetPreferredSize(new Size(w, 0)).Height;
-                info.Text = shown;
-                info.Kind = kind;
+                if (shareNote.Length > 0) UpdateState();   // batch-2: the muted line goes with the shown text
+                else { info.Text = shown; info.Kind = kind; }
                 info.MinimumSize = new Size(w, helpH);
                 root.MinimumSize = new Size(w + root.Padding.Horizontal, 0);
                 bottom.MinimumSize = new Size(w, 0);
@@ -164,11 +191,14 @@ namespace PrintPrice
                     return L.S("Time and weight in the main window are for one copy. The price is for all copies.",
                                "Tid og vægt i hovedvinduet er for ét stk. Prisen gælder alle stk.");
                 default:
-                    string help = L.S("Bambu Studio puts as many copies as fit on each build plate and slices again. Time, weight and price are for all copies.",
-                                      "Bambu Studio lægger så mange stk. som muligt på hver byggeplade og slicer igen. Tid, vægt og pris gælder alle stk.");
+                    // batch-2 qol #5: shorter (no last word alone on a line)
+                    string help = L.S("Bambu Studio fits as many copies as possible on each plate and slices again; time, weight and price are for all copies.",
+                                      "Bambu Studio lægger så mange stk. som muligt på hver plade og slicer igen; tid, vægt og pris gælder alle stk.");
                     if (files > 1)
                         help += "\n" + L.S("For a different number per file, load the files again.",   // ui-text #11
                                            "Forskelligt antal pr. fil: indlæs filerne igen.");
+                    if (shareTick != null)   // batch-2
+                        help += "\n" + L.S("Sharing is slower (colour changes).", "Deling er langsommere (farveskift).");
                     return help;
             }
         }
@@ -221,11 +251,20 @@ namespace PrintPrice
             }
             else
             {
-                info.Text = HelpText(n);
+                SetInfo(HelpText(n));
                 info.Kind = InfoKind.Info;
             }
-            SetApply(n != currentCopies || (mode == Mode.Typed && p != currentPlates));
+            SetApply(n != currentCopies || (mode == Mode.Typed && p != currentPlates) || ShareChosen != currentShare);
         }
+
+        /// The help text + the last slice's sharing line (muted) when there is one.
+        void SetInfo(string text)
+        {
+            if (shareNote.Length > 0) info.SetText(text, shareNote);
+            else info.Text = text;
+        }
+
+        bool ShareChosen { get { return shareTick != null && shareTick.Checked; } }
 
         /// "Slicing 300 copies can take several minutes." (Slice mode above WarnCopies)
         static string BigText(int n)
@@ -259,6 +298,7 @@ namespace PrintPrice
             }
             Copies = n;
             Plates = mode == Mode.Typed ? p : 0;
+            Share = shareTick != null ? shareTick.Checked : currentShare;   // batch-2
             DialogResult = DialogResult.OK;
         }
 
@@ -280,6 +320,9 @@ namespace PrintPrice
         internal InfoKind TestInfoKind { get { return info.Kind; } }
         internal bool TestApplyOn { get { return btnApply.Enabled; } }
         internal bool TestHasPlates { get { return txtPlates != null; } }
+        internal bool TestHasShare { get { return shareTick != null; } }
+        internal void TestTickShare(bool on) { if (shareTick != null) shareTick.Checked = on; }
+        internal string TestInfoMuted { get { return shareNote; } }
         /// The real Apply button (shown first: a hidden button can't be clicked); true = the window ended with OK.
         internal bool TestPressApply(IWin32Window owner)
         {

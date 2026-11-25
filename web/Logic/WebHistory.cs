@@ -182,6 +182,72 @@ namespace PrintPrice.Web
                              : L.F("Printing, done about {0}", "Printer, færdig ca. {0}", at);
         }
 
+        // ---------- batch-2: plates printed (= HistoryForm.PlatesStatusText / StatusTip / AddPlateItems / StepPlates) ----------
+
+        /// A started job of 2+ plates (some printed, or printing now) shows "3 of 5 plates" instead of "Printing"; null =
+        /// the normal name.
+        public static string PlatesStatusText(QuoteRecord r, DateTime now)
+        {
+            if (r == null || History.PlatesOf(r) < 2 || History.PrintStateOf(r, now) != PrintState.Printing) return null;
+            return History.PlatesProgressText(History.PlatesDoneOf(r, now), History.PlatesOf(r));
+        }
+
+        /// The Status cell's tooltip: "Printing plate 4 of 5, done about 16:40", a started multi-plate job "Plates printed:
+        /// 3 of 5", else PrintingText (null = none).
+        public static string StatusTip(QuoteRecord r, DateTime now)
+        {
+            if (r == null) return null;
+            DateTime end;
+            int plates = History.PlatesOf(r);
+            if (plates >= 2 && History.IsPrinting(r, now) && History.PrintingEnds(r, out end))
+            {
+                string at = end.Date == now.Date ? end.ToString("HH':'mm", Inv) : end.ToString("dd-MM HH':'mm", Inv);
+                return History.PrintingPlateText(History.PrintingPlate(r, now), plates) + L.F(", done about {0}", ", færdig ca. {0}", at);
+            }
+            if (PlatesStatusText(r, now) != null) return History.PlatesPrintedText(History.PlatesDoneOf(r, now), plates);
+            return PrintingText(r, now, false);
+        }
+
+        /// The jobs the status menu's plate part works on: 2+ plates and not failed (empty = no plate part).
+        public static List<QuoteRecord> PlateJobs(IEnumerable<QuoteRecord> recs)
+        {
+            var res = new List<QuoteRecord>();
+            if (recs != null) foreach (var r in recs) if (r != null && History.PlatesOf(r) >= 2 && !r.Failed) res.Add(r);
+            return res;
+        }
+
+        /// "+1 plate printed" can still go up (any job not all done) / "–1" can go down (any job with a plate done).
+        public static bool CanStepPlates(IList<QuoteRecord> jobs, int delta, DateTime now)
+        {
+            if (jobs == null) return false;
+            foreach (var r in jobs)
+            {
+                int k = History.PlatesDoneOf(r, now);
+                if (delta > 0 ? k < History.PlatesOf(r) : k > 0) return true;
+            }
+            return false;
+        }
+
+        /// One plate more (+1) or less (–1) on each job (History.StepPlates); the line after it: "✓ Plates printed: 4 of 5."
+        public static string StepPlates(IList<QuoteRecord> jobs, int delta, DateTime now)
+        {
+            if (jobs == null || jobs.Count == 0) return null;
+            foreach (var r in jobs) History.StepPlates(r, delta, now);
+            var p = History.Progress(jobs, now);
+            return "✓ " + History.PlatesPrintedText(p.PlatesDone, p.Plates) + ".";
+        }
+
+        /// 2+ ticked with a job of 2+ plates among them: "Selected: 3 prints, plates printed 7 of 12"; null = no line.
+        public static string SelectionProgress(ICollection<QuoteRecord> ticked, DateTime now)
+        {
+            if (ticked == null || ticked.Count < 2) return null;
+            bool any = false;
+            foreach (var r in ticked) if (r != null && History.PlatesOf(r) >= 2) any = true;
+            if (!any) return null;
+            var p = History.Progress(ticked, now);
+            return History.SelectedProgressText(ticked.Count, p.PlatesDone, p.Plates);
+        }
+
         /// The soonest end of a print still running (for one redraw then); null = none.
         public static DateTime? NextPrintingEnd(IEnumerable<QuoteRecord> list, DateTime now)
         {

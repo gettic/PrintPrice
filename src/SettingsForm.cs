@@ -18,6 +18,12 @@ namespace PrintPrice
         CheckBox chkAutoPower, chkVat, chkAutoWear, chkAutoUpdate, chkPayback;
         CheckBox chkMainInvoice;   // Quote & invoice tab: the main window's button makes invoices (AppSettings.MainInvoice)
         TextBox txtPlateFee;       // Prices tab: kr. per extra build plate (AppSettings.PlateChangeFee, batch & plates)
+        // batch-2 Prices tab: quantity discount steps "from [10] pcs: [5] % off" (QtyDiscountFrom1-3 / Pct1-3; empty = off)
+        // and "Only on the customer price" (QtyDiscountWho 2, default on)
+        readonly TextBox[] txtQtyFrom = new TextBox[3], txtQtyPct = new TextBox[3];
+        CheckBox chkQtyCustomers;
+        readonly List<Control>[] qtyRowParts = { new List<Control>(), new List<Control>(), new List<Control>() };   // each step row's controls
+        CheckBox chkShareLast;     // batch-2 Quote & invoice > Slicing: share the colours' last plate (AppSettings.ShareLastPlate)
         CheckBox chkUnitPrice;     // Quote & invoice tab: price per piece on quotes / invoices (AppSettings.QuoteShowUnitPrice)
         CheckBox chkQuoteTower;    // Quote & invoice tab: "incl. 1,7 g for the prime tower" note on quotes / invoices (AppSettings.QuoteShowTower, issue #8 step 3)
         ComboBox cmbTower;         // Quote & invoice tab: prime tower On / Off for 2+ colours (AppSettings.PrimeTower, all printers; issue #8 step 3)
@@ -134,12 +140,54 @@ namespace PrintPrice
             txtRound = Row(t, L.S("Round up to nearest", "Rund op til nærmeste"), L.S("kr. (0 = off)", "kr. (0 = fra)"));
             // batch & plates: kr. for every build plate after the first (both prices, not marked up)
             txtPlateFee = Row(t, L.S("Plate change fee", "Gebyr for pladeskift"), L.S("kr. per extra plate (0 = off)", "kr. pr. ekstra plade (0 = fra)"));
+            // batch-2: quantity discount, up to 3 steps (one row each: "from [10] pcs → [5] % off"), the highest step reached
+            // counts; "from" right-aligned in the caption column, against the box (qol #4); row 3 only once row 2 is used (qol #1a)
+            for (int i = 0; i < 3; i++)
+            {
+                int qr = t.RowCount++;
+                var from = Unit(L.S("from", "fra"));
+                from.Anchor = AnchorStyles.Right;
+                from.Margin = new Padding(0, 0, UnitGap, 0);
+                if (i == 0)
+                {
+                    var cap = new TableLayoutPanel { ColumnCount = 2, RowCount = 1, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                                                     Margin = Padding.Empty, Padding = Padding.Empty, Dock = DockStyle.Fill };
+                    cap.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+                    cap.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+                    cap.Controls.Add(Caption(L.S("Quantity discount", "Mængderabat")), 0, 0);
+                    cap.Controls.Add(from, 1, 0);
+                    t.Controls.Add(cap, 0, qr);
+                    qtyRowParts[i].Add(cap);
+                }
+                else
+                {
+                    t.Controls.Add(from, 0, qr);
+                    qtyRowParts[i].Add(from);
+                }
+                txtQtyFrom[i] = NumberBox();
+                txtQtyFrom[i].AccessibleName = L.F("Quantity discount step {0}: from pieces", "Mængderabat trin {0}: fra stk.", i + 1);
+                t.Controls.Add(txtQtyFrom[i], 1, qr);
+                var qf = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
+                                               Margin = Padding.Empty, Padding = Padding.Empty, Anchor = AnchorStyles.Left };
+                qf.Controls.Add(Unit(L.S("pcs →", "stk. →")));
+                txtQtyPct[i] = NumberBox();
+                txtQtyPct[i].Margin = new Padding(12, 3, 0, 3);
+                txtQtyPct[i].AccessibleName = L.F("Quantity discount step {0}: percent off", "Mængderabat trin {0}: procent rabat", i + 1);
+                qf.Controls.Add(txtQtyPct[i]);
+                qf.Controls.Add(Unit(L.S("% off", "% rabat")));
+                t.Controls.Add(qf, 2, qr);
+                qtyRowParts[i].Add(txtQtyFrom[i]);
+                qtyRowParts[i].Add(qf);
+            }
+            foreach (int i in new[] { 1, 2 })
+            {
+                txtQtyFrom[i].TextChanged += delegate { UpdateQtyRows(); };
+                txtQtyPct[i].TextChanged += delegate { UpdateQtyRows(); };
+            }
+            chkQtyCustomers = Check(t, L.S("Quantity discount only on the customer price", "Mængderabat kun på kundeprisen"));
 
             Section(t, L.S("Failed prints", "Fejlprint"));
             txtFailed = Row(t, L.S("Extra for failed prints", "Tillæg for fejlprint"), L.S("% (0 = off)", "% (0 = fra)"));
-            // the hint's grey second line = failed prints marked in the price history that new quotes haven't made back yet
-            Hint(t, "").SetText(L.S("Added to material + electricity for prints that fail.", "Lægges oven i materiale + strøm for print, der fejler."),
-                                L.F("Not made back yet: {0} kr.", "Ikke tjent ind endnu: {0} kr.", failedDebt.ToString("N2", Num.Dk)));
             // earn back failed prints: the checkbox is the caption of its % row; % and "paid by" only work while ticked
             int pr = t.RowCount++;
             chkPayback = new CheckBox { Text = L.S("Earn back failed prints", "Tjen fejlprint ind igen"), AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 5, Theme.LabelGap, 5) };   // row 31 like the box rows (6 gave 33)
@@ -151,8 +199,11 @@ namespace PrintPrice
             cmbPaybackWho.Items.Add(L.S("Customers only", "Kun kunder"));
             cmbPaybackWho.Items.Add(L.S("Both prices", "Begge priser"));
             chkPayback.CheckedChanged += delegate { txtPayback.Enabled = cmbPaybackWho.Enabled = chkPayback.Checked; };
-            Hint(t, L.S("Adds this % of material + electricity to new quotes until failed prints are made back.",
-                        "Lægger denne % af materiale + strøm på nye tilbud, til fejlprint er tjent ind."));
+            // qol #1b: one hint for the section (was one under each row); the grey line = failed prints marked in the price
+            // history that new quotes haven't made back yet
+            Hint(t, "").SetText(L.S("The extra is added to material + electricity for prints that fail. Earning back adds this % to new quotes until failed prints are made back.",
+                                    "Tillægget lægges oven i materiale + strøm for print, der fejler. Tjen ind lægger denne % på nye tilbud, til fejlprint er tjent ind."),
+                                L.F("Not made back yet: {0} kr.", "Ikke tjent ind endnu: {0} kr.", failedDebt.ToString("N2", Num.Dk)));
 
             // ----- Printer -----
             t = pages[TabPrinter];
@@ -220,6 +271,8 @@ namespace PrintPrice
             cmbTower.Items.Add(L.S("On (2+ colours)", "Til (2+ farver)"));
             cmbTower.Items.Add(L.S("Off", "Fra"));
             chkQuoteTower = Check(t, L.S("Show prime tower grams on quotes and invoices", "Vis primetårnets gram på tilbud og fakturaer"));
+            // batch-2: copies in several colours: the colours' part-full last plates on one shared plate (off by default)
+            chkShareLast = Check(t, L.S("Several colours: share the last plate", "Flere farver: del den sidste plade"));   // ui-text (qol #10)
             Section(t, L.S("Invoice", "Faktura"));
             chkMainInvoice = Check(t, L.S("Main window makes invoices, not quotes",
                                           "Hovedvinduet laver fakturaer, ikke tilbud"));
@@ -234,6 +287,14 @@ namespace PrintPrice
             // ui-text #12: what the plate change fee does
             tip.SetToolTip(txtPlateFee, L.S("Added once for each plate after the first, on both prices.",
                                             "Lægges til én gang for hver plade efter den første, på begge priser."));
+            // batch-2
+            string qtyTip = L.S("From this many copies, this % comes off the price.\nThe highest step reached counts. Empty = off.\nNever below cost; the minimum price still applies.",
+                                "Fra så mange stk. trækkes denne % fra prisen.\nDet højeste trin, der nås, gælder. Tomt = fra.\nAldrig under kostprisen; minimumsprisen gælder stadig.");
+            for (int i = 0; i < 3; i++) { tip.SetToolTip(txtQtyFrom[i], qtyTip); tip.SetToolTip(txtQtyPct[i], qtyTip); }
+            tip.SetToolTip(chkQtyCustomers, L.S("On: friends & family pay their normal price.\nOff: both prices get the discount.",
+                                                "Til: venner og familie betaler deres normale pris.\nFra: begge priser får rabatten."));
+            tip.SetToolTip(chkShareLast, L.S("Full plates keep one colour; each colour's last plate goes on one shared plate.\nFewer plates, but slower (colour changes).\nSTL and OBJ, 2-4 colours. Change it per job in the Copies window.",
+                                             "Fulde plader har én farve; hver farves sidste plade kommer på én fælles plade.\nFærre plader, men langsommere (farveskift).\nSTL og OBJ, 2-4 farver. Kan ændres pr. job i vinduet Antal."));
             tip.SetToolTip(chkQuoteTower,L.S("Adds \"incl. 1,7 g for the prime tower\" under Material.\nNo extra price: the grams are already counted.",
                                               "Tilføjer \"inkl. 1,7 g til primetårnet\" under Materiale.\nIngen ekstra pris: grammene er allerede talt med."));
             // issue #6: a copy of every saved invoice PDF in <settings folder>\Invoices + a button that opens that folder
@@ -382,7 +443,8 @@ namespace PrintPrice
             int cw = ClientSize.Width - 2 * Px(Edge);
             // one caption column for every tab: the longest caption (or the payback checkbox) + its right margin (LabelGap)
             // qol #13: tick boxes start where the captions' text starts (the box frame was 5 px left of it)
-            foreach (var cb in new[] { chkPayback, chkAutoWear, chkVat, chkAutoPower, chkMainInvoice, chkUnitPrice, chkQuoteTower, chkInvoiceCopies, chkAutoUpdate })
+            foreach (var cb in new[] { chkPayback, chkAutoWear, chkVat, chkAutoPower, chkMainInvoice, chkUnitPrice, chkQuoteTower, chkInvoiceCopies, chkAutoUpdate,
+                                       chkQtyCustomers, chkShareLast })
                 cb.Margin = new Padding(Px(CheckIndent), cb.Margin.Top, cb.Margin.Right, cb.Margin.Bottom);
             // qol #12: measured to the end of the caption's TEXT (its preferred width ends with GDI's trailing text padding),
             // then a 30 px clear gap to the boxes, as in the main window (PreferredSize + LabelGap gave 27 / 26 px)
@@ -437,6 +499,8 @@ namespace PrintPrice
             foreach (var p in pages) tallest = Math.Max(tallest, p.GetPreferredSize(new Size(cw, 0)).Height);
             int need = CaptionHeight + Px(PageTop) + tallest + Px(PageGap) + 1 + Px(SepGap) + Px(ButtonH) + Px(Edge);
             int h = Math.Max(Px(MinWindowH), SizeFromClientSize(new Size(ClientSize.Width, need)).Height);
+            // qol #1c: never taller than the screen's working area (OK / Cancel stay reachable; they sit at the bottom)
+            if (!Program.Hidden && !Screenshots.Active) h = Math.Min(h, Screen.FromControl(this).WorkingArea.Height);
             if (!fitted || h > Height) Height = h;
             PlaceAll();
         }
@@ -452,6 +516,8 @@ namespace PrintPrice
             separator.SetBounds(m, by - Px(SepGap) - 1, cw, 1);
             checkFlow.MaximumSize = new Size(Math.Max(1, reset.Left - Px(8) - m), 0);
             checkFlow.Location = new Point(m, by + (cancel.Height - checkFlow.Height) / 2);
+            // on a screen too short for the tallest tab (FitHeight's cap) the bottom row stays on top of the page
+            foreach (Control c in new Control[] { separator, checkFlow, reset, ok, cancel }) c.BringToFront();
         }
 
         /// --test-setup (test mode + --hidden only): clicks "Run setup again…" like the user (the App tab must be showing).
@@ -1011,7 +1077,29 @@ namespace PrintPrice
             chkQuoteTower.Checked = s.QuoteShowTower == 1;
             txtPlateFee.Text = Num.Fmt(s.PlateChangeFee);                    // batch & plates
             chkUnitPrice.Checked = s.QuoteShowUnitPrice != 0;
+            // batch-2: a step shows only when it is on (both set); empty boxes = off
+            double[] qf = { s.QtyDiscountFrom1, s.QtyDiscountFrom2, s.QtyDiscountFrom3 }, qp = { s.QtyDiscountPct1, s.QtyDiscountPct2, s.QtyDiscountPct3 };
+            for (int i = 0; i < 3; i++)
+            {
+                bool on = AppSettings.CleanQtyFrom(qf[i]) > 0 && AppSettings.CleanQtyPct(qp[i]) > 0;
+                txtQtyFrom[i].Text = on ? Num.Fmt(qf[i]) : "";
+                txtQtyPct[i].Text = on ? Num.Fmt(qp[i]) : "";
+            }
+            chkQtyCustomers.Checked = s.QtyDiscountWho != 1;
+            chkShareLast.Checked = s.ShareLastPlate == 1;
+            UpdateQtyRows();
             filling = false;
+        }
+
+        /// batch-2 (qol #1a): the third discount row shows once the second is used (or when it has a step itself); hidden
+        /// rows take no height. Shown rows stay shown while the window is open (the height only grows).
+        void UpdateQtyRows()
+        {
+            bool third = txtQtyFrom[1].Text.Trim().Length > 0 || txtQtyPct[1].Text.Trim().Length > 0 ||
+                         txtQtyFrom[2].Text.Trim().Length > 0 || txtQtyPct[2].Text.Trim().Length > 0;
+            if (third && qtyRowParts[2][0].Visible) return;
+            if (!third && fitted) return;   // never hide again (no jump while typing)
+            foreach (var c in qtyRowParts[2]) c.Visible = third;
         }
 
         // ---------- several printers (Printer tab) ----------
@@ -1254,22 +1342,27 @@ namespace PrintPrice
                 if (Num.TryParse(txtPayback.Text, out v)) payback = v;
                 txtPayback.BackColor = Theme.Input;
             }
-            if (!ok)
+            // batch-2: quantity discount steps (both boxes empty = off; one alone, a From that isn't 2+ whole pcs or a % outside
+            // 0-90 = red)
+            var qtyFrom = new double[3];
+            var qtyPct = new double[3];
+            bool qtyOk = true;
+            for (int i = 0; i < 3; i++)
+                if (!ReadQtyStep(txtQtyFrom[i], txtQtyPct[i], out qtyFrom[i], out qtyPct[i])) qtyOk = false;
+            if (!ok || !qtyOk)
             {
                 RestartRequested = false;
                 // show the first tab with a red box, and put the cursor in that box
                 for (int i = 0; i < pages.Length; i++)
                 {
-                    TextBox bad = null;
-                    foreach (Control c in pages[i].Controls)
-                        if (c is TextBox && c.BackColor == Theme.InvalidBack) { bad = (TextBox)c; break; }
+                    TextBox bad = FirstRedBox(pages[i]);
                     if (bad == null) continue;
                     SelectTab(i);
                     bad.Focus();
                     break;
                 }
                 // red text in the bottom row (never Windows' light message box, qol #3)
-                SetCheckText(BadNumbersText, null, Theme.Error);
+                SetCheckText(ok ? QtyBadText : BadNumbersText, null, Theme.Error);
                 return;
             }
             StorePrinter();   // the shown printer's boxes are valid (checked above)
@@ -1303,8 +1396,55 @@ namespace PrintPrice
             Result.QuoteShowTower = chkQuoteTower.Checked ? 1 : 0;
             Result.PlateChangeFee = plateFee;                           // batch & plates
             Result.QuoteShowUnitPrice = chkUnitPrice.Checked ? 1 : 0;
+            Result.QtyDiscountFrom1 = qtyFrom[0]; Result.QtyDiscountPct1 = qtyPct[0];   // batch-2
+            Result.QtyDiscountFrom2 = qtyFrom[1]; Result.QtyDiscountPct2 = qtyPct[1];
+            Result.QtyDiscountFrom3 = qtyFrom[2]; Result.QtyDiscountPct3 = qtyPct[2];
+            Result.QtyDiscountWho = chkQtyCustomers.Checked ? 2 : 1;
+            Result.ShareLastPlate = chkShareLast.Checked ? 1 : 0;
             DialogResult = DialogResult.OK;
             Close();
+        }
+
+        /// The first red text box on a page, also inside rows' panels (the discount % boxes).
+        static TextBox FirstRedBox(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                if (c is TextBox && c.BackColor == Theme.InvalidBack) return (TextBox)c;
+                var inner = c.HasChildren ? FirstRedBox(c) : null;
+                if (inner != null) return inner;
+            }
+            return null;
+        }
+
+        /// batch-2: one quantity-discount step. Both empty (or 0) = off (0, 0). Else From must be a whole number of pieces
+        /// (2..History.MaxStoredCount) and % above 0 up to AppSettings.MaxQtyDiscountPct; a bad or missing one turns red.
+        static bool ReadQtyStep(TextBox from, TextBox pct, out double f, out double p)
+        {
+            f = 0; p = 0;
+            from.BackColor = Theme.Input; pct.BackColor = Theme.Input;
+            string a = (from.Text ?? "").Trim(), b = (pct.Text ?? "").Trim();
+            double fv = 0, pv = 0;
+            bool fEmpty = a.Length == 0 || (Num.TryParse(a, out fv) && fv == 0);
+            bool pEmpty = b.Length == 0 || (Num.TryParse(b, out pv) && pv == 0);
+            if (fEmpty && pEmpty) return true;
+            bool fGood = !fEmpty && Num.TryParse(a, out fv) && AppSettings.CleanQtyFrom(fv) > 0;
+            bool pGood = !pEmpty && Num.TryParse(b, out pv) && AppSettings.CleanQtyPct(pv) > 0;
+            if (!fGood) from.BackColor = Theme.InvalidBack;
+            if (!pGood) pct.BackColor = Theme.InvalidBack;
+            if (!fGood || !pGood) return false;
+            f = fv; p = pv;
+            return true;
+        }
+
+        /// The bottom line when only a quantity-discount step is bad.
+        internal static string QtyBadText
+        {
+            get
+            {
+                return L.F("Quantity discount: from 2 pcs, up to {0} %, or both empty.", "Mængderabat: fra 2 stk., højst {0} %, eller begge tomme.",
+                           AppSettings.MaxQtyDiscountPct);
+            }
         }
 
         internal static string BadNumbersText

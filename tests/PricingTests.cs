@@ -3690,6 +3690,9 @@ namespace PrintPrice.Tests
             SettingsSafeTests();
             OnlineHelperTests();
             BatchTests();
+            QtyDiscountTests();
+            PlateProgressTests();
+            ShareSlicerTests();
 
             Console.WriteLine(failures == 0 ? "ALL TESTS PASSED" : failures + " TEST(S) FAILED");
             return failures == 0 ? 0 : 1;
@@ -4931,6 +4934,519 @@ namespace PrintPrice.Tests
         }
 
         // ---------- issue #8 step 3: prime tower setting + History fields ----------
+
+        // ---------- batch-2: quantity discount (settings, maths, breakdown, History snapshot, texts) ----------
+
+        // BatchSettings + steps 10 pcs = 5 %, 50 pcs = 10 % (customers only)
+        static AppSettings DiscSettings()
+        {
+            var s = BatchSettings();
+            s.QtyDiscountFrom1 = 10; s.QtyDiscountPct1 = 5;
+            s.QtyDiscountFrom2 = 50; s.QtyDiscountPct2 = 10;
+            return s;
+        }
+
+        // 10 h 0 m, 400 g at 200 kr./kg, 2,00 kr./kWh: material 80,00, power 10 x 0,1 x 2,00 = 2,00, base 82,00,
+        // wear 10 x 1,71 = 17,10 (cost 99,10); customer before 82,00 x 1,75 + 17,10 = 160,60; friends 102,50 + 17,10 = 119,60
+        static QuoteInput DiscInput(int copies)
+        {
+            return new QuoteInput { Hours = 10, Minutes = 0, FilamentGrams = 400, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2.00,
+                                    Quantity = copies };
+        }
+
+        static long OreSum(QuoteBreakdown b) { long n = 0; foreach (var l in b.Lines) n += l.Ore; return n; }
+
+        static QuoteLine LineOf(List<QuoteLine> lines, string key)
+        {
+            foreach (var l in lines) if (l.Key == key) return l;
+            return null;
+        }
+
+        static void QtyDiscountTests()
+        {
+            // settings: off by default, every price unchanged
+            var d = new AppSettings();
+            int from;
+            True("QtyDiscount: default off (all steps 0, Who 2, ShareLastPlate 0)",
+                 d.QtyDiscountFor(500, out from) == 0 && from == 0 && !d.HasQtyDiscount() && d.QtyDiscountWho == 2 && d.ShareLastPlate == 0);
+            Eq("QtyDiscount: no steps, 10 copies = 160,60", 160.60, Pricing.Calculate(DiscInput(10), BatchSettings()).OthersPrice);
+
+            var s = DiscSettings();
+            var r9 = Pricing.Calculate(DiscInput(9), s);
+            Eq("QtyDiscount: 9 copies, no step reached = 160,60", 160.60, r9.OthersPrice);
+            True("QtyDiscount: 9 copies, pct 0", r9.DiscountPct == 0 && r9.DiscountFrom == 0 && r9.OthersDiscount == 0);
+            var r10 = Pricing.Calculate(DiscInput(10), s);
+            // 160,60 x 0,05 = 8,03 -> 152,57
+            Eq("QtyDiscount: 10 copies 5 %: 160,60 - 8,03 = 152,57", 152.57, r10.OthersPrice);
+            Eq("QtyDiscount: OthersDiscount 8,03", 8.03, r10.OthersDiscount);
+            True("QtyDiscount: step 10 pcs / 5 %", r10.DiscountPct == 5 && r10.DiscountFrom == 10);
+            Eq("QtyDiscount: customers only: friends 119,60", 119.60, r10.FriendsPrice);
+            Eq("QtyDiscount: each 152,57 / 10 = 15,257", 15.257, Pricing.UnitPrice(r10.OthersPrice, 10));
+            // 160,60 x 0,10 = 16,06 -> 144,54
+            Eq("QtyDiscount: 50 copies 10 %: 144,54", 144.54, Pricing.Calculate(DiscInput(50), s).OthersPrice);
+            // unordered steps and a half-set step
+            var u = BatchSettings();
+            u.QtyDiscountFrom1 = 50; u.QtyDiscountPct1 = 10; u.QtyDiscountFrom2 = 10; u.QtyDiscountPct2 = 5;
+            u.QtyDiscountFrom3 = 20; u.QtyDiscountPct3 = 0;
+            True("QtyDiscount: unordered steps: 50 -> 10 % from 50, 20 -> 5 % from 10 (half-set step ignored)",
+                 u.QtyDiscountFor(50, out from) == 10 && from == 50 && u.QtyDiscountFor(20, out from) == 5 && from == 10);
+            // both prices: friends 119,60 x 0,05 = 5,98 -> 113,62
+            var both = DiscSettings(); both.QtyDiscountWho = 1;
+            Eq("QtyDiscount: Who 1: friends 119,60 - 5,98 = 113,62", 113.62, Pricing.Calculate(DiscInput(10), both).FriendsPrice);
+            // never below cost: 25 %: friends 119,60 x 0,75 = 89,70 < cost 99,10 -> 99,10 (discount 20,50); customer 120,45
+            var big = BatchSettings(); big.QtyDiscountFrom1 = 10; big.QtyDiscountPct1 = 25; big.QtyDiscountWho = 1;
+            var rb = Pricing.Calculate(DiscInput(10), big);
+            Eq("QtyDiscount: floor: friends held at cost 99,10", 99.10, rb.FriendsPrice);
+            Eq("QtyDiscount: floor: friends discount 20,50", 20.50, rb.FriendsDiscount);
+            Eq("QtyDiscount: 25 % customer 160,60 x 0,75 = 120,45", 120.45, rb.OthersPrice);
+            // rounding last: RoundTo 5 -> 155,00 (rounding line 2,43)
+            var rs = DiscSettings(); rs.RoundTo = 5;
+            Eq("QtyDiscount: RoundTo 5: 152,57 -> 155,00", 155.00, Pricing.Calculate(DiscInput(10), rs).OthersPrice);
+            var brs = Pricing.Breakdown(DiscInput(10), rs, false, null);
+            True("QtyDiscount: RoundTo breakdown: rounding 243 øre, discount -803, sum = 15500",
+                 LineOf(brs.Lines, QuoteLine.Rounding) != null && LineOf(brs.Lines, QuoteLine.Rounding).Ore == 243 &&
+                 LineOf(brs.Lines, QuoteLine.Discount).Ore == -803 && OreSum(brs) == 15500 && brs.TotalOre == 15500);
+            // payback after the discount, not discounted: (80,00 + 2,00) x 0,10 = 8,20 -> 152,57 + 8,20 = 160,77
+            var ps = DiscSettings(); ps.FailedPayback = 1; ps.FailedPaybackPct = 10; ps.FailedPaybackWho = 2;
+            var pin = DiscInput(10); pin.PaybackDebt = 100;
+            Eq("QtyDiscount: payback 8,20 on top: 160,77", 160.77, Pricing.Calculate(pin, ps).OthersPrice);
+            var bp = Pricing.Breakdown(pin, ps, false, null);
+            True("QtyDiscount: payback breakdown sums exactly", OreSum(bp) == bp.TotalOre && bp.TotalOre == 16077);
+            // minimum takes part: 300 g at 100 kr./kg, 0 h: 30,00 x 1,75 = 52,50; 50 pcs 10 % -> 47,25 < 50 -> 50,00, shown 2,50
+            var mi = new QuoteInput { FilamentGrams = 300, FilamentDkkPerKg = 100, ElectricityDkkPerKwh = 2.00, Quantity = 50 };
+            var rm = Pricing.Calculate(mi, s);
+            Eq("QtyDiscount: minimum lifts 47,25 -> 50,00", 50.00, rm.OthersPrice);
+            Eq("QtyDiscount: discount shown shrinks to 52,50 - 50,00 = 2,50", 2.50, rm.OthersDiscount);
+            var bm = Pricing.Breakdown(mi, s, false, null);
+            True("QtyDiscount: minimum part: discount -250, no minimum line, sum 5000",
+                 LineOf(bm.Lines, QuoteLine.Discount).Ore == -250 && LineOf(bm.Lines, QuoteLine.Minimum) == null && OreSum(bm) == 5000);
+            // minimum takes all: 20 g at 200, 1 h: base 4,00 + 0,20 = 4,20; 4,20 x 1,75 + 1,71 = 9,06 -> 50,00, minimum line 40,94
+            var sm = new QuoteInput { Hours = 1, FilamentGrams = 20, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2.00, Quantity = 10 };
+            var rsm = Pricing.Calculate(sm, s);
+            Eq("QtyDiscount: small job -> minimum 50,00", 50.00, rsm.OthersPrice);
+            Eq("QtyDiscount: small job: discount 0", 0, rsm.OthersDiscount);
+            var bsm = Pricing.Breakdown(sm, s, false, null);
+            True("QtyDiscount: small job: minimum 4094 øre, no discount line",
+                 LineOf(bsm.Lines, QuoteLine.Minimum).Ore == 4094 && LineOf(bsm.Lines, QuoteLine.Discount) == null && OreSum(bsm) == 5000);
+            // breakdown: material 80,00, power 2,00, wear 17,10, work 61,50, discount -8,03 = 152,57
+            var b10 = Pricing.Breakdown(DiscInput(10), s, false, null);
+            var dl = LineOf(b10.Lines, QuoteLine.Discount);
+            True("QtyDiscount: breakdown discount line -803 øre, Quantity 5, UnitPrice 10",
+                 dl != null && dl.Ore == -803 && dl.Quantity == 5 && dl.UnitPrice == 10 && dl.Exact < 0);
+            True("QtyDiscount: breakdown sums 15257", OreSum(b10) == 15257 && b10.TotalOre == 15257 &&
+                 LineOf(b10.Lines, QuoteLine.Work).Ore == 6150 && LineOf(b10.Lines, QuoteLine.Wear).Ore == 1710);
+            True("QtyDiscount: friends breakdown has no discount line (customers only)",
+                 LineOf(Pricing.Breakdown(DiscInput(10), s, true, null).Lines, QuoteLine.Discount) == null);
+            Pricing.MatchSavedTotal(b10, 160.00);
+            True("QtyDiscount: MatchSavedTotal 160,00 keeps a negative discount line, sums 16000",
+                 OreSum(b10) == 16000 && LineOf(b10.Lines, QuoteLine.Discount).Ore < 0);
+
+            // INI round trip and bad values
+            var ini = DiscSettings(); ini.QtyDiscountFrom3 = 100; ini.QtyDiscountPct3 = 7.5; ini.QtyDiscountWho = 1; ini.ShareLastPlate = 1;
+            var back = AppSettings.FromIni(ini.ToIni());
+            True("QtyDiscount: INI round trip (3 steps, Who 1, ShareLastPlate 1)",
+                 back.QtyDiscountFrom1 == 10 && back.QtyDiscountPct1 == 5 && back.QtyDiscountFrom2 == 50 && back.QtyDiscountPct2 == 10 &&
+                 back.QtyDiscountFrom3 == 100 && back.QtyDiscountPct3 == 7.5 && back.QtyDiscountWho == 1 && back.ShareLastPlate == 1);
+            var bad = AppSettings.FromIni(new[] { "SettingsVersion=2", "QtyDiscountFrom1=1", "QtyDiscountPct1=95", "QtyDiscountFrom2=200000",
+                                                  "QtyDiscountPct2=-5", "QtyDiscountWho=3", "ShareLastPlate=2" });
+            True("QtyDiscount: bad INI values -> 0 / Who 2 / ShareLastPlate 0",
+                 bad.QtyDiscountFrom1 == 0 && bad.QtyDiscountPct1 == 0 && bad.QtyDiscountFrom2 == 0 && bad.QtyDiscountPct2 == 0 &&
+                 bad.QtyDiscountWho == 2 && bad.ShareLastPlate == 0);
+            var none = AppSettings.FromIni(new[] { "SettingsVersion=2" });
+            True("QtyDiscount: missing keys = defaults", !none.HasQtyDiscount() && none.QtyDiscountWho == 2 && none.ShareLastPlate == 0);
+
+            // History snapshot
+            var t = new DateTime(2026, 11, 24, 12, 0, 0);
+            var rec = BatchRec(DiscInput(10), s, t, "Hook");
+            True("QtyDiscount: FromQuote snapshot 5 % from 10, Who 2", rec.QtyDiscountPct == 5 && rec.QtyDiscountFrom == 10 && rec.QtyDiscountWho == 2);
+            Eq("QtyDiscount: record price 152,57", 152.57, rec.OthersPrice);
+            Eq("QtyDiscount: SavedSettings with no steps today re-prices 152,57", 152.57,
+               Pricing.Calculate(History.ToInput(rec), History.SavedSettings(rec, BatchSettings())).OthersPrice);
+            var old = BatchRec(DiscInput(10), BatchSettings(), t, "Old");
+            True("QtyDiscount: record without discount: pct 0", old.QtyDiscountPct == 0 && old.QtyDiscountFrom == 0);
+            Eq("QtyDiscount: old record + today's steps re-prices 160,60 (no discount)", 160.60,
+               Pricing.Calculate(History.ToInput(old), History.SavedSettings(old, s)).OthersPrice);
+            var rt = History.ParseJson(History.ToJson(new List<QuoteRecord> { rec }))[0];
+            True("QtyDiscount: JSON round trip", rt.QtyDiscountPct == 5 && rt.QtyDiscountFrom == 10 && rt.QtyDiscountWho == 2);
+            string js = History.ToJson(new List<QuoteRecord> { rec }).Replace("\"QtyDiscountPct\":5", "\"QtyDiscountPct\":95");
+            var cl = History.ParseJson(js)[0];
+            True("QtyDiscount: bad % in JSON -> no discount", cl.QtyDiscountPct == 0 && cl.QtyDiscountFrom == 0);
+            True("QtyDiscount: DiscountPctFor customer 5, friends 0", History.DiscountPctFor(rec, false) == 5 && History.DiscountPctFor(rec, true) == 0);
+            var rb10 = History.RecordBreakdown(rec, BatchSettings(), false);
+            True("QtyDiscount: RecordBreakdown has the -803 line", LineOf(rb10.Lines, QuoteLine.Discount) != null &&
+                 LineOf(rb10.Lines, QuoteLine.Discount).Ore == -803 && OreSum(rb10) == 15257);
+
+            // combined bill of 2 discounted jobs: 152,57 x 2 = 305,14, no top-up; discount row -1606
+            var rec2 = BatchRec(DiscInput(10), s, t.AddMinutes(20), "Hook 2");
+            var bill = History.GroupBill(new List<QuoteRecord> { rec, rec2 }, BatchSettings(), false);
+            Eq("QtyDiscount: combined bill 305,14", 305.14, bill.Total);
+            var gb = History.GroupBreakdown(bill, BatchSettings());
+            long gsum = 0; foreach (var l in gb.Lines) gsum += l.Ore;
+            True("QtyDiscount: GroupBreakdown discount row -1606, rows sum 30514",
+                 LineOf(gb.Lines, QuoteLine.Discount) != null && LineOf(gb.Lines, QuoteLine.Discount).Ore == -1606 &&
+                 LineOf(gb.Lines, QuoteLine.Discount).Quantity == 5 && gsum == 30514 && gb.TotalOre == 30514);
+            // tester T1: only one job got it (152,57 + 160,60 = 313,17): the row has no % (Quantity 0)
+            var mixBill = History.GroupBill(new List<QuoteRecord> { rec, old }, BatchSettings(), false);
+            var mix = History.GroupBreakdown(mixBill, BatchSettings());
+            long msum = 0; foreach (var l in mix.Lines) msum += l.Ore;
+            Eq("QtyDiscount: mixed bill 313,17", 313.17, mixBill.Total);
+            True("QtyDiscount: mixed bill: discount row -803 without a % (Quantity 0), sums 31317",
+                 LineOf(mix.Lines, QuoteLine.Discount) != null && LineOf(mix.Lines, QuoteLine.Discount).Ore == -803 &&
+                 LineOf(mix.Lines, QuoteLine.Discount).Quantity == 0 && msum == 31317);
+
+            // tester T2: the % next to the final price only when it is the real cut
+            True("QtyDiscount: ShownDiscountPct 10 pcs no rounding = 5; 9 pcs = 0, no discount",
+                 Pricing.ShownDiscountPct(r10, false) == 5 && Pricing.HasDiscount(r10, false) &&
+                 Pricing.ShownDiscountPct(r9, false) == 0 && !Pricing.HasDiscount(r9, false) && !Pricing.HasDiscount(r10, true));
+            var rr5 = Pricing.Calculate(DiscInput(10), rs);   // 152,57 -> 155,00: rounding 2,43 changed the cut
+            True("QtyDiscount: RoundTo 5: rounding 2,43, ShownDiscountPct 0 but HasDiscount",
+                 Math.Abs(rr5.OthersRounding - 2.43) < 0.005 && Pricing.ShownDiscountPct(rr5, false) == 0 && Pricing.HasDiscount(rr5, false));
+            True("QtyDiscount: held at cost (friends 25 %) / shrunk by the minimum -> no %; customer 25 % full -> 25",
+                 Pricing.ShownDiscountPct(rb, true) == 0 && Pricing.HasDiscount(rb, true) && Pricing.ShownDiscountPct(rb, false) == 25 &&
+                 Pricing.ShownDiscountPct(rm, false) == 0 && Pricing.HasDiscount(rm, false));
+            Eq("QtyDiscount: OthersBeforeDiscount 160,60", 160.60, r10.OthersBeforeDiscount);
+
+            // texts
+            L.Danish = false;
+            True("QtyDiscount: Copy text: exact = with %, rounded = without, none = each only",
+                 History.EachInclDiscountText(152.57, 10, r10, false) == "(15,26 kr. each, incl. 5 % quantity discount)" &&
+                 History.EachInclDiscountText(155, 10, rr5, false) == "(15,50 kr. each, incl. quantity discount)" &&
+                 History.EachInclDiscountText(160.60, 9, r9, false) == "(17,84 kr. each)" &&
+                 History.DiscountText(0, 0) == "Quantity discount" && History.DiscountText(0, 40) == "Quantity discount (40 pcs)");
+            L.Danish = true;
+            try
+            {
+                True("QtyDiscount: DA Copy text without % / label without %",
+                     History.EachInclDiscountText(155, 10, rr5, false) == "(15,50 kr. pr. stk., inkl. mængderabat)" &&
+                     History.DiscountText(0, 0) == "Mængderabat");
+            }
+            finally { L.Danish = false; }
+            L.Danish = false;
+            True("QtyDiscount: EN texts",
+                 History.DiscountText(5, 40) == "Quantity discount 5 % (40 pcs)" && History.PriceBeforeDiscountText() == "Price before discount" &&
+                 History.EachInclDiscountText(690.84, 40, 5) == "(17,27 kr. each, incl. 5 % quantity discount)" &&
+                 History.EachInclDiscountText(50, 1, 5) == "(incl. 5 % quantity discount)" && History.EachInclDiscountText(50, 1, 0) == "" &&
+                 History.PctText(7.5) == "7,5 %" && History.DiscountShortText(5) == "–5 %");
+            L.Danish = true;
+            try
+            {
+                True("QtyDiscount: DA texts",
+                     History.DiscountText(5, 40) == "Mængderabat 5 % (40 stk.)" && History.PriceBeforeDiscountText() == "Pris før rabat" &&
+                     History.EachInclDiscountText(690.84, 40, 5) == "(17,27 kr. pr. stk., inkl. 5 % mængderabat)");
+            }
+            finally { L.Danish = false; }
+        }
+
+        // ---------- batch-2: plates printed / order progress, share-last-plate setting ----------
+
+        static void PlateProgressTests()
+        {
+            var s = BatchSettings();
+            var t = new DateTime(2026, 11, 24, 12, 0, 0);
+            // A: 10 copies on 5 plates, 10 h
+            var a = BatchRec(new QuoteInput { Hours = 10, FilamentGrams = 400, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2, Quantity = 10, Plates = 5 }, s, t, "A");
+            True("Progress: new record not counted (-1), 0 done, NotPrinted",
+                 a.PlatesDone == -1 && History.PlatesDoneOf(a, t) == 0 && History.PrintStateOf(a, t) == PrintState.NotPrinted);
+            History.StepPlates(a, 1, t); History.StepPlates(a, 1, t);
+            int k = History.StepPlates(a, 1, t);
+            True("Progress: +1 x3 = 3, Printing (started), Printed on", k == 3 && a.PlatesDone == 3 &&
+                 History.PrintStateOf(a, t) == PrintState.Printing && a.Printed && !History.IsPrinting(a, t));
+            True("Progress: -1 = 2", History.StepPlates(a, -1, t) == 2);
+            // printing plate 3: one plate = 600 / 5 = 120 min -> ends 14:00
+            History.SetPrintState(a, PrintState.Printing, t);
+            DateTime end;
+            True("Progress: Printing keeps 2, plate 3 of 5 until 14:00",
+                 a.PlatesDone == 2 && History.PrintingEnds(a, out end) && end == t.AddMinutes(120) &&
+                 History.PrintingPlate(a, t.AddMinutes(60)) == 3);
+            True("Progress: after the plate's time still Printing (counted by hand), plate 0",
+                 History.PrintStateOf(a, t.AddMinutes(150)) == PrintState.Printing && History.PrintingPlate(a, t.AddMinutes(150)) == 0);
+            History.StepPlates(a, 1, t.AddMinutes(150));
+            True("Progress: tick ends printing now: 3, PrintingSince \"\"", a.PlatesDone == 3 && a.PrintingSince == "");
+            History.StepPlates(a, 5, t);
+            True("Progress: +5 held at 5 = Printed", a.PlatesDone == 5 && History.PrintStateOf(a, t) == PrintState.Printed);
+            History.SetPrintState(a, PrintState.Printing, t);
+            True("Progress: Printing on an all-done job starts at 0", a.PlatesDone == 0);
+            History.SetPlatesDone(a, 2, t);
+            History.SetPrintState(a, PrintState.Failed, t);
+            True("Progress: Failed keeps 2", a.PlatesDone == 2 && History.PrintStateOf(a, t) == PrintState.Failed);
+            History.SetPrintState(a, PrintState.NotPrinted, t);
+            True("Progress: NotPrinted = 0", a.PlatesDone == 0 && !a.Printed && !a.Failed);
+            History.SetPrintState(a, PrintState.Printed, t);
+            True("Progress: Printed = 5", a.PlatesDone == 5);
+            History.SetPrinted(a, false);
+            True("Progress: History tick off = 0", a.PlatesDone == 0 && !a.Printed);
+
+            // old record (no key): Printed = all plates
+            var o = BatchRec(new QuoteInput { Hours = 4, FilamentGrams = 100, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2, Quantity = 4, Plates = 2 }, s, t, "Old");
+            o.Printed = true;
+            True("Progress: old Printed record = 2 of 2, Printed", History.PlatesDoneOf(o, t) == 2 && History.PrintStateOf(o, t) == PrintState.Printed);
+            // one-plate job: Printing ends after the whole time and then shows Printed (as before), PlatesDone stays -1
+            var one = BatchRec(new QuoteInput { Hours = 2, FilamentGrams = 50, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2 }, s, t, "One");
+            History.SetPrintState(one, PrintState.Printing, t);
+            True("Progress: 1 plate: -1 kept, Printed after 2 h, 1 done",
+                 one.PlatesDone == -1 && History.PrintStateOf(one, t.AddMinutes(90)) == PrintState.Printing &&
+                 History.PrintStateOf(one, t.AddMinutes(121)) == PrintState.Printed && History.PlatesDoneOf(one, t.AddMinutes(121)) == 1);
+
+            // JSON: round trip, missing key -> -1, bad -> -1
+            History.SetPlatesDone(a, 3, t);
+            string js = History.ToJson(new List<QuoteRecord> { a });
+            True("Progress: JSON round trip 3", History.ParseJson(js)[0].PlatesDone == 3);
+            True("Progress: JSON without the key -> -1", History.ParseJson(js.Replace("\"PlatesDone\":3,", "").Replace(",\"PlatesDone\":3", ""))[0].PlatesDone == -1);
+            True("Progress: JSON bad -7 -> -1", History.ParseJson(js.Replace("\"PlatesDone\":3", "\"PlatesDone\":-7"))[0].PlatesDone == -1);
+            True("Progress: CopyQuotes keeps 3", History.CopyQuotes(new List<QuoteRecord> { a })[0].PlatesDone == 3);
+
+            // AddFor: a same quote replacing it keeps the count
+            var list = new List<QuoteRecord> { a };
+            var again = BatchRec(new QuoteInput { Hours = 10, FilamentGrams = 400, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2, Quantity = 10, Plates = 5 }, s, t.AddMinutes(1), "A");
+            var kept = History.AddFor(list, again, History.ForCustomer, PrintState.Printing, t.AddMinutes(1));
+            True("Progress: AddFor same quote keeps 3", list.Count == 1 && kept.PlatesDone == 3);
+
+            // order progress: A 5 plates 3 done, B 2 plates printed, C 1 plate not printed, D failed
+            History.SetPrintState(a, PrintState.Printed, t); History.SetPlatesDone(a, 3, t);
+            var b = BatchRec(new QuoteInput { Hours = 4, FilamentGrams = 100, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2, Quantity = 4, Plates = 2 }, s, t, "B");
+            History.SetPrintState(b, PrintState.Printed, t);
+            var c = BatchRec(new QuoteInput { Hours = 1, FilamentGrams = 20, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2, Quantity = 1, Plates = 1 }, s, t, "C");
+            var dd = BatchRec(new QuoteInput { Hours = 1, FilamentGrams = 20, FilamentDkkPerKg = 200, ElectricityDkkPerKwh = 2, Quantity = 3, Plates = 3 }, s, t, "D");
+            History.SetPrintState(dd, PrintState.Failed, t);
+            var p = History.Progress(new List<QuoteRecord> { a, b, c, dd, null }, t);
+            True("Progress: order 5 + 2 + 1 = 8 plates, 3 + 2 + 0 = 5 done, 1 done, 1 started, 1 failed, 15 pcs, Printing",
+                 p.Jobs == 4 && p.Plates == 8 && p.PlatesDone == 5 && p.JobsDone == 1 && p.JobsStarted == 1 && p.JobsFailed == 1 &&
+                 p.HasFailed && p.Pieces == 15 && p.State == PrintState.Printing && !p.Printing);
+            True("Progress: all done = Printed; none = NotPrinted; only failed = Failed",
+                 History.Progress(new List<QuoteRecord> { b }, t).State == PrintState.Printed &&
+                 History.Progress(new List<QuoteRecord> { c }, t).State == PrintState.NotPrinted &&
+                 History.Progress(new List<QuoteRecord> { dd }, t).State == PrintState.Failed &&
+                 History.Progress(null, t).Jobs == 0);
+            var ol = new List<QuoteRecord> { a, b, c };
+            History.SetOrder(ol);
+            var op = History.OrderProgress(ol, a.OrderId, t);
+            True("Progress: OrderProgress 5 of 8", op.Plates == 8 && op.PlatesDone == 5);
+            // Invoices window: A + B on one invoice = 7 plates, 5 done
+            a.InvoiceNo = "2026-12345"; b.InvoiceNo = "2026-12345";
+            a.BilledAt = History.Stamp(t); b.BilledAt = History.Stamp(t);
+            var rows = History.Invoices(ol, t);
+            True("Progress: invoice row 5 of 7 plates", rows.Count == 1 && rows[0].Plates == 7 && rows[0].PlatesDone == 5);
+
+            // texts
+            L.Danish = false;
+            True("Progress: EN texts",
+                 History.PlatesProgressText(3, 5) == "3 of 5 plates" && History.PlatesProgressText(1, 1) == "" &&
+                 History.PlatesPrintedText(7, 12) == "Plates printed: 7 of 12" && History.PlusPlateText() == "One more plate printed" &&
+                 History.PrintingPlateText(4, 5) == "Printing plate 4 of 5" &&
+                 History.SelectedProgressText(3, 7, 12) == "Selected: 3 prints · 7 of 12 plates printed" &&
+                 History.SelectedProgressText(1, 0, 2) == "Selected: 1 print · 0 of 2 plates printed" &&
+                 History.MinusPlateText() == "One plate fewer printed" &&
+                 History.MixedPlatesText(4, 1) == "4 plates, 1 with mixed colours" && History.MixedPlatesText(1, 0) == "1 plate");
+            L.Danish = true;
+            try
+            {
+                True("Progress: DA texts",
+                     History.PlatesProgressText(3, 5) == "3 af 5 plader" && History.PlatesPrintedText(7, 12) == "Plader printet: 7 af 12" &&
+                     History.PlusPlateText() == "Én plade mere printet" && History.MinusPlateText() == "Én plade færre printet" &&
+                     History.PrintingPlateText(4, 5) == "Printer plade 4 af 5" &&
+                     History.SelectedProgressText(3, 7, 12) == "Valgt: 3 print · 7 af 12 plader printet" &&
+                     History.MixedPlatesText(4, 1) == "4 plader, 1 med blandede farver");
+            }
+            finally { L.Danish = false; }
+
+            // share the last plate: Settings' choice, else the job's own (several-files jobs)
+            var on = BatchSettings(); on.ShareLastPlate = 1;
+            True("ShareLastPlate: normal job follows Settings", History.ShareLastPlateFor(c, on) && !History.ShareLastPlateFor(c, s) &&
+                 !History.ShareLastPlateFor(null, null));
+            History.SetParts(c, PartsOf3(2, 2, 1), false);
+            True("ShareLastPlate: parts not set = Settings'", c.Parts.ShareLastPlate == -1 && History.ShareLastPlateFor(c, on));
+            History.SetShareLastPlate(c, false);
+            True("ShareLastPlate: job's own off wins over Settings on", !History.ShareLastPlateFor(c, on));
+            History.SetShareLastPlate(c, true);
+            string pj = History.ToJson(new List<QuoteRecord> { c });
+            True("ShareLastPlate: JSON round trip", History.ParseJson(pj)[0].Parts.ShareLastPlate == 1);
+            True("ShareLastPlate: bad 5 -> -1", History.ParseJson(pj.Replace("\"ShareLastPlate\":1", "\"ShareLastPlate\":5"))[0].Parts.ShareLastPlate == -1);
+            True("ShareLastPlate: CopyQuotes keeps it", History.CopyQuotes(new List<QuoteRecord> { c })[0].Parts.ShareLastPlate == 1);
+        }
+
+        // ---------- batch-2: online's share-the-last-plate helpers (values from plans\batch-2\online-names.md) ----------
+
+        static PlateInfo SharePlate(double seconds, double grams, int copies, params double[] slotGrams)
+        {
+            var p = new PlateInfo { Seconds = seconds, Grams = grams, Copies = copies };
+            for (int i = 0; i + 1 < slotGrams.Length; i += 2)
+                p.Filaments.Add(new FilamentUse { Slot = (int)slotGrams[i], Grams = slotGrams[i + 1] });
+            return p;
+        }
+
+        static string JoinInts(List<int> l)
+        {
+            var parts = new List<string>();
+            foreach (var x in l) parts.Add(x.ToString());
+            return string.Join(",", parts.ToArray());
+        }
+
+        const string ShareSliceInfo = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n" +
+            "  <plate>\n    <metadata key=\"index\" value=\"1\"/>\n    <metadata key=\"prediction\" value=\"2244\"/>\n" +
+            "    <metadata key=\"weight\" value=\"30.00\"/>\n    <object identify_id=\"1\" name=\"a.stl_1\" skipped=\"false\" />\n" +
+            "    <filament id=\"1\" type=\"PLA\" color=\"#FF0000\" used_m=\"3.3\" used_g=\"10.00\" />\n" +
+            "    <filament id=\"2\" type=\"PLA\" color=\"#0000FF\" used_m=\"5.6\" used_g=\"20.00\" />\n  </plate>\n" +
+            "  <plate>\n    <metadata key=\"index\" value=\"2\"/>\n    <metadata key=\"prediction\" value=\"857\"/>\n" +
+            "    <metadata key=\"weight\" value=\"\"/>\n    <object identify_id=\"2\" name=\"b.stl_1\" skipped=\"false\" />\n" +
+            "    <object identify_id=\"3\" name=\"b.stl_2\" skipped=\"false\" />\n" +
+            "    <filament id=\"1\" type=\"PLA\" color=\"#FF0000\" used_m=\"1.93\" used_g=\"5.86\" />\n  </plate>\n</config>";
+
+        const string ShareModelSettings = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<config>\n" +
+            "  <object id=\"2\"><metadata key=\"name\" value=\"a.stl_1\"/><metadata key=\"extruder\" value=\"1\"/><part id=\"1\" subtype=\"normal_part\"><metadata key=\"name\" value=\"a.stl\"/></part></object>\n" +
+            "  <object id=\"3\"><metadata key=\"name\" value=\"c\"/><metadata key=\"extruder\" value=\"2\"/></object>\n" +
+            "  <object id=\"4\"><metadata key=\"name\" value=\"b.stl_1\"/><metadata key=\"extruder\" value=\"2\"/></object>\n" +
+            "  <object id=\"5\"><metadata key=\"name\" value=\"b.stl_2\"/><metadata key=\"extruder\" value=\"2\"/></object>\n" +
+            "  <plate><metadata key=\"plater_id\" value=\"1\"/><model_instance><metadata key=\"object_id\" value=\"2\"/></model_instance><model_instance><metadata key=\"object_id\" value=\"3\"/></model_instance></plate>\n" +
+            "  <plate><metadata key=\"plater_id\" value=\"2\"/><model_instance><metadata key=\"object_id\" value=\"4\"/></model_instance><model_instance><metadata key=\"object_id\" value=\"5\"/></model_instance></plate>\n" +
+            "</config>";
+
+        const string ShareProjectSettings = "{\"filament_density\":[\"1.26\",\"1.5\"],\"filament_colour\":[\"#FF0000\",\"#0000FF\"]," +
+            "\"filament_type\":[\"PLA\",\"PLA\"],\"filament_settings_id\":[\"Bambu PLA Basic @BBL A1 #1\",\"Bambu PLA Basic @BBL A1 #2\"]}";
+
+        static void ShareSlicerTests()
+        {
+            // colours on a plate
+            True("Share: PlateColourCount {0,32 / 30,81 / 55,48} = 2, mixed; {14,52} = 1; null = 0",
+                 BambuSlicer.PlateColourCount(SharePlate(0, 0, 0, 1, 0.32, 2, 30.81, 3, 55.48)) == 2 &&
+                 BambuSlicer.IsMixedPlate(SharePlate(0, 0, 0, 1, 0.32, 2, 30.81, 3, 55.48)) &&
+                 BambuSlicer.PlateColourCount(SharePlate(0, 0, 0, 1, 14.52)) == 1 && !BambuSlicer.IsMixedPlate(SharePlate(0, 0, 0, 1, 14.52)) &&
+                 BambuSlicer.PlateColourCount(null) == 0);
+            True("Share: CanShareFile stl / obj yes; step / 3mf / gcode / null no",
+                 BambuSlicer.CanShareFile("a.STL") && BambuSlicer.CanShareFile("b.obj") && !BambuSlicer.CanShareFile("c.step") &&
+                 !BambuSlicer.CanShareFile("d.3mf") && !BambuSlicer.CanShareFile("e.gcode") && !BambuSlicer.CanShareFile(null));
+
+            // assemble list
+            var pl = new AssemblePlate { Name = "shared" };
+            pl.Objects.Add(new AssembleObject { Path = @"C:\a b\x.stl", Count = 5, Slot = 1 });
+            pl.Objects.Add(new AssembleObject { Path = @"C:\y.obj", Count = 8, Slot = 2 });
+            string json = BambuSlicer.AssembleListJson(new List<AssemblePlate> { pl });
+            True("Share: AssembleListJson", json == "{\"plates\":[{\"plate_name\":\"shared\",\"need_arrange\":true,\"plate_params\":{},\"objects\":[" +
+                 "{\"path\":\"C:/a b/x.stl\",\"count\":5,\"filaments\":[1],\"assemble_index\":[0]}," +
+                 "{\"path\":\"C:/y.obj\",\"count\":8,\"filaments\":[2],\"assemble_index\":[0]}]}]}");
+            var named = new AssemblePlate { Name = "a\"b\\c" };
+            named.Objects.Add(new AssembleObject { Path = "x.stl" });
+            True("Share: AssembleListJson escapes the name", BambuSlicer.AssembleListJson(new List<AssemblePlate> { named }).Contains("\"plate_name\":\"a\\\"b\\\\c\""));
+            var emptyPath = new AssemblePlate(); emptyPath.Objects.Add(new AssembleObject { Path = "" });
+            True("Share: AssembleListJson null / empty / no objects / empty path -> ArgumentException",
+                 Throws<ArgumentException>(() => BambuSlicer.AssembleListJson(null)) &&
+                 Throws<ArgumentException>(() => BambuSlicer.AssembleListJson(new List<AssemblePlate>())) &&
+                 Throws<ArgumentException>(() => BambuSlicer.AssembleListJson(new List<AssemblePlate> { new AssemblePlate() })) &&
+                 Throws<ArgumentException>(() => BambuSlicer.AssembleListJson(new List<AssemblePlate> { emptyPath })));
+            Func<int, int, AssemblePlate> one = (count, slot) =>
+            {
+                var p = new AssemblePlate(); p.Objects.Add(new AssembleObject { Path = "x.stl", Count = count, Slot = slot }); return p;
+            };
+            True("Share: AssembleListJson count 0 / 501 / slot 0 -> ArgumentOutOfRangeException",
+                 Throws<ArgumentOutOfRangeException>(() => BambuSlicer.AssembleListJson(new List<AssemblePlate> { one(0, 1) })) &&
+                 Throws<ArgumentOutOfRangeException>(() => BambuSlicer.AssembleListJson(new List<AssemblePlate> { one(501, 1) })) &&
+                 Throws<ArgumentOutOfRangeException>(() => BambuSlicer.AssembleListJson(new List<AssemblePlate> { one(1, 0) })));
+            True("Share: AssembleArgs always --ensure-on-bed",
+                 string.Join(" ", BambuSlicer.AssembleArgs("L", null).ToArray()) == "--load-assemble-list L --ensure-on-bed");
+            True("Share: AssembleArgs with ScaleArgs(150): --scale 1.5, --ensure-on-bed once",
+                 string.Join(" ", BambuSlicer.AssembleArgs("L", BambuSlicer.ScaleArgs(150)).ToArray()) == "--load-assemble-list L --scale 1.5 --ensure-on-bed");
+
+            // last plates and object names
+            var lc = BambuSlicer.LastPlateCounts(new List<string> { "hook.stl_1", "stand.stl_2", "hook.stl_3" }, new List<string> { "hook.stl", "stand.stl" });
+            True("Share: LastPlateCounts [2, 1]", lc != null && lc.Length == 2 && lc[0] == 2 && lc[1] == 1);
+            var lc2 = BambuSlicer.LastPlateCounts(new List<string> { "part_2.stl" }, new List<string> { "part_2.stl" });
+            True("Share: LastPlateCounts part_2.stl = [1]", lc2 != null && lc2.Length == 1 && lc2[0] == 1);
+            True("Share: LastPlateCounts no match / same names -> null",
+                 BambuSlicer.LastPlateCounts(new List<string> { "x.stl_1" }, new List<string> { "hook.stl" }) == null &&
+                 BambuSlicer.LastPlateCounts(new List<string> { "a.stl_1" }, new List<string> { "a.stl", "A.STL" }) == null);
+            True("Share: AssembleObjectName clip_2 -> clip.stl_2; no match unchanged",
+                 BambuSlicer.AssembleObjectName("E:/jobs/files/clip_2", new List<string> { @"E:\jobs\files\clip.stl" }) == "clip.stl_2" &&
+                 BambuSlicer.AssembleObjectName("E:/jobs/files/other_2", new List<string> { @"E:\jobs\files\clip.stl" }) == "E:/jobs/files/other_2");
+            True("Share: BiggestGroup [3,7,7] = 1, [] / null = -1",
+                 BambuSlicer.BiggestGroup(new List<double> { 3, 7, 7 }) == 1 && BambuSlicer.BiggestGroup(new List<double>()) == -1 &&
+                 BambuSlicer.BiggestGroup(null) == -1);
+
+            // WithoutLastPlate: 50 + 17 copies on 2 plates -> the first plate only
+            var r = new SliceResult { Seconds = 26001, Grams = 193.54, Plates = 2, Copies = 67, PerPlate = 50 };
+            r.Filaments.Add(new FilamentUse { Slot = 1, Grams = 193.54, ModelGrams = 193.54 });
+            r.PlateList.Add(SharePlate(19369, 144.39, 50, 1, 144.39));
+            r.PlateList.Add(SharePlate(6632, 49.15, 17, 1, 49.15));
+            var w = BambuSlicer.WithoutLastPlate(r);
+            True("Share: WithoutLastPlate 19369 s, 144,39 g, 1 plate, 50 copies, per plate 50",
+                 w.Seconds == 19369 && Math.Abs(w.Grams - 144.39) < 0.005 && w.Plates == 1 && w.Copies == 50 && w.PerPlate == 50 && w.PlateList.Count == 1);
+            True("Share: WithoutLastPlate slot 1 Grams / ModelGrams 144,39",
+                 w.Filaments.Count == 1 && Math.Abs(w.Filaments[0].Grams - 144.39) < 0.005 && Math.Abs(w.Filaments[0].ModelGrams - 144.39) < 0.005);
+            True("Share: WithoutLastPlate leaves r unchanged", r.Seconds == 26001 && r.PlateList.Count == 2 && r.Copies == 67 && r.Filaments[0].Grams == 193.54);
+            var r1 = new SliceResult { Seconds = 100, Grams = 10, Plates = 1, Copies = 3, PerPlate = 3 };
+            r1.Filaments.Add(new FilamentUse { Slot = 1, Grams = 10, Metres = 1 });
+            var p1 = SharePlate(100, 10, 3, 1, 10); p1.Filaments[0].Metres = 1;
+            r1.PlateList.Add(p1);
+            var w1 = BambuSlicer.WithoutLastPlate(r1);
+            True("Share: WithoutLastPlate one plate -> nothing left",
+                 w1.Plates == 0 && w1.Filaments.Count == 0 && w1.Copies == 0 && w1.PerPlate == 0 && w1.Seconds == 0 && w1.Grams == 0 && w1.PlateList.Count == 0);
+
+            // RemapSlots
+            var rm = new SliceResult();
+            rm.Filaments.Add(new FilamentUse { Slot = 1 }); rm.Filaments.Add(new FilamentUse { Slot = 2 });
+            rm.PlateList.Add(SharePlate(0, 0, 0, 1, 1, 2, 1, 4, 1));
+            BambuSlicer.RemapSlots(rm, new List<int> { 2, 3 });
+            True("Share: RemapSlots 1,2 -> 2,3; slot 4 unchanged",
+                 rm.Filaments[0].Slot == 2 && rm.Filaments[1].Slot == 3 && rm.PlateList[0].Filaments[0].Slot == 2 &&
+                 rm.PlateList[0].Filaments[1].Slot == 3 && rm.PlateList[0].Filaments[2].Slot == 4);
+
+            // model_settings extruders, slot numbers
+            var ex = BambuSlicer.ObjectExtruders(ShareModelSettings);
+            True("Share: ObjectExtruders {1: [1, 2], 2: [2, 2]}",
+                 ex.Count == 2 && ex.ContainsKey(1) && ex.ContainsKey(2) && JoinInts(ex[1]) == "1,2" && JoinInts(ex[2]) == "2,2");
+            True("Share: ObjectExtruders \"\" / bad -> empty", BambuSlicer.ObjectExtruders("").Count == 0 && BambuSlicer.ObjectExtruders("<bad").Count == 0);
+            var sn = BambuSlicer.SlotNumbers(new List<string> { "1.26", "1.5", "x", "" });
+            True("Share: SlotNumbers [1,26, 1,5, 0, 0]", sn.Count == 4 && sn[0] == 1.26 && sn[1] == 1.5 && sn[2] == 0 && sn[3] == 0);
+
+            // the CLI's one-filament plate bug
+            var dens = new List<double> { 1.26, 1.5 };
+            var cols = new List<string> { "#FF0000", "#0000FF" };
+            var types = new List<string> { "PLA", "PETG" };
+            var profs = new List<string> { "Bambu PLA Basic @BBL A1 #1", "Bambu PLA Basic @BBL A1 #2" };
+            var fp = SharePlate(0, 5.86, 0, 1, 5.86);
+            bool fixedIt = BambuSlicer.FixSingleFilamentPlate(fp, new List<int> { 2, 2 }, dens, cols, types, profs);
+            // 5,86 x 1,5 / 1,26 = 6,976 -> 6,98
+            True("Share: FixSingleFilamentPlate slot 1 5,86 g -> slot 2 6,98 g, blue, PETG, profile without #2",
+                 fixedIt && fp.Filaments[0].Slot == 2 && Math.Abs(fp.Filaments[0].Grams - 6.98) < 0.001 && fp.Filaments[0].Colour == "#0000FF" &&
+                 fp.Filaments[0].Type == "PETG" && fp.Filaments[0].Profile == "Bambu PLA Basic @BBL A1" && Math.Abs(fp.Grams - 6.98) < 0.001);
+            bool any = false;
+            foreach (var e in new[] { new List<int> { 1, 1 }, new List<int> { 2, 0 }, new List<int> { 2, 3 } })
+            {
+                var q = SharePlate(0, 5.86, 0, 1, 5.86);
+                if (BambuSlicer.FixSingleFilamentPlate(q, e, dens, cols, types, profs) || q.Filaments[0].Slot != 1 || q.Grams != 5.86) any = true;
+            }
+            var two = SharePlate(0, 30, 0, 1, 10, 2, 20);
+            if (BambuSlicer.FixSingleFilamentPlate(two, new List<int> { 2, 2 }, dens, cols, types, profs) || two.Filaments[0].Slot != 1) any = true;
+            True("Share: FixSingleFilamentPlate [1,1] / [2,0] / [2,3] / two slots -> unchanged", !any);
+            var res = BambuSlicer.ParseSliceInfo(ShareSliceInfo);
+            int fixes = BambuSlicer.FixSingleFilamentPlates(res, ShareModelSettings, ShareProjectSettings);
+            FilamentUse s1 = null, s2 = null;
+            foreach (var f in res.Filaments) { if (f.Slot == 1) s1 = f; else if (f.Slot == 2) s2 = f; }
+            True("Share: FixSingleFilamentPlates 1 fix: plate 2 slot 2 6,98 g",
+                 fixes == 1 && res.SingleFilamentFixes == 1 && res.PlateList[1].Filaments[0].Slot == 2 &&
+                 Math.Abs(res.PlateList[1].Filaments[0].Grams - 6.98) < 0.001);
+            True("Share: FixSingleFilamentPlates totals: slot 1 10,00 g / 3,3 m / ModelGrams -1, slot 2 26,98 g / 7,53 m, 36,98 g",
+                 s1 != null && s2 != null && Math.Abs(s1.Grams - 10) < 0.001 && Math.Abs(s1.Metres - 3.3) < 0.001 && s1.ModelGrams == -1 &&
+                 Math.Abs(s2.Grams - 26.98) < 0.001 && Math.Abs(s2.Metres - 7.53) < 0.001 && Math.Abs(res.Grams - 36.98) < 0.001);
+
+            // trade-off hint
+            var shared = SharePlate(12931, 79.04, 0, 1, 35.71, 2, 43.33); shared.ColourChanges = 75;
+            var own = new List<PlateInfo> { SharePlate(1985, 14.52, 0), SharePlate(3143, 27.60, 0) };
+            var tr = BambuSlicer.ShareTradeOff(own, shared);
+            // 12931 - (1985 + 3143) = 7803 s; 79,04 - (14,52 + 27,60) = 36,92 g
+            True("Share: ShareTradeOff 1 plate saved, +7803 s, +36,92 g, 2 colours, 75 changes",
+                 tr != null && tr.Applied && tr.PlatesSaved == 1 && tr.ExtraSeconds == 7803 && Math.Abs(tr.ExtraGrams - 36.92) < 0.001 &&
+                 tr.Colours == 2 && tr.ColourChanges == 75);
+            True("Share: ShareTradeOff one replaced / null shared -> null",
+                 BambuSlicer.ShareTradeOff(new List<PlateInfo> { own[0] }, shared) == null && BambuSlicer.ShareTradeOff(own, null) == null);
+
+            // AddResult keeps the new plate fields
+            var src = new SliceResult();
+            var sp = SharePlate(10, 1, 1, 1, 1); sp.ColourChanges = 12; sp.ColourChangeSeconds = 340; sp.Shared = true;
+            src.PlateList.Add(sp);
+            var tot = new SliceResult();
+            BambuSlicer.AddResult(tot, src, "a.stl");
+            True("Share: AddResult copies ColourChanges / ColourChangeSeconds / Shared",
+                 tot.PlateList.Count == 1 && tot.PlateList[0].ColourChanges == 12 && tot.PlateList[0].ColourChangeSeconds == 340 && tot.PlateList[0].Shared);
+        }
 
         // ---------- batch & plates (issue #9/#10): copies, plates, plate change fee, orders, texts ----------
         static AppSettings BatchSettings()

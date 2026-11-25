@@ -32,6 +32,31 @@
                 <div class="field"><input id="set-platefee" type="text" inputmode="decimal" class="mid @Bad(plateFee)" @bind="plateFee" @bind:event="oninput" /><span>@L.S("kr. per extra plate (0 = off)", "kr. pr. ekstra plade (0 = fra)")</span></div>
                 <div class="help">@L.S("For jobs that need several build plates: added once for each plate after the first, on both prices.",
                                        "For opgaver, der skal bruge flere byggeplader: lægges til én gang for hver plade efter den første, på begge priser.")</div>
+                @* batch-2: quantity discount, up to 3 steps "from [10] pcs → [5] % off" (= SettingsForm; both empty = off) *@
+                @* qol #1a (= SettingsForm): row 3 shows once row 2 is used (or has a step itself); never hidden again while open *@
+                @{ qtyThird = qtyThird || (qtyFrom[1] ?? "").Trim().Length > 0 || (qtyPct[1] ?? "").Trim().Length > 0
+                              || (qtyFrom[2] ?? "").Trim().Length > 0 || (qtyPct[2] ?? "").Trim().Length > 0; }
+                @for (int i = 0; i < (qtyThird ? 3 : 2); i++)
+                {
+                    int n = i;
+                    bool badF, badP; double qf, qp;
+                    WebCalc.ReadQtyStep(qtyFrom[n], qtyPct[n], out qf, out qp, out badF, out badP);
+                    <label for="@("set-qtyfrom" + (n + 1))">@(n == 0 ? L.S("Quantity discount", "Mængderabat") : "")</label>
+                    <div class="field qtystep">
+                        <input id="@("set-qtyfrom" + (n + 1))" type="text" inputmode="numeric" class="small @(badF ? "invalid" : "")" value="@qtyFrom[n]"
+                               aria-label="@L.F("Quantity discount step {0}: from pieces", "Mængderabat trin {0}: fra stk.", n + 1)"
+                               @oninput='e => qtyFrom[n] = (string)e.Value' />
+                        <span>@L.S("pcs →", "stk. →")</span>
+                        <input id="@("set-qtypct" + (n + 1))" type="text" inputmode="decimal" class="small @(badP ? "invalid" : "")" value="@qtyPct[n]"
+                               aria-label="@L.F("Quantity discount step {0}: percent off", "Mængderabat trin {0}: procent rabat", n + 1)"
+                               @oninput='e => qtyPct[n] = (string)e.Value' />
+                        <span>@L.S("% off", "% rabat")</span>
+                    </div>
+                }
+                <label></label>
+                <label><input type="checkbox" id="set-qtycustomers" @bind="qtyCustomers" /> @L.S("Quantity discount only on the customer price", "Mængderabat kun på kundeprisen")</label>
+                <div class="help">@L.S("From this many copies, this % comes off the price. The highest step reached counts. Empty = off. Never below cost; the minimum price still applies.",
+                                       "Fra så mange stk. trækkes denne % fra prisen. Det højeste trin, der nås, gælder. Tomt = fra. Aldrig under kostprisen; minimumsprisen gælder stadig.")</div>
 
                 <h3>@L.S("Failed prints", "Fejlprint")</h3>
                 <label>@L.S("Extra for failed prints", "Tillæg for fejlprint")</label>
@@ -193,7 +218,8 @@
 
     AppSettings work;
     int tab;
-    bool auto, reset, vat, autoPower, mainInvoice, quoteTower, unitPrice, asking, resetNote;
+    bool auto, reset, vat, autoPower, mainInvoice, quoteTower, unitPrice, asking, resetNote, qtyCustomers, qtyThird;
+    string[] qtyFrom = new string[3], qtyPct = new string[3];   // batch-2: the quantity discount steps' boxes
     string friends, others, minimum, round, failed, watts, rate, name, type, addOn, problem, validDays, dueDays, plateFee;
 
     string[] TabNames { get { return new[] { L.S("Prices", "Priser"), "Printer", L.S("Electricity", "Elpris"), L.S("Quote & invoice", "Tilbud og faktura"), L.S("App", "Program") }; } }
@@ -229,6 +255,10 @@
         mainInvoice = s.MainInvoice == 1;
         quoteTower = s.QuoteShowTower == 1;   // issue #8 step 3
         plateFee = Num.Fmt(s.PlateChangeFee); unitPrice = s.QuoteShowUnitPrice != 0;   // batch-plates
+        // batch-2: a step shows only when it is on (both set); empty boxes = off
+        double[] qf = { s.QtyDiscountFrom1, s.QtyDiscountFrom2, s.QtyDiscountFrom3 }, qp = { s.QtyDiscountPct1, s.QtyDiscountPct2, s.QtyDiscountPct3 };
+        for (int i = 0; i < 3; i++) { qtyFrom[i] = WebCalc.QtyBoxText(qf[i], qp[i], true); qtyPct[i] = WebCalc.QtyBoxText(qf[i], qp[i], false); }
+        qtyCustomers = s.QtyDiscountWho != 1;
         problem = null;
     }
 
@@ -275,6 +305,22 @@
             problem = L.S("Use numbers of 0 or more.", "Brug tal på 0 eller mere.");
             return;
         }
+        var qf = new double[3];
+        var qp = new double[3];
+        for (int i = 0; i < 3; i++)
+        {
+            bool bf, bp;
+            if (!WebCalc.ReadQtyStep(qtyFrom[i], qtyPct[i], out qf[i], out qp[i], out bf, out bp))
+            {
+                tab = TabPrices;
+                problem = WebCalc.QtyBadText();
+                return;
+            }
+        }
+        work.QtyDiscountFrom1 = qf[0]; work.QtyDiscountPct1 = qp[0];   // batch-2
+        work.QtyDiscountFrom2 = qf[1]; work.QtyDiscountPct2 = qp[1];
+        work.QtyDiscountFrom3 = qf[2]; work.QtyDiscountPct3 = qp[2];
+        work.QtyDiscountWho = qtyCustomers ? 2 : 1;
         if (auto) ra = work.MachineRatePerHour; else Ok(rate, out ra);
         work.FriendsMarkupPct = f; work.OthersMarkupPct = o; work.MinimumPrice = mi; work.RoundTo = ro; work.FailedPrintPct = fa;
         work.PrinterWatts = wa; work.MachineRatePerHour = ra; work.AutoWearRate = auto ? 1 : 0;

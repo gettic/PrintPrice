@@ -48,6 +48,19 @@ namespace PrintPrice
         public bool PaybackBothPrices;   // true = also in FriendsPrice (FailedPaybackWho = 1)
         // Batch & plates: (Plates - 1) x PlateChangeFee, in both prices (not marked up, before minimum and rounding). 0 = none.
         public double PlateFee;
+        // Quantity discount (batch-2): the step reached by QuoteInput.Quantity (AppSettings.QtyDiscountFor): DiscountPct
+        // (0 = none) and DiscountFrom (pcs). FriendsDiscount / OthersDiscount = kr. taken off each price (before payback
+        // and rounding; never below cost; shrunk when the minimum price lifts the customer price). 0 = none.
+        public double DiscountPct;
+        public int DiscountFrom;
+        public double FriendsDiscount;
+        public double OthersDiscount;
+        // The prices before the discount (markup + wear + plate fee; before minimum, payback and rounding) and the kr.
+        // RoundUp added to each final price (0 = rounding changed nothing). For Pricing.ShownDiscountPct.
+        public double FriendsBeforeDiscount;
+        public double OthersBeforeDiscount;
+        public double FriendsRounding;
+        public double OthersRounding;
     }
 
     /// One line of a quote breakdown (Pricing.QuoteBreakdown). Amount is whole øre; texts belong to the ui (by Key).
@@ -59,6 +72,9 @@ namespace PrintPrice
         public const string Other = "other";
         // batch & plates: the plate change fee (Quantity = extra plates, UnitPrice = kr. per extra plate)
         public const string Plates = "plates";
+        // batch-2: the quantity discount, a NEGATIVE line (Exact and Ore below 0; Quantity = %, UnitPrice = the step's
+        // From in pcs). The only line that can be negative.
+        public const string Discount = "discount";
         // wear split (QuoteLine.Parts of the wear line)
         public const string WearPrinter = "wear.printer", WearParts = "wear.parts", WearHotend = "wear.hotend", WearPlate = "wear.plate";
 
@@ -73,6 +89,7 @@ namespace PrintPrice
         //   work: Quantity = markup %      payback: Quantity = FailedPaybackPct
         //   minimum: Quantity = MinimumPrice      rounding: Quantity = RoundTo
         //   plates: Quantity = extra plates (Plates - 1), UnitPrice = PlateChangeFee
+        //   discount: Quantity = DiscountPct, UnitPrice = DiscountFrom (pcs); Exact / Ore negative
         public double Quantity;
         public double UnitPrice;
         public List<QuoteLine> Parts;     // wear only (AutoWearRate on + a Wear.Breakdown given): printer, parts, hotend,
@@ -272,13 +289,27 @@ namespace PrintPrice
             r.PlateFee = PlateFee(input.Plates, s.PlateChangeFee);
 
             // Both prices: markup + machine-time rate (wear, not marked up). Minimum price is customers only.
-            r.FriendsPrice = r.BaseCost * (1 + s.FriendsMarkupPct / 100.0)
-                             + r.PrintHours * s.MachineRatePerHour + r.PlateFee;
+            double wear = r.PrintHours * s.MachineRatePerHour;
+            double friendsBefore = r.BaseCost * (1 + s.FriendsMarkupPct / 100.0) + wear + r.PlateFee;
 
             // Customer price: markup + machine-time rate + optional minimum price.
-            double others = r.BaseCost * (1 + s.OthersMarkupPct / 100.0)
-                            + r.PrintHours * s.MachineRatePerHour + r.PlateFee;
-            if (r.BaseCost > 0 && others < s.MinimumPrice) others = s.MinimumPrice;
+            double othersBefore = r.BaseCost * (1 + s.OthersMarkupPct / 100.0) + wear + r.PlateFee;
+
+            // Quantity discount (batch-2): the step the copies reach, % of the price before the minimum, never below cost.
+            int from;
+            r.DiscountPct = s.QtyDiscountFor(input.Quantity < 1 ? 1 : input.Quantity, out from);
+            r.DiscountFrom = r.DiscountPct > 0 ? from : 0;
+            double cost = r.BaseCost + wear + r.PlateFee;
+            r.OthersDiscount = DiscountOf(othersBefore, cost, r.DiscountPct);
+            if (s.QtyDiscountWho == 1) r.FriendsDiscount = DiscountOf(friendsBefore, cost, r.DiscountPct);
+            r.FriendsPrice = friendsBefore - r.FriendsDiscount;
+
+            double others = othersBefore - r.OthersDiscount;
+            if (r.BaseCost > 0 && others < s.MinimumPrice)
+            {
+                others = s.MinimumPrice;   // the minimum still applies; the discount shown shrinks to what is left of it
+                r.OthersDiscount = Math.Max(0, othersBefore - s.MinimumPrice);
+            }
             r.OthersPrice = others;
 
             // Failed prints payback: after markup, wear and minimum price, before rounding (rounding extra not counted).
@@ -292,12 +323,46 @@ namespace PrintPrice
                 if (r.PaybackBothPrices) r.FriendsPrice += r.PaybackCost;
             }
 
+            r.FriendsBeforeDiscount = friendsBefore;
+            r.OthersBeforeDiscount = othersBefore;
+            double fr = r.FriendsPrice, ot = r.OthersPrice;
             r.FriendsPrice = RoundUp(r.FriendsPrice, s.RoundTo);
             r.OthersPrice = RoundUp(r.OthersPrice, s.RoundTo);
+            r.FriendsRounding = Math.Max(0, r.FriendsPrice - fr);
+            r.OthersRounding = Math.Max(0, r.OthersPrice - ot);
             return r;
         }
 
         const string TooBigText = "Values must be finite numbers below 10.000.000.";
+
+        /// The discount % that may be printed next to the final price (Copy text "incl. 5 % quantity discount"): the step's
+        /// % only when the cut really is that %: the whole discount was given (not held at cost, not shrunk by the minimum)
+        /// and rounding added nothing (under half an øre). 0 = no discount on this price OR a cut that isn't the % (then
+        /// say "incl. quantity discount" without a number; HasDiscount tells the two apart). Null r = 0.
+        public static double ShownDiscountPct(QuoteResult r, bool friends)
+        {
+            if (!HasDiscount(r, friends)) return 0;
+            double disc = friends ? r.FriendsDiscount : r.OthersDiscount;
+            double before = friends ? r.FriendsBeforeDiscount : r.OthersBeforeDiscount;
+            double rounding = friends ? r.FriendsRounding : r.OthersRounding;
+            if (rounding >= 0.005) return 0;
+            if (Math.Abs(disc - before * r.DiscountPct / 100.0) >= 0.005) return 0;
+            return r.DiscountPct;
+        }
+
+        /// True when this price (friends = friends & family) got a quantity discount above 0.
+        public static bool HasDiscount(QuoteResult r, bool friends)
+        {
+            return r != null && r.DiscountPct > 0 && (friends ? r.FriendsDiscount : r.OthersDiscount) > 0;
+        }
+
+        /// The quantity discount on one price: before x pct / 100, but never taking the price below cost; 0 for pct <= 0.
+        public static double DiscountOf(double before, double cost, double pct)
+        {
+            if (!(pct > 0) || !(before > 0)) return 0;
+            double d = before * Math.Min(pct, 100) / 100.0;
+            return Math.Max(0, Math.Min(d, before - cost));
+        }
 
         // ---------- batch & plates (issue #9/#10) ----------
 
@@ -436,6 +501,10 @@ namespace PrintPrice
             if (paid)
                 lines.Add(new QuoteLine { Key = QuoteLine.Payback, Exact = r.PaybackCost, Quantity = s.FailedPaybackPct });
             lines.Add(new QuoteLine { Key = QuoteLine.Work, Exact = work, Quantity = pct });
+            double discount = friends ? r.FriendsDiscount : r.OthersDiscount;
+            if (discount > 0)
+                lines.Add(new QuoteLine { Key = QuoteLine.Discount, Exact = -discount, Quantity = r.DiscountPct,
+                    UnitPrice = r.DiscountFrom });
             if (!friends && r.BaseCost > 0 && before < s.MinimumPrice)
                 lines.Add(new QuoteLine { Key = QuoteLine.Minimum, Exact = s.MinimumPrice - before, Quantity = s.MinimumPrice });
             if (s.RoundTo > 0)
@@ -473,8 +542,32 @@ namespace PrintPrice
 
         /// Gives each line whole øre so they sum to total: floor of each exact amount, then the øre left over go one by
         /// one to the lines with the largest remainders (ties: the earlier line); too many (only from float noise) are
-        /// taken back from the smallest remainders.
+        /// taken back from the smallest remainders. A discount line (QuoteLine.Discount, negative) gets its own
+        /// -whole øre (-ShownOre(-Exact)) and the other lines share total + those øre.
         public static void SplitOre(List<QuoteLine> lines, long total)
+        {
+            if (lines.Count == 0) return;
+            long off = 0;
+            var rest = lines;
+            foreach (var l in lines)
+                if (IsDiscount(l))
+                {
+                    if (ReferenceEquals(rest, lines)) rest = new List<QuoteLine>(lines.Count);
+                    l.Ore = -ShownOre(Math.Max(0, -l.Exact));
+                    off -= l.Ore;
+                }
+            if (!ReferenceEquals(rest, lines))
+            {
+                foreach (var l in lines) if (!IsDiscount(l)) rest.Add(l);
+                if (rest.Count > 0) SplitPositive(rest, total + off);
+                return;
+            }
+            SplitPositive(lines, total);
+        }
+
+        static bool IsDiscount(QuoteLine l) { return l != null && l.Key == QuoteLine.Discount; }
+
+        static void SplitPositive(List<QuoteLine> lines, long total)
         {
             int n = lines.Count;
             if (n == 0) return;
@@ -511,10 +604,10 @@ namespace PrintPrice
             long want = ShownOre(saved);
             if (want == b.TotalOre) return;
             double sum = 0;
-            foreach (var l in b.Lines) sum += Math.Max(0, l.Exact);
+            foreach (var l in b.Lines) sum += IsDiscount(l) ? Math.Min(0, l.Exact) : Math.Max(0, l.Exact);
             if (sum <= 0) return;
-            double k = want / 100.0 / sum;
-            foreach (var l in b.Lines) l.Exact = Math.Max(0, l.Exact) * k;
+            double k = want / 100.0 / sum;   // every line (a discount line too) scaled alike
+            foreach (var l in b.Lines) l.Exact = (IsDiscount(l) ? Math.Min(0, l.Exact) : Math.Max(0, l.Exact)) * k;
             b.Price = saved;
             b.TotalOre = want;
             SplitOre(b.Lines, want);

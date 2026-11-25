@@ -301,7 +301,8 @@ namespace PrintPrice.Web
 
         internal static List<QuoteRow> Rows(Sheet d)
         {
-            return QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams);
+            // batch-2: pieces for the quantity discount's "(40 pcs)" (= QuotePage.Draw)
+            return QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName, d.Quantity), d.TowerGrams);
         }
 
         // ---------- prime tower on quotes / invoices (issue #8 step 3, = MainForm.QuotePurge / WithTowerLine) ----------

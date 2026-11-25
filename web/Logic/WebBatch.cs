@@ -167,6 +167,34 @@ namespace PrintPrice.Web
                        "Et skøn. Præcise tal: placér kopierne i Bambu Studio og åbn den slicede fil.");
         }
 
+        // ---------- batch-2: colours sharing plates (the website reads them from the file, it never builds them) ----------
+
+        /// Plates of the file that print 2+ colours (BambuSlicer.IsMixedPlate: filaments of 0,5 g or more).
+        public static int MixedPlates(IList<PlateInfo> plates)
+        {
+            int n = 0;
+            if (plates != null) foreach (var p in plates) if (p != null && BambuSlicer.IsMixedPlate(p)) n++;
+            return n;
+        }
+
+        /// A plate's colours for its dots (filaments of 0,5 g or more, slot order, as the desktop's plates menu).
+        public static List<string> PlateColours(PlateInfo p)
+        {
+            var res = new List<string>();
+            if (p == null || p.Filaments == null) return res;
+            foreach (var f in p.Filaments.Where(x => x != null && x.Grams >= 0.5).OrderBy(x => x.Slot)) res.Add(f.Colour ?? "");
+            return res;
+        }
+
+        /// The plates list's heading: "4 plates – the price is for all of them:"; with mixed-colour plates the shared
+        /// History.MixedPlatesText first ("4 plates, 1 with mixed colours – the price is for all of them:"). ui-text #5: a dash in both.
+        public static string PlatesHeading(int count, int mixed)
+        {
+            string first = mixed <= 0 ? L.F("{0} plates", "{0} plader", count) : History.MixedPlatesText(count, mixed);
+            return first + " – " + (count == 2 ? L.S("the price is for both:", "prisen gælder dem begge:")
+                                               : L.S("the price is for all of them:", "prisen gælder dem alle:"));
+        }
+
         /// The hint for a multi-plate file printed N times.
         public static string MultipliedHint(int filePlates)
         {

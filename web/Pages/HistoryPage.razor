@@ -166,6 +166,8 @@ else
                 <button class="small accent" @onclick="() => AskDelete(rows)">@WebHistory.DeleteTickedText(ticked.Count)</button>
             }
         </div>
+        string selProgress = WebHistory.SelectionProgress(ticked, now);   // batch-2: "Selected: 3 prints, plates printed 7 of 12"
+        @if (selProgress != null) { <div class="hinfo selprog" role="status">@selProgress</div> }
     }
 
     @if (listView)
@@ -554,14 +556,14 @@ else if (Quotes.Count > 0)
     struct Seen
     {
         public QuoteRecord R;
-        public int For, Hours, Minutes;
+        public int For, Hours, Minutes, PlatesDone;   // PlatesDone: batch-2 (+1 / –1 plate printed)
         public bool Printed, Failed;
         public double PaidBack, Grams, FriendsPrice, OthersPrice;
         public string SavedAt, Note, Customer, InvoiceNo, FailedAt, PrinterId, PrinterName, PrinterModel, PrintingSince, PaidAt;
 
         public Seen(QuoteRecord r)
         {
-            R = r; For = r.For; Hours = r.Hours; Minutes = r.Minutes; Printed = r.Printed; Failed = r.Failed;
+            R = r; For = r.For; Hours = r.Hours; Minutes = r.Minutes; Printed = r.Printed; Failed = r.Failed; PlatesDone = r.PlatesDone;
             PaidBack = r.PaidBack; Grams = r.Grams; FriendsPrice = r.FriendsPrice; OthersPrice = r.OthersPrice;
             SavedAt = r.SavedAt; Note = r.Note; Customer = r.Customer; InvoiceNo = r.InvoiceNo; FailedAt = r.FailedAt;
             PrintingSince = r.PrintingSince; PaidAt = r.PaidAt;
@@ -571,7 +573,7 @@ else if (Quotes.Count > 0)
         // strings by reference: a changed field is a new string (an equal new one only means one extra recount)
         public bool Same(QuoteRecord r)
         {
-            return ReferenceEquals(R, r) && For == r.For && Hours == r.Hours && Minutes == r.Minutes && Printed == r.Printed
+            return ReferenceEquals(R, r) && For == r.For && Hours == r.Hours && Minutes == r.Minutes && Printed == r.Printed && PlatesDone == r.PlatesDone
                 && Failed == r.Failed && PaidBack.Equals(r.PaidBack) && Grams.Equals(r.Grams) && FriendsPrice.Equals(r.FriendsPrice)
                 && OthersPrice.Equals(r.OthersPrice) && ReferenceEquals(SavedAt, r.SavedAt) && ReferenceEquals(Note, r.Note)
                 && ReferenceEquals(Customer, r.Customer) && ReferenceEquals(InvoiceNo, r.InvoiceNo) && ReferenceEquals(FailedAt, r.FailedAt)
@@ -758,6 +760,16 @@ else if (Quotes.Count > 0)
                     <button class="@("small " + WebStatus.Css(s) + (cur ? " on" : ""))" aria-pressed="@cur" @onclick="() => SetStatus(new List<QuoteRecord> { rec }, s)">@Mark(s) @QuoteRows.StateName(s)</button>
                 }
             </div>
+            @if (History.PlatesOf(rec) >= 2 && !rec.Failed)
+            {
+                @* batch-2: plates printed on the phone's actions too *@
+                var one = new List<QuoteRecord> { rec };
+                <div class="stchoices stplates" role="group" aria-label="@History.PlatesPrintedText(History.PlatesDoneOf(rec, now), History.PlatesOf(rec))">
+                    <span class="muted">@History.PlatesPrintedText(History.PlatesDoneOf(rec, now), History.PlatesOf(rec))</span>
+                    <button class="small" disabled="@(!WebHistory.CanStepPlates(one, 1, now))" @onclick="() => StepPlates(one, 1)">@History.PlusPlateText()</button>
+                    <button class="small" disabled="@(!WebHistory.CanStepPlates(one, -1, now))" @onclick="() => StepPlates(one, -1)">@History.MinusPlateText()</button>
+                </div>
+            }
             @if (rec.InvoiceNo.Length > 0)
             {
                 <button class="@(History.IsPaid(rec) ? "paidsheet on" : "paidsheet")" @onclick="() => PaidClicked(rec)">@(rec.InvoiceNo + " · " + WebHistory.PaidButton(rec))</button>
@@ -996,7 +1008,7 @@ else if (Quotes.Count > 0)
     string statusLine;            // "✓ Print status: Printed."
     TaskCompletionSource<bool> askDone;
     int askCount;
-    readonly ElementReference[] menuItems = new ElementReference[4];
+    readonly ElementReference[] menuItems = new ElementReference[6];   // the 4 statuses, then +1 / –1 plate (batch-2)
     bool focusMenu;
 
     /// The mark of a status: hollow circle / the clock / ✓ / ✗, in its colour.
@@ -1009,10 +1021,12 @@ else if (Quotes.Count > 0)
     {
         var st = History.PrintStateOf(rec, now);
         string name = QuoteRows.StateName(st);
-        string tip = WebHistory.PrintingText(rec, now, false) ?? name;
-        string chip = st == PrintState.Printing ? (WebHistory.PrintingText(rec, now, true) ?? name) : name;
+        string plates = WebHistory.PlatesStatusText(rec, now);   // batch-2: "3 of 5 plates" for a started multi-plate job
+        string tip = WebHistory.StatusTip(rec, now) ?? name;
+        string chip = plates ?? (st == PrintState.Printing ? (WebHistory.PrintingText(rec, now, true) ?? name) : name);
+        string cell = plates ?? name;
         return @<button class="@(css + " " + WebStatus.Css(st))" aria-haspopup="menu" aria-expanded="@(menuRecs != null && menuAt == at && menuRecs[0] == rec)"
-                        aria-label="@(WebStatus.Heading + ": " + name)" title="@tip" @onclick="() => OpenRowMenu(rec, at)">@Mark(st)<span class="stname">@(css.Contains("chip") ? chip : name)</span></button>;
+                        aria-label="@(WebStatus.Heading + ": " + cell)" title="@tip" @onclick="() => OpenRowMenu(rec, at)">@Mark(st)<span class="stname">@(css.Contains("chip") ? chip : cell)</span></button>;
     }
 
     /// The four choices (a dot on the current one; several with different statuses: no dot). Arrow keys move, Esc closes.
@@ -1020,6 +1034,7 @@ else if (Quotes.Count > 0)
     {
         var recs = menuRecs;
         PrintState? cur = WebStatus.Shared(recs, now);
+        var plateJobs = WebHistory.PlateJobs(recs);
         return @<div class="stlayer">
             <div class="stback" @onclick="CloseMenu" @onclick:stopPropagation="true"></div>
             <div class="stmenu" role="menu" aria-label="@WebStatus.Heading" @onkeydown="MenuKey" @onclick:stopPropagation="true">
@@ -1030,6 +1045,17 @@ else if (Quotes.Count > 0)
                     int k = i;
                     <button role="menuitemradio" aria-checked="@(cur == s)" class="@(cur == s ? "stitem on" : "stitem")" @ref="menuItems[k]"
                             @onclick="() => SetStatus(recs, s)"><span class="stdot">@(cur == s ? "●" : "")</span>@Mark(s)<span>@QuoteRows.StateName(s)</span></button>
+                }
+                @if (plateJobs.Count > 0)
+                {
+                    @* batch-2: plates printed (= HistoryForm.AddPlateItems): the count, "+1 plate printed" and "–1" *@
+                    var prog = History.Progress(plateJobs, now);
+                    <div class="stsep" role="separator"></div>
+                    <div class="sthead muted stplates">@History.PlatesPrintedText(prog.PlatesDone, prog.Plates)</div>
+                    <button role="menuitem" class="stitem stplus" @ref="menuItems[4]" disabled="@(!WebHistory.CanStepPlates(plateJobs, 1, now))"
+                            @onclick="() => StepPlates(plateJobs, 1)"><span class="stdot"></span><span>@History.PlusPlateText()</span></button>
+                    <button role="menuitem" class="stitem stminus" @ref="menuItems[5]" disabled="@(!WebHistory.CanStepPlates(plateJobs, -1, now))"
+                            @onclick="() => StepPlates(plateJobs, -1)"><span class="stdot"></span><span>@History.MinusPlateText()</span></button>
                 }
             </div>
         </div>;
@@ -1062,7 +1088,8 @@ else if (Quotes.Count > 0)
     {
         if (e.Key == "Escape") { CloseMenu(); return; }
         if (e.Key != "ArrowDown" && e.Key != "ArrowUp") return;
-        int at = Math.Max(0, Math.Min(3, menuFocus + (e.Key == "ArrowDown" ? 1 : -1)));
+        int last = WebHistory.PlateJobs(menuRecs).Count > 0 ? 5 : 3;   // batch-2: +1 / –1 plate after the statuses
+        int at = Math.Max(0, Math.Min(last, menuFocus + (e.Key == "ArrowDown" ? 1 : -1)));
         menuFocus = at;
         try { await menuItems[at].FocusAsync(); } catch (Exception) { }
     }
@@ -1089,6 +1116,19 @@ else if (Quotes.Count > 0)
         if (!recs.TrueForAll(r => Quotes.Contains(r) && History.PrintStateOf(r, when) == state)) { statusLine = null; return; }
         bool moved = WebStatus.IsStateShow(filter.Show) && !recs.TrueForAll(r => WebHistory.Matches(r, filter, null));
         statusLine = WebStatus.ListText(recs.Count, state, moved);
+    }
+
+    /// batch-2: one plate more / less printed on each of these jobs, saved at once; the line says the new count.
+    async Task StepPlates(List<QuoteRecord> jobs, int delta)
+    {
+        CloseMenu();
+        if (jobs == null || jobs.Count == 0) return;
+        DateTime when = DateTime.Now;
+        string line = WebHistory.StepPlates(jobs, delta, when);
+        await Changed.InvokeAsync();
+        // a failed save puts the list back (no line then)
+        if (!jobs.TrueForAll(r => Quotes.Contains(r))) { statusLine = null; return; }
+        statusLine = line;
     }
 
     void Answered(bool yes)

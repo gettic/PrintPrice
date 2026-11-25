@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -56,6 +57,7 @@ namespace PrintPrice
         readonly ContextMenuStrip statusMenu;            // the Status cell's four choices (ShowStatusMenu)
         readonly ContextMenuStrip rowMenu;
         ToolStripMenuItem[] miStates;   // the row menu's four print statuses (PrintState order)
+        readonly List<ToolStripItem> plateItems = new List<ToolStripItem>();   // batch-2: the row menu's "+1 / –1 plate printed" part
         ToolStripMenuItem miDelete, miOpen, miRepeat, miQuote, miInvoice, miFriends, miCustomer, miName, miSameName;
         bool filling, refillingMonths;
         string saveError;
@@ -329,7 +331,7 @@ namespace PrintPrice
                 var r = grid.GetCellDisplayRectangle(e.ColumnIndex, e.RowIndex, false);
                 if (e.ColumnIndex == colStatus.Index)
                 {
-                    string printing = PrintingText(rec, false);
+                    string printing = StatusTip(rec);   // batch-2: "Printing plate 4 of 5, done about …" / "Plates printed: 3 of 5"
                     if (printing != null) modelTip.Show(printing, grid, r.Left, r.Bottom + 2, 8000);
                     return;
                 }
@@ -563,6 +565,20 @@ namespace PrintPrice
                 }
                 PrintState? shared = SharedState(sel);
                 for (int k = 0; k < 4; k++) miStates[k].Checked = shared.HasValue && (int)shared.Value == k;
+                // batch-2: plates printed (+1 / –1) for selected jobs of 2+ plates, after the statuses
+                foreach (var old in plateItems) { rowMenu.Items.Remove(old); old.Dispose(); }
+                plateItems.Clear();
+                var tmp = new ContextMenuStrip();
+                AddPlateItems(tmp, sel);
+                int at = rowMenu.Items.IndexOf(miStates[3]) + 1;
+                while (tmp.Items.Count > 0)
+                {
+                    var it = tmp.Items[0];
+                    tmp.Items.RemoveAt(0);
+                    rowMenu.Items.Insert(at++, it);
+                    plateItems.Add(it);
+                }
+                tmp.Dispose();
                 miFriends.Checked = allFriends;
                 miCustomer.Checked = allCustomers;
                 miOpen.Enabled = miRepeat.Enabled = one;
@@ -1036,7 +1052,36 @@ namespace PrintPrice
             lblCount.Text = n >= 2 ? L.F("{0} of {1} selected", "{0} af {1} valgt", n, shown.Count)
                           : shown.Count == list.Count ? L.F(list.Count == 1 ? "{0} quote" : "{0} quotes", "{0} tilbud", list.Count)
                           : L.F("{0} of {1} quotes", "{0} af {1} tilbud", shown.Count, list.Count);
+            UpdateSelectionProgress(n);
         }
+
+        /// batch-2: 2+ selected with a job of 2+ plates among them: the info box says "Selected: 3 prints, plates printed
+        /// 7 of 12" (instead of the help; a ✓ / error line from an action stays). Back to the help when that ends.
+        void UpdateSelectionProgress(int selected)
+        {
+            // a new selection replaces an older ✓ line (actions show theirs after filling the list, so theirs stays)
+            if (info == null || saveError != null || listError != null) return;
+            string text = null;
+            if (selected >= 2)
+            {
+                var sel = SelectedRecords();
+                if (sel.Any(r => r != null && History.PlatesOf(r) >= 2))
+                {
+                    var p = History.Progress(sel, DateTime.Now);
+                    text = History.SelectedProgressText(sel.Count, p.PlatesDone, p.Plates);
+                }
+            }
+            if (text == null)
+            {
+                if (progressShown) { progressShown = false; ShowInfo(); }
+                return;
+            }
+            if (progressShown && info.Text == text) return;
+            ShowDone(text, InfoKind.Info, null, null);
+            progressShown = true;
+        }
+
+        bool progressShown;   // the info box shows the selection's plates line (UpdateSelectionProgress)
 
         // ---------- month cards ----------
         /// The six cards for the chosen month (all months = the sum of every month). Search and Show don't change them.
@@ -1269,8 +1314,34 @@ namespace PrintPrice
             e.PaintBackground(e.CellBounds, selected);
             var rec = grid.Rows[e.RowIndex].Tag as QuoteRecord;
             if (rec == null) { e.Handled = true; return; }
-            PaintStatusCell(e.Graphics, e.CellBounds, History.PrintStateOf(rec, DateTime.Now), selected, CurrentAutoScaleDimensions.Height / 96f, grid.Font);
+            DateTime now = DateTime.Now;
+            PaintStatusCell(e.Graphics, e.CellBounds, History.PrintStateOf(rec, now), selected, CurrentAutoScaleDimensions.Height / 96f, grid.Font,
+                            PlatesStatusText(rec, now));
             e.Handled = true;
+        }
+
+        /// batch-2: a started job of 2+ plates (some printed, or printing now) shows "3 of 5 plates" instead of "Printing";
+        /// null = the normal short name.
+        internal static string PlatesStatusText(QuoteRecord r, DateTime now)
+        {
+            if (r == null || History.PlatesOf(r) < 2 || History.PrintStateOf(r, now) != PrintState.Printing) return null;
+            return History.PlatesProgressText(History.PlatesDoneOf(r, now), History.PlatesOf(r));
+        }
+
+        /// batch-2: the Status cell's dark tooltip: "Printing plate 4 of 5, done about 16:40" (1 plate: "Printing, done about
+        /// 16:40"), a started multi-plate job "Plates printed: 3 of 5"; null = none.
+        internal static string StatusTip(QuoteRecord r)
+        {
+            if (r == null) return null;
+            DateTime now = DateTime.Now, end;
+            int plates = History.PlatesOf(r);
+            if (plates >= 2 && History.IsPrinting(r, now) && History.PrintingEnds(r, out end))
+            {
+                string at = end.Date == now.Date ? end.ToString("HH:mm", Num.Dk) : end.ToString("dd-MM HH:mm", Num.Dk);
+                return History.PrintingPlateText(History.PrintingPlate(r, now), plates) + L.F(", done about {0}", ", færdig ca. {0}", at);
+            }
+            if (PlatesStatusText(r, now) != null) return History.PlatesPrintedText(History.PlatesDoneOf(r, now), plates);
+            return PrintingText(r, false);
         }
 
         /// The Model cell of a scaled job whose name doesn't fit: the model part gets the "…", the scale " (150 × 100 × 50 %)"
@@ -1328,6 +1399,12 @@ namespace PrintPrice
         /// no mark, Muted "Mixed" / "Blandet". sc = dpi / 96.
         internal static void PaintStatusCell(Graphics g, Rectangle cell, PrintState? shared, bool selected, float sc, Font font)
         {
+            PaintStatusCell(g, cell, shared, selected, sc, font, null);
+        }
+
+        /// batch-2: as above; text = the words after the mark (null = ShortStateName; "3 of 5 plates" for a started job).
+        internal static void PaintStatusCell(Graphics g, Rectangle cell, PrintState? shared, bool selected, float sc, Font font, string text)
+        {
             if (!shared.HasValue)
             {
                 // qol 10: lined up with the marked states' text (mark 7 + 14 + gap 6 px)
@@ -1349,7 +1426,8 @@ namespace PrintPrice
                     float inset = Math.Max(1f, 1f * sc);
                     var dial = new RectangleF(box.Left + inset, box.Top + inset, box.Width - 2 * inset, box.Height - 2 * inset);
                     float cx = dial.Left + dial.Width / 2, cy = dial.Top + dial.Height / 2;
-                    using (var pen = new Pen(Theme.Warning, w))
+                    // batch-2 qol #9: on a selected (red) row the amber clock is hard to see: the row's text colour then
+                    using (var pen = new Pen(selected ? Color.White : Theme.Warning, w))
                     {
                         g.DrawEllipse(pen, dial);
                         g.DrawLine(pen, cx, cy, cx, dial.Top + dial.Height * 0.22f);
@@ -1389,7 +1467,10 @@ namespace PrintPrice
             g.SmoothingMode = old;
             var textRect = new Rectangle(box.Right + 1 + (int)Math.Round(6 * sc), cell.Y, cell.Right - box.Right - (int)Math.Round(8 * sc), cell.Height);
             Color fore = state == PrintState.NotPrinted ? Theme.Muted : selected ? Color.White : Theme.Text;
-            TextRenderer.DrawText(g, ShortStateName(state), font, textRect, fore,
+            // batch-2: "3 of 5 plates" when it fits the column, else the short "3/5 plates" (the tooltip has the whole line)
+            if (text != null && TextRenderer.MeasureText(g, text, font, Size.Empty, TextFormatFlags.NoPadding).Width > textRect.Width)
+                text = System.Text.RegularExpressions.Regex.Replace(text, @"^(\d+)\D+?(\d+) ", "$1/$2 ");
+            TextRenderer.DrawText(g, text ?? ShortStateName(state), font, textRect, fore,
                                   TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
         }
 
@@ -1437,6 +1518,40 @@ namespace PrintPrice
                 mi.Click += delegate { SetStatus(new List<QuoteRecord> { r }, st); };
                 statusMenu.Items.Add(mi);
             }
+            AddPlateItems(statusMenu, new List<QuoteRecord> { r });
+        }
+
+        /// batch-2: under the statuses of a job with 2+ plates: a muted "Plates printed: 3 of 5" line, "+1 plate printed" and
+        /// "–1" (each off at its end). Several jobs (row menu): the summed count, and the steps go on each job with 2+ plates.
+        void AddPlateItems(ToolStrip menu, List<QuoteRecord> recs)
+        {
+            var multi = recs.Where(x => x != null && History.PlatesOf(x) >= 2 && !x.Failed).ToList();
+            if (multi.Count == 0) return;
+            DateTime now = DateTime.Now;
+            var prog = History.Progress(multi, now);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(new ToolStripMenuItem(History.PlatesPrintedText(prog.PlatesDone, prog.Plates)) { Enabled = false });
+            var plus = new ToolStripMenuItem(History.PlusPlateText()) { ForeColor = Theme.Text,
+                Enabled = multi.Any(x => History.PlatesDoneOf(x, now) < History.PlatesOf(x)) };
+            plus.Click += delegate { StepPlates(multi, 1); };
+            var minus = new ToolStripMenuItem(History.MinusPlateText()) { ForeColor = Theme.Text,
+                Enabled = multi.Any(x => History.PlatesDoneOf(x, now) > 0) };
+            minus.Click += delegate { StepPlates(multi, -1); };
+            menu.Items.Add(plus);
+            menu.Items.Add(minus);
+        }
+
+        /// batch-2: one plate more (+1) or less (–1) printed on each job (History.StepPlates), saved at once; the ✓ line says
+        /// the new count ("✓ Plates printed: 4 of 5.").
+        internal void StepPlates(List<QuoteRecord> recs, int delta)
+        {
+            if (recs == null || recs.Count == 0) return;
+            DateTime now = DateTime.Now;
+            foreach (var r in recs) History.StepPlates(r, delta, now);
+            SaveList();
+            Fill(recs, recs[0]);
+            var prog = History.Progress(recs, now);
+            ShowDone("✓ " + History.PlatesPrintedText(prog.PlatesDone, prog.Plates) + ".", InfoKind.Success, null, null);
         }
 
         /// Picture mode: the Status cell's menu of a list row, drawn where it opens (under the cell).
@@ -1572,6 +1687,7 @@ namespace PrintPrice
         void ShowInfo()
         {
             doneShown = false;
+            progressShown = false;
             string help = view == ViewList
                 ? L.S("Ctrl/Shift+click selects several. Quote… or Invoice… makes one page for all selected. Repeat print uses today's prices; " +
                       "double-click opens it as saved. Right-click for more.\n" +
@@ -1594,6 +1710,7 @@ namespace PrintPrice
         void ShowDone(string text, InfoKind kind, string[] links, Action[] clicks)
         {
             doneShown = true;
+            progressShown = false;
             info.Text = text;
             info.Kind = kind;
             doneLinks = links;
@@ -1759,6 +1876,34 @@ namespace PrintPrice
         internal void TestQuote(bool invoice) { ShowQuote(invoice); }
         internal bool TestQuoteButtonsOn { get { return btnQuote.Enabled && btnInvoice.Enabled; } }
         internal string TestInfo { get { return info.Text ?? ""; } }
+        /// batch-2 picture mode: the list row of r (-1 = not shown).
+        internal int SampleRowOf(QuoteRecord r)
+        {
+            for (int i = 0; i < grid.Rows.Count; i++) if (ReferenceEquals(grid.Rows[i].Tag, r)) return i;
+            return -1;
+        }
+        /// batch-2 tests: the Status cell's menu for r as a click opens it; clicks the item with this text (the real handler).
+        /// false = no such item or it is off.
+        internal bool TestStatusMenuClick(QuoteRecord r, string text)
+        {
+            FillStatusMenu(r);
+            foreach (ToolStripItem it in statusMenu.Items)
+                if (it is ToolStripMenuItem && it.Text == text)
+                {
+                    if (!it.Enabled) return false;
+                    it.PerformClick();
+                    return true;
+                }
+            return false;
+        }
+        /// The status menu's item texts for r (enabled ones marked "+", off ones "-").
+        internal string TestStatusMenuTexts(QuoteRecord r)
+        {
+            FillStatusMenu(r);
+            var t = new List<string>();
+            foreach (ToolStripItem it in statusMenu.Items) if (it is ToolStripMenuItem) t.Add((it.Enabled ? "+" : "-") + it.Text);
+            return string.Join(" | ", t);
+        }
         internal InfoKind TestInfoKind { get { return info.Kind; } }
 
         void ShowRowMenu(Point screen)

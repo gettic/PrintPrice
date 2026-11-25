@@ -121,6 +121,9 @@ static class WebTests
         // 17. batch-plates (issue #9 / #10): copies and plates without slicing, History fields, settings
         BatchTests.Run(True, Eq);
 
+        // 18. batch-2 (issue #10 follow-up): quantity discount, plates printed, plates that mix colours from a file
+        Batch2Tests.Run(True, Eq);
+
         Console.WriteLine(failed == 0 ? "All " + passed + " web tests passed." : failed + " FAILED, " + passed + " passed.");
         return failed == 0 ? 0 : 1;
     }

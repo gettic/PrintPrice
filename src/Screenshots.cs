@@ -556,6 +556,8 @@ namespace PrintPrice
                     History.SetCopies(batchJobs[1], 40, 2, 28, false);
                     using (var page = QuotePage.Render(main.SampleGroupData(batchJobs, gb, true), false))
                         page.Save(Path.Combine(folder, "invoice_group_batch.png"), ImageFormat.Png);
+                    SnapBatch2(main, s, folder, sample);
+                    SnapCompact(main, folder, sample);
                     main.Hide();
                 }
                 return 0;
@@ -564,6 +566,140 @@ namespace PrintPrice
             {
                 try { File.WriteAllText(Path.Combine(folder, "error.txt"), ex.ToString()); } catch { }
                 return 1;
+            }
+        }
+
+        /// batch-2 (issue #10 follow-up): the quantity discount (Benchy x 40: price lines, quote), the Prices tab with steps,
+        /// the Slicing tick, a two-colour batch with a shared last plate (✓ line, plates menu with colour dots, Copies window,
+        /// file picker tick), and plates printed in History (cell, status menu, selection line) and the Invoices window.
+        static void SnapBatch2(MainForm main, AppSettings s, string folder, string sample)
+        {
+            main.SetSampleJob();
+            main.SetSamplePicture(sample, "sample0");
+            main.SetSampleBatchJob();
+            main.SampleDiscount(true);
+            Snap(main, folder, "main_discount.png");
+            using (var q = main.RenderSampleQuote(false, "Mette Hansen"))
+                if (q != null) q.Save(Path.Combine(folder, "quote_discount.png"), ImageFormat.Png);
+            main.SampleDiscount(false);
+            var ds = s.Clone();
+            ds.QtyDiscountFrom1 = 10; ds.QtyDiscountPct1 = 5; ds.QtyDiscountFrom2 = 50; ds.QtyDiscountPct2 = 10;
+            ds.ShareLastPlate = 1;
+            using (var set = new SettingsForm(ds))
+            {
+                Place(set);
+                set.Show();
+                Snap(set, folder, "settings_discount.png");
+                set.SelectedTab = SettingsForm.TabQuote;
+                Snap(set, folder, "settings_quote_share.png");
+                set.Hide();
+            }
+            main.SetSampleSharedJob();
+            Snap(main, folder, "main_shared.png");
+            Snap(main, folder, "main_shared_plates_menu.png", main.SamplePlatesMenu);
+            using (var cw = main.SampleShareCopiesWindow()) if (cw != null) SnapForm(cw, folder, "copies_share.png");
+            var names = new List<string> { "clip_red.stl", "clip_blue.stl", "clip_white.stl" };
+            using (var picker = new FilePickerForm("Cable clip", names, null, false, "Bambu PLA Basic", null))
+            {
+                Place(picker);
+                picker.Show();
+                picker.ShareDefault = true;
+                picker.SampleChoices(new[] { "Bambu PLA Basic", "Bambu PLA Basic", "Bambu PLA Basic" }, new[] { "#C12E1F", "#0A2989", "#FFFFFF" }, null, false);
+                picker.SampleCopies(new[] { 30, 20, 1 });
+                Snap(picker, folder, "picker_share.png");
+                picker.Hide();
+            }
+            // plates printed: a 10-copy job on 5 plates, 3 printed (a copy of the sample list, memory only)
+            var quotes = HistoryForm.SampleQuotes();
+            var job = quotes[3];
+            History.SetCopies(job, 10, 5, 2, false);
+            job.Failed = false; job.FailedAt = "";
+            job.Printed = true; job.PrintingSince = ""; job.PlatesDone = 3;
+            using (var hist = new HistoryForm(quotes, null, true))
+            {
+                hist.QuoteRequested = (owner, recs, isInvoice) => null;
+                hist.BackupRequested = owner => false;
+                hist.SamplePicturesForMode = HistoryForm.SamplePictures(folder);
+                Place(hist);
+                hist.Show();
+                hist.SelectMonth(DateTime.MinValue);
+                int row = hist.SampleRowOf(job);
+                hist.SampleSelect(new int[0]);
+                Snap(hist, folder, "history_plates.png");
+                if (row >= 0) Snap(hist, folder, "history_plates_menu.png", (g, o) => hist.SampleStatusMenu(row, g, o));
+                int other = row == 0 ? 1 : 0;
+                hist.SampleSelect(new[] { row, other });
+                Snap(hist, folder, "history_plates_selected.png");
+                hist.Hide();
+            }
+            var invQuotes = HistoryForm.SampleInvoiceQuotes();
+            var ij = invQuotes.Find(q => !string.IsNullOrEmpty(q.InvoiceNo) && !q.Failed);
+            if (ij != null)
+            {
+                History.SetCopies(ij, 12, 4, 3, false);
+                ij.Printed = true; ij.PrintingSince = ""; ij.PlatesDone = 1;
+            }
+            using (var hist = new HistoryForm(invQuotes, null, true))
+            {
+                hist.QuoteRequested = (owner, recs, isInvoice) => null;
+                hist.Settings = s;
+                Place(hist);
+                hist.Show();
+                using (var inv = hist.NewInvoicesForm())
+                {
+                    Place(inv);
+                    inv.Show(hist);
+                    Snap(inv, folder, "invoices_plates.png");
+                    inv.Hide();
+                }
+                hist.Hide();
+            }
+        }
+
+        /// batch-2 compact mode: the main window as on 1080p at 150 % (672 px working area at 96 dpi): 1 colour, the
+        /// 2-colour prime tower job, 4 colours, 4 colours + payback, the shared plate, the discount; compact_check.txt
+        /// says per picture whether it fits and nothing is cut off (MainForm.FitReport). Compact stays on once on.
+        static void SnapCompact(MainForm main, string folder, string sample)
+        {
+            var lines = new List<string>();
+            MainForm.TestWorkHeight = 672;
+            try
+            {
+                Action<string> shot = name =>
+                {
+                    main.SampleCheckFit();
+                    Snap(main, folder, name);
+                    lines.Add(main.FitReport(name));
+                };
+                main.SetSampleJob();
+                main.SetSamplePicture(sample, "sample0");
+                lines.Add(main.FitReport("(1 colour before the check)"));
+                main.SetSampleMultiJob();
+                main.SetSamplePicture(Path.Combine(folder, "model2.png"), "sample1");
+                shot("main_compact_multi.png");
+                main.SetSamplePayback(33.70);
+                shot("main_compact_multi_payback.png");
+                main.SetSamplePayback(0);
+                main.SetSampleJob();
+                main.SetSamplePicture(sample, "sample0");
+                shot("main_compact_one.png");
+                main.SetSampleTowerJob();
+                shot("main_compact_tower.png");
+                main.SetSampleSharedJob();
+                shot("main_compact_shared.png");
+                Snap(main, folder, "main_compact_shared_plates_menu.png", main.SamplePlatesMenu);
+                main.SetSampleJob();
+                main.SetSamplePicture(sample, "sample0");
+                main.SetSampleBatchJob();
+                main.SampleDiscount(true);
+                shot("main_compact_discount.png");
+                main.SampleDiscount(false);
+            }
+            finally
+            {
+                MainForm.TestWorkHeight = 0;
+                main.SetCompact(false);
+                File.WriteAllLines(Path.Combine(folder, "compact_check.txt"), lines.ToArray());
             }
         }
 

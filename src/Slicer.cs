@@ -22,6 +22,9 @@ namespace PrintPrice
         public double TowerSeconds;    // issue #8 step 3: feature_type_times "Prime tower", summed over plates
         // batch-plates: the same per plate (sliced_plates[].id -> seconds; plates without an id left out)
         public SortedDictionary<int, double> PlateTowerSeconds = new SortedDictionary<int, double>();
+        // batch-2: per plate id: filament_change_times and their time (total_predication - main_predication, >= 0)
+        public SortedDictionary<int, int> PlateColourChanges = new SortedDictionary<int, int>();
+        public SortedDictionary<int, double> PlateChangeSeconds = new SortedDictionary<int, double>();
         public List<double[]> ObjectSizes = new List<double[]>();   // issue #8: per object {width X, depth Y, height Z} mm, as sliced (scaled)
         public List<string> ObjectNames = new List<string>();       // batch-plates T1: objects[].name, same order as ObjectSizes
         // plans\too-small: per object {plate id (0 = missing), bbox x, bbox y, width, depth, height} as placed (SlicedOffBed)
@@ -765,6 +768,7 @@ namespace PrintPrice
             if (res != null)
             {
                 ApplyPlateNames(res, modelSettings);   // idea 21: plate names for the plates list
+                FixSingleFilamentPlates(res, modelSettings, settings);   // batch-2: the CLI's slot-1 report of a one-filament plate
                 res.Picture = FromProject(path3mf);
                 res.StudioFile = path3mf;
                 var parsed = ParseSettings(settings);   // once for the slots and the printer
@@ -1151,6 +1155,18 @@ namespace PrintPrice
                                              string printer, string nozzleSize, string defaultFilament, IProgress<string> progress,
                                              CancellationToken ct, ScaleXyz scale)
         {
+            return SliceBatch(exe, items, colours, workDir, printer, nozzleSize, defaultFilament, progress, ct, scale, false);
+        }
+
+        /// Batch-2 (issue #10): the same; shareLastPlate = after the per-colour runs, the colours' part-full last plates go
+        /// on ONE shared plate (ShareLastPlates: --load-assemble-list; STL / OBJ only, 2-4 colours; doesn't fit -> once
+        /// more without the biggest group; anything else -> own plates kept). Result.Share: null = nothing to share, else
+        /// Applied + the trade-off (plates saved, extra time / grams) or Problem. The shared plate: PlateInfo.Shared, File
+        /// = the colours' file names joined with " + ", after the full plates.
+        public static SliceResult SliceBatch(string exe, IList<BatchItem> items, IList<ColourChoice> colours, string workDir,
+                                             string printer, string nozzleSize, string defaultFilament, IProgress<string> progress,
+                                             CancellationToken ct, ScaleXyz scale, bool shareLastPlate)
+        {
             if (items == null || items.Count == 0 || items.Any(x => x == null || string.IsNullOrEmpty(x.Path)))
                 throw new SliceException(L.S("No model file to slice.", "Ingen modelfil at slice."));
             long sum = 0;
@@ -1179,8 +1195,10 @@ namespace PrintPrice
             var other = new List<int>();
             for (int i = 0; i < items.Count; i++) (IsProjectOrSliced(items[i].Path) ? other : plain).Add(i);
             var groups = plain.GroupBy(slotOf).OrderBy(x => x.Key).ToList();
-            int runs = groups.Count + other.Count, run = 0;
+            bool share = shareLastPlate && groups.Count(x => x.Key > 0) >= 2;
+            int runs = groups.Count + other.Count + (share ? 1 : 0), run = 0;
             var total = new SliceResult();
+            var done = new List<BatchGroup>();
 
             foreach (var g in groups)
             {
@@ -1200,8 +1218,27 @@ namespace PrintPrice
                 if (placed < counts.Sum()) throw new SliceException(MissingCopiesText(placed, counts.Sum()));
                 r.Copies = counts.Sum();
                 r.PerPlate = r.PlateList.Count == 0 ? 0 : r.PlateList.Max(x => x.Copies);
-                AddResult(total, r, names, g.Key == 0 ? 0 : g.Key - 1);   // the run's slot 1 = this colour
+                done.Add(new BatchGroup { Slot = g.Key, Names = names, Paths = paths, Result = r });
             }
+
+            // batch-2: the colours' part-full last plates on one shared plate (or each colour keeps its own)
+            SliceResult shared = null;
+            var sharedGroups = new List<int>();
+            if (share)
+            {
+                if (progress != null)
+                    progress.Report(L.S("Sharing the last plate between the colours in Bambu Studio…", "Deler den sidste plade mellem farverne i Bambu Studio…") +
+                                    " (" + (++run) + "/" + runs + ")");
+                total.Share = ShareLastPlates(exe, done, colourFiles, workDir, printer, scaleArgs, ct, out shared, out sharedGroups);
+            }
+            for (int k = 0; k < done.Count; k++)
+            {
+                var bg = done[k];
+                // a shared group's last plate is on the shared plate (a group with one plate adds only its size here)
+                var r = sharedGroups.Contains(k) ? WithoutLastPlate(bg.Result) : bg.Result;
+                AddResult(total, r, bg.Names, bg.Slot == 0 ? 0 : bg.Slot - 1);   // the run's slot 1 = this colour
+            }
+            if (shared != null) AddResult(total, shared, shared.PlateList[0].File, 0);   // slots already the real ones
 
             foreach (int i in other)
             {
@@ -1270,6 +1307,162 @@ namespace PrintPrice
             r.Copies = k;
             r.PerPlate = k;
             return r;
+        }
+
+        /// One colour's clone run in SliceBatch (Slot 0 = filament.json, no colour choice).
+        sealed class BatchGroup
+        {
+            public int Slot;
+            public string Names = "";
+            public List<string> Paths = new List<string>();   // as sliced (scaled copies keep the file name)
+            public SliceResult Result;
+            public int[] LastCounts;                           // copies per file on its last plate (ShareLastPlates)
+        }
+
+        /// Batch-2: the colour groups' part-full last plates on one shared plate. Eligible: a colour (Slot > 0), only STL /
+        /// OBJ files, a last plate whose objects map to its files (LastPlateCounts). Fewer than 2 colour groups = null
+        /// (nothing to share); 2+ groups but < 2 eligible, or more than MaxTogetherColours: Problem, own plates. The run:
+        /// one assemble plate, the colours' profiles as tagged copies (share<j>.json, so the CLI keeps the tower), slots
+        /// remapped to the real ones. Doesn't fit / fails: with 3+ groups once more without the biggest (BiggestGroup by
+        /// copies x one-copy footprint, else the plate's grams); still failing = Problem, own plates. Cancel / timeout are
+        /// rethrown. shared = the shared plate's result (one plate, Shared, Copies, names as a clone run's), used = indexes
+        /// into groups whose last plate it replaces.
+        static ShareInfo ShareLastPlates(string exe, List<BatchGroup> groups, List<string> colourFiles, string workDir, string printer,
+                                         IList<string> scaleArgs, CancellationToken ct, out SliceResult shared, out List<int> used)
+        {
+            shared = null;
+            used = new List<int>();
+            var colourGroups = Enumerable.Range(0, groups.Count).Where(i => groups[i].Slot > 0).ToList();
+            if (colourGroups.Count < 2) return null;
+            var cand = new List<int>();
+            bool otherFormat = false;
+            foreach (int i in colourGroups)
+            {
+                var g = groups[i];
+                if (!g.Paths.All(CanShareFile)) { otherFormat = true; continue; }
+                var last = g.Result.PlateList.LastOrDefault();
+                if (last == null || last.Copies <= 0) continue;
+                var counts = LastPlateCounts(last.Objects, g.Paths.Select(Path.GetFileName).ToList());
+                if (counts == null || counts.Sum() != last.Copies) continue;
+                g.LastCounts = counts;
+                cand.Add(i);
+            }
+            Func<string, ShareInfo> problem = text => new ShareInfo { Applied = false, Problem = text, Colours = cand.Count };
+            if (cand.Count > MaxTogetherColours)
+                return problem(L.F("More than {0} colours can't share one plate on the AMS lite, so each colour kept its own plates.",
+                                   "Mere end {0} farver kan ikke dele én plade med AMS lite, så hver farve beholdt sine egne plader.", MaxTogetherColours));
+            if (cand.Count < 2)
+                return problem(otherFormat
+                    ? L.S("Only STL and OBJ files can share a plate, so each colour kept its own plates.",
+                          "Kun STL- og OBJ-filer kan dele en plade, så hver farve beholdt sine egne plader.")
+                    : L.S("The last plates couldn't be shared, so each colour kept its own plates.",
+                          "De sidste plader kunne ikke deles, så hver farve beholdt sine egne plader."));
+            var tryList = new List<int>(cand);
+            Exception error = null;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    shared = RunSharedPlate(exe, groups, tryList, colourFiles, workDir, printer, scaleArgs, ct);
+                    used = tryList;
+                    break;
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (SliceTimeout) { throw; }
+                catch (Exception ex)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    error = ex;
+                    shared = null;
+                    if (tryList.Count < 3) break;
+                    var areas = tryList.Select(i =>
+                    {
+                        var g = groups[i];
+                        var last = g.Result.PlateList.Last();
+                        double box = g.Result.SizeX * g.Result.SizeY;
+                        return box > 0 ? box * last.Copies : last.Grams;
+                    }).ToList();
+                    tryList = new List<int>(tryList);
+                    tryList.RemoveAt(BiggestGroup(areas));
+                }
+            }
+            if (shared == null)
+            {
+                var se = error as SliceException;
+                if (se != null && se.ExitCode == ArrangeFailedCode)
+                    return problem(L.S("The colours' last plates don't fit on one plate together, so each colour kept its own plates.",
+                                       "Farvernes sidste plader kan ikke være på én plade sammen, så hver farve beholdt sine egne plader."));
+                string raw = error == null ? "" : (error.Message ?? "").Trim();   // Bambu's own error last, after a line break
+                return problem(L.S("Bambu Studio couldn't share the last plate, so each colour kept its own plates.",
+                                   "Bambu Studio kunne ikke dele den sidste plade, så hver farve beholdt sine egne plader.") +
+                               (raw.Length > 0 ? "\n" + raw : ""));
+            }
+            var replaced = used.Select(i => groups[i].Result.PlateList.Last()).ToList();
+            return ShareTradeOff(replaced, shared.PlateList[0]);
+        }
+
+        /// The CLI's exit code when an assemble plate is too full ("An error occurred when auto-arranging object(s).").
+        internal const int ArrangeFailedCode = -21;
+
+        /// One shared-plate run (ShareLastPlates): throws SliceException when it fails or doesn't come back as one plate
+        /// holding every copy.
+        static SliceResult RunSharedPlate(string exe, List<BatchGroup> groups, List<int> tryList, List<string> colourFiles,
+                                          string workDir, string printer, IList<string> scaleArgs, CancellationToken ct)
+        {
+            string outDir = NewOutDir(workDir);
+            var realSlots = tryList.Select(i => groups[i].Slot).ToList();   // run slot j+1 = realSlots[j]
+            var files = new List<string>();
+            for (int j = 0; j < realSlots.Count; j++) files.Add(TaggedCopy(colourFiles[realSlots[j] - 1], j + 1, outDir));
+            var plate = new AssemblePlate { Name = "shared" };
+            var paths = new List<string>();
+            int copies = 0;
+            for (int j = 0; j < tryList.Count; j++)
+            {
+                var g = groups[tryList[j]];
+                for (int k = 0; k < g.Paths.Count; k++)
+                {
+                    if (g.LastCounts[k] <= 0) continue;
+                    plate.Objects.Add(new AssembleObject { Path = Path.GetFullPath(g.Paths[k]), Count = g.LastCounts[k], Slot = j + 1 });
+                    paths.Add(Path.GetFullPath(g.Paths[k]));
+                    copies += g.LastCounts[k];
+                }
+            }
+            string list = Path.Combine(outDir, "assemble_list.json");
+            File.WriteAllText(list, AssembleListJson(new[] { plate }));
+            string load = string.Join(";", files);
+            var extra = AssembleArgs(list, scaleArgs);
+            if (files.Select(FilamentTypeOf).Where(t => t.Length > 0).Select(t => t.ToUpperInvariant()).Distinct().Count() > 1)
+                extra.Add("--allow-mix-temp");
+            string name = string.Join(" + ", tryList.Select(i => groups[i].Names));
+            var r = RunSlice(exe, new string[0], workDir, printer, load, load, extra, outDir, name, ct);
+            if (r.PlateList.Count != 1) throw new SliceException(MissingCopiesText(0, copies));
+            var p = r.PlateList[0];
+            p.Objects = p.Objects.Select(o => AssembleObjectName(o, paths)).ToList();
+            if (p.Objects.Count != copies) throw new SliceException(MissingCopiesText(p.Objects.Count, copies));
+            RemapSlots(r, realSlots);
+            p.Shared = true;
+            p.Copies = copies;
+            p.File = name;
+            r.Copies = copies;
+            r.PerPlate = copies;
+            r.SizeX = r.SizeY = r.SizeZ = 0;   // T1 sizes come from the colour runs
+            r.SizeObjects = 0;
+            return r;
+        }
+
+        /// A copy of a written filament profile in outDir (share<slot>.json) with its name tagged for the slot
+        /// (TaggedName), so the CLI keeps the prime tower when two colours use the same filament. "from" kept.
+        static string TaggedCopy(string profilePath, int slot, string outDir)
+        {
+            var json = Serializer();
+            var d = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(profilePath));
+            object n;
+            string name = d != null && d.TryGetValue("name", out n) && n != null ? n.ToString() : "";
+            if (d != null && name.Length > 0) d["name"] = TaggedName(name, slot);
+            string path = Path.Combine(outDir, "share" + slot.ToString(CultureInfo.InvariantCulture) + ".json");
+            File.WriteAllText(path, json.Serialize(d));
+            return path;
         }
 
         /// A batch run that came back short: "Bambu Studio placed only 12 of 40 copies. Try fewer copies or make the model
@@ -1356,6 +1549,14 @@ namespace PrintPrice
                     st.TowerSeconds += towerSeconds;
                     int plateId = p.ContainsKey("id") ? (int)JsonNum(p, "id") : 0;
                     if (plateId > 0) AddTo(st.PlateTowerSeconds, plateId, towerSeconds);
+                    if (plateId > 0)
+                    {
+                        int changes;
+                        st.PlateColourChanges.TryGetValue(plateId, out changes);
+                        st.PlateColourChanges[plateId] = changes + (int)JsonNum(p, "filament_change_times");
+                        double tot = JsonNum(p, "total_predication"), main = JsonNum(p, "main_predication");
+                        AddTo(st.PlateChangeSeconds, plateId, tot > 0 && main > 0 ? Math.Max(0, tot - main) : 0);
+                    }
                     object oo;
                     var objs = p.TryGetValue("objects", out oo) ? oo as System.Collections.IEnumerable : null;
                     if (objs != null)
@@ -1425,13 +1626,19 @@ namespace PrintPrice
                 {
                     double ts;
                     if (p != null && stats.PlateTowerSeconds.TryGetValue(p.Index, out ts)) p.TowerSeconds = ts;
+                    int cc;
+                    if (p != null && stats.PlateColourChanges.TryGetValue(p.Index, out cc)) p.ColourChanges = cc;
+                    double cs;
+                    if (p != null && stats.PlateChangeSeconds.TryGetValue(p.Index, out cs)) p.ColourChangeSeconds = cs;
                 }
             if (res == null || stats == null || stats.TotalGrams.Count == 0) return;
-            foreach (var f in res.Filaments)
-            {
-                double main;
-                if (stats.MainGrams.TryGetValue(f.Slot, out main)) f.ModelGrams = main;
-            }
+            // batch-2: after FixSingleFilamentPlates the CLI's per-slot model grams belong to the wrong slots: leave -1
+            if (res.SingleFilamentFixes == 0)
+                foreach (var f in res.Filaments)
+                {
+                    double main;
+                    if (stats.MainGrams.TryGetValue(f.Slot, out main)) f.ModelGrams = main;
+                }
             double purge = 0;
             foreach (var kv in stats.TotalGrams)
             {

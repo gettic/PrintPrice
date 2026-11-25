@@ -20,6 +20,9 @@ namespace PrintPrice
         public bool Together;
         /// Batch & plates: copies per file (same order as Parts; null = 1 each), from the picker's Copies boxes.
         public List<int> Copies;
+        /// batch-2: share the colours' part-full last plates on one plate (the picker's "Share the last plate" tick; Repeat print /
+        /// Open again: History.ShareLastPlateFor). Only used for a batch (copies) with 2+ colours.
+        public bool Share;
 
         /// A .3mf project or a G-code keeps its own colours (no colour of its own in the picker).
         public static bool OwnColours(string file)
@@ -117,6 +120,9 @@ namespace PrintPrice
         readonly TableLayoutPanel grid;
         readonly BackupForm.Tick together;
         readonly Label togetherNote;
+        readonly BackupForm.Tick share;   // batch-2: "Share the last plate between the colours" (copies in 2+ colours)
+        readonly Label shareNote;
+        bool shareWanted;                  // the tick as the user (or Settings) wants it; shown only while it can be used
         readonly ToolTip tip;
         Button ok;
 
@@ -256,10 +262,28 @@ namespace PrintPrice
             };
             togetherText = togetherNote.Text;
             t.Controls.Add(togetherNote);
+            // batch-2: copies in 2+ colours: full plates keep one colour, the colours' part-full last plates share one plate
+            share = new BackupForm.Tick
+            {
+                Text = L.S("Share the last plate between the colours (AMS lite)", "Del den sidste plade mellem farverne (AMS lite)"),
+                Size = new Size(ContentW, 26), Margin = new Padding(0, 6, 0, 0), Visible = plain >= 2
+            };
+            share.CheckedChanged += delegate { if (share.Enabled && !updating) shareWanted = share.Checked; };
+            t.Controls.Add(share);
+            shareNote = new Label
+            {
+                Text = L.F("Full plates keep one colour; each colour's last plate goes on one shared plate. Fewer plates, but slower (colour changes). STL and OBJ, 2–{0} colours.",
+                           "Fulde plader har én farve; hver farves sidste plade kommer på én fælles plade. Færre plader, men langsommere (farveskift). STL og OBJ, 2–{0} farver.",
+                           BambuSlicer.MaxTogetherColours),
+                AutoSize = true, Tag = "muted", Font = new Font("Segoe UI", 9f), UseMnemonic = false,
+                MaximumSize = new Size(ContentW - BackupForm.Tick.TextX, 0), Margin = new Padding(BackupForm.Tick.TextX, 0, 0, 0), Visible = plain >= 2
+            };
+            t.Controls.Add(shareNote);
 
             // buttons 32 px high like the other windows, 6 px apart, Cancel's right edge = the drop-downs' right edge;
-            // the top margin evens the gap under the note with the gaps above (info box -> rows, rows -> "Print together")
-            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, 7, 0, 0) };
+            // the top margin evens the gap under the note with the gaps above (info box -> rows, rows -> "Print together");
+            // batch-2 qol #3: at least 16 px clear under the share note's last line
+            var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill, Margin = new Padding(0, plain >= 2 ? 16 : 7, 0, 0) };
             Func<string, Button> button = text => new Button { Text = text, AutoSize = true, MinimumSize = new Size(75, 32), Margin = new Padding(6, 0, 0, 0) };
             ok = button(L.S("Slice selected", "Slice valgte"));
             var cancel = button(L.S("Cancel", "Annullér"));
@@ -531,6 +555,13 @@ namespace PrintPrice
             together.Enabled = plain.Count >= 2 && colours >= 2 && colours <= BambuSlicer.MaxTogetherColours && !anyBatch;
             // greyed out = not used (Accept ignores it), so it doesn't keep showing a tick
             if (!together.Enabled && together.Checked) together.Checked = false;
+            // batch-2: sharing the last plate is for copies in 2+ colours (greyed out = unticked, the wish is kept)
+            int shareColours = plain.Where(r => BambuSlicer.CanShareFile(r.Name)).Select(Key).Distinct().Count();
+            bool canShare = anyBatch && shareColours >= 2;
+            updating = true;
+            share.Enabled = canShare;
+            share.Checked = canShare && shareWanted;
+            updating = false;
             // qol #5: say why it is greyed out when copies are the reason
             if (togetherNote != null && togetherText != null)
             {
@@ -540,6 +571,14 @@ namespace PrintPrice
         }
 
         string togetherText;   // the note under "together" as built
+        bool updating;         // UpdateState sets the share tick (not the user's wish)
+
+        /// batch-2: the share tick's start value (Settings' ShareLastPlate); shown ticked once it can be used.
+        internal bool ShareDefault
+        {
+            get { return shareWanted; }
+            set { shareWanted = value; UpdateState(); }
+        }
         static string NoTogetherText { get { return L.S("Not with copies above 1.", "Ikke med mere end 1 stk."); } }
 
         static string Key(Row r) { return (r.Filament ?? "").ToLowerInvariant() + "|" + (r.Colour ?? "").ToUpperInvariant(); }
@@ -583,6 +622,7 @@ namespace PrintPrice
             }
             Plan = ColourPlan.Build(parts, together.Visible && together.Enabled && together.Checked);
             Plan.Copies = copies.Any(c => c > 1) ? copies : null;
+            Plan.Share = share.Visible && share.Enabled && share.Checked;   // batch-2
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -600,6 +640,9 @@ namespace PrintPrice
         internal bool TestTogetherOn { get { return together.Enabled; } }
         internal string TestInfoText { get { return helpBox != null ? helpBox.Text ?? "" : ""; } }
         internal void TestTickTogether() { together.Checked = true; }
+        internal bool TestShareOn { get { return share.Enabled; } }
+        internal bool TestShareTicked { get { return share.Checked; } }
+        internal void TestTickShare(bool on) { share.Checked = on; }
 
         /// Picture mode / tests: the copies typed into each row's box (null entries = left as they are).
         internal void SampleCopies(int[] copies)

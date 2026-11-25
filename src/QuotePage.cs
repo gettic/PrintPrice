@@ -589,7 +589,7 @@ namespace PrintPrice
                 y += 44;
                 HLine(L0, R0, y, p.Line, 2);
                 y += 14;
-                y = DrawRows(g, p, d, QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams),
+                y = DrawRows(g, p, d, QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName, d.Quantity), d.TowerGrams),
                              y, draw, F, T, compact);
                 y += 4;
                 HLine(L0, R0, y, p.Line, 2);

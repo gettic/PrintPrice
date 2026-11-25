@@ -309,7 +309,14 @@ namespace PrintPrice
             bt.Controls.Add(lblFailedCap, 0, 3); bt.Controls.Add(lblFailed, 1, 3);
             var baseCap = BreakCaption(L.S("Base cost", "Kostpris")); baseCap.Font = new Font(Font, FontStyle.Bold);
             lblBase.Font = new Font(Font, FontStyle.Bold);
-            bt.Controls.Add(baseCap, 0, 4); bt.Controls.Add(lblBase, 1, 4);
+            // batch-2 compact mode: the Power row folds into this one ("Base cost  incl. power 3,91 kr."), see SetCompact
+            lblBasePower = new Label { AutoSize = true, Tag = "muted", UseMnemonic = false, Visible = false, Margin = new Padding(0, 3, 3, 3), Anchor = AnchorStyles.Left };
+            var baseFlow = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
+                                                 Margin = Padding.Empty, Padding = Padding.Empty, Anchor = AnchorStyles.Left };
+            baseFlow.Controls.Add(baseCap);
+            baseFlow.Controls.Add(lblBasePower);
+            powerCap = (Label)bt.GetControlFromPosition(0, 2);
+            bt.Controls.Add(baseFlow, 0, 4); bt.Controls.Add(lblBase, 1, 4);
             // failed prints payback: added after markup (not part of the base cost), hidden while 0, see UpdatePaybackRow
             lblPaybackCap = BreakCaption(""); lblPayback = BreakLabel();
             lblPaybackCap.Visible = lblPayback.Visible = false;
@@ -368,11 +375,17 @@ namespace PrintPrice
             lblAuto.LocationChanged += delegate { FitModelPicture(); };
             picModel.Resize += delegate { picModel.Invalidate(); };
             Load += delegate { printerCardReady = true; LayoutPrinterCard(); };   // after the widths above are set
+            // batch-2: too tall for the screen (e.g. 4 colours on 1080p at 150 %): compact mode (CheckFit)
+            Shown += delegate { CheckFit(); };
+            SizeChanged += delegate { CheckFit(); };
+            Move += delegate { CheckFit(); };   // dragged onto a smaller screen
 
             // ---------- Prices ----------
             var prices = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, Margin = new Padding(0, 0, 0, 8) };
-            prices.Controls.Add(PriceBox(L.S("Friends && family", "Venner og familie"), "friends", out lblFriends, out lblFriendsInfo), 0, 0);
+            var friendsPriceBox = PriceBox(L.S("Friends && family", "Venner og familie"), "friends", out lblFriends, out lblFriendsInfo);
+            prices.Controls.Add(friendsPriceBox, 0, 0);
             var custBox = PriceBox(L.S("Customers", "Kunder"), "others", out lblOthers, out lblOthersInfo);
+            compactParts = new Control[] { inputs, grpBreak, prices, friendsPriceBox, custBox, root };   // batch-2 compact mode (SetCompact)
             custBox.Margin = Padding.Empty;   // gap only between the boxes, not after the last one
             prices.Controls.Add(custBox, 1, 0);
             root.Controls.Add(prices);
@@ -1155,6 +1168,13 @@ namespace PrintPrice
         List<int> jobFileCopies;
         /// The next slice's copies per file (set by the Copies window and Repeat print, used once by AnalyzeAsync).
         List<int> copiesForNextSlice;
+        /// batch-2: the shown job's "share the colours' last plate" choice (as sliced; Open again = the record's). Saved with
+        /// the job's parts (History.SetShareLastPlate).
+        bool jobShare;
+        /// The next slice's share choice (the Copies window, Repeat print; used once by AnalyzeAsync); null = the picker's
+        /// tick for a new job, the shown job's for Scale… / tower / Copies, else Settings'.
+        bool? shareForNextSlice;
+        bool SettingsShare { get { return settings.ShareLastPlate == 1; } }
 
         /// scalePct = the size to slice at (100 = as the file is); rescale = the shown job again at another size (Scale…):
         /// the same files and colour plan (no picker), the picture stays, and a failed slice keeps the shown numbers.
@@ -1169,6 +1189,8 @@ namespace PrintPrice
             // link keep the shown job's; a new job: the file picker's, else 1 each)
             var nextCopies = copiesForNextSlice;
             copiesForNextSlice = null;
+            var nextShare = shareForNextSlice;   // batch-2
+            shareForNextSlice = null;
             // issue #8: G-code can't be scaled; say so first (not "Bambu Studio was not found" when it's missing)
             if (BambuSlicer.IsScaled(scalePct) && localFiles != null && localFiles.Any(BambuSlicer.IsGcodeFile))
             {
@@ -1283,7 +1305,11 @@ namespace PrintPrice
                 bool tower = sliceTower;   // issue #8 step 3: this slice's tower switch
                 int fileCount = chosen != null ? chosen.Count : localFiles.Count;
                 var fileCopies = NormalizeCopies(nextCopies ?? (rescale != null ? jobFileCopies : plan != null ? plan.Copies : null), fileCount);
-                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token, scale, tower, fileCopies));
+                // batch-2: share the colours' last plate (the Copies window / Repeat once, Scale… keeps the job's, a new job: the
+                // picker's tick, else Settings')
+                bool share = nextShare ?? (rescale != null ? jobShare : plan != null && savedParts == null && rescale == null ? plan.Share : SettingsShare);
+                var result = await Task.Run(() => RunJob(exe, printablesId, chosen, files, printer, nozzle, process, filament, bed, colourPlan, progress, token, scale, tower, fileCopies, share));
+                jobShare = share;
                 // batch & plates: the shown job's copies and plates (the boxes below hold the totals of all copies)
                 jobFileCopies = fileCopies;
                 jobCopies = result.Copies > 0 ? result.Copies : fileCopies != null ? fileCopies.Sum() : 1;
@@ -1378,7 +1404,10 @@ namespace PrintPrice
             string what = modelName != null ? "\"" + modelName + "\"" :
                           localFiles.Count == 1 ? Path.GetFileName(localFiles[0]) : L.F("{0} files", "{0} filer", localFiles.Count);
             if (BambuSlicer.IsScaled(jobScale)) what += " (" + ScaleLabel(jobScale) + ")";   // issue #8: "3D Benchy" (150 %)
-            what = History.CopiesName(what, jobCopies);   // batch & plates: 4 × "3D Benchy"
+            // batch-2 qol #2: several files with copies: "50 pcs (2 files)" (jobCopies = all pieces; "50 × 2 files" read as 100)
+            bool filesInWhat = modelName == null && localFiles.Count > 1 && jobCopies > 1 && !BambuSlicer.IsScaled(jobScale);
+            if (filesInWhat) what = History.PiecesText(jobCopies) + " (" + L.F("{0} files", "{0} filer", localFiles.Count) + ")";
+            else what = History.CopiesName(what, jobCopies);   // batch & plates: 4 × "3D Benchy"
             // grams worked out from the filament length (e.g. Cura): shown as an estimate; a missing value is left out
             var said = new List<string>();
             if (!noTime) said.Add((totalMinutes / 60) + L.S(" h ", " t ") + (totalMinutes % 60) + " m");
@@ -1397,8 +1426,13 @@ namespace PrintPrice
             // ", N plates" only without the plates link (2+ plates: the link under the line says it)
             bool platesLink = result.PlateList != null && result.PlateList.Count >= 2;
             string extra = (parts > 1 ? (result.Together ? L.F(", {0} files on one plate", ", {0} filer på én plade", parts)
-                                                         : L.F(", {0} files", ", {0} filer", parts)) : "") +
+                                                         : filesInWhat ? "" : L.F(", {0} files", ", {0} filer", parts)) : "") +
                            (result.Plates > parts && !platesLink ? L.F(", {0} plates", ", {0} plader", result.Plates) : "");
+            // batch-2: a shared last plate: ", 4 plates, 1 with mixed colours" (also with the plates link: it says which one);
+            // numbers joined to their words by no-break spaces
+            int mixedPlates = SharedMixedPlates(result);
+            if (mixedPlates > 0)
+                extra += ", " + SharedPlatesText(mixedPlates).Replace(' ', ' ');   // qol #2: ", 1 shared plate" (the plates link says how many)
             if (string.IsNullOrEmpty(how) && extra.Length > 0) extra = extra.Substring(2);
             string tail = (how ?? "") + extra;
             // name for the history (after the link box was filled, whose TextChanged clears it)
@@ -1436,6 +1470,17 @@ namespace PrintPrice
             else if (studioFirst)
                 notes.Add(L.F("\"Open in Studio\" opens only the first file (1 of {0}).",
                               "\"Åbn i Studio\" åbner kun den første fil (1 af {0}).", parts));
+            // batch-2: what sharing the last plate did: the trade-off ("Sharing: 1 plate less, +2 h 11 m, +37 g"), or one short
+            // Warning line when it fell back (the reason in the line's dark tooltip, like "together")
+            bool shareFellBack = result.Share != null && !result.Share.Applied && !string.IsNullOrEmpty(result.Share.Problem);
+            // with the plates link the trade-off is the plates menu's last line (the box stays at 3 lines); one plate: a note
+            shareMenuNote = result.Share != null && result.Share.Applied ? ShareNoteText(result.Share) : null;
+            if (shareMenuNote != null && !platesLink) notes.Add(shareMenuNote);
+            else if (shareFellBack && !fellBack)
+            {
+                notes.Add(L.S("Each colour kept its own plates.", "Hver farve beholdt sine egne plader."));
+                autoWarning = true;
+            }
             // a sliced file made for another of our printers: its time and weight are that printer's (warning stripe)
             if (result.FromSlicedFile && !string.IsNullOrEmpty(result.PrinterModel) &&
                 Wear.FindModel(result.PrinterModel).Key != Wear.FindModel(settings.PrinterModel).Key)
@@ -1448,12 +1493,43 @@ namespace PrintPrice
             if (notes.Count > 0) lblAuto.SetText(lblAuto.Text, string.Join("\n", notes));
             if (fellBack && lblAuto.NoteControl != null && printerTip != null)
                 printerTip.SetToolTip(lblAuto.NoteControl, WrapTip(result.TogetherProblem, 45));
+            else if (shareFellBack && lblAuto.NoteControl != null && printerTip != null)
+                printerTip.SetToolTip(lblAuto.NoteControl, WrapTip(result.Share.Problem, 45));
             ShowPlatesLink(result.PlateList);
             platesProblem = fellBack ? result.TogetherProblem : null;   // a Repeat print shows them in the link's tooltip
             platesStudioOf = studioFirst ? parts : 0;
             SetAutoColor();
             if (noTime) txtHours.Focus();
             else if (noGrams && !txtGrams.ReadOnly) txtGrams.Focus();
+        }
+
+        // ---------- batch-2: share the colours' last plate ----------
+
+        /// Mixed-colour plates of a slice whose last plate was shared (SliceResult.Share applied); 0 = none / not shared.
+        static int SharedMixedPlates(SliceResult r)
+        {
+            if (r == null || r.Share == null || !r.Share.Applied || r.PlateList == null) return 0;
+            return Math.Max(1, r.PlateList.Count(p => p != null && (p.Shared || BambuSlicer.IsMixedPlate(p))));
+        }
+
+        /// "1 shared plate" / "1 fælles plade" ("2 shared plates" / "2 fælles plader"): the ✓ line's part (qol #2).
+        internal static string SharedPlatesText(int n)
+        {
+            return n == 1 ? L.S("1 shared plate", "1 fælles plade") : L.F("{0} shared plates", "{0} fælles plader", n);
+        }
+
+        /// "Sharing: 1 plate fewer, +2 h 11 m, +37 g" / "Deling: 1 plade færre, +2 t 11 m, +37 g" (what the shared plate cost
+        /// against each colour's own last plate); a fallback = its Problem text; null = "".
+        internal static string ShareNoteText(ShareInfo s)
+        {
+            if (s == null) return "";
+            if (!s.Applied) return s.Problem ?? "";
+            string plates = s.PlatesSaved == 1 ? L.S("1 plate fewer", "1 plade færre") : L.F("{0} plates fewer", "{0} plader færre", s.PlatesSaved);   // ui-text #3
+            int min = (int)Math.Round(Math.Abs(s.ExtraSeconds) / 60.0);
+            string time = (s.ExtraSeconds < 0 ? "–" : "+") + (min >= 60 ? L.F("{0} h {1} m", "{0} t {1} m", min / 60, min % 60) : min + " m");
+            double g = Math.Round(Math.Abs(s.ExtraGrams));
+            string grams = (s.ExtraGrams < 0 ? "–" : "+") + Num.Fmt(g) + " g";
+            return L.S("Sharing: ", "Deling: ") + plates + ", " + time + ", " + grams;
         }
 
         // ---------- a colour per file and plates (idea 21) ----------
@@ -1698,7 +1774,25 @@ namespace PrintPrice
             int files = mode == CopiesForm.Mode.Typed ? 1 : JobFileCount;
             // several files: the window's number is per file (shown: the same number of every file, else the first one's)
             int each = files > 1 && jobFileCopies != null && jobFileCopies.Count > 0 ? jobFileCopies[0] : files > 1 ? 1 : jobCopies;
-            return new CopiesForm(mode, each, jobPlates, files);
+            // batch-2: the share tick for a job of 2+ colours from STL / OBJ files (the last slice's sharing line under the help)
+            bool offer = mode == CopiesForm.Mode.Slice && CanShareJob;
+            var r = lastJobResult;
+            string note = offer && r != null && r.Share != null ? ShareNoteText(r.Share) : null;
+            return new CopiesForm(mode, each, jobPlates, files, offer ? (bool?)jobShare : null, note);
+        }
+
+        /// batch-2: the shown job has 2+ colours among its STL / OBJ files (a colour plan), so its last plates could be shared.
+        bool CanShareJob
+        {
+            get
+            {
+                var job = lastJob;
+                if (job == null || job.Plan == null || job.Plan.Parts == null) return false;
+                var keys = new HashSet<int>();
+                foreach (var p in job.Plan.Parts)
+                    if (p != null && p.Slot > 0 && BambuSlicer.CanShareFile(p.File)) keys.Add(p.Slot);
+                return keys.Count >= 2;
+            }
         }
 
         /// The Copies window for the shown job; Apply slices it again with the new copies (Slice / Multiply) or prices the
@@ -1709,28 +1803,38 @@ namespace PrintPrice
             if (!CanCopiesJob && !TypedCopiesOffered) return;
             var mode = CopiesMode;
             int copies, plates;
+            bool share;
             using (var f = NewCopiesForm())
             {
                 if (f.ShowDialog(this) != DialogResult.OK) return;
                 copies = f.Copies;
                 plates = f.Plates;
+                share = f.Share;
             }
             if (mode == CopiesForm.Mode.Typed) { SetTypedCopies(copies, plates); return; }
-            var _ = RecopyAsync(copies);
+            var _ = RecopyAsync(copies, CanShareJob ? share : jobShare);
         }
 
         /// Slices the shown job again with copies of each file (same files, colours, size and tower; a failed slice keeps the
         /// job as it was).
         async Task<bool> RecopyAsync(int copies)
         {
+            return await RecopyAsync(copies, jobShare);
+        }
+
+        /// batch-2: as above with the share choice (the Copies window's tick).
+        async Task<bool> RecopyAsync(int copies, bool share)
+        {
             var job = lastJob;
             if (job == null) return false;
             var keepRepeat = repeatOf;
             copiesForNextSlice = new List<int> { Math.Max(1, copies) };
             towerForNextSlice = jobTower;
+            shareForNextSlice = share;
             bool ok = await AnalyzeAsync(job.PrintablesId, job.LocalFiles, null, null, false, jobScale, job);
             copiesForNextSlice = null;
             towerForNextSlice = null;
+            shareForNextSlice = null;
             if (ok) repeatOf = keepRepeat;
             return ok;
         }
@@ -1805,10 +1909,47 @@ namespace PrintPrice
         /// 28 copies" (DA "28 stk.") instead of the object count.
         static string PlateMenuLine(PlateInfo p, bool showFile)
         {
-            if (p == null || p.Copies <= 0) return BambuSlicer.PlateLine(p, showFile);
+            if (p == null || p.Copies <= 0) return BambuSlicer.PlateLine(p, showFile) + ColourChangesPart(p);
             string numbers = BambuSlicer.PlateNumbers(new PlateInfo { Seconds = p.Seconds, Grams = p.Grams });
-            return BambuSlicer.PlateTitle(p, showFile) + " – " + numbers + ", " +
-                   (p.Copies == 1 ? L.S("1 copy", "1 stk.") : L.F("{0} copies", "{0} stk.", p.Copies));
+            // batch-2: the shared last plate says so ("Plate 3 (shared)"), not Bambu Studio's internal plate name
+            string title = p.Shared ? L.S("Shared plate", "Fælles plade") : BambuSlicer.PlateTitle(p, showFile);
+            return title + " – " + numbers + ", " +
+                   (p.Copies == 1 ? L.S("1 copy", "1 stk.") : L.F("{0} copies", "{0} stk.", p.Copies)) + ColourChangesPart(p);
+        }
+
+        /// batch-2: " · 212 colour changes" / " · 212 farveskift" for a plate with 2+ colours whose changes are known; else "".
+        static string ColourChangesPart(PlateInfo p)
+        {
+            if (p == null || p.ColourChanges <= 0 || !BambuSlicer.IsMixedPlate(p)) return "";
+            return " · " + (p.ColourChanges == 1 ? L.S("1 colour change", "1 farveskift") : L.F("{0} colour changes", "{0} farveskift", p.ColourChanges));
+        }
+
+        /// batch-2: the colours on a plate (filaments of 0,5 g or more, as BambuSlicer.PlateColourCount counts them), in slot
+        /// order; the plates menu draws one dot each.
+        static List<Color> PlateColours(PlateInfo p)
+        {
+            var list = new List<Color>();
+            if (p == null || p.Filaments == null) return list;
+            foreach (var f in p.Filaments.Where(x => x != null && x.Grams >= 0.5).OrderBy(x => x.Slot))
+                list.Add(ParseColour(f.Colour));
+            return list;
+        }
+
+        /// A row of round colour dots (d px each, 3 px apart, Muted ring so black shows) on a transparent strip `slots` dots wide.
+        static Bitmap ColourDots(List<Color> colours, int slots, int d)
+        {
+            var bmp = new Bitmap(Math.Max(1, slots * (d + 3)), d);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                for (int i = 0; i < colours.Count && i < slots; i++)
+                {
+                    var r = new Rectangle(i * (d + 3) + 1, 1, d - 3, d - 3);
+                    if (!colours[i].IsEmpty) using (var b = new SolidBrush(colours[i])) g.FillEllipse(b, r);
+                    using (var pen = new Pen(Theme.Muted)) g.DrawEllipse(pen, r);
+                }
+            }
+            return bmp;
         }
 
         /// The names in a plate's tooltip. Batch plates (qol #4): Bambu Studio's copy names ("3DBenchy.stl_29", …) grouped
@@ -1836,13 +1977,29 @@ namespace PrintPrice
         ContextMenuStrip PlatesMenu(List<PlateInfo> plates, ToolTip tip)
         {
             bool showFile = plates.Select(p => p.File ?? "").Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1;
-            var menu = new ContextMenuStrip { ShowImageMargin = false, Renderer = new QuoteMenuRenderer(), ShowItemToolTips = false,
+            // batch-2: a job with 2+ colours on its plates gets a colour dot per colour on each plate (image margin)
+            var colours = plates.Select(PlateColours).ToList();
+            int slots = colours.Count == 0 ? 0 : colours.Max(c => c.Count);
+            bool dots = slots >= 1 && colours.SelectMany(c => c).Select(c => c.ToArgb()).Distinct().Count() >= 2;
+            int d = ScalePx(12);
+            var menu = new ContextMenuStrip { ShowImageMargin = dots, Renderer = new QuoteMenuRenderer(), ShowItemToolTips = false,
                                               BackColor = Theme.Input, ForeColor = Theme.Text };
+            if (dots) menu.ImageScalingSize = new Size(slots * (d + 3), d);
+            var images = new List<Image>();
+            menu.Disposed += delegate { foreach (var i in images) i.Dispose(); };
             menu.Items.Add(new ToolStripMenuItem(L.S("Plates in this job:", "Plader i dette job:")) { Enabled = false });
             menu.Items.Add(new ToolStripSeparator());
-            foreach (var p in plates)
+            for (int pi = 0; pi < plates.Count; pi++)
             {
+                var p = plates[pi];
                 var mi = new ToolStripMenuItem(PlateMenuLine(p, showFile).Replace("&", "&&")) { ForeColor = Theme.Text };
+                if (dots)
+                {
+                    var img = ColourDots(colours[pi], slots, d);
+                    images.Add(img);
+                    mi.Image = img;
+                    mi.ImageScaling = ToolStripItemImageScaling.None;
+                }
                 var objects = PlateObjectNames(p);
                 if (objects.Count > 0 && tip != null)
                 {
@@ -1862,6 +2019,12 @@ namespace PrintPrice
                 }
                 menu.Items.Add(mi);
             }
+            if (!string.IsNullOrEmpty(shareMenuNote) && ReferenceEquals(plates, shownPlates))
+            {
+                // batch-2: what sharing the last plate cost / saved, muted under the plates
+                menu.Items.Add(new ToolStripSeparator());
+                menu.Items.Add(new ToolStripMenuItem(shareMenuNote) { Enabled = false });
+            }
             if (tip != null)
                 menu.KeyUp += delegate   // keyboard (arrow keys): the highlighted plate's object names too
                 {
@@ -1874,6 +2037,7 @@ namespace PrintPrice
         }
 
         List<PlateInfo> shownPlates;   // the plates behind the link (picture mode draws their menu)
+        string shareMenuNote;          // batch-2: "Sharing: 1 plate less, +1 h 41 m, +23 g" as the plates menu's last line (null = none)
         string platesProblem;          // the last slice's TogetherProblem when "together" fell back (null = didn't)
         int platesStudioOf;            // the last slice's file count when Studio opens only the first file (0 = not)
 
@@ -1881,6 +2045,7 @@ namespace PrintPrice
         void ForgetPlates()
         {
             shownPlates = null;
+            shareMenuNote = null;
             platesProblem = null;
             platesStudioOf = 0;
         }
@@ -1958,6 +2123,62 @@ namespace PrintPrice
             var f = typedMode ? new CopiesForm(CopiesForm.Mode.Typed, Math.Max(1, jobCopies), Math.Max(1, jobPlates), 1) : NewCopiesForm();
             f.SampleType(typed > 0 ? typed : Math.Max(1, jobCopies));   // also "as it opens": nothing marked in the picture
             if (typedMode && typed > 0) f.SampleTypePlates(Math.Max(1, (typed + 9) / 10));
+            return f;
+        }
+
+        /// batch-2 picture mode: the quantity discount on (from 10 pcs 5 %, from 50 pcs 10 %, customers only) or off again, then
+        /// the shown job is priced again (main_discount.png / quote_discount.png).
+        internal void SampleDiscount(bool on)
+        {
+            if (!offline) return;
+            settings.QtyDiscountFrom1 = on ? 10 : 0; settings.QtyDiscountPct1 = on ? 5 : 0;
+            settings.QtyDiscountFrom2 = on ? 50 : 0; settings.QtyDiscountPct2 = on ? 10 : 0;
+            settings.QtyDiscountWho = 2;
+            Recalculate();
+        }
+
+        /// batch-2 picture mode: 30 red + 20 blue clips with "share the last plate": one full red plate (24), one full blue
+        /// plate (16), and the shared plate (6 red + 4 blue, 2 colours, 61 colour changes); numbers in the style of online's
+        /// runs. The ✓ line, the sharing note, the plates link (its menu: main_shared_plates_menu.png).
+        internal void SetSampleSharedJob()
+        {
+            if (!offline) return;
+            ClearJob();
+            txtUrl.Text = L.F("{0} files: ", "{0} filer: ", 2) + "clip_red.stl, clip_blue.stl";
+            var r = new SliceResult { Seconds = 4 * 3600 + 12 * 60 + 3 * 3600 + 5 * 60 + 2 * 3600 + 43 * 60, Grams = 69.4 + 46.3 + 53.6, Plates = 3,
+                                      PurgeGrams = 22.6, ColourChangeHours = 1.68, Copies = 50, PerPlate = 24 };
+            r.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#C12E1F", Type = "PLA", Profile = "Bambu PLA Basic", Grams = 69.4 + 30.4, ModelGrams = -1 });
+            r.Filaments.Add(new FilamentUse { Slot = 2, Colour = "#0A2989", Type = "PLA", Profile = "Bambu PLA Basic", Grams = 46.3 + 23.2, ModelGrams = -1 });
+            var p1 = new PlateInfo { Index = 1, File = "clip_red.stl", Seconds = 4 * 3600 + 12 * 60, Grams = 69.4, Copies = 24 };
+            p1.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#C12E1F", Grams = 69.4 });
+            var p2 = new PlateInfo { Index = 1, File = "clip_blue.stl", Seconds = 3 * 3600 + 5 * 60, Grams = 46.3, Copies = 16 };
+            p2.Filaments.Add(new FilamentUse { Slot = 2, Colour = "#0A2989", Grams = 46.3 });
+            var p3 = new PlateInfo { Index = 1, File = "clip_red.stl + clip_blue.stl", Seconds = 2 * 3600 + 43 * 60, Grams = 53.6, Copies = 10,
+                                     Shared = true, ColourChanges = 61 };
+            p3.Filaments.Add(new FilamentUse { Slot = 1, Colour = "#C12E1F", Grams = 30.4 });
+            p3.Filaments.Add(new FilamentUse { Slot = 2, Colour = "#0A2989", Grams = 23.2 });
+            for (int i = 1; i <= 24; i++) p1.Objects.Add("clip_red.stl_" + i);
+            for (int i = 1; i <= 16; i++) p2.Objects.Add("clip_blue.stl_" + i);
+            for (int i = 25; i <= 30; i++) p3.Objects.Add("clip_red.stl_" + i);
+            for (int i = 17; i <= 20; i++) p3.Objects.Add("clip_blue.stl_" + i);
+            r.PlateList.Add(p1); r.PlateList.Add(p2); r.PlateList.Add(p3);
+            r.Share = new ShareInfo { Applied = true, Colours = 2, PlatesSaved = 1, ExtraSeconds = 6042, ExtraGrams = 22.6, ColourChanges = 61 };
+            txtElecPrice.Text = "3,65";
+            jobCopies = 50; jobPlates = 3; jobPerPlate = 24; jobCopiesMultiplied = false; jobCopiesTyped = false;
+            jobFileCopies = new List<int> { 30, 20 };
+            jobShare = true;
+            ShowJobResult(r, null, new List<string> { @"C:\Models\clip_red.stl", @"C:\Models\clip_blue.stl" }, 2, settings.ProcessPreset, "Bambu PLA Basic", null);
+            jobModel = "Cable clip";
+            SetSampleRowPrices("200");
+            Recalculate();
+        }
+
+        /// batch-2 picture mode: the Copies window of a two-colour job with the share tick (on) and the last slice's sharing line.
+        internal CopiesForm SampleShareCopiesWindow()
+        {
+            if (!offline) return null;
+            var f = new CopiesForm(CopiesForm.Mode.Slice, 30, 3, 2, true, lastJobResult != null && lastJobResult.Share != null ? ShareNoteText(lastJobResult.Share) : null);
+            f.SampleType(30);
             return f;
         }
 
@@ -2201,7 +2422,7 @@ namespace PrintPrice
                 }
                 // 11. two files with their own copies (4 + 10), sliced by Bambu Studio (online's tiny test blocks): saved per
                 // file, then Repeat print slices each file with its own count again, and the plan rebuilt from the record has them
-                string onlineFiles = Path.GetFullPath(Path.Combine(Application.StartupPath, "..", "plans", "batch-plates", "online", "files"));
+                string onlineFiles = BatchTestFiles();
                 var f2 = new List<string> { Path.Combine(onlineFiles, "red_block.stl"), Path.Combine(onlineFiles, "blue_block.stl") };
                 if (!f2.All(File.Exists)) log.Check(false, "11 test blocks missing in " + onlineFiles);
                 else
@@ -2251,11 +2472,257 @@ namespace PrintPrice
                         Screenshots.Snap(this, dir, "test_batch_two_files.png");
                     }
                 }
+                await TestBatch2(log, dir, when, typeJob);
                 settings.PlateChangeFee = keepFee; settings.QuoteShowUnitPrice = keepUnit;
             }
             catch (Exception ex) { log.Check(false, "exception: " + ex); }
             try { File.WriteAllLines(Path.Combine(dir, "test_batch.txt"), log.Lines); } catch { }
             Program.EndTestRun(log.Ok ? 0 : 4);
+        }
+
+        /// The tests' model files (online's tiny blocks, cube.step): plans\batch-plates\online\files, or its plans\_old copy.
+        static string BatchTestFiles()
+        {
+            string root = Path.GetFullPath(Path.Combine(Application.StartupPath, "..", "plans"));
+            string a = Path.Combine(root, "batch-plates", "online", "files"), b = Path.Combine(root, "_old", "batch-plates", "online", "files");
+            return Directory.Exists(a) ? a : b;
+        }
+
+        /// batch-2 part of --test-batch (sections 12-15): the quantity discount (price lines, tooltip, quote rows, Copy text,
+        /// saved record, off = as before), plates printed in History (status menu +1 / –1 saved, "3 of 5 plates", "Printing
+        /// plate 4 of 5", the selection line, the Invoices row's totals), a REAL two-colour batch with sharing the last plate
+        /// (Bambu Studio: 1 shared plate, the ✓ line, notes, plates menu dots, saved choice, Copies window) and its fallback.
+        async Task TestBatch2(TestLog log, string dir, DateTime when, Action typeJob)
+        {
+            double[] keep = { settings.QtyDiscountFrom1, settings.QtyDiscountPct1, settings.QtyDiscountFrom2, settings.QtyDiscountPct2,
+                              settings.QtyDiscountFrom3, settings.QtyDiscountPct3, settings.QtyDiscountWho, settings.ShareLastPlate };
+            try
+            {
+                // 12. quantity discount: from 10 pcs 5 %, from 50 pcs 10 %, customers only
+                typeJob();
+                settings.QtyDiscountFrom1 = 10; settings.QtyDiscountPct1 = 5;
+                settings.QtyDiscountFrom2 = 50; settings.QtyDiscountPct2 = 10;
+                settings.QtyDiscountFrom3 = 0; settings.QtyDiscountPct3 = 0;
+                settings.QtyDiscountWho = 2;
+                SetTypedCopies(40, 2);
+                log.Check(last.DiscountPct == 5 && last.DiscountFrom == 10 && last.OthersDiscount > 0 && last.FriendsDiscount == 0,
+                          "12a 40 pcs: " + Num.Fmt(last.DiscountPct) + " % from " + last.DiscountFrom + ", customer -" + Num.Kr(last.OthersDiscount) +
+                          ", friends -" + Num.Kr(last.FriendsDiscount));
+                log.Check(lblOthersInfo.Text == History.EachText(last.OthersPrice, 40) + " · " + History.DiscountShortText(5) &&
+                          lblFriendsInfo.Text == History.EachText(last.FriendsPrice, 40),
+                          "12b price lines: \"" + lblFriendsInfo.Text + "\" / \"" + lblOthersInfo.Text + "\"");
+                string tip = printerTip.GetToolTip(lblOthersInfo) ?? "";
+                log.Check(tip.Contains(L.F("Before discount: {0}", "Før rabat: {0}", Num.Kr(last.OthersPrice + last.OthersDiscount))) &&
+                          tip.Contains("–" + Num.Kr(last.OthersDiscount)) && !(printerTip.GetToolTip(lblFriendsInfo) ?? "").Contains("–"),
+                          "12c tooltip: " + tip.Replace("\n", " / "));
+                var b = Pricing.Breakdown(lastInput, settings, false, null);
+                var rows = QuoteRows.Build(b, null, -1, lastInput.Hours, lastInput.Minutes, "", 40);
+                var sub = rows.FirstOrDefault(r => r.Subtotal);
+                var disc = rows.FirstOrDefault(r => r.Label == History.DiscountText(5, 40));
+                var dl = b.Lines.First(l => l.Key == QuoteLine.Discount);
+                long beforeOre = 0;
+                foreach (var l in QuoteRows.FoldMinimum(b.Lines)) { if (l.Key == QuoteLine.Discount) break; beforeOre += l.Ore; }
+                log.Check(sub != null && sub.Label == History.PriceBeforeDiscountText() && sub.Amount == Num.Kr(beforeOre / 100.0) &&
+                          disc != null && disc.Amount == "–" + Num.Kr(-dl.Ore / 100.0) && rows.IndexOf(disc) == rows.IndexOf(sub) + 2,
+                          "12d quote rows: " + (sub != null ? sub.Label + " " + sub.Amount : "no subtotal") + " | " + (disc != null ? disc.Label + " " + disc.Amount : "no discount row"));
+                string ct = QuoteText(null);
+                log.Check(ct.Contains(Num.Kr(last.OthersPrice) + " " + History.EachInclDiscountText(last.OthersPrice, 40, last, false)) &&
+                          ct.Contains(Num.Kr(last.FriendsPrice) + " (" + History.EachPriceText(last.FriendsPrice, 40) + ")"),
+                          "12e Copy text: " + ct.Replace(Environment.NewLine, " | "));
+                var dq = BuildQuote(false, when, "40", "Rabat Kunde");
+                log.Check(dq.EachLine == History.EachText(dq.Breakdown.Total, 40), "12f quote page each line after the discount: " + dq.EachLine);
+                using (var page = QuotePage.Render(dq, false)) page.Save(Path.Combine(dir, "test_batch2_discount_quote.png"), System.Drawing.Imaging.ImageFormat.Png);
+                QuoteRecord dr;
+                jobModel = "Rabatklips";
+                string e1 = SaveToHistory(History.ForCustomer, "Rabat Kunde", out dr);
+                string drt = dr != null ? RecordText(dr, false, false) : "";
+                log.Check(e1 == null && dr != null && dr.QtyDiscountPct == 5 && dr.QtyDiscountFrom == 10 && drt.Contains(L.S("quantity discount", "mængderabat")),
+                          "12g saved with 5 %: " + drt.Replace(Environment.NewLine, " | "));
+                SetTypedCopies(60, 2);
+                log.Check(last.DiscountPct == 10 && lblOthersInfo.Text.EndsWith(History.DiscountShortText(10)), "12h 60 pcs: the 10 % step, " + lblOthersInfo.Text);
+                settings.QtyDiscountWho = 1;
+                Recalculate();
+                log.Check(last.FriendsDiscount > 0 && lblFriendsInfo.Text.EndsWith(History.DiscountShortText(10)), "12i both prices: friends -" + Num.Kr(last.FriendsDiscount));
+                // off again: no discount anywhere, the texts as before
+                settings.QtyDiscountFrom1 = settings.QtyDiscountPct1 = settings.QtyDiscountFrom2 = settings.QtyDiscountPct2 = 0;
+                settings.QtyDiscountWho = 2;
+                Recalculate();
+                var b0 = Pricing.Breakdown(lastInput, settings, false, null);
+                log.Check(last.DiscountPct == 0 && lblOthersInfo.Text == History.EachText(last.OthersPrice, 60) &&
+                          !b0.Lines.Any(l => l.Key == QuoteLine.Discount) &&
+                          !QuoteRows.Build(b0, null, -1, lastInput.Hours, lastInput.Minutes, "", 60).Any(r => r.Subtotal) &&
+                          QuoteText(null) == QuoteRows.JobText(null, LinkSource(), lastInput.Hours, lastInput.Minutes, Num.Fmt(lastInput.FilamentGrams), 0,
+                                                               last.FriendsPrice, last.OthersPrice, 60, 2, true),
+                          "12j discount off: no row, no mark, the old Copy text");
+                Screenshots.Snap(this, dir, "test_batch2_discount.png");
+
+                // 13. plates printed: a job of 10 copies on 5 plates in History; the real status menu +1 / –1, saved at once
+                typeJob();
+                SetTypedCopies(10, 5);
+                QuoteRecord p5;
+                jobModel = "Plader5";
+                SaveToHistory(History.ForCustomer, "Plade Kunde", out p5);
+                typeJob();
+                SetTypedCopies(4, 2);
+                QuoteRecord p2;
+                jobModel = "Plader2";
+                SaveToHistory(History.ForCustomer, "Plade Kunde", out p2);
+                if (p5 == null || p2 == null) log.Check(false, "13 saving the test jobs failed");
+                else
+                {
+                    var hist = new HistoryForm(history, null, false) { Settings = settings };
+                    try
+                    {
+                        hist.Show();
+                        Application.DoEvents();
+                        hist.TestSelect(new List<QuoteRecord> { p5 });
+                        string menu = hist.TestStatusMenuTexts(p5);
+                        log.Check(menu.Contains("-" + History.PlatesPrintedText(0, 5)) && menu.Contains("+" + History.PlusPlateText()) &&
+                                  menu.Contains("-" + History.MinusPlateText()), "13a status menu: " + menu);
+                        bool c1 = hist.TestStatusMenuClick(p5, History.PlusPlateText()), c2 = hist.TestStatusMenuClick(p5, History.PlusPlateText()),
+                             c3 = hist.TestStatusMenuClick(p5, History.PlusPlateText());
+                        DateTime now = DateTime.Now;
+                        log.Check(c1 && c2 && c3 && p5.PlatesDone == 3 && History.PrintStateOf(p5, now) == PrintState.Printing &&
+                                  HistoryForm.PlatesStatusText(p5, now) == History.PlatesProgressText(3, 5) &&
+                                  hist.TestInfo == "✓ " + History.PlatesPrintedText(3, 5) + ".",
+                                  "13b +1 x 3: " + p5.PlatesDone + " done, cell \"" + HistoryForm.PlatesStatusText(p5, now) + "\", line \"" + hist.TestInfo + "\"");
+                        string problem;
+                        var disk = History.Load(out problem);
+                        var p5d = disk != null ? disk.FirstOrDefault(x => x.Id == p5.Id) : null;
+                        log.Check(p5d != null && p5d.PlatesDone == 3, "13c saved at once: history.json has " + (p5d != null ? p5d.PlatesDone.ToString() : "no record"));
+                        bool c4 = hist.TestStatusMenuClick(p5, History.MinusPlateText());
+                        disk = History.Load(out problem);
+                        p5d = disk != null ? disk.FirstOrDefault(x => x.Id == p5.Id) : null;
+                        log.Check(c4 && p5.PlatesDone == 2 && p5d != null && p5d.PlatesDone == 2, "13d –1: " + p5.PlatesDone + " (saved " + (p5d != null ? p5d.PlatesDone : -9) + ")");
+                        hist.SetStatus(new List<QuoteRecord> { p5 }, PrintState.Printing);
+                        string stip = HistoryForm.StatusTip(p5) ?? "";
+                        log.Check(History.IsPrinting(p5, DateTime.Now) && stip.StartsWith(History.PrintingPlateText(3, 5)), "13e printing now: \"" + stip + "\"");
+                        hist.TestSelect(new List<QuoteRecord> { p5, p2 });
+                        var prog = History.Progress(new[] { p5, p2 }, DateTime.Now);
+                        log.Check(hist.TestInfo == History.SelectedProgressText(2, prog.PlatesDone, 7), "13f 2 selected: \"" + hist.TestInfo + "\"");
+                        hist.SetStatus(new List<QuoteRecord> { p5 }, PrintState.Printed);
+                        log.Check(p5.PlatesDone == 5 && History.PrintStateOf(p5, DateTime.Now) == PrintState.Printed && HistoryForm.PlatesStatusText(p5, DateTime.Now) == null,
+                                  "13g Printed = all 5 plates, the cell says Printed");
+                        hist.TestSelect(new List<QuoteRecord> { p5 });
+                        log.Check(!hist.TestStatusMenuTexts(p5).Contains("+" + History.PlusPlateText()), "13h all printed: +1 is off");
+                        Screenshots.Snap(hist, dir, "test_batch2_history.png");
+                    }
+                    finally { hist.Close(); hist.Dispose(); }
+                }
+
+                // 14. a REAL two-colour batch with "share the last plate" on (Bambu Studio): red block x 4 + blue block x 10 each
+                // fit one plate, so the two part-full last plates become ONE shared plate with both colours
+                string files = BatchTestFiles();
+                var blocks = new List<string> { Path.Combine(files, "red_block.stl"), Path.Combine(files, "blue_block.stl") };
+                if (!blocks.All(File.Exists)) log.Check(false, "14 test blocks missing in " + files);
+                else
+                {
+                    ClearJob();
+                    var parts = new List<HistoryPart>
+                    {
+                        new HistoryPart { File = blocks[0], Filament = "Bambu PLA Basic", Colour = "#C12E1F", Copies = 4 },
+                        new HistoryPart { File = blocks[1], Filament = "Bambu PLA Basic", Colour = "#0A2989", Copies = 10 },
+                    };
+                    txtUrl.Text = L.F("{0} files: ", "{0} filer: ", 2) + string.Join(", ", blocks.Select(Path.GetFileName));
+                    shareForNextSlice = true;
+                    bool done = await AnalyzeAsync(null, blocks, null, parts, false);
+                    var res = lastJobResult;
+                    var shared = res != null ? res.PlateList.FirstOrDefault(p => p.Shared) : null;
+                    log.Add("INFO 14 result: " + (lblAuto.Text ?? "").Replace("\n", " / ") + " | plates " + (res != null ? res.PlateList.Count : 0) +
+                            (res != null && res.Share != null ? " | share applied " + res.Share.Applied + ", saved " + res.Share.PlatesSaved + ", +" +
+                             Math.Round(res.Share.ExtraSeconds) + " s, +" + Num.Fmt(Math.Round(res.Share.ExtraGrams, 2)) + " g, changes " + res.Share.ColourChanges +
+                             ", problem " + (res.Share.Problem ?? "-") : " | no share info"));
+                    log.Check(done && res != null && res.Share != null && res.Share.Applied && res.Share.PlatesSaved == 1 && jobCopies == 14 && jobShare,
+                              "14a sliced with sharing: applied, 1 plate saved, 14 copies");
+                    log.Check(shared != null && res.PlateList.Count == 1 && BambuSlicer.IsMixedPlate(shared) && BambuSlicer.PlateColourCount(shared) == 2 &&
+                              shared.Copies == 14, "14b one shared plate with both colours and 14 copies: " +
+                              (shared != null ? PlateMenuLine(shared, false) + ", colours " + BambuSlicer.PlateColourCount(shared) : "none"));
+                    string line = lblAuto.Text ?? "";
+                    log.Check(line.Contains(SharedPlatesText(1).Replace(' ', ' ')) &&
+                              res != null && res.Share != null && lblAuto.MutedLine.Contains(ShareNoteText(res.Share)) && !autoWarning,
+                              "14c ✓ line + sharing note: " + line.Replace("\n", " / ") + " / " + lblAuto.MutedLine);
+                    if (res != null && res.PlateList.Count > 0)
+                    {
+                        using (var m = PlatesMenu(res.PlateList, null))
+                        {
+                            var item = m.Items.OfType<ToolStripMenuItem>().LastOrDefault();
+                            log.Check(m.ShowImageMargin && item != null && item.Image != null &&
+                                      (shared == null || shared.ColourChanges <= 0 || item.Text.Contains(L.S("colour change", "farveskift"))),
+                                      "14d plates menu: colour dots" + (item != null ? ", \"" + item.Text + "\"" : ""));
+                        }
+                    }
+                    if (done)
+                    {
+                        QuoteRecord sr;
+                        jobModel = "Delte klodser";
+                        string e5 = SaveToHistory(History.ForCustomer, "Plade Kunde", out sr);
+                        log.Check(e5 == null && sr != null && sr.Parts != null && sr.Parts.ShareLastPlate == 1 && History.ShareLastPlateFor(sr, settings),
+                                  "14e saved with the share choice: " + (sr != null && sr.Parts != null ? sr.Parts.ShareLastPlate.ToString() : "no parts"));
+                        using (var f = NewCopiesForm())
+                            log.Check(f.TestHasShare && f.TestInfoMuted == ShareNoteText(res.Share), "14f Copies window: share tick, note \"" + f.TestInfoMuted + "\"");
+                        Screenshots.Snap(this, dir, "test_batch2_shared.png");
+                        if (sr != null)
+                        {
+                            ClearJob();
+                            Reopen(sr);
+                            log.Check(jobShare, "14g Open again keeps the share choice");
+                        }
+                    }
+                    // 15. the fallback: two 150 x 150 mm plates (big1.stl, one per plate) in two colours: their last plates don't fit
+                    // on one plate together, so each colour keeps its own plates (warning note, the reason in the tooltip). The
+                    // second colour is a copy of big1.stl in this test's own folder.
+                    string big = Path.Combine(files, "big1.stl"), bigBlue = Path.Combine(dir, "big1_blue.stl");
+                    if (!File.Exists(big)) log.Check(false, "15 big1.stl missing in " + files);
+                    else
+                    {
+                        File.Copy(big, bigBlue, true);
+                        ClearJob();
+                        var two = new List<string> { big, bigBlue };
+                        var parts2 = new List<HistoryPart>
+                        {
+                            new HistoryPart { File = two[0], Filament = "Bambu PLA Basic", Colour = "#C12E1F", Copies = 2 },
+                            new HistoryPart { File = two[1], Filament = "Bambu PLA Basic", Colour = "#0A2989", Copies = 2 },
+                        };
+                        txtUrl.Text = L.F("{0} files: ", "{0} filer: ", 2) + string.Join(", ", two.Select(Path.GetFileName));
+                        shareForNextSlice = true;
+                        bool done2 = await AnalyzeAsync(null, two, null, parts2, false);
+                        var r2 = lastJobResult;
+                        log.Add("INFO 15 result: " + (lblAuto.Text ?? "").Replace("\n", " / ") + " | plates " + (r2 != null ? r2.PlateList.Count : 0) +
+                                " | problem " + (r2 != null && r2.Share != null ? r2.Share.Problem ?? "-" : "no share info"));
+                        log.Check(done2 && r2 != null && r2.Share != null && !r2.Share.Applied && !string.IsNullOrEmpty(r2.Share.Problem) &&
+                                  r2.PlateList.Count == 4 && autoWarning &&
+                                  lblAuto.MutedLine.Contains(L.S("Each colour kept its own plates.", "Hver farve beholdt sine egne plader.")),
+                                  "15a fell back: own plates, warning note");
+                        string ntip = lblAuto.NoteControl != null ? printerTip.GetToolTip(lblAuto.NoteControl) ?? "" : "";
+                        log.Check(r2 != null && r2.Share != null && ntip.Replace("\n", " ") == WrapTip(r2.Share.Problem, 45).Replace("\n", " "),
+                                  "15b the reason in the note's tooltip: " + ntip.Replace("\n", " "));
+                        Screenshots.Snap(this, dir, "test_batch2_fallback.png");
+                    }
+                }
+                // 16. compact mode: a made-up working area 40 px lower than the window -> compact, smaller, nothing cut off;
+                // back off = the same height as before
+                int before = Height;
+                string normalFit = FitReport("16 normal");
+                log.Add("INFO " + normalFit);   // the credits panel's "GitHub" link reports 1-2 px over its panel in both modes (not visible)
+                Func<string, string> cutOf = s => s.Contains("CUT:") ? s.Substring(s.IndexOf("CUT:")) : "";
+                TestWorkHeight = (int)Math.Round((Height - ScalePx(40)) * 96f / DeviceDpi);
+                SampleCheckFit();
+                string fit = FitReport("16 compact");
+                log.Check(compact && Height < before && Height <= ScalePx(TestWorkHeight) && cutOf(fit) == cutOf(normalFit) && lblBasePower.Visible && !lblPower.Visible,
+                          fit + " (was " + before + " px)");
+                Screenshots.Snap(this, dir, "test_batch2_compact.png");
+                TestWorkHeight = 0;
+                SetCompact(false);
+                log.Check(!compact && Height == before, "16b compact off again: " + Height + " px");
+            }
+            catch (Exception ex) { log.Check(false, "batch-2 exception: " + ex); }
+            finally
+            {
+                shareForNextSlice = null;
+                settings.QtyDiscountFrom1 = keep[0]; settings.QtyDiscountPct1 = keep[1]; settings.QtyDiscountFrom2 = keep[2];
+                settings.QtyDiscountPct2 = keep[3]; settings.QtyDiscountFrom3 = keep[4]; settings.QtyDiscountPct3 = keep[5];
+                settings.QtyDiscountWho = keep[6]; settings.ShareLastPlate = keep[7];
+            }
         }
 
         /// Picture mode: draws the plates menu (never shown on screen there) under its link, as it opens.
@@ -2283,6 +2750,8 @@ namespace PrintPrice
                     var font = SystemFonts.StatusFont;
                     var ts = TextRenderer.MeasureText(text, font);
                     var box = new Rectangle(x + item.Bounds.Right + 4, y + item.Bounds.Top, ts.Width + 12, ts.Height + 8);
+                    // batch-2 qol #11: a wide menu leaves no room beside it in the picture: no cut-off tooltip then
+                    if (box.Right > g.VisibleClipBounds.Right) return;
                     using (var b = new SolidBrush(Theme.InfoBack)) g.FillRectangle(b, box);
                     using (var pen = new Pen(Theme.Border)) g.DrawRectangle(pen, box.X, box.Y, box.Width - 1, box.Height - 1);
                     TextRenderer.DrawText(g, text, font, box, Theme.Text, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
@@ -2359,6 +2828,7 @@ namespace PrintPrice
         FilePickerForm PickFiles(string title, List<string> names, List<bool> ticked, bool printables)
         {
             var picker = new FilePickerForm(title, names, ticked, printables, BambuSlicer.ShortName(settings.FilamentPreset), FilamentNames);
+            picker.ShareDefault = SettingsShare;   // batch-2: the share tick starts as Settings say
             using (picker)
             {
                 if (picker.ShowDialog(this) != DialogResult.OK) return null;
@@ -2371,7 +2841,7 @@ namespace PrintPrice
         static SliceResult RunJob(string exe, string printId, List<RemoteFile> remote, List<string> local, string printer,
                                   string nozzle, string process, string filament, string bed, ColourPlan plan,
                                   IProgress<string> progress, CancellationToken ct, ScaleXyz scalePct = null, bool primeTower = true,
-                                  IList<int> copies = null)
+                                  IList<int> copies = null, bool shareLastPlate = false)
         {
             if (scalePct == null) scalePct = ScaleXyz.None;
             // batch & plates: copies per file (null = 1 each); any 2+ = BambuSlicer.SliceBatch
@@ -2424,8 +2894,9 @@ namespace PrintPrice
                         items.Add(new BatchItem { Name = models[i].Key, Path = models[i].Value, Copies = i < copies.Count ? Math.Max(1, copies[i]) : 1,
                                                   Slot = plan != null && i < plan.Slots.Count ? Math.Max(1, plan.Slots[i]) : 1 });
                     total = BambuSlicer.SliceBatch(exe, items, plan != null ? plan.Colours : null, work, printer, nozzle,
-                                                   BambuSlicer.ShortName(filament), progress, ct, scalePct);
+                                                   BambuSlicer.ShortName(filament), progress, ct, scalePct, shareLastPlate);   // batch-2
                     if (plan != null)
+                    {
                         foreach (var f in total.Filaments)
                         {
                             if (f == null || f.Slot < 1 || f.Slot > plan.Colours.Count) continue;
@@ -2433,6 +2904,13 @@ namespace PrintPrice
                             f.Profile = string.IsNullOrEmpty(c.Filament) ? BambuSlicer.ShortName(filament) : c.Filament;
                             if (!string.IsNullOrEmpty(c.Colour)) f.Colour = c.Colour;
                         }
+                        // batch-2: the plates' colour dots in the user's colours too (the plates menu)
+                        foreach (var p in total.PlateList)
+                            if (p != null && p.Filaments != null)
+                                foreach (var f in p.Filaments)
+                                    if (f != null && f.Slot >= 1 && f.Slot <= plan.Colours.Count && !string.IsNullOrEmpty(plan.Colours[f.Slot - 1].Colour))
+                                        f.Colour = plan.Colours[f.Slot - 1].Colour;
+                    }
                 }
                 else if (plan != null)
                 {
@@ -2880,7 +3358,8 @@ namespace PrintPrice
             FitColourGrid();
             string note = multi ? PurgeNote(r, PurgeLineWidth()) : "";
             lblPurge.Text = note;
-            lblPurge.Visible = note.Length > 0;
+            lblPurge.Visible = note.Length > 0 && !compact;
+            UpdatePurgeTip();
             txtGrams.ReadOnly = multi;
             txtGrams.TabStop = !multi;
             txtGrams.ForeColor = multi ? Theme.Muted : Theme.Text;
@@ -2924,14 +3403,116 @@ namespace PrintPrice
 
         /// One row height for the whole Cost breakdown (material rows, Power, Failed, Base cost, payback): 28 px at 96 dpi,
         /// at least a kr/kg box + 3 px.
-        int BreakRowHeight() { return Math.Max(ScalePx(28), rowPrice[0].Height + ScalePx(3)); }
+        int BreakRowHeight()
+        {
+            return compact ? Math.Max(ScalePx(24), rowPrice[0].Height + ScalePx(1))   // compact: the boxes just fit
+                           : Math.Max(ScalePx(28), rowPrice[0].Height + ScalePx(3));
+        }
+
+        // ---------- batch-2: compact mode (only when the window doesn't fit the screen) ----------
+
+        bool compact;                 // on: rows 24 px, Power folded into Base cost, colour-change note in a tooltip, lower price boxes, smaller gaps
+        bool fitting;                 // CheckFit running (its size change must not call it again)
+        Label powerCap, lblBasePower; // the Power row's caption; "incl. power 3,91 kr." after "Base cost" (compact only)
+        Control[] compactParts;       // inputs table, Cost breakdown, prices table, the two price boxes
+        /// Tests / picture mode: a made-up working-area height (96-dpi px) instead of the screen's; 0 = the real screen
+        /// (picture mode and hidden test runs never look at the real screen).
+        internal static int TestWorkHeight;
+
+        /// Turns compact mode on when the window is taller than the screen's working area (never back off by itself:
+        /// no jumping between two looks). Big screens never see it.
+        void CheckFit()
+        {
+            if (compact || fitting || breakBaseHeight == 0 || WindowState == FormWindowState.Minimized) return;
+            int avail;
+            if (TestWorkHeight > 0) avail = ScalePx(TestWorkHeight);
+            else if (offline || Program.Hidden || Screenshots.Active) return;
+            else avail = Screen.FromControl(this).WorkingArea.Height;
+            if (Height <= avail) return;
+            fitting = true;
+            try { SetCompact(true); }
+            finally { fitting = false; }
+        }
+
+        /// Compact mode on / off (picture mode and tests switch it back off). Saves ~98 px at 96 dpi with 4 colours.
+        internal void SetCompact(bool on)
+        {
+            if (compactParts == null || compact == on) return;
+            SuspendLayout();
+            compact = on;
+            int gap = ScalePx(on ? 4 : 8);
+            compactParts[0].Margin = new Padding(0, 0, 0, gap);
+            compactParts[1].Margin = new Padding(0, 0, 0, gap);
+            compactParts[2].Margin = new Padding(0, 0, 0, gap);
+            compactParts[3].Height = compactParts[4].Height = ScalePx(on ? 84 : 112);
+            foreach (var big in new[] { lblFriends, lblOthers })   // 22 -> 19 pt: the price keeps clear of its grey line
+            {
+                var old = big.Font;
+                big.Font = new Font("Segoe UI", on ? 19f : 22f, FontStyle.Bold);
+                old.Dispose();
+            }
+            int edge = ScalePx(14), edgeV = ScalePx(on ? 10 : 14);
+            compactParts[5].Padding = new Padding(edge, edgeV, edge, edgeV);   // the window's top / bottom edge
+            int infoV = ScalePx(on ? 4 : 8);   // the live-price box (and its Update button, lined up with it)
+            lblPowerInfo.Margin = new Padding(lblPowerInfo.Margin.Left, infoV, lblPowerInfo.Margin.Right, infoV);
+            btnPower.Margin = new Padding(btnPower.Margin.Left, infoV, btnPower.Margin.Right, btnPower.Margin.Bottom);
+            powerCap.Visible = lblPower.Visible = !on;
+            lblBasePower.Visible = on;
+            breakRowHeight = BreakRowHeight();
+            FitColourGrid();
+            lblPurge.Visible = !on && lblPurge.Text.Length > 0;
+            UpdatePurgeTip();
+            UpdateBreakHeight();
+            ResumeLayout(true);
+            if (!fitting) Recalculate();   // the Base cost line's power part
+        }
+
+        /// Compact: the colour-change note lives in the tooltip of the material rows' grams and of Base cost.
+        void UpdatePurgeTip()
+        {
+            if (printerTip == null) return;
+            string tip = compact && lblPurge.Text.Length > 0 ? lblPurge.Text : null;
+            foreach (var g in rowGrams) printerTip.SetToolTip(g, tip);
+        }
+
+        internal bool TestCompact { get { return compact; } }
+
+        /// Picture mode / tests: "name: window 662 px (fits 672), compact, all inside" - every visible control lies inside
+        /// its parent's client area (nothing cut off) and the window fits the made-up working area.
+        internal string FitReport(string name)
+        {
+            var cut = new List<string>();
+            Action<Control> walk = null;
+            walk = c =>
+            {
+                foreach (Control k in c.Controls)
+                {
+                    if (!k.Visible) continue;
+                    if (!(c is Form) && (k.Right > c.ClientSize.Width + 1 || k.Bottom > c.ClientSize.Height + 1) && !(c is ScrollableControl && ((ScrollableControl)c).AutoScroll))
+                        cut.Add((k.Name.Length > 0 ? k.Name : k.GetType().Name) + " \"" + (k.Text ?? "").Replace("\n", " ") + "\" in " + c.GetType().Name);
+                    walk(k);
+                }
+            };
+            walk(this);
+            int limit = TestWorkHeight > 0 ? ScalePx(TestWorkHeight) : 0;
+            return name + ": window " + Height + " px" + (limit > 0 ? (Height <= limit ? " (fits " : " (TOO TALL for ") + limit + ")" : "") +
+                   (compact ? ", compact" : ", normal") + (cut.Count == 0 ? ", all inside" : ", CUT: " + string.Join("; ", cut));
+        }
+
+        /// Picture mode: checks the fit now (TestWorkHeight set by Screenshots).
+        internal void SampleCheckFit()
+        {
+            if (!offline && !Program.Hidden) return;
+            CheckFit();
+            if (compact) Recalculate();   // the Base cost line's power part
+        }
 
         /// Breakdown table rows 2-5 (Power, Failed, Base cost, payback) get the same fixed height; a hidden Failed /
         /// payback row is 0 (Absolute rows don't collapse by themselves). Before Load: AutoSize rows.
         void SetBreakRows()
         {
             if (breakBaseHeight == 0) return;
-            bool[] on = { true, settings.FailedPrintPct > 0, true, paybackRowOn, plateFeeRowOn };
+            bool[] on = { !compact, settings.FailedPrintPct > 0, true, paybackRowOn, plateFeeRowOn };   // compact: Power folds into Base cost
             for (int i = 0; i < on.Length; i++)
             {
                 var st = breakTable.RowStyles[2 + i];
@@ -3410,6 +3991,7 @@ namespace PrintPrice
                 last = null;
                 SetStatus(problem, false);
                 lblPower.Text = lblFailed.Text = lblBase.Text = lblPayback.Text = "–";   // payback row keeps its place (no jump while typing)
+                lblBasePower.Text = "";
                 foreach (var c in rowCost) c.Text = "–";
                 lblFriends.Text = lblOthers.Text = "–";
                 btnCopy.Enabled = btnSave.Enabled = false;
@@ -3448,6 +4030,8 @@ namespace PrintPrice
                     rowCost[i].Text = Num.Kr(rowItems[i].Sum(k => last.FilamentCosts[k]));
             else rowCost[0].Text = Num.Kr(last.MaterialCost);
             lblPower.Text = Num.Kr(last.PowerCost) + "  (" + last.PowerKwh.ToString("N2", Num.Dk) + " kWh)";
+            lblBasePower.Text = L.F("incl. power {0}", "inkl. strøm {0}", Num.Kr(last.PowerCost));   // compact mode only
+            if (printerTip != null) printerTip.SetToolTip(lblBasePower, compact ? L.S("Power: ", "Strøm: ") + lblPower.Text : null);
             lblFailed.Text = Num.Kr(last.FailedPrintCost);
             lblBase.Text = Num.Kr(last.BaseCost);
             UpdatePaybackRow();
@@ -3467,18 +4051,46 @@ namespace PrintPrice
         void UpdatePriceLines()
         {
             bool batch = jobCopies > 1 && last != null;
-            lblFriendsInfo.Text = batch ? History.EachText(last.FriendsPrice, jobCopies) : friendsMarkupLine;
-            lblOthersInfo.Text = batch ? History.EachText(last.OthersPrice, jobCopies) : othersMarkupLine;
+            // batch-2: a quantity discount adds " · –5 %" to the line (left out when the line would not fit its box)
+            lblFriendsInfo.Text = batch ? WithDiscountMark(History.EachText(last.FriendsPrice, jobCopies), true, lblFriendsInfo) : friendsMarkupLine;
+            lblOthersInfo.Text = batch ? WithDiscountMark(History.EachText(last.OthersPrice, jobCopies), false, lblOthersInfo) : othersMarkupLine;
             if (printerTip == null) return;
             string fee = last != null && last.PlateFee > 0
                 ? "\n" + L.F("incl. {0} for plate changes", "inkl. {0} til pladeskift", Num.Kr(last.PlateFee)) : "";
-            printerTip.SetToolTip(lblFriendsInfo, batch || fee.Length > 0 ? friendsMarkupLine + fee : null);
-            printerTip.SetToolTip(lblOthersInfo, batch || fee.Length > 0 ? othersMarkupLine + fee : null);
+            string fTip = DiscountTip(true), oTip = DiscountTip(false);
+            printerTip.SetToolTip(lblFriendsInfo, batch || fee.Length > 0 || fTip.Length > 0 ? friendsMarkupLine + fee + fTip : null);
+            printerTip.SetToolTip(lblOthersInfo, batch || fee.Length > 0 || oTip.Length > 0 ? othersMarkupLine + fee + oTip : null);
             // qol #8: a job typed by hand with copies: the boxes hold ONE copy's time and grams, the units say so
             bool each = jobCopiesTyped && jobCopies > 1;
             if (lblMinutesUnit != null) lblMinutesUnit.Text = each ? L.S("m each", "m/stk.") : "m";
             if (lblGramsUnit != null) lblGramsUnit.Text = each ? L.S("g each", "g/stk.") : "g";
             UpdatePlateFeeRow();
+        }
+
+        /// batch-2: "40 pcs · 5,31 kr. each" + " · –5 %" when the price's cut really is the step's % (Pricing.ShownDiscountPct:
+        /// rounding / the minimum / the cost floor changed nothing) and the line still fits its label (measured; else the
+        /// line as it was, the discount is in the tooltip).
+        string WithDiscountMark(string line, bool friends, Label lbl)
+        {
+            double pct = Pricing.ShownDiscountPct(last, friends);
+            if (!(pct > 0)) return line;
+            string with = line + " · " + History.DiscountShortText(pct);
+            int room = lbl.Width - lbl.Padding.Horizontal - 10;   // GDI+ draws a little wider than TextRenderer measures
+            return room <= 0 || TextRenderer.MeasureText(with, lbl.Font).Width <= room ? with : line;
+        }
+
+        /// batch-2: the price tooltip's discount lines: "\nBefore discount: 727,20 kr.\nQuantity discount 5 % (from 10 pcs):
+        /// –36,36 kr."; a cut that isn't the % (ShownDiscountPct 0): only "\nIncl. quantity discount (from 10 pcs)"; "" without.
+        string DiscountTip(bool friends)
+        {
+            if (last == null || !Pricing.HasDiscount(last, friends)) return "";
+            double pct = Pricing.ShownDiscountPct(last, friends);
+            double price = friends ? last.FriendsPrice : last.OthersPrice, discount = friends ? last.FriendsDiscount : last.OthersDiscount;
+            if (!(pct > 0))
+                return "\n" + L.F("Incl. quantity discount (from {0})", "Inkl. mængderabat (fra {0})", History.PiecesText(last.DiscountFrom));
+            return "\n" + L.F("Before discount: {0}", "Før rabat: {0}", Num.Kr(price + discount)) +
+                   "\n" + L.F("Quantity discount {0} (from {1}): {2}", "Mængderabat {0} (fra {1}): {2}", History.PctText(pct),
+                              History.PiecesText(last.DiscountFrom), "–" + Num.Kr(discount));
         }
 
         Label lblMinutesUnit, lblGramsUnit;   // the m / g units after the time and grams boxes (qol #8)
@@ -3532,9 +4144,9 @@ namespace PrintPrice
             SetBreakRows();
             // the designed height holds 3 plain rows; the real rows are: material rows (+ purge line), then Power, Base cost
             // (+ Failed, + payback) at one fixed row height each
-            int rows = 2 + (settings.FailedPrintPct > 0 ? 1 : 0) + (paybackRowOn ? 1 : 0) + (plateFeeRowOn ? 1 : 0);
+            int rows = (compact ? 1 : 2) + (settings.FailedPrintPct > 0 ? 1 : 0) + (paybackRowOn ? 1 : 0) + (plateFeeRowOn ? 1 : 0);
             int h = breakBaseHeight - 3 * plainRowHeight + rows * breakRowHeight + colourGrid.Height + colourGrid.Margin.Vertical;
-            if (lblPurge.Text.Length > 0) h += lblPurge.PreferredHeight + lblPurge.Margin.Vertical;   // text "" = hidden
+            if (lblPurge.Text.Length > 0 && !compact) h += lblPurge.PreferredHeight + lblPurge.Margin.Vertical;   // text "" = hidden; compact: a tooltip
             grpBreak.Height = h;
         }
 
@@ -3952,8 +4564,8 @@ namespace PrintPrice
             bool typed = jobCopiesTyped && jobCopies > 1 && lastInput != null;
             string text = QuoteRows.JobText(customer, LinkSource(), typed ? lastInput.Hours : lastHours, typed ? lastInput.Minutes : lastMinutes,
                                             typed ? Num.Fmt(lastInput.FilamentGrams) : txtGrams.Text,
-                                            filaments != null ? filaments.Count : 0, last.FriendsPrice, last.OthersPrice,
-                                            jobCopies, Math.Max(1, jobPlates), settings.QuoteShowUnitPrice != 0);
+                                            filaments != null ? filaments.Count : 0, last,
+                                            jobCopies, Math.Max(1, jobPlates), settings.QuoteShowUnitPrice != 0);   // batch-2 (T2: the % only when it is the real cut)
             return WithTowerLine(text, filaments != null && settings.QuoteShowTower == 1 ? jobTowerGrams : -1);   // issue #8 step 3
         }
 
@@ -5428,6 +6040,8 @@ namespace PrintPrice
             if (jobParts != null) History.SetParts(r, jobParts, jobTogether);   // idea 21: the filament / colour per file
             else if (repeatOf != null && History.PartsOf(repeatOf) != null)    // a repeat print: new records don't copy them
                 History.SetParts(r, History.PartsOf(repeatOf), History.PartsTogether(repeatOf));
+            if (jobCopies > 1 && CanShareJob || reopened != null && reopened.Parts != null && reopened.Parts.ShareLastPlate >= 0)
+                History.SetShareLastPlate(r, jobShare);   // batch-2: the job's sharing choice (a several-files job only)
             if (reopened != null) r.For = reopened.For;   // opened again and re-saved: same person as before
             if (repeatOf != null) { r.For = repeatOf.For; r.RepeatOf = repeatOf.Id ?? ""; }   // a repeat print: new record, same person
             if (forWho != 0)
@@ -5556,7 +6170,7 @@ namespace PrintPrice
                         // payback is folded into Work & handling too (pricing, whole-app review)
                         long workOre = lines.Where(l => l.Key == QuoteLine.Work || l.Key == QuoteLine.Payback).Sum(l => l.Ore) + (minLine != null ? minLine.Ore : 0);
                         var shown = QuoteRows.FoldMinimum(lines);
-                        var rows = QuoteRows.AddTowerNote(QuoteRows.Build(qd.Breakdown, qd.MaterialNames, qd.PurgeGrams, qd.Hours, qd.Minutes, qd.PlateName), qd.TowerGrams);
+                        var rows = QuoteRows.AddTowerNote(QuoteRows.Build(qd.Breakdown, qd.MaterialNames, qd.PurgeGrams, qd.Hours, qd.Minutes, qd.PlateName, qd.Quantity), qd.TowerGrams);
                         var workRow = rows.FirstOrDefault(r => r.Kind == QuoteRowKind.Head && r.Label == L.S("Work & handling", "Arbejde & håndtering"));
                         bool minDrawn = rows.Any(r => (r.Label + " " + r.Detail).IndexOf("inimum", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                                       (r.Label + " " + r.Detail).IndexOf(L.S("lowest price", "laveste pris"), StringComparison.OrdinalIgnoreCase) >= 0);
@@ -5910,7 +6524,7 @@ namespace PrintPrice
                     log.Check(lblPurge.Visible && lblPurge.Text.Replace("\n", " ").ToLowerInvariant().Contains(towerApp.ToLowerInvariant()),
                               "12a the app's note shows \"" + towerApp + "\": \"" + lblPurge.Text.Replace("\n", " / ") + "\"");
                     string note = QuoteRows.TowerNote(1.70);
-                    Func<QuoteData, List<QuoteRow>> rowsOf = d => QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams);
+                    Func<QuoteData, List<QuoteRow>> rowsOf = d => QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName, d.Quantity), d.TowerGrams);
                     Func<List<QuoteRow>, int> noteAt = rows => rows.FindIndex(x => x.Kind == QuoteRowKind.Note && x.Label == note);
                     var when12 = new DateTime(2026, 11, 20, 12, 0, 0);
                     settings.QuoteShowTower = 0;
@@ -7022,15 +7636,21 @@ namespace PrintPrice
                         done = applied > 0 && await RecopyAsync(applied);
                         log.Add("sliced again in " + (sw.ElapsedMilliseconds / 1000) + " s");
                         var rb = lastJobResult;
-                        check(done && rb != null && !ReferenceEquals(rb, first) && jobCopies == specCopies,
-                              "sliced again: " + jobCopies + " copies, " + jobPlates + " plate(s), " + jobPerPlate + " per plate");
+                        // several files: the window's number is per file, jobCopies = all pieces (release-test-7: stale check)
+                        int nFiles = Math.Max(1, JobFileCount);
+                        int pieces = specCopies * nFiles;
+                        check(done && rb != null && !ReferenceEquals(rb, first) && jobCopies == pieces,
+                              "sliced again: " + jobCopies + " copies (" + specCopies + " × " + nFiles + " files), " + jobPlates + " plate(s), " + jobPerPlate + " per plate");
                         string perPlate = rb != null ? string.Join(",", rb.PlateList.Select(p => p.Copies)) : "";
                         log.Add("copies per plate: " + perPlate);
                         if (expectPlates != null) check(perPlate == expectPlates, "copies per plate " + perPlate + " = expected " + expectPlates);
-                        check((lblAuto.Text ?? "").StartsWith("✓ " + specCopies + " × "), "result line: " + (lblAuto.Text ?? "").Replace("\n", " / "));
+                        check((lblAuto.Text ?? "").StartsWith("✓ " + History.PiecesText(pieces) + " (") || (lblAuto.Text ?? "").StartsWith("✓ " + pieces + " × "),
+                              "result line: " + (lblAuto.Text ?? "").Replace("\n", " / "));
                         if (rb != null)
                             foreach (var p in rb.PlateList) log.Add("plate menu: " + PlateMenuLine(p, false));
-                        check(lblOthersInfo.Text == History.EachText(last.OthersPrice, specCopies), "price line: " + lblOthersInfo.Text);
+                        // the line may end in the quantity discount's " · –5 %" (Settings' steps)
+                        check(lblOthersInfo.Text == WithDiscountMark(History.EachText(last.OthersPrice, pieces), false, lblOthersInfo),
+                              "price line: " + lblOthersInfo.Text);
                         log.Add("Copy text: " + QuoteText(null).Replace(Environment.NewLine, " | "));
                         if (first != null && rb != null)
                             log.Add("1 copy " + first.Seconds + " s / " + first.Grams.ToString("0.##", Num.Dk) + " g -> " + specCopies + " copies " +
@@ -7126,7 +7746,7 @@ namespace PrintPrice
                     }
                     TestRecordLines(log, rec);
                     if (specCopies > 0 && rec != null)
-                        check(rec.Quantity == specCopies && rec.Plates == jobPlates && rec.PerPlate == jobPerPlate && rec.CopiesEstimated == 0,
+                        check(rec.Quantity == specCopies * Math.Max(1, JobFileCount) && rec.Plates == jobPlates && rec.PerPlate == jobPerPlate && rec.CopiesEstimated == 0,
                               "record: Quantity " + rec.Quantity + ", Plates " + rec.Plates + ", per plate " + rec.PerPlate + ", name \"" + RecordModelName(rec) + "\"");
                     var savedParts = rec != null ? History.PartsOf(rec) : null;
                     check(savedParts != null && savedParts.Count == parts.Count, "record keeps the " + parts.Count + " part(s)");
@@ -7287,7 +7907,7 @@ namespace PrintPrice
                             string png = Path.Combine(dir, "test_history_" + cmd + "_" + arg + ".png");
                             using (var bmp = QuotePage.Render(d, false)) bmp.Save(png, System.Drawing.Imaging.ImageFormat.Png);
                             HistoryTest.PageModels[cmd + " " + arg] = d.Model ?? "";
-                            bool towerRow = TestHasTowerRow(QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName), d.TowerGrams), d.TowerGrams);
+                            bool towerRow = TestHasTowerRow(QuoteRows.AddTowerNote(QuoteRows.Build(d.Breakdown, d.MaterialNames, d.PurgeGrams, d.Hours, d.Minutes, d.PlateName, d.Quantity), d.TowerGrams), d.TowerGrams);
                             HistoryTest.PageTowers[cmd + " " + arg] = new KeyValuePair<double, bool>(d.TowerGrams, towerRow);
                             log.Add("  " + cmd + " page " + Path.GetFileName(png) + ": model \"" + d.Model + "\"" +
                                     (d.Invoice ? ", invoice " + d.InvoiceNo : ", quote " + d.Number) +
@@ -7593,10 +8213,12 @@ namespace PrintPrice
                 }
                 towerForNextSlice = History.PrimeTowerFor(r, settings);   // issue #8 step 3: the saved tower switch
                 copiesForNextSlice = RepeatCopies(r, parts.Count);        // batch & plates: the saved copies
+                shareForNextSlice = History.ShareLastPlateFor(r, settings);   // batch-2: the saved sharing choice
                 lastSliceBedError = false;
                 bool done = await AnalyzeAsync(id, paths, res => KeepSavedMaterials(res, r), parts, History.PartsTogether(r),
                                                RecordScale(r), null);   // issue #8: at the saved size
                 copiesForNextSlice = null;
+                shareForNextSlice = null;
                 if (done) { repeatOf = r; ShowRepeatLine(r, null); return; }
                 if (lastSliceBedError) { RefuseRepeat(r); return; }
                 string failed = (lblAuto.Text ?? "").Trim().TrimEnd('.');
@@ -7702,6 +8324,7 @@ namespace PrintPrice
             jobParts = History.PartsOf(r);   // a colour per file (idea 21): saving it again / a failed repeat keeps them
             jobFileCopies = RepeatCopies(r, jobParts != null ? jobParts.Count : 1);   // per file (several files: History.PartCopies)
             jobTogether = History.PartsTogether(r);
+            jobShare = History.ShareLastPlateFor(r, settings);   // batch-2
             ResetModelPicture();
             SetJobLoaded(true);   // no picture (Printables link, missing file) = logo without "No model yet"
             string src = (r.Source ?? "").Trim().Trim('"');

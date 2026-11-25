@@ -16,6 +16,7 @@ namespace PrintPrice
         public string Label = "", Detail = "", Amount = "";
         public int ColourIndex = -1;   // material sub-line: QuoteLine.Index (colour dot from the page's colours); -1 = no dot
         public bool Alone;             // a head line without sub-lines: a little more room under it
+        public bool Subtotal;          // batch-2: "Price before discount" (a sum of the rows above; not part of the total again)
     }
 
     static class QuoteRows
@@ -37,6 +38,13 @@ namespace PrintPrice
         /// The breakdown rows by QuoteLine.Key: material head (+ a sub-line per colour and the purge note), then a rule
         /// and a head line (wear: + its parts) for every other line. Names by QuoteLine.Index (empty = "Colour N").
         public static List<QuoteRow> Build(QuoteBreakdown b, IList<string> materialNames, double purgeGrams, int hours, int minutes, string plateName)
+        {
+            return Build(b, materialNames, purgeGrams, hours, minutes, plateName, 0);
+        }
+
+        /// batch-2: as above; pieces = the job's copies for the quantity discount's "(40 pcs)" (0 = left out).
+        public static List<QuoteRow> Build(QuoteBreakdown b, IList<string> materialNames, double purgeGrams, int hours, int minutes, string plateName,
+                                           int pieces)
         {
             var rows = new List<QuoteRow>();
             var lines = FoldMinimum(b.Lines);   // the customer never sees a minimum-price top-up: it is part of Work & handling
@@ -90,12 +98,41 @@ namespace PrintPrice
                         rows.Add(Head(L.S("Rounding", "Afrunding"),
                             L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity)), l.Ore, true));
                         break;
+                    case QuoteLine.Discount:   // batch-2: "Price before discount" + "Quantity discount 5 % (40 pcs)  –36,36 kr."
+                        AddDiscountRows(rows, lines, l, pieces);
+                        break;
                     default:
                         rows.Add(Head(l.Key, "", l.Ore, true));
                         break;
                 }
             }
             return rows;
+        }
+
+        /// batch-2: the quantity discount's two rows (the rule before them is already added): "Price before discount" with
+        /// the sum of every line before the discount line (a subtotal, QuoteRow.Subtotal: not added to the total again), a rule,
+        /// then "Quantity discount 5 % (40 pcs)" with the negative amount ("–36,36 kr."). % 0 (a combined bill whose jobs
+        /// differ) = "Quantity discount" alone.
+        static void AddDiscountRows(List<QuoteRow> rows, List<QuoteLine> lines, QuoteLine l, int pieces)
+        {
+            long before = 0;
+            foreach (var x in lines)
+            {
+                if (ReferenceEquals(x, l)) break;
+                before += x.Ore;
+            }
+            var sub = Head(History.PriceBeforeDiscountText(), "", before, true);
+            sub.Subtotal = true;
+            rows.Add(sub);
+            rows.Add(new QuoteRow { Kind = QuoteRowKind.Rule });
+            string label = l.Quantity > 0 ? History.DiscountText(l.Quantity, pieces) : L.S("Quantity discount", "Mængderabat");
+            rows.Add(new QuoteRow { Kind = QuoteRowKind.Head, Label = label, Amount = MinusKr(l.Ore), Alone = true });
+        }
+
+        /// "–36,36 kr." for a negative øre amount (en dash, like the price box's "–5 %"); 0 or more = Num.Kr.
+        public static string MinusKr(long ore)
+        {
+            return ore < 0 ? "–" + Num.Kr(-ore / 100.0) : Num.Kr(ore / 100.0);
         }
 
         /// Issue #8 step 3: the "incl. 1,7 g for the prime tower" note (no amount) at the end of the material part (before the first
@@ -200,6 +237,9 @@ namespace PrintPrice
                     case QuoteLine.Rounding:
                         rows.Add(Head(L.S("Rounding", "Afrunding"), l.Quantity > 0
                             ? L.F("up to nearest {0} kr.", "op til nærmeste {0} kr.", Num.Fmt(l.Quantity)) : "", l.Ore, true));
+                        break;
+                    case QuoteLine.Discount:   // batch-2: the jobs' discounts summed (% only when they share one)
+                        AddDiscountRows(rows, lines, l, 0);
                         break;
                     default:
                         rows.Add(Head(l.Key, "", l.Ore, true));
@@ -390,6 +430,34 @@ namespace PrintPrice
         public static string JobText(string customer, string source, int hours, int minutes, string grams, int colours,
                                      double friendsPrice, double customerPrice, int quantity, int plates, bool showEach)
         {
+            return JobText(customer, source, hours, minutes, grams, colours, friendsPrice, customerPrice, quantity, plates, showEach, 0, 0);
+        }
+
+        /// batch-2: as above; friendsPct / customerPct = the quantity discount % each price got (0 = none): the price's
+        /// suffix becomes "(17,27 kr. each, incl. 5 % quantity discount)" (EachSuffix with pct).
+        public static string JobText(string customer, string source, int hours, int minutes, string grams, int colours,
+                                     double friendsPrice, double customerPrice, int quantity, int plates, bool showEach,
+                                     double friendsPct, double customerPct)
+        {
+            return JobText(customer, source, hours, minutes, grams, colours, friendsPrice, customerPrice, quantity, plates, showEach,
+                           friendsPct, customerPct, friendsPct > 0, customerPct > 0);
+        }
+
+        /// batch-2 (T2): the Copy text of a calculated job: prices and discounts from r (r.FriendsPrice / r.OthersPrice;
+        /// the % only when it is the real cut: Pricing.ShownDiscountPct / HasDiscount, as History.EachInclDiscountText(…, r, friends)).
+        public static string JobText(string customer, string source, int hours, int minutes, string grams, int colours,
+                                     QuoteResult r, int quantity, int plates, bool showEach)
+        {
+            return JobText(customer, source, hours, minutes, grams, colours, r.FriendsPrice, r.OthersPrice, quantity, plates, showEach,
+                           Pricing.ShownDiscountPct(r, true), Pricing.ShownDiscountPct(r, false), Pricing.HasDiscount(r, true), Pricing.HasDiscount(r, false));
+        }
+
+        /// batch-2 (release-test-7 T2): as above; friendsDiscounted / customerDiscounted = the price got a quantity discount,
+        /// pct 0 then = "incl. quantity discount" without a number (rounding / minimum changed the cut: Pricing.ShownDiscountPct).
+        public static string JobText(string customer, string source, int hours, int minutes, string grams, int colours,
+                                     double friendsPrice, double customerPrice, int quantity, int plates, bool showEach,
+                                     double friendsPct, double customerPct, bool friendsDiscounted, bool customerDiscounted)
+        {
             string nl = Environment.NewLine;
             bool batch = quantity > 1;
             string text = L.S("3D print quote", "Tilbud på 3D-print") + nl;
@@ -399,8 +467,8 @@ namespace PrintPrice
             if (batch) text += History.QuantityText(quantity) + nl;
             text += PrintTimeText(hours, minutes, batch ? plates : 1) + L.F(", filament: {0} g", ", filament: {0} g", (grams ?? "").Trim()) +
                     (colours > 0 ? L.F(" ({0} colours)", " ({0} farver)", colours) : "") + nl;
-            text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(friendsPrice) + EachSuffix(friendsPrice, quantity, showEach) + nl;
-            text += L.S("Customer: ", "Kunde: ") + Num.Kr(customerPrice) + EachSuffix(customerPrice, quantity, showEach);
+            text += L.S("Friends & family: ", "Venner og familie: ") + Num.Kr(friendsPrice) + EachSuffix(friendsPrice, quantity, showEach, friendsPct, friendsDiscounted) + nl;
+            text += L.S("Customer: ", "Kunde: ") + Num.Kr(customerPrice) + EachSuffix(customerPrice, quantity, showEach, customerPct, customerDiscounted);
             return text;
         }
 
@@ -430,6 +498,21 @@ namespace PrintPrice
         {
             if (!showEach || quantity <= 1) return "";
             return " (" + History.EachPriceText(total, quantity) + ")";
+        }
+
+        /// batch-2: as above with the quantity discount the price got (pct > 0): " (17,27 kr. each, incl. 5 % quantity
+        /// discount)", without the each part when !showEach or 1 copy (" (incl. 5 % quantity discount)"). pct 0 = EachSuffix.
+        public static string EachSuffix(double total, int quantity, bool showEach, double pct)
+        {
+            return EachSuffix(total, quantity, showEach, pct, pct > 0);
+        }
+
+        /// The same; discounted with pct 0 = " (17,27 kr. each, incl. quantity discount)" (no number).
+        public static string EachSuffix(double total, int quantity, bool showEach, double pct, bool discounted)
+        {
+            if (!discounted) return EachSuffix(total, quantity, showEach);
+            string t = History.EachInclDiscountText(total, showEach ? quantity : 1, pct, true);
+            return t.Length > 0 ? " " + t : "";
         }
 
         /// The breakdown row of the plate change fee: "Plate changes" / "Pladeskift".
@@ -469,7 +552,7 @@ namespace PrintPrice
             text += PrintTimeText(r.Hours, r.Minutes, qty > 1 ? History.PlatesOf(r) : 1) +
                     L.F(", filament: {0} g", ", filament: {0} g", Num.Fmt(r.Grams)) + nl;
             double price = friends ? r.FriendsPrice : r.OthersPrice;
-            text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(price) + EachSuffix(price, qty, showEach);
+            text += (invoice ? L.S("Total: ", "I alt: ") : L.S("Price: ", "Pris: ")) + Num.Kr(price) + EachSuffix(price, qty, showEach, History.DiscountPctFor(r, friends));
             if (invoice)
             {
                 DateTime billed;
@@ -511,11 +594,13 @@ namespace PrintPrice
             double flush = purgeGrams > 0 ? Math.Max(0, purgeGrams - tw) : purgeGrams;
             bool g = flush > 0.5, h = colourChangeHours >= 0.05;
             string grams = g ? flush.ToString(flush >= 10 ? "0" : "0.#", Num.Dk) : "";
-            string hours = h ? colourChangeHours.ToString("0.#", Num.Dk) : "";
+            // batch-2 qol #6: the time as "1 h 41 m" / "1 t 41 m" (was "1,7 h"); under an hour "41 m"
+            int mins = h ? Math.Max(1, (int)Math.Round(colourChangeHours * 60)) : 0;
+            string hours = !h ? "" : mins >= 60 ? L.F("{0} h {1} m", "{0} t {1} m", mins / 60, mins % 60) : mins + " m";
             note = "";
-            if (g && h) note = L.F("incl. {0} g and {1} h for colour changes", "heraf {0} g og {1} t til farveskift", grams, hours);
+            if (g && h) note = L.F("incl. {0} g and {1} for colour changes", "heraf {0} g og {1} til farveskift", grams, hours);
             else if (g) note = L.F("incl. {0} g for colour changes", "heraf {0} g til farveskift", grams);
-            else if (h) note = L.F("{0} h for colour changes", "{0} t til farveskift", hours);
+            else if (h) note = L.F("{0} for colour changes", "{0} til farveskift", hours);
             tower = TowerText(tw, towerSeconds, true);
         }
 
@@ -636,7 +721,7 @@ namespace PrintPrice
                 double amount = i < jobOre.Length ? jobOre[i] / 100.0 : 0;
                 text += "- " + History.CopiesName(ModelName(r.Model), qty) + ": " +
                         L.F("{0} h {1} m", "{0} t {1} m", r.Hours, r.Minutes) + (qty > 1 ? OnPlates(History.PlatesOf(r)) : "") +
-                        L.F(", {0} g", ", {0} g", Num.Fmt(r.Grams)) + ": " + Num.Kr(amount) + EachSuffix(amount, qty, showEach) + nl;
+                        L.F(", {0} g", ", {0} g", Num.Fmt(r.Grams)) + ": " + Num.Kr(amount) + EachSuffix(amount, qty, showEach, History.DiscountPctFor(r, bill.Friends)) + nl;
             }
             var count = History.CountPrints(bill.Jobs);
             if (count.Pieces > count.Models)

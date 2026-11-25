@@ -385,7 +385,7 @@ namespace PrintPrice
                 colDue.Width = Math.Max(widest(head, new[] { "Due", "Forfald" }), widest(grid.Font, new[] { "00-00-0000" })) + pad;
                 colTotal.Width = Math.Max(widest(head, new[] { "Total", "I alt" }), widest(bold, new[] { "00.000,00 kr." })) + pad;
                 colStatus.Width = Math.Max(widest(head, new[] { "Status" }),
-                                           widest(grid.Font, new[] { "Not printed", "Printing", "Printed", "Failed", "Ikke printet", "Printer nu", "Printet", "Fejlet", "Mixed", "Blandet" })) + Px(14 + 6 + 14);
+                                           widest(grid.Font, new[] { "Not printed", "Printing", "Printed", "Failed", "Ikke printet", "Printer nu", "Printet", "Fejlet", "Mixed", "Blandet" })) + Px(14 + 6 + 14 + 12);   // batch-2 qol #9: +12 for "1 of 5 plates"
                 colPaid.Width = Math.Max(widest(head, new[] { "Paid", "Betalt" }),
                                          widest(grid.Font, new[] { "Paid", "Unpaid", "Overdue", "Betalt", "Ubetalt", "Forfalden" })) + Px(14 + 6 + 14);
                 foreach (var cb in new[] { cmbStatus, cmbPeriod, cmbPayment })
@@ -595,7 +595,11 @@ namespace PrintPrice
                 if (e.RowIndex < 0 || e.ColumnIndex != colStatus.Index || e.RowIndex >= shown.Count) return;
                 bool selected = (e.State & DataGridViewElementStates.Selected) != 0;
                 e.PaintBackground(e.CellBounds, selected);
-                PaintStatusCell(e.Graphics, e.CellBounds, shown[e.RowIndex].State, selected, CurrentAutoScaleDimensions.Height / 96f, grid.Font);
+                // batch-2: some of the invoice's plates printed, not all: amber clock + "7 of 12 plates" (also when the jobs differ)
+                var ir = shown[e.RowIndex];
+                bool partly = ir.Plates >= 2 && ir.PlatesDone > 0 && ir.PlatesDone < ir.Plates && ir.State != PrintState.Failed;
+                PaintStatusCell(e.Graphics, e.CellBounds, partly ? PrintState.Printing : ir.State, selected, CurrentAutoScaleDimensions.Height / 96f, grid.Font,
+                                partly ? History.PlatesProgressText(ir.PlatesDone, ir.Plates) : null);
                 e.Handled = true;
             }
 

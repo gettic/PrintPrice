@@ -144,6 +144,11 @@ namespace PrintPrice.Web
             s.AutoPowerPrice = d.AutoPowerPrice; s.PowerAddOn = d.PowerAddOn; s.PowerIncludeVat = d.PowerIncludeVat; s.PriceArea = d.PriceArea;
             s.QuoteValidDays = d.QuoteValidDays; s.InvoiceDueDays = d.InvoiceDueDays; s.MainInvoice = d.MainInvoice; s.QuoteShowTower = d.QuoteShowTower;
             s.PlateChangeFee = d.PlateChangeFee; s.QuoteShowUnitPrice = d.QuoteShowUnitPrice;   // batch-plates
+            s.QtyDiscountFrom1 = d.QtyDiscountFrom1; s.QtyDiscountPct1 = d.QtyDiscountPct1;      // batch-2 (all off)
+            s.QtyDiscountFrom2 = d.QtyDiscountFrom2; s.QtyDiscountPct2 = d.QtyDiscountPct2;
+            s.QtyDiscountFrom3 = d.QtyDiscountFrom3; s.QtyDiscountPct3 = d.QtyDiscountPct3;
+            s.QtyDiscountWho = d.QtyDiscountWho;
+            // ShareLastPlate is not on a web tab (the website never slices): it stays as it is
             s.FilamentPreset = d.FilamentPreset;
             // the active printer: its name and model stay, the rest = that model's defaults
             var m = Wear.FindModel(s.PrinterModel);
